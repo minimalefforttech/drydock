@@ -1,0 +1,137 @@
+{
+  "name": "drydock",
+  "displayName": "Drydock",
+  "description": "Drydock \u2014 the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "private": true,
+  "type": "module",
+  "main": "./dist/extension.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/minimalefforttech/drydock.git"
+  },
+  "scripts": {
+    "bundle": "node ../../tools/bundle-extension.mjs",
+    "package:vsix": "node ../../tools/package-vsix.mjs"
+  },
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "activationEvents": [
+    "onCommand:drydock.isolatedRun.start",
+    "onCommand:drydock.isolatedRun.appServerProbe",
+    "onCommand:drydock.isolatedRun.stop",
+    "onCommand:drydock.isolatedRun.status",
+    "onCommand:drydock.panel.open",
+    "onView:drydock.controlPanel"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "drydock",
+          "title": "Drydock",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "drydock": [
+        {
+          "type": "webview",
+          "id": "drydock.controlPanel",
+          "name": "Control Panel",
+          "icon": "media/icon.svg",
+          "contextualTitle": "Drydock"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "drydock.isolatedRun.start",
+        "title": "Isolated Run: Run Isolated Agent Prompt"
+      },
+      {
+        "command": "drydock.isolatedRun.appServerProbe",
+        "title": "Isolated Run: Probe Codex App Server Transport"
+      },
+      {
+        "command": "drydock.isolatedRun.stop",
+        "title": "Isolated Run: Stop Active Runtime"
+      },
+      {
+        "command": "drydock.isolatedRun.status",
+        "title": "Isolated Run: Show Runtime Status"
+      },
+      {
+        "command": "drydock.panel.open",
+        "title": "Drydock: Open Control Panel"
+      },
+      {
+        "command": "drydock.planDocs.open",
+        "title": "Drydock: Open Plan Documents"
+      },
+      {
+        "command": "drydock.taskReview.open",
+        "title": "Drydock: Open Task Review"
+      },
+      {
+        "command": "drydock.taskReview.addComment",
+        "title": "Task Review: Add Review Comment"
+      },
+      {
+        "command": "drydock.taskReview.resolveThread",
+        "title": "Task Review: Resolve Review Comment"
+      }
+    ],
+    "menus": {
+      "comments/commentThread/context": [
+        {
+          "command": "drydock.taskReview.addComment",
+          "group": "inline",
+          "when": "commentController == drydock.taskReview"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "drydock.taskReview.resolveThread",
+          "group": "navigation",
+          "when": "commentController == drydock.taskReview && commentThread == drydock.taskReview"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Drydock",
+      "properties": {
+        "drydock.stateRoot": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Root directory for product state (SQLite event store, disposable workspaces). Leave empty to use `~/.drydock`. Changing this requires a window reload."
+        },
+        "drydock.deniedPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Absolute paths excluded from runtime mounts, diff snapshots, and access-request approval. A mount intersecting a denied path (in either direction) is refused. Changing this requires a window reload."
+        },
+        "drydock.disableDefaultDeniedPaths": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Not recommended.** By default, sensitive home-directory config roots (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.azure`, `~/.docker`) are merged into `#drydock.deniedPaths#` so the agent can never mount them, even via an approved access request. Enabling this removes that protection \u2014 an agent could then be granted read or write access to your SSH keys, cloud credentials, and other secrets. Leave this off unless you have a specific reason and understand the risk. Changing this requires a window reload."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "@drydock/agent-adapters": "0.1.0",
+    "@drydock/artifacts": "0.1.0",
+    "@drydock/contracts": "0.1.0",
+    "@drydock/core": "0.1.0",
+    "@drydock/runtime-adapters": "0.1.0",
+    "@drydock/storage-sqlite": "0.1.0",
+    "@drydock/work-management": "0.1.0"
+  }
+}

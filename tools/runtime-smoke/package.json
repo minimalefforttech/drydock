@@ -1,0 +1,15 @@
+{
+  "name": "@drydock/runtime-smoke",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "dependencies": {
+    "@drydock/agent-adapters": "0.1.0",
+    "@drydock/artifacts": "0.1.0",
+    "@drydock/contracts": "0.1.0",
+    "@drydock/core": "0.1.0",
+    "@drydock/runtime-adapters": "0.1.0",
+    "@drydock/storage-sqlite": "0.1.0"
+  }
+}

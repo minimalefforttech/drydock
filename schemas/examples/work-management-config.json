@@ -1,0 +1,262 @@
+{
+  "stateStores": [
+    {
+      "id": "personal",
+      "path": "~/.drydock/state",
+      "role": "primary",
+      "scope": "personal",
+      "writable": true
+    },
+    {
+      "id": "team-catalog",
+      "path": "D:/team/drydock/catalog",
+      "role": "shared",
+      "scope": "team",
+      "writable": false
+    }
+  ],
+  "artifactStores": [
+    {
+      "id": "personal-artifacts",
+      "path": "~/.drydock/artifacts",
+      "writable": true
+    }
+  ],
+  "sharedPaths": [
+    {
+      "id": "studio-python",
+      "path": "D:/studio/python-packages",
+      "access": "read-only",
+      "purpose": "studio-python-packages",
+      "overridable": true
+    },
+    {
+      "id": "shared-libs",
+      "path": "D:/studio/shared-libs",
+      "access": "read-write",
+      "purpose": "approved-shared-libraries",
+      "overridable": true
+    }
+  ],
+  "logging": {
+    "defaultMode": "redacted",
+    "expandedLogging": false,
+    "expandedMetrics": false,
+    "retentionClass": "standard",
+    "piiPolicy": "redact"
+  },
+  "packaging": {
+    "channel": "vsix",
+    "incrementVersionOnPackage": true,
+    "publishToMarketplace": false
+  },
+  "sourceControl": {
+    "allowDeveloperBranches": true,
+    "crossBoundaryBranchPrefix": "agent-transfer/"
+  },
+  "naming": {
+    "displayNameRef": "product.displayName",
+    "avoidHardcodedProductName": true
+  },
+  "defaultTaskProvider": "internal",
+  "projects": [
+    {
+      "id": "project-extension",
+      "name": "API Service",
+      "path": "C:/work/api-service",
+      "kind": "git"
+    },
+    {
+      "id": "project-runtime",
+      "name": "Runtime Harness",
+      "path": "C:/work/runtime-harness",
+      "kind": "git"
+    },
+    {
+      "id": "project-docs",
+      "name": "Engineering Docs",
+      "path": "C:/work/engineering-docs",
+      "kind": "folder"
+    }
+  ],
+  "workspaceSets": [
+    {
+      "id": "workspace-core",
+      "name": "Core Extension",
+      "projectIds": [
+        "project-extension",
+        "project-runtime"
+      ],
+      "defaultMode": "implementation",
+      "tags": [
+        "core",
+        "runtime"
+      ],
+      "createdAt": "2026-07-01T00:00:00.000Z",
+      "updatedAt": "2026-07-01T00:00:00.000Z"
+    },
+    {
+      "id": "workspace-planning",
+      "name": "Planning And Docs",
+      "projectIds": [
+        "project-extension",
+        "project-docs"
+      ],
+      "defaultMode": "plan",
+      "tags": [
+        "planning",
+        "docs"
+      ],
+      "createdAt": "2026-07-01T00:00:00.000Z",
+      "updatedAt": "2026-07-01T00:00:00.000Z"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task-stage0-work-management",
+      "providerId": "internal",
+      "title": "Define work management model",
+      "status": "active",
+      "statusCategory": "active",
+      "workspaceSetIds": [
+        "workspace-core",
+        "workspace-planning"
+      ],
+      "projectIds": [
+        "project-extension",
+        "project-docs"
+      ],
+      "updatedAt": "2026-07-01T08:00:00.000Z",
+      "lastWorkedAt": "2026-07-01T09:30:00.000Z",
+      "lastWorkspaceSetId": "workspace-planning"
+    }
+  ],
+  "taskWorkspaceLinks": [
+    {
+      "taskId": "task-stage0-work-management",
+      "workspaceSetId": "workspace-core",
+      "reason": "primary",
+      "createdAt": "2026-07-01T08:00:00.000Z"
+    },
+    {
+      "taskId": "task-stage0-work-management",
+      "workspaceSetId": "workspace-planning",
+      "reason": "secondary",
+      "createdAt": "2026-07-01T08:05:00.000Z"
+    }
+  ],
+  "taskWorkSessions": [
+    {
+      "id": "work-session-1",
+      "taskId": "task-stage0-work-management",
+      "workspaceSetId": "workspace-core",
+      "projectIds": [
+        "project-extension",
+        "project-runtime"
+      ],
+      "mode": "implementation",
+      "startedAt": "2026-07-01T08:00:00.000Z",
+      "endedAt": "2026-07-01T09:00:00.000Z",
+      "lastActivityAt": "2026-07-01T08:55:00.000Z",
+      "runtimeGenerationIds": [
+        "runtime-generation-1"
+      ],
+      "runIds": [
+        "run-1"
+      ],
+      "diffCheckpointIds": [
+        "diff-1"
+      ],
+      "planBlockIds": [
+        "plan-block-1"
+      ],
+      "testRunIds": [
+        "test-1"
+      ],
+      "noteIds": [
+        "note-1"
+      ]
+    },
+    {
+      "id": "work-session-2",
+      "taskId": "task-stage0-work-management",
+      "workspaceSetId": "workspace-planning",
+      "projectIds": [
+        "project-extension",
+        "project-docs"
+      ],
+      "mode": "plan",
+      "startedAt": "2026-07-01T09:05:00.000Z",
+      "lastActivityAt": "2026-07-01T09:30:00.000Z",
+      "runtimeGenerationIds": [
+        "runtime-generation-2"
+      ],
+      "runIds": [
+        "run-2"
+      ],
+      "diffCheckpointIds": [
+        "diff-2"
+      ],
+      "planBlockIds": [
+        "plan-block-2"
+      ],
+      "testRunIds": [],
+      "noteIds": [
+        "note-2"
+      ]
+    }
+  ],
+  "dayPlans": [
+    {
+      "id": "day-2026-07-01",
+      "date": "2026-07-01",
+      "timezone": "Pacific/Auckland",
+      "items": [
+        {
+          "id": "day-item-1",
+          "taskId": "task-stage0-work-management",
+          "title": "Work management plan",
+          "startDate": "2026-07-01",
+          "endDate": "2026-07-02",
+          "allocation": "focus",
+          "status": "active",
+          "noteIds": [
+            "note-2"
+          ]
+        },
+        {
+          "id": "day-item-2",
+          "taskId": "task-stage0-work-management",
+          "title": "Runtime cleanup follow-up",
+          "startDate": "2026-07-01",
+          "endDate": "2026-07-01",
+          "allocation": "buffer",
+          "status": "pushed",
+          "pushedFrom": "2026-07-01",
+          "pushedTo": "2026-07-03",
+          "pushReason": "Unexpected meetings",
+          "noteIds": [
+            "note-3"
+          ]
+        }
+      ],
+      "notes": [
+        {
+          "id": "note-2",
+          "scope": "task",
+          "taskId": "task-stage0-work-management",
+          "text": "Switched to planning workspace to isolate docs changes.",
+          "createdAt": "2026-07-01T09:20:00.000Z"
+        },
+        {
+          "id": "note-3",
+          "scope": "day",
+          "text": "Lots of meetings; pushed cleanup polish to Friday.",
+          "createdAt": "2026-07-01T10:00:00.000Z"
+        }
+      ],
+      "createdAt": "2026-07-01T08:00:00.000Z",
+      "updatedAt": "2026-07-01T10:00:00.000Z"
+    }
+  ]
+}

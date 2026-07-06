@@ -1,0 +1,75 @@
+{
+  "schemaVersion": "drydock.extension.v1",
+  "id": "builtin.task.asana",
+  "displayName": "Asana Task Provider",
+  "version": "0.0.1",
+  "kind": "task-provider",
+  "extensionPoints": [
+    {
+      "type": "task-provider",
+      "id": "asana",
+      "version": "v1",
+      "capabilities": {
+        "operations": [
+          "detect",
+          "validateAuth",
+          "discoverProjects",
+          "listTasks",
+          "getTask",
+          "createTask",
+          "updateTask",
+          "commentTask",
+          "transitionTask",
+          "attachArtifact",
+          "syncEvents",
+          "mapToCanonicalTask"
+        ],
+        "objects": [
+          "workspace",
+          "project",
+          "task",
+          "story",
+          "webhook"
+        ],
+        "sync": "polling-or-webhook"
+      }
+    }
+  ],
+  "auth": {
+    "mode": "oauth-or-api-token",
+    "secretRefRequired": true,
+    "scopes": [
+      "default"
+    ]
+  },
+  "api": {
+    "baseUrlTemplate": "https://app.asana.com/api/1.0",
+    "docs": [
+      "https://developers.asana.com/reference/rest-api-reference",
+      "https://developers.asana.com/reference/tasks",
+      "https://developers.asana.com/reference/webhooks"
+    ]
+  },
+  "capabilities": {
+    "readOnlyProbeEnv": [
+      "PREVALIDATE_ASANA_TOKEN",
+      "PREVALIDATE_ASANA_WORKSPACE_GID"
+    ],
+    "mutationProbeRequires": [
+      "PREVALIDATE_ASANA_TEST_PROJECT_GID"
+    ],
+    "rateLimitPolicy": "provider-default",
+    "conflictPolicy": "manual"
+  },
+  "canonicalMappings": {
+    "id": "task.gid",
+    "externalId": "task.gid",
+    "title": "task.name",
+    "description": "task.notes",
+    "status": "task.completed ? completed : active",
+    "statusCategory": "task.completed ? done : active",
+    "externalUrl": "task.permalink_url",
+    "projectRefs": "task.projects",
+    "labels": "task.tags"
+  }
+}

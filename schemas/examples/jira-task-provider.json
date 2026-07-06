@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "drydock.extension.v1",
+  "id": "builtin.task.jira",
+  "displayName": "Jira Task Provider",
+  "version": "0.0.1",
+  "kind": "task-provider",
+  "extensionPoints": [
+    {
+      "type": "task-provider",
+      "id": "jira",
+      "version": "v1",
+      "capabilities": {
+        "operations": [
+          "detect",
+          "validateAuth",
+          "discoverProjects",
+          "listTasks",
+          "getTask",
+          "createTask",
+          "updateTask",
+          "commentTask",
+          "transitionTask",
+          "attachArtifact",
+          "syncEvents",
+          "mapToCanonicalTask"
+        ],
+        "objects": [
+          "issue",
+          "project",
+          "comment",
+          "transition",
+          "webhook"
+        ],
+        "sync": "polling-or-webhook"
+      }
+    }
+  ],
+  "auth": {
+    "mode": "oauth-or-api-token",
+    "secretRefRequired": true,
+    "scopes": [
+      "read:jira-work",
+      "write:jira-work",
+      "manage:jira-webhook"
+    ]
+  },
+  "api": {
+    "baseUrlTemplate": "https://{site}.atlassian.net",
+    "docs": [
+      "https://developer.atlassian.com/cloud/jira/platform/rest/v3/intro/",
+      "https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/",
+      "https://developer.atlassian.com/cloud/jira/platform/webhooks/"
+    ]
+  },
+  "capabilities": {
+    "readOnlyProbeEnv": [
+      "PREVALIDATE_JIRA_BASE_URL",
+      "PREVALIDATE_JIRA_EMAIL",
+      "PREVALIDATE_JIRA_API_TOKEN"
+    ],
+    "mutationProbeRequires": [
+      "PREVALIDATE_JIRA_TEST_PROJECT_KEY"
+    ],
+    "rateLimitPolicy": "provider-default",
+    "conflictPolicy": "manual"
+  },
+  "canonicalMappings": {
+    "id": "issue.key",
+    "externalId": "issue.id",
+    "title": "issue.fields.summary",
+    "description": "issue.fields.description",
+    "status": "issue.fields.status.name",
+    "statusCategory": "issue.fields.status.statusCategory.key",
+    "externalUrl": "baseUrl + /browse/ + issue.key",
+    "projectRefs": "issue.fields.project",
+    "labels": "issue.fields.labels"
+  }
+}

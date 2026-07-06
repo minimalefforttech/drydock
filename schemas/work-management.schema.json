@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://drydock.local/schemas/work-management.schema.json",
+  "title": "Drydock Work Management Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "stateStores",
+    "artifactStores",
+    "projects",
+    "workspaceSets",
+    "tasks",
+    "taskWorkspaceLinks",
+    "taskWorkSessions",
+    "dayPlans",
+    "defaultTaskProvider"
+  ],
+  "properties": {
+    "stateStores": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "path",
+          "role",
+          "scope",
+          "writable"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "primary",
+              "shared",
+              "archive"
+            ]
+          },
+          "scope": {
+            "enum": [
+              "personal",
+              "team",
+              "portable"
+            ]
+          },
+          "writable": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "artifactStores": {
+      "type": "array"
+    },
+    "sharedPaths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "path",
+          "access",
+          "purpose",
+          "overridable"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "access": {
+            "enum": [
+              "read-only",
+              "read-write"
+            ]
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "overridable": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultMode",
+        "expandedLogging",
+        "expandedMetrics",
+        "retentionClass",
+        "piiPolicy"
+      ],
+      "properties": {
+        "defaultMode": {
+          "const": "redacted"
+        },
+        "expandedLogging": {
+          "type": "boolean"
+        },
+        "expandedMetrics": {
+          "type": "boolean"
+        },
+        "retentionClass": {
+          "enum": [
+            "short",
+            "standard",
+            "long"
+          ]
+        },
+        "piiPolicy": {
+          "enum": [
+            "redact",
+            "allow-expanded"
+          ]
+        }
+      }
+    },
+    "packaging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "channel",
+        "incrementVersionOnPackage",
+        "publishToMarketplace"
+      ],
+      "properties": {
+        "channel": {
+          "const": "vsix"
+        },
+        "incrementVersionOnPackage": {
+          "const": true
+        },
+        "publishToMarketplace": {
+          "const": false
+        }
+      }
+    },
+    "sourceControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowDeveloperBranches",
+        "crossBoundaryBranchPrefix"
+      ],
+      "properties": {
+        "allowDeveloperBranches": {
+          "type": "boolean"
+        },
+        "crossBoundaryBranchPrefix": {
+          "type": "string"
+        }
+      }
+    },
+    "naming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "displayNameRef",
+        "avoidHardcodedProductName"
+      ],
+      "properties": {
+        "displayNameRef": {
+          "type": "string"
+        },
+        "avoidHardcodedProductName": {
+          "const": true
+        }
+      }
+    },
+    "projects": {
+      "type": "array"
+    },
+    "workspaceSets": {
+      "type": "array"
+    },
+    "tasks": {
+      "type": "array"
+    },
+    "taskWorkspaceLinks": {
+      "type": "array"
+    },
+    "taskWorkSessions": {
+      "type": "array"
+    },
+    "dayPlans": {
+      "type": "array"
+    },
+    "defaultTaskProvider": {
+      "type": "string"
+    }
+  }
+}

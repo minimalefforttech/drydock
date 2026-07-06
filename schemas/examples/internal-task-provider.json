@@ -1,0 +1,83 @@
+{
+  "schemaVersion": "drydock.extension.v1",
+  "id": "builtin.task.internal",
+  "displayName": "Internal Task Provider",
+  "version": "0.0.1",
+  "kind": "task-provider",
+  "extensionPoints": [
+    {
+      "type": "task-provider",
+      "id": "internal",
+      "version": "v1",
+      "capabilities": {
+        "operations": [
+          "detect",
+          "validateAuth",
+          "discoverProjects",
+          "listTasks",
+          "getTask",
+          "createTask",
+          "updateTask",
+          "commentTask",
+          "transitionTask",
+          "attachArtifact",
+          "syncEvents",
+          "mapToCanonicalTask"
+        ],
+        "objects": [
+          "task",
+          "project",
+          "folder-allocation",
+          "prompt-history",
+          "run-link",
+          "plan-link",
+          "diff-link",
+          "memory-link",
+          "test-link"
+        ],
+        "sync": "local"
+      }
+    }
+  ],
+  "auth": {
+    "mode": "none",
+    "secretRefRequired": false,
+    "scopes": []
+  },
+  "api": {
+    "storage": "sqlite",
+    "docs": [
+      "https://www.sqlite.org/wal.html",
+      "https://www.sqlite.org/lang_transaction.html"
+    ]
+  },
+  "capabilities": {
+    "defaultProvider": true,
+    "offline": true,
+    "multiProjectActivation": true,
+    "workspaceSets": true,
+    "workspaceSwitching": true,
+    "taskWorkSessions": true,
+    "dayPlanner": true,
+    "relatedTaskDiscovery": true,
+    "promptHistory": true,
+    "runHistory": true,
+    "planLinks": true,
+    "diffLinks": true,
+    "memoryLinks": true,
+    "testLinks": true,
+    "rateLimitPolicy": "none",
+    "conflictPolicy": "manual"
+  },
+  "canonicalMappings": {
+    "id": "task.id",
+    "externalId": "task.id",
+    "title": "task.title",
+    "description": "task.description",
+    "status": "task.status",
+    "statusCategory": "task.statusCategory",
+    "externalUrl": "task.localUrl",
+    "projectRefs": "task.projectRefs",
+    "labels": "task.labels"
+  }
+}

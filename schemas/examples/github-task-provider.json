@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "drydock.extension.v1",
+  "id": "builtin.task.github-issues",
+  "displayName": "GitHub Issues Task Provider",
+  "version": "0.0.1",
+  "kind": "task-provider",
+  "extensionPoints": [
+    {
+      "type": "task-provider",
+      "id": "github-issues",
+      "version": "v1",
+      "capabilities": {
+        "operations": [
+          "detect",
+          "validateAuth",
+          "discoverProjects",
+          "listTasks",
+          "getTask",
+          "createTask",
+          "updateTask",
+          "commentTask",
+          "transitionTask",
+          "attachArtifact",
+          "syncEvents",
+          "mapToCanonicalTask"
+        ],
+        "objects": [
+          "repository",
+          "issue",
+          "comment",
+          "label",
+          "milestone",
+          "webhook"
+        ],
+        "sync": "polling-or-webhook"
+      }
+    }
+  ],
+  "auth": {
+    "mode": "oauth-or-api-token",
+    "secretRefRequired": true,
+    "scopes": [
+      "issues:read",
+      "issues:write",
+      "metadata:read",
+      "webhooks:write"
+    ]
+  },
+  "api": {
+    "baseUrlTemplate": "https://api.github.com",
+    "docs": [
+      "https://docs.github.com/en/rest/issues/issues",
+      "https://docs.github.com/en/rest/issues/comments",
+      "https://docs.github.com/en/webhooks"
+    ]
+  },
+  "capabilities": {
+    "readOnlyProbeEnv": [
+      "PREVALIDATE_GITHUB_TOKEN",
+      "PREVALIDATE_GITHUB_REPO"
+    ],
+    "mutationProbeRequires": [
+      "PREVALIDATE_GITHUB_TEST_LABEL"
+    ],
+    "rateLimitPolicy": "provider-default",
+    "conflictPolicy": "manual"
+  },
+  "canonicalMappings": {
+    "id": "repository.full_name + # + issue.number",
+    "externalId": "issue.node_id",
+    "title": "issue.title",
+    "description": "issue.body",
+    "status": "issue.state",
+    "statusCategory": "issue.state == closed ? done : active",
+    "externalUrl": "issue.html_url",
+    "projectRefs": "repository",
+    "labels": "issue.labels"
+  }
+}

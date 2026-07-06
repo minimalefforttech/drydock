@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Webview harness — Task Review panel</title>
+  <style>
+    /* Dark-theme values for the --vscode-* variables the real panel CSS uses.
+       A missing variable degrades to the fallback in var(), so this subset only
+       needs the load-bearing ones. */
+    :root {
+      --vscode-font-family: "Segoe UI", system-ui, sans-serif;
+      --vscode-font-size: 13px;
+      --vscode-foreground: #cccccc;
+      --vscode-descriptionForeground: #9d9d9d;
+      --vscode-errorForeground: #f48771;
+      --vscode-focusBorder: #007fd4;
+      --vscode-sideBar-background: #252526;
+      --vscode-editor-background: #1e1e1e;
+      --vscode-editor-foreground: #d4d4d4;
+      --vscode-editorWidget-background: #252526;
+      --vscode-input-background: #3c3c3c;
+      --vscode-input-foreground: #cccccc;
+      --vscode-input-border: #3c3c3c;
+      --vscode-input-placeholderForeground: #7f7f7f;
+      --vscode-button-background: #0e639c;
+      --vscode-button-foreground: #ffffff;
+      --vscode-button-hoverBackground: #1177bb;
+      --vscode-button-secondaryBackground: #3a3d41;
+      --vscode-button-secondaryForeground: #cccccc;
+      --vscode-badge-background: #4d4d4d;
+      --vscode-badge-foreground: #ffffff;
+      --vscode-dropdown-background: #3c3c3c;
+      --vscode-dropdown-foreground: #cccccc;
+      --vscode-dropdown-border: #3c3c3c;
+      --vscode-list-hoverBackground: #2a2d2e;
+      --vscode-list-activeSelectionBackground: #094771;
+      --vscode-panel-border: #3c3c3c;
+      --vscode-widget-border: #454545;
+      --vscode-textLink-foreground: #3794ff;
+      --vscode-textPreformat-foreground: #d7ba7d;
+      --vscode-charts-green: #89d185;
+      --vscode-charts-red: #f14c4c;
+      --vscode-charts-yellow: #cca700;
+      --vscode-charts-blue: #4a90d9;
+      --vscode-testing-iconPassed: #73c991;
+      --vscode-testing-iconFailed: #f14c4c;
+      --vscode-editorError-foreground: #f48771;
+      --vscode-editorWarning-foreground: #cca700;
+      --vscode-toolbar-hoverBackground: rgba(90, 93, 94, 0.31);
+      --vscode-scrollbarSlider-background: rgba(121, 121, 121, 0.4);
+    }
+    html, body { margin: 0; height: 100%; background: #1b1b1b; }
+    body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
+    /* Editor-panel-shaped stage: the task-review panel is an editor-area webview,
+       so it renders wider than the sidebar panel. */
+    #stage {
+      width: 900px; height: calc(100vh - 32px); background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border); overflow: auto; box-sizing: border-box;
+    }
+    #stage-note { color: #7f7f7f; font-size: 12px; max-width: 260px; }
+    #stage-note code { color: #d7ba7d; }
+  </style>
+  <link rel="stylesheet" href="/assets/taskReview.css" />
+</head>
+<body class="vscode-dark">
+  <div id="stage">
+    <div id="app" data-task-id="t-1"></div>
+  </div>
+  <div id="stage-note">
+    <p><strong>Task Review harness.</strong> Real bundled panel, mock host, dummy fixtures for task <code>t-1</code>.</p>
+    <p>Drive scenarios from the console: <code>__harness.scenario.taskReviewUpdated("t-1")</code> (silent no-op refetch) · <code>__harness.scenario.agentRevised()</code> (mutates the fixture then pushes an update → changed row flashes + <code>updated · just now</code> stamp).</p>
+    <p>Inspect sends: <code>__harness.log</code> (diff.openFile / review.addComment / taskReview.submit lines).</p>
+  </div>
+  <script src="/harness.js"></script>
+  <script src="/assets/taskReview.js"></script>
+</body>
+</html>

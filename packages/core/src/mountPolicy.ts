@@ -1,0 +1,268 @@
+/**
+ * Pure mount-policy helpers.
+ *
+ * Mounts derive from workspace roots plus a session mode: plan mode is
+ * read-only, implementation mode is read-write, clone mode never mounts live
+ * roots. Denied paths are excluded in both containment directions — a denied
+ * path can neither be mounted nor be exposed inside a mounted root.
+ */
+
+import path from "node:path";
+import type { MountPolicy, SessionMode } from "@drydock/contracts";
+import type { IdGenerator } from "./ids.js";
+
+export type { SessionMode };
+
+export interface BuildMountPolicyRequest {
+  readonly mode: SessionMode;
+  readonly workspaceRoots: readonly string[];
+  readonly sharedRead: readonly string[];
+  readonly sharedWrite: readonly string[];
+  readonly deniedPaths?: readonly string[];
+  readonly approvedBy?: string;
+  readonly approvedAt?: string;
+}
+
+export function buildMountPolicy(request: BuildMountPolicyRequest, ids: IdGenerator): MountPolicy[] {
+  const deniedPaths = request.deniedPaths ?? [];
+  const mounts: MountPolicy[] = [];
+  if (request.mode !== "clone") {
+    for (const [index, root] of request.workspaceRoots.entries()) {
+      assertMountAllowed(root, deniedPaths);
+      mounts.push(policy({
+        ids,
+        hostPath: root,
+        runtimePath: `/workspace/root-${String(index + 1)}`,
+        mode: request.mode === "implementation" ? "read-write" : "read-only",
+        source: "workspace-root",
+        ...approvalFields(request)
+      }));
+    }
+  }
+
+  for (const [index, root] of request.sharedRead.entries()) {
+    assertMountAllowed(root, deniedPaths);
+    mounts.push(policy({
+      ids,
+      hostPath: root,
+      runtimePath: `/shared/read-${String(index + 1)}`,
+      mode: "read-only",
+      source: "shared-read",
+      ...approvalFields(request)
+    }));
+  }
+
+  for (const [index, root] of request.sharedWrite.entries()) {
+    assertMountAllowed(root, deniedPaths);
+    mounts.push(policy({
+      ids,
+      hostPath: root,
+      runtimePath: `/shared/write-${String(index + 1)}`,
+      mode: "read-write",
+      source: "shared-write",
+      ...approvalFields(request)
+    }));
+  }
+
+  return mounts;
+}
+
+/**
+ * Role sessions: a child session must never inherit broader access
+ * than its parent (threat-model.md). Every child mount must sit inside some
+ * parent mount, and read-write requires the covering parent mount to be
+ * read-write. Applies at spawn AND at every later mount expansion. The
+ * child's own disposable workspace is the caller's concern (it is product
+ * scratch, not host reach) — pass only host-reach mounts here.
+ */
+export function assertChildMountsWithinParent(
+  childMounts: readonly MountPolicy[],
+  parentMounts: readonly MountPolicy[],
+  caseInsensitive?: boolean
+): void {
+  for (const child of childMounts) {
+    const covering = parentMounts.filter((parent) => isPathWithin(child.hostPath, parent.hostPath, caseInsensitive));
+    if (covering.length === 0) {
+      throw new Error(
+        `Child session mount ${child.hostPath} is outside the parent session's access. Grant it to the parent first.`
+      );
+    }
+    if (child.mode === "read-write" && !covering.some((parent) => parent.mode === "read-write")) {
+      throw new Error(
+        `Child session mount ${child.hostPath} requests read-write but the parent's access there is read-only.`
+      );
+    }
+  }
+}
+
+export function assertWorkspaceInsideOwner(workspacePath: string, ownerRoot: string): void {
+  const relative = path.relative(path.resolve(ownerRoot), path.resolve(workspacePath));
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Workspace ${workspacePath} is outside owner root ${ownerRoot}.`);
+  }
+}
+
+// MARK: Path policy
+
+/**
+ * Canonical comparison key for host paths: resolved, forward slashes, no
+ * trailing separator, case-folded on case-insensitive platforms (Windows).
+ */
+export function normalizePathKey(value: string, caseInsensitive: boolean = process.platform === "win32"): string {
+  let key = path.resolve(value).replace(/\\/g, "/");
+  if (key.length > 1 && key.endsWith("/")) {
+    key = key.slice(0, -1);
+  }
+  return caseInsensitive ? key.toLowerCase() : key;
+}
+
+/** True when child equals parent or lives underneath it (normalized keys). */
+export function isPathWithin(child: string, parent: string, caseInsensitive?: boolean): boolean {
+  const childKey = normalizePathKey(child, caseInsensitive);
+  const parentKey = normalizePathKey(parent, caseInsensitive);
+  return childKey === parentKey || childKey.startsWith(`${parentKey}/`);
+}
+
+/** True when the path is denied or contains/lives inside a denied path. */
+export function isPathDenied(hostPath: string, deniedPaths: readonly string[], caseInsensitive?: boolean): boolean {
+  return deniedPaths.some((denied) =>
+    isPathWithin(hostPath, denied, caseInsensitive) || isPathWithin(denied, hostPath, caseInsensitive)
+  );
+}
+
+/**
+ * Refuses mounts that intersect a denied path in either direction: mounting a
+ * parent of a denied path would expose it, mounting inside one is direct
+ * access. Also refuses a filesystem root outright (a drive root like `C:\` or
+ * `/`, or a bare UNC share root `\\server\share`) — mounting an entire volume
+ * is never intentional and defeats the blast-radius bound. Throws a
+ * user-visible error instead of silently skipping.
+ */
+export function assertMountAllowed(hostPath: string, deniedPaths: readonly string[], caseInsensitive?: boolean): void {
+  if (isFilesystemRoot(hostPath)) {
+    throw new Error(`Refusing to mount a filesystem root: ${hostPath}`);
+  }
+  if (isPathDenied(hostPath, deniedPaths, caseInsensitive)) {
+    throw new Error(`Mount of ${hostPath} is refused: it intersects a denied path.`);
+  }
+}
+
+/**
+ * True when the resolved path is a whole-volume root: a drive/POSIX root equal
+ * to its own `path.parse().root` (`C:\`, `/`), or a bare UNC share root
+ * (`\\server\share`) with no deeper segment. UNC roots parse with the share as
+ * the root, so the deeper-segment check is what separates `\\srv\share` (root)
+ * from `\\srv\share\dir` (mountable).
+ */
+export function isFilesystemRoot(hostPath: string): boolean {
+  const resolved = path.resolve(hostPath);
+  const parsed = path.parse(resolved);
+  if (resolved === parsed.root) {
+    return true;
+  }
+  // A UNC share root: the resolved path equals `\\server\share` with nothing
+  // after it. path.parse leaves `.base`/`.name` empty only at the true root,
+  // but Windows UNC parsing keeps the share in `.root`; compare against a
+  // normalized separator form to catch a trailing-slash variant too.
+  const normalized = resolved.replace(/[\\/]+$/, "");
+  const uncMatch = /^\\\\[^\\/]+\\[^\\/]+$/.exec(normalized);
+  return uncMatch !== null;
+}
+
+/**
+ * The sensitive host directories that ship denied by default (opt-out via
+ * setting). These are home-relative config/credential roots the agent should
+ * never mount without an explicit, deliberate override.
+ */
+export function defaultDeniedPaths(homeDir: string): string[] {
+  return [".ssh", ".aws", ".gnupg", ".kube", ".azure", ".docker"].map((segment) =>
+    path.join(homeDir, segment)
+  );
+}
+
+/** Path segments that mark a directory as credential/secret-bearing. */
+const SENSITIVE_SEGMENTS: readonly string[] = [".ssh", ".aws", ".gnupg", ".kube", ".azure", ".docker", "secrets"];
+
+/**
+ * Basename patterns that flag a sensitive file. Each is tested case-insensitively
+ * against the path's basename; `*`/`.` behave as literal glob/extension anchors.
+ */
+const SENSITIVE_BASENAME_PATTERNS: readonly RegExp[] = [
+  /^\.env$/i,
+  /^\.env\..+$/i,
+  /^id_rsa.*$/i,
+  /^id_ed25519.*$/i,
+  /^id_ecdsa.*$/i,
+  /^.+\.pem$/i,
+  /^.+\.key$/i,
+  /^.+\.p12$/i,
+  /^.+\.pfx$/i,
+  /^credentials$/i,
+  /^credentials\.json$/i,
+  /^\.netrc$/i,
+  /^\.npmrc$/i,
+  /^\.pypirc$/i
+];
+
+/** What flagged a path as sensitive: the matched segment or basename, verbatim. */
+export interface SensitivePathMatch {
+  readonly kind: "directory" | "file";
+  readonly match: string;
+}
+
+/**
+ * The credential/secret trigger for a candidate path, or null when none: the
+ * first path segment matching a sensitive directory name (case-insensitive),
+ * else a basename matching a sensitive-file pattern. Pure and separator-
+ * agnostic — accepts Windows or POSIX separators. Drives the risk-tiered
+ * approval card and its "why this escalated" wording.
+ */
+export function sensitivePathMatch(candidatePath: string): SensitivePathMatch | null {
+  const segments = candidatePath.split(/[\\/]+/).filter((segment) => segment.length > 0);
+  const directory = segments.find((segment) => SENSITIVE_SEGMENTS.includes(segment.toLowerCase()));
+  if (directory !== undefined) {
+    return { kind: "directory", match: directory };
+  }
+  const basename = segments[segments.length - 1];
+  if (basename === undefined) {
+    return null;
+  }
+  return SENSITIVE_BASENAME_PATTERNS.some((pattern) => pattern.test(basename))
+    ? { kind: "file", match: basename }
+    : null;
+}
+
+/** True when a candidate path names a credential/secret directory or file. */
+export function isSensitivePath(candidatePath: string): boolean {
+  return sensitivePathMatch(candidatePath) !== null;
+}
+
+// MARK: Construction helpers
+
+function approvalFields(request: BuildMountPolicyRequest): { readonly approvedBy?: string; readonly approvedAt?: string } {
+  if (request.approvedBy === undefined || request.approvedAt === undefined) {
+    return {};
+  }
+  return { approvedBy: request.approvedBy, approvedAt: request.approvedAt };
+}
+
+function policy(input: {
+  readonly ids: IdGenerator;
+  readonly hostPath: string;
+  readonly runtimePath: string;
+  readonly mode: MountPolicy["mode"];
+  readonly source: MountPolicy["source"];
+  readonly approvedBy?: string;
+  readonly approvedAt?: string;
+}): MountPolicy {
+  const base = {
+    mountId: input.ids.mountId(),
+    hostPath: path.resolve(input.hostPath),
+    runtimePath: input.runtimePath,
+    mode: input.mode,
+    source: input.source
+  };
+  return input.approvedBy === undefined || input.approvedAt === undefined
+    ? base
+    : { ...base, approvedBy: input.approvedBy, approvedAt: input.approvedAt };
+}

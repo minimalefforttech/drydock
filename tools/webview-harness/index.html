@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Webview harness — Drydock panel</title>
+  <style>
+    /* Dark-theme values for the --vscode-* variables the real panel CSS uses.
+       A missing variable degrades to the fallback in var(), so this subset only
+       needs the load-bearing ones. */
+    :root {
+      --vscode-font-family: "Segoe UI", system-ui, sans-serif;
+      --vscode-font-size: 13px;
+      --vscode-foreground: #cccccc;
+      --vscode-descriptionForeground: #9d9d9d;
+      --vscode-errorForeground: #f48771;
+      --vscode-focusBorder: #007fd4;
+      --vscode-sideBar-background: #252526;
+      --vscode-editor-background: #1e1e1e;
+      --vscode-editor-foreground: #d4d4d4;
+      --vscode-input-background: #3c3c3c;
+      --vscode-input-foreground: #cccccc;
+      --vscode-input-border: #3c3c3c;
+      --vscode-input-placeholderForeground: #7f7f7f;
+      --vscode-button-background: #0e639c;
+      --vscode-button-foreground: #ffffff;
+      --vscode-button-hoverBackground: #1177bb;
+      --vscode-button-secondaryBackground: #3a3d41;
+      --vscode-button-secondaryForeground: #cccccc;
+      --vscode-badge-background: #4d4d4d;
+      --vscode-badge-foreground: #ffffff;
+      --vscode-list-hoverBackground: #2a2d2e;
+      --vscode-list-activeSelectionBackground: #094771;
+      --vscode-panel-border: #3c3c3c;
+      --vscode-widget-border: #454545;
+      --vscode-textBlockQuote-background: #222d3a;
+      --vscode-textLink-foreground: #3794ff;
+      --vscode-textPreformat-foreground: #d7ba7d;
+      --vscode-charts-green: #89d185;
+      --vscode-charts-red: #f14c4c;
+      --vscode-charts-yellow: #cca700;
+      --vscode-testing-iconPassed: #73c991;
+      --vscode-testing-iconFailed: #f14c4c;
+      --vscode-editorWarning-foreground: #cca700;
+      --vscode-notifications-background: #252526;
+      --vscode-scrollbarSlider-background: rgba(121, 121, 121, 0.4);
+    }
+    html, body { margin: 0; height: 100%; background: #1b1b1b; }
+    body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
+    /* Sidebar-shaped stage: the real panel renders inside at ~VS Code width.
+       Padding mirrors the real webview body (styles.css: 0 10px 12px) so the
+       tab bar's full-bleed negative margins land exactly like in VS Code. */
+    #stage {
+      width: 340px; height: calc(100vh - 32px); background: var(--vscode-sideBar-background);
+      border: 1px solid var(--vscode-panel-border); display: flex; flex-direction: column; overflow: hidden;
+      padding: 0 10px 12px; box-sizing: border-box;
+    }
+    #stage-note { color: #7f7f7f; font-size: 12px; max-width: 260px; }
+    #stage-note code { color: #d7ba7d; }
+  </style>
+  <link rel="stylesheet" href="/assets/main.css" />
+</head>
+<body class="vscode-dark">
+  <div id="stage">
+    <div id="app"></div>
+  </div>
+  <div id="stage-note">
+    <p><strong>Webview visual-test harness.</strong> Real bundled panel, mock host, dummy fixtures.</p>
+    <p>Drive scenarios from the console: <code>__harness.scenario.streamTurn("s-live")</code>,
+    <code>__harness.scenario.attention("s-waiting", ["turn-completed"])</code>,
+    <code>__harness.scenario.accessRequest({...})</code>.</p>
+  </div>
+  <script src="/harness.js"></script>
+  <script src="/assets/main.js"></script>
+</body>
+</html>

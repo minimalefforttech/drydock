@@ -1,0 +1,2036 @@
+/* Control panel styles — VS Code theme variables only, no remote assets.
+   Redesigned for the three-tab layout (Chat | Work | System). Compact and
+   quiet; usable down to ~300px panel width. Class names for moved-unchanged
+   rendering (chat-log, chat-message, diagnostics-log, status, runtime-row…)
+   are preserved to minimize churn. */
+
+/* Full-height chain: the chat tab fills the panel to the bottom (a flex column),
+   while the Work/System tabs keep their natural, document-scrolled height. */
+html,
+body {
+  height: 100%;
+}
+
+body {
+  padding: 0 10px 12px;
+  box-sizing: border-box;
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* --------------------------------------------------------------------------
+   Tab bar + panels
+   -------------------------------------------------------------------------- */
+
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  margin: 0 -10px 8px;
+  padding: 4px 10px 0;
+}
+
+.tab-button {
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--vscode-foreground);
+  opacity: 0.7;
+  /* Narrow-panel fit: three tabs must sit inside ~300px alongside the bar's
+     own horizontal padding; wider per-tab padding overflows the panel body. */
+  padding: 6px 8px;
+  min-width: 0;
+  flex-shrink: 1;
+  cursor: pointer;
+  font-size: 0.95em;
+}
+
+.tab-button:hover {
+  opacity: 1;
+}
+
+.tab-button.active {
+  opacity: 1;
+  border-bottom-color: var(--vscode-focusBorder, var(--vscode-button-background));
+  font-weight: 600;
+}
+
+.tab-panel {
+  display: block;
+}
+
+/* The chat panel fills the remaining viewport height as a flex column so its
+   transcript can absorb free space and scroll internally. Work/System keep
+   natural height (no panel-fill class). */
+.tab-panel.panel-fill {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tab-panel.panel-fill.hidden {
+  display: none !important;
+}
+
+/* --------------------------------------------------------------------------
+   Buttons + inputs (shared)
+   -------------------------------------------------------------------------- */
+
+.button {
+  border: none;
+  border-radius: 2px;
+  padding: 5px 12px;
+  cursor: pointer;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+
+.button.primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+.button.ghost {
+  background: transparent;
+  color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-button-secondaryBackground);
+}
+
+.button.small {
+  padding: 2px 8px;
+  font-size: 0.85em;
+}
+
+.button.danger.armed {
+  background: var(--vscode-editorError-foreground, #f14c4c);
+  color: #ffffff;
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.button:not(:disabled):hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.button.primary:not(:disabled):hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.icon-button {
+  border: none;
+  background: transparent;
+  color: var(--vscode-foreground);
+  opacity: 0.75;
+  cursor: pointer;
+  border-radius: 2px;
+  padding: 2px 6px;
+  font-size: 1em;
+  line-height: 1;
+}
+
+.icon-button:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.icon-button.danger:hover {
+  color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+  align-items: center;
+}
+
+.text-input,
+.number-input {
+  min-width: 0;
+  flex: 1;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  padding: 3px 6px;
+  font-family: var(--vscode-font-family);
+  box-sizing: border-box;
+}
+
+.number-input {
+  flex: 0 0 52px;
+}
+
+select {
+  min-width: 0;
+  color: var(--vscode-dropdown-foreground);
+  background: var(--vscode-dropdown-background);
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 2px;
+  padding: 3px 4px;
+}
+
+.set-select {
+  flex: 1;
+}
+
+h3 {
+  margin: 12px 0 6px;
+  font-size: 1em;
+}
+
+.empty {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+/* R13: new-chat empty transcript — two centered lines that orient the first-run
+   user (call to action + a dim line naming the mode consequences the segment
+   hides). Replaces the bare "No messages yet." box. */
+.chat-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 24px 12px;
+  text-align: center;
+}
+
+.chat-empty-lead {
+  font-weight: 600;
+}
+
+.chat-empty-modes {
+  font-size: 0.85em;
+  opacity: 0.7;
+  max-width: 46ch;
+}
+
+/* --------------------------------------------------------------------------
+   Status dots + badges
+   -------------------------------------------------------------------------- */
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  background: var(--vscode-descriptionForeground, #888);
+}
+
+.status-dot.state-live {
+  background: var(--vscode-testing-iconPassed, #2ea043);
+}
+
+.status-dot.state-ended {
+  background: var(--vscode-descriptionForeground, #888);
+}
+
+.status-dot.state-running {
+  background: var(--vscode-testing-iconPassed, #2ea043);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.status-dot.state-failed {
+  background: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, #f14c4c));
+}
+
+/* Running in another window: a hollow ring, not a filled dot. */
+.status-dot.state-elsewhere {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--vscode-descriptionForeground, #888);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.status {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.8em;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  white-space: nowrap;
+}
+
+.status-running,
+.session-status-active,
+.session-status-starting,
+.mode-read-write,
+.change-add,
+.approval-approved,
+.patch-applied {
+  background: var(--vscode-testing-iconPassed, #2ea043);
+  color: #ffffff;
+}
+
+.status-quarantined,
+.status-lost,
+.status-reset-required,
+.change-delete,
+.approval-rejected,
+.patch-discarded,
+.access-denied {
+  background: var(--vscode-editorError-foreground, #f14c4c);
+  color: #ffffff;
+}
+
+.approval-pending,
+.patch-proposed,
+.access-pending {
+  background: var(--vscode-editorWarning-foreground, #cca700);
+  color: #000000;
+}
+
+/* --------------------------------------------------------------------------
+   Chips + popovers
+   -------------------------------------------------------------------------- */
+
+.chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-badge-background);
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  font-size: 0.85em;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip-button {
+  cursor: pointer;
+}
+
+.chip-button:hover {
+  filter: brightness(1.1);
+}
+
+/* Plan-documents pill row (above the composer). Chip-consistent styling. */
+.plan-docs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 0;
+}
+
+.plan-docs-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-badge-background);
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+.plan-docs-pill::before {
+  content: "📄";
+  font-size: 0.9em;
+}
+
+.popover-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 200px;
+  max-width: min(320px, 90vw);
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  word-break: break-word;
+  white-space: normal;
+  font-size: 0.85em;
+}
+
+.popover-line {
+  margin: 2px 0;
+}
+
+.popover-mount {
+  margin: 2px 0;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.95em;
+  opacity: 0.9;
+  word-break: break-all;
+}
+
+/* Overflow ⋯ menu items render inside a popover. */
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--vscode-foreground);
+  padding: 5px 6px;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.menu-item:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.menu-item.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.menu-item.danger .menu-danger {
+  width: 100%;
+  text-align: left;
+  border: none;
+  padding: 5px 6px;
+}
+
+/* --------------------------------------------------------------------------
+   Chat tab
+   -------------------------------------------------------------------------- */
+
+/* The chat tab is itself a full-height flex column; header / context strip /
+   composer are fixed-height, the transcript region is the flex:1 scroller, and
+   the Changes / Diagnostics disclosures sit at natural height with their own
+   inner scroll caps. */
+.chat-tab {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 8px;
+  flex: 0 0 auto;
+}
+
+.chat-back {
+  font-size: 1.2em;
+  line-height: 1;
+  padding: 0 6px;
+  flex: 0 0 auto;
+}
+
+.chat-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chat-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-title:hover {
+  text-decoration: underline;
+}
+
+.chat-header-spacer {
+  flex: 1;
+}
+
+.rename-input {
+  flex: 1;
+  min-width: 80px;
+}
+
+/* Context strip: provider/model selects FIRST (one row), a native collapsed
+   mounts <details> BELOW them. */
+.context-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 8px;
+  flex: 0 0 auto;
+}
+
+.context-provider-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.provider-select.compact,
+.model-select.compact {
+  flex: 1 1 120px;
+  min-width: 90px;
+}
+
+/* Mounts disclosure (replaces the workspace chip + custom mounts popover). */
+.context-mounts {
+  margin: 0;
+  border-top: none;
+  padding-top: 0;
+}
+
+.context-mounts-summary {
+  cursor: pointer;
+  font-size: 0.85em;
+  opacity: 0.8;
+  padding: 2px 0;
+  list-style: revert;
+}
+
+.context-mounts-summary:hover {
+  opacity: 1;
+}
+
+.context-mounts-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 0 2px;
+  max-height: 22vh;
+  overflow-y: auto;
+}
+
+.context-mount-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82em;
+}
+
+.context-mount-path {
+  font-family: var(--vscode-editor-font-family);
+  word-break: break-all;
+  opacity: 0.9;
+  min-width: 0;
+}
+
+/* Mode chips inside the mounts list. */
+.chip.mode-read-write {
+  background: var(--vscode-testing-iconPassed, #2ea043);
+  color: #ffffff;
+  border-color: transparent;
+}
+
+.chip.mode-read-only {
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+
+/* Clone chip inside the mounts list: a clone repo, no live mount. */
+.chip.mode-clone {
+  background: var(--vscode-charts-purple, #9a6dd7);
+  color: #ffffff;
+  border-color: transparent;
+}
+
+/* Clone sync working set. */
+.clone-repo-head {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.8;
+  padding: 6px 4px 2px;
+  margin-top: 2px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+.working-set-row.conflicted {
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 12%, transparent);
+}
+
+.conflict-marker {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  font-size: 12px;
+  margin-right: 2px;
+  flex: 0 0 auto;
+}
+
+/* R12: names the conflict state as a word beside the ⚠, same pill idiom as the
+   CLONE chip but tinted with the warning accent. */
+.chip.chip-conflict {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border-color: transparent;
+  background: var(--vscode-editorWarning-foreground, #cca700);
+  color: var(--vscode-editor-background, #1e1e1e);
+  margin-right: 4px;
+}
+
+/* R12: dim one-line caption above the clone Pull/Push action row, explaining the
+   pull/push vs accept/discard vocabulary shift where it happens. */
+.clone-caption {
+  font-size: 0.8em;
+  opacity: 0.7;
+  padding: 2px 4px 4px;
+}
+
+/* Clone-mode chip on a Work-tab session card lives with the shared session-row
+   chip vocabulary (`.session-chip.chip-clone`) below (R1/R9 consolidation). */
+
+.auth-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--vscode-editorWarning-foreground);
+  background: var(--vscode-inputValidation-warningBackground, rgba(255, 200, 0, 0.1));
+}
+
+.auth-banner-text {
+  flex: 1 1 100%;
+  word-break: break-word;
+}
+
+/* Transcript region: the flex:1 scroller that absorbs the panel's free space.
+   Holds the transcript log and inline access-request cards. */
+.transcript-region {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 4px 0 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 2px;
+  padding: 6px;
+}
+
+/* Dev log: full-width structural entries, no online-chat bubbles. */
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-message {
+  width: 100%;
+}
+
+.chat-meta {
+  margin: 0 0 3px;
+  opacity: 0.6;
+  font-size: 0.76em;
+}
+
+/* User turn: a compact tinted card, blue-accented left border. */
+.chat-user-body {
+  border-left: 3px solid var(--vscode-focusBorder, var(--vscode-button-background));
+  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.08));
+  border-radius: 3px;
+  padding: 6px 10px;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+/* Attention stack: pending questions + access requests share ONE card slot
+   with a small ‹ i/N › pager top-right, instead of a pile of full cards. */
+.attention-stack-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 2px 4px;
+}
+.attention-stack-title {
+  font-size: 0.78em;
+  font-weight: 600;
+  opacity: 0.75;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.attention-stack-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.attention-stack-nav .icon-button { padding: 0 4px; font-size: 0.9em; }
+.attention-stack-counter { font-size: 0.76em; opacity: 0.65; min-width: 28px; text-align: center; }
+
+.question-card .question-text {
+  font-size: 0.92em;
+  font-weight: 500;
+  word-break: break-word;
+  white-space: pre-wrap;
+  margin-bottom: 8px;
+}
+.question-options {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.question-options .question-option {
+  text-align: left;
+  white-space: normal;
+  word-break: break-word;
+}
+.question-answer-row {
+  display: flex;
+  gap: 4px;
+}
+.question-answer-row input { flex: 1; min-width: 0; }
+.attention-card.busy { opacity: 0.6; pointer-events: none; }
+
+/* Subagent group: collapsed one-liner that ticks live; expanding
+   reveals the child's own feed. Left rail marks it as delegated work. */
+.agent-group {
+  border-left: 2px solid var(--vscode-tree-indentGuidesStroke, rgba(128, 128, 128, 0.35));
+  border-radius: 3px;
+  padding: 2px 0 2px 8px;
+  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.05));
+}
+
+.agent-group-header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.86em;
+  padding: 2px 4px;
+}
+
+.agent-group-header::-webkit-details-marker { display: none; }
+.agent-group-header::before { content: "▸"; opacity: 0.6; font-size: 0.8em; }
+.agent-group[open] > .agent-group-header::before { content: "▾"; }
+
+.agent-group-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  align-self: center;
+  background: var(--vscode-descriptionForeground, #999);
+}
+.agent-group-dot.status-running {
+  background: var(--vscode-charts-green, #3fb950);
+  animation: agent-group-pulse 1.6s ease-in-out infinite;
+}
+.agent-group-dot.status-completed { background: var(--vscode-charts-green, #3fb950); animation: none; }
+.agent-group-dot.status-failed { background: var(--vscode-editorError-foreground, #f14c4c); }
+.agent-group-dot.status-cancelled,
+.agent-group-dot.status-unknown { background: var(--vscode-descriptionForeground, #999); }
+
+@keyframes agent-group-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.agent-group-label { font-weight: 600; }
+.agent-group-type,
+.agent-group-stats { opacity: 0.6; font-size: 0.92em; }
+.agent-group-activity {
+  opacity: 0.55;
+  font-size: 0.92em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+.agent-group-chip.chip-failed {
+  color: var(--vscode-editorError-foreground, #f14c4c);
+  font-weight: 700;
+}
+.agent-group-chip.chip-done { color: var(--vscode-charts-green, #3fb950); opacity: 0.8; }
+
+.agent-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 4px 6px 12px;
+}
+
+.agent-group-prompt,
+.agent-group-result,
+.agent-group-usage,
+.agent-group-note {
+  opacity: 0.65;
+  font-size: 0.82em;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.agent-group-note { font-style: italic; }
+
+.agent-group-prose { font-size: 0.94em; }
+.agent-group-prose > * { margin: 0 0 6px; }
+.agent-group-prose > *:last-child { margin-bottom: 0; }
+
+.agent-group-entry {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.78em;
+  word-break: break-all;
+}
+
+.agent-entry-detail { margin: 2px 0 0 14px; font-size: 0.95em; }
+.agent-entry-detail > summary { cursor: pointer; opacity: 0.6; list-style: none; }
+.agent-entry-detail > summary::before { content: "⋯ "; }
+.agent-entry-detail-pre {
+  margin: 2px 0 0;
+  padding: 4px 6px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
+  border-radius: 3px;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Nested child groups indent inside their parent's body. */
+.agent-group-body > .agent-group { margin-left: 2px; }
+
+/* Assistant turn: full-width structural markdown, no bubble. */
+.chat-assistant-body {
+  word-break: break-word;
+}
+
+.chat-assistant-body > * {
+  margin: 0 0 8px;
+}
+
+.chat-assistant-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.md-heading {
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+h1.md-heading { font-size: 1.25em; }
+h2.md-heading { font-size: 1.15em; }
+h3.md-heading { font-size: 1.05em; }
+h4.md-heading { font-size: 1em; }
+
+.md-paragraph {
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
+.md-list {
+  margin: 0 0 8px;
+  padding-left: 20px;
+  line-height: 1.45;
+}
+
+.md-list li {
+  margin: 1px 0;
+}
+
+.md-code {
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background, rgba(128, 128, 128, 0.08)));
+}
+
+.md-code-badge {
+  display: block;
+  padding: 2px 8px;
+  font-size: 0.72em;
+  text-transform: lowercase;
+  opacity: 0.7;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.md-pre {
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+  white-space: pre;
+}
+
+/* Subtle streaming affordance appended after the assistant body. */
+.stream-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: -2px;
+  background: var(--vscode-foreground);
+  opacity: 0.55;
+  animation: stream-blink 1s step-end infinite;
+}
+
+@keyframes stream-blink {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 0.1; }
+}
+
+/* Composer */
+
+.composer {
+  margin: 0 0 8px;
+  flex: 0 0 auto;
+}
+
+.prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  padding: 6px;
+  font-family: var(--vscode-font-family);
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.composer-spacer {
+  flex: 1;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--vscode-button-secondaryBackground);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.segmented .segment {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--vscode-foreground);
+  padding: 3px 10px;
+  font-size: 0.85em;
+}
+
+.segmented .segment.active {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+/* Collapsible sections (Changes / Diagnostics / advanced groups) */
+
+.section {
+  margin: 8px 0;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  padding-top: 4px;
+}
+
+/* Changes / Diagnostics disclosures sit at natural height (their inner lists
+   carry the scroll caps); they must not stretch the chat column. */
+.chat-tab > .section {
+  flex: 0 0 auto;
+  margin: 6px 0;
+}
+
+.section > summary {
+  cursor: pointer;
+  padding: 4px 0;
+  font-weight: 600;
+  list-style: revert;
+}
+
+.section-body {
+  padding: 4px 0 6px;
+}
+
+/* --------------------------------------------------------------------------
+   Working set (Copilot-style Changes section)
+   -------------------------------------------------------------------------- */
+
+.working-set-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 6px;
+}
+
+.working-set-title {
+  font-size: 0.85em;
+  opacity: 0.8;
+}
+
+.working-set-spacer {
+  flex: 1;
+}
+
+.working-set-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.working-set-refresh {
+  font-size: 1em;
+}
+
+.working-set-snapshot {
+  opacity: 0.7;
+}
+
+/* File list capped ~30vh with its own scroll. */
+.working-set-files {
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.working-set-row {
+  padding: 2px 2px;
+  border-radius: 3px;
+  gap: 6px;
+}
+
+.working-set-row:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.change-glyph {
+  flex: 0 0 auto;
+  width: 1.1em;
+  text-align: center;
+  font-weight: 700;
+  font-family: var(--vscode-editor-font-family);
+}
+
+.change-glyph.kind-add { color: var(--vscode-testing-iconPassed, #2ea043); }
+.change-glyph.kind-modify { color: var(--vscode-editorWarning-foreground, #cca700); }
+.change-glyph.kind-delete { color: var(--vscode-editorError-foreground, #f14c4c); }
+.change-glyph.kind-rename { color: var(--vscode-descriptionForeground, #888); }
+
+.working-set-name .file-base {
+  font-weight: 600;
+}
+
+.working-set-name .file-dir {
+  opacity: 0.55;
+  font-size: 0.92em;
+}
+
+.working-set-open {
+  cursor: pointer;
+}
+
+.working-set-stats {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 6px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+.stat-added { color: var(--vscode-testing-iconPassed, #2ea043); }
+.stat-removed { color: var(--vscode-editorError-foreground, #f14c4c); }
+
+/* R15: dim inline tag on a row whose discard is unsupported — states the
+   irreversibility next to the stats instead of only in the disabled ✕'s tooltip. */
+.no-rollback-tag {
+  flex: 0 0 auto;
+  font-size: 0.78em;
+  font-style: italic;
+  opacity: 0.65;
+}
+
+/* Row action icons: revealed on hover, always visible on focus. */
+.working-set-row-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+}
+
+.working-set-row:hover .working-set-row-actions,
+.working-set-row:focus-within .working-set-row-actions {
+  opacity: 1;
+}
+
+.row-accept:hover {
+  color: var(--vscode-testing-iconPassed, #2ea043);
+}
+
+.row-discard:hover,
+.row-discard.armed {
+  color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+.row-discard.armed {
+  opacity: 1;
+  font-weight: 700;
+}
+
+/* Relocated, de-emphasized Comments sub-section inside Changes. */
+.comments-section {
+  border-top: 1px dashed var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  margin-top: 6px;
+}
+
+.comments-section > summary {
+  font-weight: 500;
+  opacity: 0.8;
+  font-size: 0.9em;
+}
+
+/* --------------------------------------------------------------------------
+   Drag-drop into the composer
+   -------------------------------------------------------------------------- */
+
+.drop-active {
+  outline: 2px dashed var(--vscode-focusBorder, var(--vscode-button-background));
+  outline-offset: -2px;
+  background: var(--vscode-list-dropBackground, rgba(128, 128, 128, 0.08));
+}
+
+/* Facts grid (diagnostics) */
+
+.facts-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  margin: 4px 0 8px;
+  font-size: 0.85em;
+}
+
+.fact-key {
+  opacity: 0.65;
+  white-space: nowrap;
+}
+
+.fact-value {
+  font-family: var(--vscode-editor-font-family);
+  word-break: break-all;
+}
+
+/* --------------------------------------------------------------------------
+   Diagnostics + event log (shared markup)
+   -------------------------------------------------------------------------- */
+
+.diagnostics-log {
+  max-height: 25vh;
+  overflow-y: auto;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 2px;
+  padding: 5px 6px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.82em;
+}
+
+.diagnostic-row {
+  display: block;
+  padding: 1px 0;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.diagnostic-meta {
+  opacity: 0.6;
+  margin-right: 6px;
+}
+
+.diagnostic-row.kind-agent-error .diagnostic-text {
+  color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+/* --------------------------------------------------------------------------
+   Cards (Work tab attention + sessions)
+   -------------------------------------------------------------------------- */
+
+.card {
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  background: var(--vscode-editorWidget-background, transparent);
+}
+
+.card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.attention-list {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+}
+
+/* R4: the needs-attention section rests as ONE clickable summary line
+   (`⚠ N requests · M failed — review`) pinned at top; clicking expands the full
+   access cards in place. The whole section is hidden (display:none) when empty. */
+.attention-section {
+  display: none;
+}
+
+.attention-section.has-attention {
+  display: block;
+  margin: 10px 0 4px;
+}
+
+.attention-summary {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 3px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  background: var(--vscode-inputValidation-warningBackground, rgba(255, 200, 0, 0.1));
+  border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.attention-summary:hover {
+  background: var(--vscode-list-hoverBackground, var(--vscode-editorWidget-background, transparent));
+}
+
+.attention-section.has-attention .attention-card {
+  border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.attention-title {
+  font-weight: 600;
+}
+
+.attention-path {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+  word-break: break-all;
+  opacity: 0.9;
+}
+
+.attention-reason {
+  font-size: 0.85em;
+  opacity: 0.8;
+  margin-top: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Access-request cards (shared by Work-tab "needs attention" + inline Chat)
+   -------------------------------------------------------------------------- */
+
+.access-cards {
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 8px;
+}
+
+/* Inline chat variant: same visual language as the attention card, always
+   shows the warning accent (not gated behind a parent .has-attention class). */
+.access-card {
+  border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.access-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.access-card-path {
+  width: 100%;
+  margin-top: 6px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+/* Risk-tiered escalation (rw / sensitive): louder accent + typed confirm
+   (Phase 3, B1/B4). The amber/red accent overrides the quiet base card border. */
+.access-escalated {
+  border-color: var(--vscode-editorWarning-foreground, #cca700);
+  border-left-width: 3px;
+  border-left-color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.access-card.access-escalated,
+.attention-section.has-attention .access-escalated {
+  border-left-color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+.access-warning {
+  margin-top: 4px;
+  font-size: 0.82em;
+  font-weight: 600;
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.access-escalated .access-warning {
+  color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+.card-actions-spacer {
+  flex: 1;
+}
+
+.access-confirm {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.access-confirm-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8em;
+  opacity: 0.9;
+}
+
+.access-confirm-input {
+  width: 100%;
+  font-family: var(--vscode-editor-font-family);
+}
+
+/* R5: the exact token to type, named in the confirm label as a monospace pill so
+   the guess-which-segment step is removed while the typing friction stays. */
+.confirm-token {
+  font-family: var(--vscode-editor-font-family);
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-foreground);
+}
+
+/* --------------------------------------------------------------------------
+   Attention markers on Work-tab session rows (Phase 3; R1/R9 salience inversion)
+   -------------------------------------------------------------------------- */
+
+/* Halo on the status dot. LOUD rows (failed / waiting-on-access) keep the 3px
+   glowing ring; a merely-ready row (turn completed) is demoted to a thin 1px
+   ring so a benign completion stops out-shouting a real failure (R1). */
+.status-dot.attn-halo {
+  box-shadow: 0 0 0 2px var(--vscode-editorWidget-background, var(--vscode-editor-background)),
+    0 0 0 3px currentColor;
+}
+
+/* Loud halos: red for failure (R1/R9), amber for a pending access request. */
+.status-dot.attn-halo.attn-loud-failed { color: var(--vscode-editorError-foreground, #f14c4c); }
+.status-dot.attn-halo.attn-loud-approval { color: var(--vscode-editorWarning-foreground, #cca700); }
+
+/* Demoted "ready" halo: a thin 1px green ring, not the 3px glow. */
+.status-dot.attn-halo.attn-ready {
+  color: var(--vscode-testing-iconPassed, #2ea043);
+  box-shadow: 0 0 0 1px var(--vscode-editorWidget-background, var(--vscode-editor-background)),
+    0 0 0 2px currentColor;
+}
+
+/* --------------------------------------------------------------------------
+   Session-row title chips (R1/R9). ONE ordered vocabulary, kind-namespaced so a
+   future role chip (multi-agent roles) is a new `.chip-*` colour rule only.
+   -------------------------------------------------------------------------- */
+.session-chip {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  margin-left: 2px;
+}
+
+/* State chips carry weight + accent by severity. Failed/approval are LOUD
+   (bold + accent); ready is demoted to the normal (non-bold) meta weight. */
+.session-chip.chip-failed,
+.session-chip.chip-approval {
+  font-size: 0.78em;
+  font-weight: 600;
+}
+
+.session-chip.chip-failed { color: var(--vscode-editorError-foreground, #f14c4c); }
+.session-chip.chip-approval { color: var(--vscode-editorWarning-foreground, #cca700); }
+
+/* Demoted completion: non-bold, dim green — "a turn finished", not an alarm. */
+.session-chip.chip-ready {
+  font-size: 0.78em;
+  font-weight: 400;
+  color: var(--vscode-testing-iconPassed, #2ea043);
+}
+
+/* Role chip: a spawned child session names its role, quietly. */
+.session-chip.chip-role {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.25));
+  color: var(--vscode-badge-foreground, inherit);
+  opacity: 0.85;
+}
+
+/* Subagent chip: ⑂ N while children run; red when one failed. */
+.session-chip.chip-subagents {
+  font-size: 0.78em;
+  font-weight: 500;
+  color: var(--vscode-charts-green, #3fb950);
+}
+.session-chip.chip-subagents-failed { color: var(--vscode-editorError-foreground, #f14c4c); }
+
+/* Agents lens: the [Log | Agents] alternate hierarchy view. */
+.transcript-lens-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 0 6px;
+}
+.lens-segmented .segment { font-size: 0.78em; padding: 1px 8px; }
+.spawn-role-select {
+  font-size: 0.78em;
+  max-width: 90px;
+  opacity: 0.85;
+}
+.agents-lens {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.agents-lens-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 3px;
+  font-size: 0.86em;
+  min-width: 0;
+  overflow: hidden;
+}
+.agents-lens-row .agent-group-dot { align-self: center; flex: none; }
+.agents-lens-row.clickable { cursor: pointer; }
+.agents-lens-row.clickable:hover { background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1)); }
+.agents-lens-row.is-root { font-weight: 600; }
+.agents-lens-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.agents-lens-meta { opacity: 0.6; font-size: 0.92em; white-space: nowrap; flex: none; }
+.agents-lens-activity {
+  opacity: 0.55;
+  font-size: 0.92em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agents-lens-empty { opacity: 0.6; font-size: 0.82em; font-style: italic; padding: 6px 4px; }
+
+/* Clone chip: the clone badge, now one entry in the shared ordered chip list. */
+.session-chip.chip-clone {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
+  background: var(--vscode-charts-purple, #9a6dd7);
+  color: #ffffff;
+  margin-left: 6px;
+}
+
+/* R9: on a failed row the state word in the meta line renders in the red accent
+   (not dim grey), so failure survives a fast scan without the 8px dot hue. */
+.session-card-meta .meta-word-failed {
+  color: var(--vscode-editorError-foreground, #f14c4c);
+  font-weight: 600;
+}
+
+/* Resume button on ended/failed rows: hover-revealed alongside delete. */
+.session-resume {
+  flex: 0 0 auto;
+  opacity: 0;
+  padding: 1px 8px;
+}
+
+.session-card:hover .session-resume,
+.session-resume:focus-visible {
+  opacity: 1;
+}
+
+.session-resume:disabled {
+  opacity: 0.5;
+}
+
+/* --------------------------------------------------------------------------
+   Granted-access ledger (Work-tab session rows, Phase 3 B1/B3)
+   -------------------------------------------------------------------------- */
+
+.session-grants {
+  margin-top: 4px;
+  padding-left: 14px;
+}
+
+.session-grants-chip {
+  font-size: 0.78em;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.session-grants-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.8em;
+}
+
+.session-grant-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.session-grant-mode {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 0.9em;
+}
+
+.session-grant-mode.mode-read-write {
+  background: var(--vscode-testing-iconPassed, #2ea043);
+  color: #ffffff;
+}
+
+.session-grant-mode.mode-read-only {
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+
+.session-grant-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
+.session-grant-warn {
+  flex: 0 0 auto;
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+/* --------------------------------------------------------------------------
+   Unreviewed marker on working-set rows (Phase 3 B2)
+   -------------------------------------------------------------------------- */
+
+.unreviewed-dot {
+  flex: 0 0 auto;
+  width: 0.7em;
+  text-align: center;
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Accept-all armed state names the exposure; make the count legible. */
+.working-set-actions .button.armed {
+  background: var(--vscode-editorWarning-foreground, #cca700);
+  color: #000000;
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+   Tasks (Work tab)
+   -------------------------------------------------------------------------- */
+
+.task-cards {
+  display: flex;
+  flex-direction: column;
+}
+
+.task-card-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.task-card-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.task-card-title:hover {
+  text-decoration: underline;
+}
+
+.task-state-select {
+  flex: 0 0 auto;
+  max-width: 110px;
+  font-size: 0.85em;
+}
+
+.task-delete {
+  opacity: 0;
+  flex: 0 0 auto;
+}
+
+.task-card:hover .task-delete,
+.task-delete.armed {
+  opacity: 1;
+}
+
+.task-card-note {
+  font-size: 0.85em;
+  margin-top: 4px;
+  cursor: text;
+  word-break: break-word;
+}
+
+.task-card-note.placeholder {
+  opacity: 0.5;
+  font-style: italic;
+}
+
+.task-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+/* Each chip pairs a label pill with its inline action buttons. */
+.task-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+}
+
+.task-chip .chip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip-remove,
+.chip-open {
+  padding: 0 4px;
+  font-size: 0.8em;
+  opacity: 0.6;
+}
+
+.task-chip:hover .chip-remove,
+.task-chip:hover .chip-open {
+  opacity: 1;
+}
+
+.task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  align-items: center;
+}
+
+/* R6: a thin leading separator that sets the window-mutating Activate… apart
+   from the lighter link actions to its left. */
+.task-actions-divider {
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: 1px;
+  margin: 2px 2px;
+  background: var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+}
+
+.session-card-tasks {
+  margin-top: 4px;
+}
+
+.session-task-chip {
+  font-size: 0.8em;
+}
+
+.session-cards {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Lean, scannable rows (Copilot-sessions style): tight vertical rhythm, two
+   text lines, no border/status-badge chrome — just a dot + title + dim meta. */
+.session-card {
+  cursor: pointer;
+  padding: 6px 8px;
+  margin: 1px 0;
+  border: 1px solid transparent;
+  border-left: 2px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+}
+
+.session-card:hover {
+  background: var(--vscode-list-hoverBackground, var(--vscode-editorWidget-background, transparent));
+}
+
+.session-card.selected {
+  border-left-color: var(--vscode-focusBorder, var(--vscode-button-background));
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-editorWidget-background, transparent));
+}
+
+.session-card-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.session-card-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.session-delete {
+  opacity: 0;
+}
+
+.session-card:hover .session-delete,
+.session-delete.armed {
+  opacity: 1;
+}
+
+.session-card-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82em;
+  opacity: 0.7;
+  margin-top: 1px;
+  /* Aligns under the title, past the dot. */
+  padding-left: 14px;
+}
+
+/* "running elsewhere" state label reads as a distinct, non-actionable state. */
+.session-card-meta.meta-elsewhere {
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.session-card-note {
+  font-size: 0.85em;
+  font-style: italic;
+  margin-top: 2px;
+  padding-left: 14px;
+  cursor: text;
+  word-break: break-word;
+}
+
+.session-card-note.placeholder {
+  opacity: 0.5;
+}
+
+.note-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  padding: 4px 6px;
+  font-family: var(--vscode-font-family);
+}
+
+/* --------------------------------------------------------------------------
+   Lists reused across tabs (projects, changed files, review, plans, runtimes)
+   -------------------------------------------------------------------------- */
+
+.runtimes,
+.workspace-list,
+.changed-files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+.runtime-row,
+.workspace-row,
+.changed-file-row,
+.project-row,
+.review-comment-row,
+.plan-block-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.runtime-name,
+.workspace-paths,
+.changed-file-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+}
+
+.changed-file-path {
+  cursor: pointer;
+}
+
+.projects-list,
+.review-comments,
+.plan-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 6px 0;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 8px;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+/* --------------------------------------------------------------------------
+   System tab
+   -------------------------------------------------------------------------- */
+
+.banner {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--vscode-editorWarning-foreground);
+  background: var(--vscode-inputValidation-warningBackground, rgba(255, 200, 0, 0.1));
+  word-break: break-word;
+}
+
+.footer {
+  margin-top: 12px;
+  opacity: 0.6;
+  font-size: 0.8em;
+  word-break: break-all;
+}
+
+/* --------------------------------------------------------------------------
+   Task-first creation flow
+   -------------------------------------------------------------------------- */
+
+.task-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.task-create-toggle {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
+.task-create-expandable {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0 6px 22px;
+}
+
+.task-create-desc {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.task-create-workspace {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85em;
+}
+
+.task-card-meta {
+  font-size: 0.8em;
+  opacity: 0.6;
+  margin-top: 3px;
+}
+
+/* --------------------------------------------------------------------------
+   Touch-history hover popover
+   -------------------------------------------------------------------------- */
+
+/* The hover popover is absolutely positioned relative to the Work tab root. */
+.work-tab {
+  position: relative;
+}
+
+.history-popover {
+  position: absolute;
+  z-index: 30;
+  min-width: 180px;
+  max-width: min(260px, 92%);
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  font-size: 0.82em;
+}
+
+.history-popover-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  opacity: 0.85;
+}
+
+.history-popover-row {
+  margin: 2px 0;
+  word-break: break-word;
+  opacity: 0.9;
+}
+
+/* Advanced set rows double as touch-history hover anchors. */
+.sets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+.set-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: default;
+}
+
+.set-row:hover {
+  background: var(--vscode-list-hoverBackground, var(--vscode-editorWidget-background, transparent));
+}
+
+.set-row-name {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+.set-row-paths {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+/* --------------------------------------------------------------------------
+   Memory section
+   -------------------------------------------------------------------------- */
+
+.memory-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memory-card {
+  padding: 6px 8px;
+}
+
+.memory-card-content {
+  font-size: 0.9em;
+  word-break: break-word;
+}
+
+.memory-card-source {
+  font-size: 0.78em;
+  opacity: 0.6;
+  margin-top: 3px;
+}
+
+.memory-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.memory-approved {
+  margin-top: 8px;
+  opacity: 0.7;
+}
+
+.memory-approved-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.82em;
+}
+
+.memory-approved-row {
+  word-break: break-word;
+  opacity: 0.8;
+}
+
+/* --------------------------------------------------------------------------
+   Mini-task from a review comment
+   -------------------------------------------------------------------------- */
+
+.comment-to-task {
+  flex: 0 0 auto;
+  font-size: 0.78em;
+  padding: 0 6px;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.review-comment-row:hover .comment-to-task {
+  opacity: 1;
+}

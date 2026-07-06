@@ -1,0 +1,543 @@
+/* Task Review panel styles — VS Code theme variables only, no remote assets.
+   Modeled on planDocs.css (font/scrollbar/dock-layout conventions). */
+
+body {
+  padding: 0 16px 16px;
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* --------------------------------------------------------------------------
+   Header bar
+   -------------------------------------------------------------------------- */
+
+.tr-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 12px 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+.tr-title {
+  margin: 0;
+  font-size: 1.15em;
+  word-break: break-word;
+}
+
+.tr-header-spacer {
+  flex: 1;
+}
+
+.tr-revision-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.78em;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  white-space: nowrap;
+}
+
+/* Dim decaying stamp next to ↻ announcing a meaningful refetch (R11). Visibility
+   is driven by the `.tr-stamp-visible` modifier (JS toggles it on announce, and a
+   ~5s timer removes it — re-armed on a newer update) so the opacity transition
+   actually renders a soft fade. At rest it is transparent AND out of the a11y
+   tree (visibility:hidden), taking no interactive space. */
+.tr-updated-stamp {
+  font-size: 0.75em;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.6s ease-out, visibility 0s linear 0.6s;
+}
+
+.tr-updated-stamp.tr-stamp-visible {
+  opacity: 0.6;
+  visibility: visible;
+  transition: opacity 0.2s ease-in;
+}
+
+.tr-result {
+  flex-basis: 100%;
+  font-size: 0.85em;
+  padding: 4px 0 0;
+}
+
+.tr-result-line {
+  opacity: 0.9;
+}
+
+.tr-result-error {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  opacity: 1;
+}
+
+/* --------------------------------------------------------------------------
+   Body layout: navigator · dock
+   -------------------------------------------------------------------------- */
+
+.tr-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+/* Wide viewports (>=900px): the dock becomes a right column. Below that width
+   it stacks under the navigator (grid-column 1 / -1 by default). */
+@media (min-width: 900px) {
+  .tr-body {
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+  }
+}
+
+.tr-empty {
+  margin: 24px 0;
+  opacity: 0.7;
+}
+
+/* --------------------------------------------------------------------------
+   Navigator: projects → files
+   -------------------------------------------------------------------------- */
+
+.tr-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.tr-nav-empty {
+  opacity: 0.6;
+  font-size: 0.9em;
+  padding: 8px 0;
+}
+
+/* Collapsed marker legend (R8a): a quiet disclosure at the top of the navigator
+   that decodes the row glyph vocabulary. */
+.tr-legend {
+  font-size: 0.8em;
+  opacity: 0.85;
+}
+
+.tr-legend > summary {
+  cursor: pointer;
+  opacity: 0.7;
+  padding: 2px 4px;
+  list-style-position: inside;
+  user-select: none;
+}
+
+.tr-legend > summary:hover {
+  opacity: 1;
+}
+
+.tr-legend-line {
+  padding: 4px 4px 2px 16px;
+  opacity: 0.75;
+  line-height: 1.5;
+}
+
+.tr-project {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tr-project-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 4px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.tr-project-name {
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.tr-project-count {
+  font-size: 0.75em;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.tr-note {
+  font-size: 0.8em;
+  opacity: 0.6;
+  font-style: italic;
+  padding: 2px 4px;
+}
+
+/* --------------------------------------------------------------------------
+   File rows (mirror the working-set visual conventions)
+   -------------------------------------------------------------------------- */
+
+.tr-file-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.tr-file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  min-width: 0;
+}
+
+.tr-file-row:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.tr-file-row.conflicted {
+  border-color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.tr-file-row.clone {
+  cursor: default;
+}
+
+/* Meaningful-refetch flash (R11): a one-shot ~1s background tint that fades back
+   out, marking a row whose entry changed under the reviewer. The class is removed
+   on animationend (JS) so a later refetch can re-trigger it. */
+.tr-file-row.tr-row-flash {
+  animation: tr-row-flash 1s ease-out;
+}
+
+@keyframes tr-row-flash {
+  0% {
+    background: var(--vscode-list-activeSelectionBackground, rgba(74, 144, 217, 0.35));
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tr-file-row.tr-row-flash {
+    animation-duration: 0.01ms;
+  }
+}
+
+.change-glyph {
+  flex: none;
+  width: 1.2em;
+  text-align: center;
+  font-weight: 600;
+}
+
+.kind-add { color: var(--vscode-charts-green, #89d185); }
+.kind-modify { color: var(--vscode-charts-yellow, #cca700); }
+.kind-delete { color: var(--vscode-charts-red, #f14c4c); }
+.kind-rename { color: var(--vscode-charts-blue, #4a90d9); }
+
+.conflict-marker {
+  flex: none;
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.unreviewed-dot {
+  flex: none;
+  color: var(--vscode-charts-blue, #4a90d9);
+  font-size: 1.1em;
+  line-height: 1;
+}
+
+.tr-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9em;
+}
+
+.tr-file-path.tr-file-open {
+  cursor: pointer;
+  color: var(--vscode-textLink-foreground, #4daafc);
+}
+
+.tr-file-path.tr-file-open:hover {
+  text-decoration: underline;
+}
+
+.file-base { }
+
+.file-dir {
+  opacity: 0.6;
+  font-size: 0.85em;
+}
+
+.tr-file-stats {
+  flex: none;
+  display: inline-flex;
+  gap: 6px;
+  font-size: 0.8em;
+  white-space: nowrap;
+}
+
+.stat-added { color: var(--vscode-charts-green, #89d185); }
+.stat-removed { color: var(--vscode-charts-red, #f14c4c); }
+
+.tr-file-markers {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tr-comment-badge {
+  font-size: 0.72em;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  white-space: nowrap;
+}
+
+.tr-clone-chip {
+  font-size: 0.68em;
+  padding: 0 6px;
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-button-secondaryForeground, inherit);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tr-reviewed {
+  color: var(--vscode-testing-iconPassed, #2ea043);
+  font-size: 0.85em;
+}
+
+/* Opened-but-still-commented marker (R3): the third reviewed state. Muted grey
+   half-tone, sitting between the unreviewed dot's blue and the reviewed ✓'s
+   green — "seen, but still has notes". */
+.tr-opened {
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+  opacity: 0.85;
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.tr-file-add {
+  flex: none;
+  /* Holds the 💬+ label (R8b) without the row width jumping vs the old bare +. */
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+   Inline per-file add-comment form
+   -------------------------------------------------------------------------- */
+
+.tr-comment-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 6px 26px;
+  padding: 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, transparent);
+}
+
+.tr-comment-line {
+  width: 80px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  padding: 4px 6px;
+  font-family: var(--vscode-font-family);
+}
+
+.tr-comment-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  padding: 6px;
+  font-family: var(--vscode-font-family);
+}
+
+.tr-comment-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tr-comment-error {
+  font-size: 0.8em;
+  color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+/* --------------------------------------------------------------------------
+   Comments dock
+   -------------------------------------------------------------------------- */
+
+.tr-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  padding-top: 10px;
+}
+
+/* On wide viewports the dock is the right column, no top border. */
+@media (min-width: 900px) {
+  .tr-dock {
+    grid-column: 2;
+    grid-row: 1;
+    position: sticky;
+    top: 8px;
+    border-top: none;
+    padding-top: 0;
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+  }
+}
+
+.tr-dock-heading {
+  margin: 0;
+  font-size: 0.95em;
+}
+
+.tr-dock-empty {
+  opacity: 0.6;
+  font-size: 0.9em;
+  padding: 8px 0;
+}
+
+.tr-dock-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tr-dock-group-head {
+  font-size: 0.78em;
+  font-weight: 600;
+  word-break: break-all;
+  opacity: 0.85;
+}
+
+.tr-dock-group-head.tr-dock-jump {
+  cursor: pointer;
+  color: var(--vscode-textLink-foreground, #4daafc);
+}
+
+.tr-dock-group-head.tr-dock-jump:hover {
+  text-decoration: underline;
+}
+
+.tr-dock-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+}
+
+/* Delegated comments are in-flight with the agent: dim + italic. */
+.tr-dock-entry.delegated {
+  opacity: 0.55;
+  font-style: italic;
+}
+
+.tr-dock-anchor {
+  font-size: 0.75em;
+  opacity: 0.8;
+  word-break: break-all;
+}
+
+.tr-dock-body {
+  font-size: 0.9em;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.tr-dock-meta {
+  font-size: 0.75em;
+  opacity: 0.65;
+  word-break: break-word;
+}
+
+.tr-dock-status {
+  align-self: flex-start;
+  color: var(--vscode-dropdown-foreground);
+  background: var(--vscode-dropdown-background);
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 2px;
+  padding: 2px 4px;
+  font-size: 0.85em;
+}
+
+/* --------------------------------------------------------------------------
+   Buttons (self-contained; this entry does not import the control-panel bundle)
+   -------------------------------------------------------------------------- */
+
+.button {
+  border: none;
+  border-radius: 2px;
+  padding: 5px 12px;
+  cursor: pointer;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+
+.button.primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+.button.ghost {
+  background: transparent;
+  color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-button-secondaryBackground);
+}
+
+.button.small {
+  padding: 2px 8px;
+  font-size: 0.85em;
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.icon-button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--vscode-foreground);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.95em;
+  line-height: 1;
+}
+
+.icon-button:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.icon-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

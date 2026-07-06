@@ -1,0 +1,141 @@
+{
+  "schemaVersion": "drydock.extension.v1",
+  "id": "example.custom-extension-pack",
+  "displayName": "Custom Extension Pack",
+  "version": "0.0.1",
+  "kind": "multi-provider",
+  "extensionPoints": [
+    {
+      "type": "task-provider",
+      "id": "custom-task",
+      "version": "v1",
+      "capabilities": {
+        "operations": [
+          "detect",
+          "validateAuth",
+          "discoverProjects",
+          "listTasks",
+          "getTask",
+          "createTask",
+          "updateTask",
+          "commentTask",
+          "transitionTask",
+          "attachArtifact",
+          "syncEvents",
+          "mapToCanonicalTask"
+        ],
+        "objects": [
+          "task",
+          "project",
+          "comment",
+          "link"
+        ],
+        "sync": "polling"
+      }
+    },
+    {
+      "type": "agent-provider",
+      "id": "custom-agent",
+      "version": "v1",
+      "capabilities": {
+        "events": [
+          "text",
+          "tool-call",
+          "file-create",
+          "file-modify",
+          "file-delete",
+          "command",
+          "error",
+          "done"
+        ],
+        "cancellation": true,
+        "auth": true
+      }
+    },
+    {
+      "type": "runtime-adapter",
+      "id": "custom-runtime",
+      "version": "v1",
+      "capabilities": {
+        "create": true,
+        "exec": true,
+        "readonlyMounts": true,
+        "writeMounts": true,
+        "stop": true,
+        "forceRemove": true,
+        "reconcile": true,
+        "cleanupAccounting": true
+      }
+    },
+    {
+      "type": "panel-provider",
+      "id": "custom-panel",
+      "version": "v1",
+      "capabilities": {
+        "views": [
+          "agent-flow",
+          "task-context"
+        ],
+        "messageSchema": "schemas/panel-message.schema.json",
+        "eventSubscriptions": [
+          "task.updated",
+          "agent.event",
+          "runtime.cleanup"
+        ]
+      }
+    },
+    {
+      "type": "memory-provider",
+      "id": "custom-memory",
+      "version": "v1",
+      "capabilities": {
+        "reviewRequired": true,
+        "search": true,
+        "export": true
+      }
+    },
+    {
+      "type": "test-provider",
+      "id": "custom-test",
+      "version": "v1",
+      "capabilities": {
+        "automated": true,
+        "hitl": true,
+        "artifactRefs": true
+      }
+    }
+  ],
+  "auth": {
+    "mode": "provider-secret-ref",
+    "secretRefRequired": true,
+    "scopes": [
+      "custom:read",
+      "custom:write"
+    ]
+  },
+  "api": {
+    "baseUrlTemplate": "https://custom.example.invalid/api",
+    "schemaRefs": [
+      "schemas/extension-manifest.schema.json",
+      "schemas/task-provider.schema.json"
+    ]
+  },
+  "capabilities": {
+    "trustedExtensionRequired": true,
+    "noHostAgentCommands": true,
+    "schemaBound": true,
+    "rateLimitPolicy": "manifest-declared",
+    "conflictPolicy": "manual"
+  },
+  "canonicalMappings": {
+    "id": "task.id",
+    "externalId": "task.remoteId",
+    "title": "task.title",
+    "description": "task.description",
+    "status": "task.status",
+    "statusCategory": "task.statusCategory",
+    "externalUrl": "task.url",
+    "projectRefs": "task.projects",
+    "labels": "task.labels"
+  }
+}

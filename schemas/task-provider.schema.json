@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://drydock.local/schemas/task-provider.schema.json",
+  "title": "Drydock Task Provider Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "providerId",
+    "operations",
+    "canonicalTask",
+    "sync"
+  ],
+  "properties": {
+    "providerId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "enum": [
+          "detect",
+          "validateAuth",
+          "discoverProjects",
+          "listTasks",
+          "getTask",
+          "createTask",
+          "updateTask",
+          "commentTask",
+          "transitionTask",
+          "attachArtifact",
+          "syncEvents",
+          "mapToCanonicalTask"
+        ]
+      }
+    },
+    "canonicalTask": {
+      "type": "object",
+      "required": [
+        "id",
+        "providerId",
+        "title",
+        "status",
+        "statusCategory",
+        "folderAllocations",
+        "workspaceRootIds",
+        "syncState"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "externalId": {
+          "type": "string"
+        },
+        "externalUrl": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "statusCategory": {
+          "enum": [
+            "backlog",
+            "ready",
+            "active",
+            "blocked",
+            "review",
+            "done",
+            "cancelled"
+          ]
+        },
+        "folderAllocations": {
+          "type": "array"
+        },
+        "workspaceRootIds": {
+          "type": "array"
+        },
+        "syncState": {
+          "enum": [
+            "local-only",
+            "synced",
+            "dirty",
+            "conflicted",
+            "remote-deleted"
+          ]
+        }
+      }
+    },
+    "sync": {
+      "type": "object",
+      "required": [
+        "mode",
+        "conflictPolicy"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "local",
+            "polling",
+            "webhook",
+            "polling-or-webhook"
+          ]
+        },
+        "conflictPolicy": {
+          "enum": [
+            "local-wins",
+            "remote-wins",
+            "manual"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/contracts" },
+    { "path": "./packages/core" },
+    { "path": "./packages/storage-sqlite" },
+    { "path": "./packages/artifacts" },
+    { "path": "./packages/work-management" },
+    { "path": "./packages/runtime-adapters" },
+    { "path": "./packages/agent-adapters" },
+    { "path": "./apps/vscode-extension" },
+    { "path": "./apps/vscode-extension/webview-ui" },
+    { "path": "./tools/runtime-smoke" }
+  ]
+}
