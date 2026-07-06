@@ -1,6 +1,6 @@
 {
   "name": "drydock-monorepo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Security-first VS Code extension for running coding agents in disposable isolated runtimes.",

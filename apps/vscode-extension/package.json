@@ -2,7 +2,7 @@
   "name": "drydock",
   "displayName": "Drydock",
   "description": "Drydock \u2014 the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "local",
   "private": true,
   "type": "module",
@@ -142,12 +142,12 @@
     }
   },
   "dependencies": {
-    "@drydock/agent-adapters": "0.1.0",
-    "@drydock/artifacts": "0.1.0",
-    "@drydock/contracts": "0.1.0",
-    "@drydock/core": "0.1.0",
-    "@drydock/runtime-adapters": "0.1.0",
-    "@drydock/storage-sqlite": "0.1.0",
-    "@drydock/work-management": "0.1.0"
+    "@drydock/agent-adapters": "0.2.0",
+    "@drydock/artifacts": "0.2.0",
+    "@drydock/contracts": "0.2.0",
+    "@drydock/core": "0.2.0",
+    "@drydock/runtime-adapters": "0.2.0",
+    "@drydock/storage-sqlite": "0.2.0",
+    "@drydock/work-management": "0.2.0"
   }
 }
