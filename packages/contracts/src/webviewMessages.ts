@@ -25,6 +25,7 @@ export const WEBVIEW_PROTOCOL_VERSION = 1;
 /** Roles a user may spawn as child sessions. */
 export const SPAWNABLE_AGENT_ROLES: readonly AgentRole[] = ["researcher", "planner", "worker", "tester", "reviewer"];
 export const MAX_PROMPT_LENGTH = 20_000;
+export const MAX_CLIPBOARD_LENGTH = 200_000;
 export const MAX_ID_LENGTH = 200;
 export const MAX_MODEL_ID_LENGTH = 120;
 export const MAX_PATH_LENGTH = 1_024;
@@ -36,7 +37,7 @@ export interface ChatModelSelection {
   readonly model?: string;
 }
 
-/** Session modes selectable from the composer. Clone mounts no live roots. */
+/** Session start modes supported by the host. Clone mounts no live roots. */
 export type ChatSessionModeSelection = "plan" | "implementation" | "clone";
 
 /**
@@ -68,6 +69,7 @@ export type PanelRequestPayload =
   | { readonly type: "question.list" }
   | { readonly type: "question.answer"; readonly questionId: string; readonly answer: string }
   | { readonly type: "question.dismiss"; readonly questionId: string }
+  | { readonly type: "clipboard.writeText"; readonly text: string }
   | { readonly type: "provider.list" }
   | { readonly type: "provider.login"; readonly providerId: string }
   | { readonly type: "session.list" }
@@ -170,13 +172,35 @@ export interface ChatSessionSummary {
   /** Agent transport — drives the webview's subagent capability tier. */
   readonly transport?: string;
   /** Live subagent counters for the ⑂ chip (host-derived; local-live sessions only). */
-  readonly agentActivity?: { readonly running: number; readonly failed: number };
+  readonly agentActivity?: AgentActivitySummary;
   /** Spawned-by lineage for product-owned role sessions. */
   readonly parentSessionId?: string;
   /** Role this session plays when spawned as a child. */
   readonly spawnedRole?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/** One compact live/delegated-agent summary for scan views. */
+export interface AgentActivityItem {
+  readonly nodeId: string;
+  readonly parentNodeId?: string;
+  readonly label: string;
+  readonly status: "running" | "completed" | "failed" | "cancelled" | "unknown";
+  readonly startedAt?: string;
+  readonly endedAt?: string;
+  readonly lastActivityAt?: string;
+  readonly lastActivity?: string;
+  readonly lastCommand?: string;
+  readonly toolUses: number;
+  readonly tokens?: number;
+}
+
+/** Live subagent summary folded by the host from structured agent events. */
+export interface AgentActivitySummary {
+  readonly running: number;
+  readonly failed: number;
+  readonly agents?: readonly AgentActivityItem[];
 }
 
 /** One agent-changed file in a clone, relative to the sync base. */
@@ -420,6 +444,10 @@ export interface PanelInitState {
   readonly stateRootDisplayPath: string;
   /** Folder names open in this window; the `auto` workspace selection mounts these. */
   readonly openFolderNames: readonly string[];
+  /** Idle label threshold for delegated agents. */
+  readonly agentIdleThresholdMs: number;
+  /** Wrap long lines inside chat transcript code blocks. */
+  readonly codeBlockWordWrap: boolean;
 }
 
 export type PanelResponsePayload =
@@ -433,6 +461,7 @@ export type PanelResponsePayload =
   | { readonly type: "chat.restartBackend"; readonly session: ChatSessionSummary; readonly providerCatalogs: readonly AgentModelCatalog[] }
   | { readonly type: "chat.resumeSession"; readonly session: ChatSessionSummary; readonly providerCatalogs: readonly AgentModelCatalog[] }
   | { readonly type: "chat.cancelTurn"; readonly accepted: true }
+  | { readonly type: "clipboard.writeText"; readonly accepted: true }
   | { readonly type: "chat.endSession"; readonly session: ChatSessionSummary }
   | { readonly type: "chat.spawnRole"; readonly session: ChatSessionSummary }
   | { readonly type: "question.list"; readonly questions: readonly AgentQuestionSummary[] }
@@ -511,7 +540,7 @@ export type PanelPushPayload =
   | { readonly type: "session.updated"; readonly session: ChatSessionSummary }
   | { readonly type: "session.deleted"; readonly sessionId: string }
   | { readonly type: "session.attention"; readonly sessionId: string; readonly reasons: readonly SessionAttentionReason[] }
-  | { readonly type: "session.agentActivity"; readonly sessionId: string; readonly running: number; readonly failed: number }
+  | { readonly type: "session.agentActivity"; readonly sessionId: string; readonly activity: AgentActivitySummary }
   | { readonly type: "question.asked"; readonly question: AgentQuestionSummary }
   | { readonly type: "question.resolved"; readonly question: AgentQuestionSummary }
   | { readonly type: "policy.accessRequested"; readonly accessRequest: AccessRequestSummary }
@@ -757,6 +786,11 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const questionId = payload["questionId"];
       if (!isBoundedString(questionId, MAX_ID_LENGTH)) return null;
       return { type: "question.dismiss", questionId };
+    }
+    case "clipboard.writeText": {
+      const text = payload["text"];
+      if (!isBoundedString(text, MAX_CLIPBOARD_LENGTH)) return null;
+      return { type: "clipboard.writeText", text };
     }
     case "clone.pull": {
       const sessionId = payload["sessionId"];

@@ -57,7 +57,7 @@ export function renderAttentionStack(
   const stack = el("div", "attention-stack");
   const header = el("div", "attention-stack-header");
   const headline = el("span", "attention-stack-title");
-  headline.textContent = item.kind === "question" ? "Agent asks" : "Agent requests access";
+  headline.textContent = item.kind === "question" ? "Open Questions:" : "Agent requests access";
   header.append(headline);
   if (items.length > 1) {
     const nav = el("div", "attention-stack-nav");

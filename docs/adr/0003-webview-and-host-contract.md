@@ -1,6 +1,6 @@
 # 0003 - Webview and host contract
 
-Status: Accepted - 2026-07-06
+Status: Superseded by [0006](0006-task-scoped-chat-and-agent-visibility.md) - 2026-07-06
 
 Refs: `docs/design/architecture-implementation-plan.md`, `docs/design/threat-model.md`, `packages/contracts/src/webviewMessages.ts`, `packages/core/src/accessRequestProtocol.ts`
 

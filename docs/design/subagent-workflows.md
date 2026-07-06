@@ -3,8 +3,8 @@
 Subagent visibility and the role-session workflows below ship together.
 Codex support is REQUIRED in v1; the design uses one common
 normalized standard across providers, degrading per provider with honest UI
-states rather than silent gaps. The hierarchy view is a `[Log|Agents]` toggle
-in Chat. Related: roadmap, the role-based extension points
+states rather than silent gaps. The hierarchy view is a `[Chat|Agents]` toggle
+in Chat. Related: `task-chat-and-agent-visibility.md`, roadmap, the role-based extension points
 that let panels contribute `sessionChips`/`sessionMetaSegments`/
 `sessionLoudness` per session role, `task-review.md` (role-flow-view
 deferral), `threat-model.md` (subagent access rule), `workflow-scenarios.md`
@@ -104,7 +104,7 @@ Everything derives from the durable event stream; the tree is a projection.
 | Persistence & replay | `session_events` (rowid replay order) — new fields ride `payload_json`; old rows stay valid |
 | Live + replay to UI | `chat.event` push and `session.timeline` both project through `TranscriptLine` (`events.ts:91`, `controlPanelProvider.ts:136`) — one type extension serves both |
 | Transcript rendering | Dev-log transcript + Diagnostics section (`chatTab.ts:909`); `collapsible()` and inline-toggle patterns (`components.ts:74`, grants ledger) |
-| Work-tab chips | The documented role-extension points: `sessionChips` / `sessionMetaSegments` / `sessionLoudness` (`workTab.ts:79-132`) — the ⑂ chip is the promised one-entry change |
+| Tasks-tab chips | The documented role-extension points: `sessionChips` / `sessionMetaSegments` / `sessionLoudness` (`workTab.ts:79-132`) — the ⑂ chip is the promised one-entry change |
 | Tree computation | ONE pure reducer in contracts, consumed by both the webview (Agents lens) and the host (session-summary decoration) |
 
 ### Lineage model (contracts — the common standard)
@@ -190,9 +190,9 @@ projection extractable from either `AgentEvent[]` (host) or
 - **Webview (Agents lens):** reduces the selected session's lines — which it
   already holds from `session.timeline` + streamed `chat.event`. No new push
   type, no polling.
-- **Host (Work-tab chips):** live sessions keep incremental counters from the
-  same reducer; `ChatSessionSummary` gains `agentActivity?: { running:
-  number; failed: number }` via the existing summary decoration. This rides
+- **Host (Tasks-tab chips):** live sessions keep incremental counters from the
+  same reducer; `ChatSessionSummary` gains `agentActivity?: AgentActivitySummary`
+  with running/failed counts plus optional compact per-agent rows. This rides
   its own coalesced `session.agentActivity` push (the same pattern as
   `session.attention`) rather than `session.updated`, so a running child does
   not force a record fetch in the hot event path or churn `updatedAt`;
@@ -230,7 +230,7 @@ header/prompt/result card with an honest no-feed note. The flat Diagnostics
 section keeps receiving everything, prefixed `[<label>]`.
 
 **Agents lens — the alternate view (decided: toggle in Chat).** A
-`[Log | Agents]` segmented toggle on the transcript region. The Agents lens
+`[Chat | Agents]` segmented toggle on the transcript region. The Agents lens
 renders the tree: one row per node, indent = depth, status dot + label +
 model/type chip + counts + last activity + duration (+ tokens where
 reported); running nodes reuse the header-pulse treatment. Clicking a node
@@ -239,7 +239,7 @@ Capability-tier empty/degraded states per the table above. No graph canvas —
 a tree earns its keep at sidebar fan-out sizes; a flow panel stays
 deferred.
 
-**Work tab.** `sessionChips` gains `⑂ N` while N subagents are running
+**Tasks tab.** `sessionChips` gains `⑂ N` while N subagents are running
 (namespaced class, one colour rule — the documented extension pattern); a
 failed child renders the chip in the failed accent. `sessionLoudness` is
 untouched in v1 — a subagent failure inside a *succeeding* turn does not

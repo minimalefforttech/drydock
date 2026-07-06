@@ -1107,7 +1107,7 @@ Stage 4+/7+ UI:
 - Review thread panels for Markdown docs and code diffs, with familiar file/line comments, status, assignee/agent, and resolution state.
 - Mini-task view showing which review comments were grouped, delegated, fixed, verified, or left open.
 
-Webview stack (ADR 0003):
+Webview stack (ADR 0006, superseding ADR 0003):
 
 - Panel v0 is framework-free TypeScript (direct DOM, `textContent`-only rendering) to keep the CSP story trivial while the surface is throwaway-cheap.
 - Keep the renderer framework-free unless a future feature is large enough to justify changing the ADR; plain scoped CSS either way.
@@ -1123,13 +1123,13 @@ Message rules (implemented in `webviewMessages.ts`):
 
 ### Mermaid Diagram Rendering
 
-Rendering agent-authored Mermaid diagrams (plan docs, dependency views) is the sole sanctioned exception to the textContent-only rendering rule (ADR 0003), and it carries its own hardening because the source is untrusted:
+Rendering agent-authored Mermaid diagrams (plan docs, dependency views, chat transcript diagrams) is the sole sanctioned exception to the textContent-only rendering rule (ADR 0006), and it carries its own hardening because the source is untrusted:
 
 - Render configuration is host-locked to `securityLevel: "strict"` with `htmlLabels: false` (this drops `foreignObject` support, closing the CSS-exfiltration path documented in GHSA-87f9-hvmw-gh4p / CVE-2022-31108).
 - The webview strips every `%%{init:...}%%` directive from agent-authored source before rendering, as defense-in-depth over the pinned render config.
 - The rendered SVG is adopted through an inert `DOMParser` pass plus a scrub step, never through raw `innerHTML`.
 - Node-click interaction runs through the host page's own container click listener over stable node-group ids; Mermaid's built-in `click` directive stays disabled.
-- The Mermaid runtime loads as a separate lazy-loaded bundle, script-injected only when a rendered document actually contains a diagram, and only the plan-docs panel's CSP carries the `style-src 'unsafe-inline'` relaxation this rendering path needs — no other panel gets it.
+- The Mermaid runtime loads as a separate lazy-loaded bundle, script-injected only when a rendered document actually contains a diagram, and only panels with Mermaid rendering enabled carry the `style-src 'unsafe-inline'` relaxation this rendering path needs.
 - Blocks that fail to render fall back to fenced source text with a "diagram" badge and a short error note, rather than failing the whole document view.
 - No remote fetch: the renderer operates only on inline agent-authored diagram source, never against a remote URL.
 
@@ -1148,9 +1148,9 @@ Architecture is maintained through four document types.
 2. ADRs for decisions that should not be rediscovered.
    - `docs/adr/0001-runtime-isolation-and-access-policy.md`
    - `docs/adr/0002-product-owned-orchestration.md`
-   - `docs/adr/0003-webview-and-host-contract.md`
    - `docs/adr/0004-workspace-isolation-and-review-flows.md`
    - `docs/adr/0005-product-identity-and-namespace.md`
+   - `docs/adr/0006-task-scoped-chat-and-agent-visibility.md`
 
 3. Runbooks for operations and troubleshooting.
    - `docs/runbooks/runtime-cleanup.md`

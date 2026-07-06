@@ -1,12 +1,12 @@
 /**
- * Tab bar + router for the chat panel (Work | Chat | System).
+ * Tab bar + router for the chat panel (Tasks | Chat | System).
  *
- * Work is the home surface — a lean session list — and Chat is the detail view
- * entered from it (its own back button "‹" returns to Work).
+ * Tasks is the home surface — a lean session list — and Chat is the detail view
+ * entered from it (its own back button "‹" returns to Tasks).
  *
  * Hidden tabs keep their DOM (display:none) so switching is instant and view
  * state survives. The active tab is persisted; switching notifies a callback so
- * a view can refresh on activation (e.g. Work refetches pending requests).
+ * a view can refresh on activation (e.g. Tasks refetches pending requests).
  *
  * SECURITY: labels here are static; no dynamic strings reach the DOM as markup.
  */
@@ -15,7 +15,7 @@ import { el } from "./components.js";
 import type { AppState, TabId } from "./state.js";
 
 const TABS: readonly { id: TabId; label: string }[] = [
-  { id: "work", label: "Work" },
+  { id: "work", label: "Tasks" },
   { id: "chat", label: "Chat" },
   { id: "system", label: "System" }
 ];
@@ -58,7 +58,7 @@ export function buildTabs(state: AppState, onActivate: (tab: TabId) => void): Ta
     bar.append(btn);
 
     // The chat panel fills the whole viewport (flex column to the bottom); the
-    // Work/System panels keep their natural, document-scrolled height.
+    // Tasks/System panels keep their natural, document-scrolled height.
     const panel = el("div", `tab-panel hidden${id === "chat" ? " panel-fill" : ""}`);
     panel.setAttribute("role", "tabpanel");
     panels[id] = panel;

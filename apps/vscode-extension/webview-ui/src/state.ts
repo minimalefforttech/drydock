@@ -14,6 +14,7 @@
 
 import type {
   AccessRequestSummary,
+  AgentActivitySummary,
   AgentModelCatalog,
   AgentQuestionSummary,
   ChatSessionSummary,
@@ -37,6 +38,7 @@ declare function acquireVsCodeApi(): VsCodeApi;
 export const vscode: VsCodeApi = acquireVsCodeApi();
 
 export type TabId = "chat" | "work" | "system";
+export type ThinkingEffort = "low" | "medium" | "high";
 
 export interface ChatMessage {
   readonly id: string;
@@ -59,10 +61,21 @@ export interface DiagnosticEntry {
   readonly agentPath?: readonly string[];
   readonly nodeId?: string;
   readonly label?: string;
+  readonly subagentType?: string;
+  readonly model?: string;
   readonly nodeStatus?: "running" | "completed" | "failed" | "cancelled";
   readonly toolStatus?: "started" | "completed" | "failed";
+  readonly commandName?: string;
   readonly detail?: string;
   readonly usage?: JsonObject;
+}
+
+/** Freeform, task-scoped notes the user adds from the chat panel. */
+export interface TaskNote {
+  readonly noteId: string;
+  readonly taskId: string;
+  readonly createdAt: string;
+  readonly text: string;
 }
 
 /** One rendered line inside a subagent group's feed. */
@@ -97,6 +110,8 @@ export interface AgentGroup {
   fileEdits: number;
   errors: number;
   lastActivity?: string;
+  lastActivityAt?: string;
+  lastCommand?: string;
   createdAt: string;
   endedAt?: string;
   entries: AgentGroupEntry[];
@@ -139,7 +154,11 @@ export interface AppState {
   /** Subagent groups for the SELECTED session, keyed by node id. */
   agentGroups: Record<string, AgentGroup>;
   /** Per-session ⑂ chip counters from `session.agentActivity` pushes. */
-  agentActivity: Record<string, { running: number; failed: number }>;
+  agentActivity: Record<string, AgentActivitySummary>;
+  /** Host-provided threshold for showing delegated agents as idle. */
+  agentIdleThresholdMs: number;
+  /** Host/user setting: wrap long lines inside chat transcript code blocks. */
+  codeBlockWordWrap: boolean;
   /** Agent questions (all statuses); pending ones stack in the attention UI. */
   questions: AgentQuestionSummary[];
   /** Non-session (probe/run/runtime) lines shown on the System tab. */
@@ -150,7 +169,8 @@ export interface AppState {
   promptDraft: string;
   providerId: string;
   selectedModel: string;
-  composerMode: "implementation" | "plan" | "clone";
+  thinkingEffort: ThinkingEffort;
+  composerMode: "implementation" | "plan";
   changedFiles: Map<string, string>;
   lastIsolation: IsolationSummary | null;
   workspacePolicy: WorkspacePolicyState | null;
@@ -182,6 +202,8 @@ export interface AppState {
    * it migrates to [].
    */
   memoryCandidates: MemoryCandidateSummary[];
+  /** Webview-local task notes keyed by durable taskId. */
+  taskNotes: TaskNote[];
 }
 
 function freshState(): AppState {
@@ -193,6 +215,8 @@ function freshState(): AppState {
     diagnostics: [],
     agentGroups: {},
     agentActivity: {},
+    agentIdleThresholdMs: 5 * 60_000,
+    codeBlockWordWrap: true,
     questions: [],
     systemLog: [],
     lastSequence: 0,
@@ -201,6 +225,7 @@ function freshState(): AppState {
     promptDraft: "",
     providerId: CODEX_PROVIDER_ID,
     selectedModel: "",
+    thinkingEffort: "medium",
     composerMode: "implementation",
     changedFiles: new Map(),
     lastIsolation: null,
@@ -211,12 +236,22 @@ function freshState(): AppState {
     tasks: [],
     planDocs: null,
     attention: {},
-    memoryCandidates: []
+    memoryCandidates: [],
+    taskNotes: []
   };
 }
 
 function isTabId(value: unknown): value is TabId {
   return value === "chat" || value === "work" || value === "system";
+}
+
+function isTaskNote(value: unknown): value is TaskNote {
+  if (typeof value !== "object" || value === null) return false;
+  const note = value as Record<string, unknown>;
+  return typeof note["noteId"] === "string"
+    && typeof note["taskId"] === "string"
+    && typeof note["createdAt"] === "string"
+    && typeof note["text"] === "string";
 }
 
 /**
@@ -249,7 +284,13 @@ export function restore(): AppState {
     state.agentGroups = { ...(raw["agentGroups"] as Record<string, AgentGroup>) };
   }
   if (typeof raw["agentActivity"] === "object" && raw["agentActivity"] !== null) {
-    state.agentActivity = { ...(raw["agentActivity"] as Record<string, { running: number; failed: number }>) };
+    state.agentActivity = { ...(raw["agentActivity"] as Record<string, AgentActivitySummary>) };
+  }
+  if (typeof raw["agentIdleThresholdMs"] === "number" && Number.isFinite(raw["agentIdleThresholdMs"])) {
+    state.agentIdleThresholdMs = raw["agentIdleThresholdMs"];
+  }
+  if (typeof raw["codeBlockWordWrap"] === "boolean") {
+    state.codeBlockWordWrap = raw["codeBlockWordWrap"];
   }
   if (Array.isArray(raw["questions"])) state.questions = [...(raw["questions"] as AgentQuestionSummary[])];
   if (typeof raw["lastSequence"] === "number") state.lastSequence = raw["lastSequence"];
@@ -262,8 +303,15 @@ export function restore(): AppState {
   // `selectedModel` (current) or `modelDraft` (older) both name the model.
   if (typeof raw["selectedModel"] === "string") state.selectedModel = raw["selectedModel"];
   else if (typeof raw["modelDraft"] === "string") state.selectedModel = raw["modelDraft"];
-  if (raw["composerMode"] === "plan" || raw["composerMode"] === "implementation" || raw["composerMode"] === "clone") {
+  if (raw["thinkingEffort"] === "low" || raw["thinkingEffort"] === "medium" || raw["thinkingEffort"] === "high") {
+    state.thinkingEffort = raw["thinkingEffort"];
+  }
+  if (raw["composerMode"] === "plan" || raw["composerMode"] === "implementation") {
     state.composerMode = raw["composerMode"];
+  } else if (raw["composerMode"] === "clone") {
+    // Clone is now transfer/sync plumbing for clone sessions, not a composer
+    // mode. Existing persisted blobs fall back to Develop.
+    state.composerMode = "implementation";
   }
   if (Array.isArray(raw["changedFiles"])) {
     for (const entry of raw["changedFiles"] as unknown[]) {
@@ -309,6 +357,9 @@ export function restore(): AppState {
   if (Array.isArray(raw["memoryCandidates"])) {
     state.memoryCandidates = [...(raw["memoryCandidates"] as MemoryCandidateSummary[])];
   }
+  if (Array.isArray(raw["taskNotes"])) {
+    state.taskNotes = raw["taskNotes"].filter(isTaskNote);
+  }
   return state;
 }
 
@@ -322,6 +373,8 @@ export function persist(state: AppState): void {
     diagnostics: state.diagnostics,
     agentGroups: state.agentGroups,
     agentActivity: state.agentActivity,
+    agentIdleThresholdMs: state.agentIdleThresholdMs,
+    codeBlockWordWrap: state.codeBlockWordWrap,
     questions: state.questions,
     systemLog: state.systemLog,
     lastSequence: state.lastSequence,
@@ -330,6 +383,7 @@ export function persist(state: AppState): void {
     promptDraft: state.promptDraft,
     providerId: state.providerId,
     selectedModel: state.selectedModel,
+    thinkingEffort: state.thinkingEffort,
     composerMode: state.composerMode,
     changedFiles: [...state.changedFiles.entries()],
     lastIsolation: state.lastIsolation,
@@ -340,7 +394,8 @@ export function persist(state: AppState): void {
     tasks: state.tasks,
     planDocs: state.planDocs,
     attention: state.attention,
-    memoryCandidates: state.memoryCandidates
+    memoryCandidates: state.memoryCandidates,
+    taskNotes: state.taskNotes
   });
 }
 
@@ -349,6 +404,8 @@ export function applyInitState(state: AppState, init: PanelInitState): void {
   state.runtimes = init.runtimes;
   state.providerCatalogs = [...init.providerCatalogs];
   state.openFolderNames = [...init.openFolderNames];
+  state.agentIdleThresholdMs = init.agentIdleThresholdMs;
+  state.codeBlockWordWrap = init.codeBlockWordWrap;
 }
 
 export function upsertSession(state: AppState, session: ChatSessionSummary): void {
@@ -407,7 +464,7 @@ export function applySessionAttention(state: AppState, sessionId: string, reason
 
 /**
  * Highest-priority attention reason for a session (failed > approval > done),
- * or null when nothing is waiting. Drives the single Work-row marker chip.
+ * or null when nothing is waiting. Drives the single Tasks-row marker chip.
  */
 export function topAttentionReason(state: AppState, sessionId: string): string | null {
   const reasons = state.attention[sessionId];

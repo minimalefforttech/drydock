@@ -1,11 +1,10 @@
 /**
- * Work tab: overview of pending attention, sessions, and advanced workspace
+ * Tasks tab: overview of pending attention, tasks, and advanced workspace
  * controls.
  *
  * - "Needs attention" strip: pending access requests as cards (approve/deny).
- * - Sessions: newest-first flat list of cards (title, status, provider/model,
- *   relative time, editable note, hover-delete). Clicking a card selects the
- *   session and jumps to the Chat tab.
+ * - Tasks: the primary work container. Linked chats render inside task cards;
+ *   old unlinked chats appear only in the small "needs task" cleanup section.
  * - Workspace sets (advanced, collapsed): register open folders / create set /
  *   pick the set consumed by the Chat context strip + chat.start.
  *
@@ -18,6 +17,8 @@
 import {
   WORK_TASK_STATES,
   type AccessRequestSummary,
+  type AgentActivityItem,
+  type AgentActivitySummary,
   type ChatSessionSummary,
   type MemoryCandidateSummary,
   type WorkHistoryEntry,
@@ -88,7 +89,7 @@ function isSessionReady(session: ChatSessionSummary, reasons: readonly string[])
 function sessionChips(
   session: ChatSessionSummary,
   reasons: readonly string[],
-  activity?: { running: number; failed: number }
+  activity?: AgentActivitySummary
 ): SessionChip[] {
   const chips: SessionChip[] = [];
   // State chip: failed (loud) > approval (loud) > ready (demoted). At most one.
@@ -157,6 +158,22 @@ function sessionStateLabel(session: ChatSessionSummary): string {
   if (session.status === "active" || session.status === "starting") return "running";
   if (session.status === "failed") return "failed";
   return "ended";
+}
+
+function durationLabel(startedAt: string | undefined, endedAt: string | undefined): string {
+  if (startedAt === undefined) return "";
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start)) return "";
+  const end = endedAt === undefined ? Date.now() : Date.parse(endedAt);
+  const seconds = Math.max(0, Math.round(((Number.isFinite(end) ? end : Date.now()) - start) / 1000));
+  if (seconds < 60) return `${String(seconds)}s`;
+  return `${String(Math.floor(seconds / 60))}m ${String(seconds % 60)}s`;
+}
+
+function formatTokenCount(tokens: number): string {
+  if (tokens < 1_000) return String(tokens);
+  if (tokens < 1_000_000) return `${(tokens / 1_000).toFixed(1)}k`;
+  return `${(tokens / 1_000_000).toFixed(1)}m`;
 }
 
 const TASK_STATE_LABELS: Record<WorkTaskState, string> = {
@@ -391,10 +408,12 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   memoryApproved.body.append(memoryApprovedList);
   memorySection.body.append(memoryPending, memoryApproved.details);
 
-  // --- Sessions ---------------------------------------------------------------
-  const sessionsHeading = el("h3");
-  sessionsHeading.textContent = "Chats";
+  // --- Chats needing a task --------------------------------------------------
+  // Chats are owned by a task in the main UI. This collapsed cleanup drawer is
+  // only for legacy/orphan sessions that have not been linked yet.
+  const unassignedSessionsSection = collapsible("Chats needing a task");
   const sessionsList = el("div", "session-cards");
+  unassignedSessionsSection.body.append(sessionsList);
 
   // --- Workspace sets (advanced) ---------------------------------------------
   const workspaceSets = collapsible("Workspace sets (advanced)");
@@ -594,16 +613,14 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     scheduleHistoryClose();
   });
 
-  // Work-home order: needs-attention summary → Chats → Tasks → Memory →
-  // Workspace sets (advanced). The user's own status (Chats) sits above the
-  // agent's asks (attention expands in place; it never buries the session list).
+  // Tasks-home order: needs-attention summary → Tasks (with chats inside) →
+  // orphan-chat cleanup → Memory → Workspace sets (advanced).
   root.append(
     attentionSection,
-    sessionsHeading,
-    sessionsList,
     tasksHeading,
     taskCreateForm,
     tasksList,
+    unassignedSessionsSection.details,
     memorySection.details,
     workspaceSets.details
   );
@@ -614,6 +631,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     if (state.selectedSessionId === payload.sessionId) {
       ctx.bridge.chat.resetToNewChat();
     }
+    renderTasks();
     renderSessions();
     // Deleting a failed session changes the attention summary's failed count.
     renderAttention();
@@ -623,6 +641,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     // Upsert here too so card rendering never depends on another subscriber's
     // handler running first (push handlers fire in subscription order).
     upsertSession(state, payload.session);
+    renderTasks();
     renderSessions();
     // A status flip to/from "failed" shifts the attention summary count.
     renderAttention();
@@ -633,16 +652,23 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // one, so re-rendering here — not just relying on that flag — keeps the dot
   // in sync regardless of handler order).
   onPush("chat.turnStarted", (payload) => {
-    if (payload.sessionId === state.selectedSessionId) renderSessions();
+    if (payload.sessionId === state.selectedSessionId) {
+      renderTasks();
+      renderSessions();
+    }
   });
   onPush("chat.turnCompleted", (payload) => {
-    if (payload.sessionId === state.selectedSessionId) renderSessions();
+    if (payload.sessionId === state.selectedSessionId) {
+      renderTasks();
+      renderSessions();
+    }
   });
   // --- push: session.attention (Phase 3 waiting-on-user signal) ---------------
-  // The host owns the badge/toast; the panel owns the Work-row marker + halo and
+  // The host owns the badge/toast; the panel owns the Tasks-row marker + halo and
   // (when the affected session is selected) the chat header's dot.
   onPush("session.attention", (payload) => {
     if (!applySessionAttention(state, payload.sessionId, payload.reasons)) return;
+    renderTasks();
     renderSessions();
     if (payload.sessionId === state.selectedSessionId) ctx.bridge.chat.render();
     ctx.persist();
@@ -650,13 +676,18 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // --- push: session.agentActivity (⑂ chip) ------------------------------------
   onPush("session.agentActivity", (payload) => {
     const previous = state.agentActivity[payload.sessionId];
-    if (payload.running === 0 && payload.failed === 0) {
+    const activity = payload.activity;
+    if (activity.running === 0 && activity.failed === 0) {
       if (previous === undefined) return;
       delete state.agentActivity[payload.sessionId];
     } else {
-      if (previous !== undefined && previous.running === payload.running && previous.failed === payload.failed) return;
-      state.agentActivity[payload.sessionId] = { running: payload.running, failed: payload.failed };
+      if (previous !== undefined
+        && previous.running === activity.running
+        && previous.failed === activity.failed
+        && JSON.stringify(previous.agents ?? []) === JSON.stringify(activity.agents ?? [])) return;
+      state.agentActivity[payload.sessionId] = activity;
     }
+    renderTasks();
     renderSessions();
     ctx.persist();
   });
@@ -669,12 +700,15 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     renderTasks();
     // Sessions carry a chip derived from their linking task, so re-render them too.
     renderSessions();
+    ctx.bridge.chat.render();
     ctx.persist();
   });
   onPush("task.deleted", (payload) => {
     state.tasks = state.tasks.filter((t) => t.taskId !== payload.taskId);
+    state.taskNotes = state.taskNotes.filter((note) => note.taskId !== payload.taskId);
     renderTasks();
     renderSessions();
+    ctx.bridge.chat.render();
     ctx.persist();
   });
   // --- push: memory.candidateAdded --------------------------------------------
@@ -703,10 +737,11 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     if (response.ok && response.payload.type === "session.list") {
       state.sessions = [...response.payload.sessions];
       renderSessions();
-      // Failed sessions feed the attention summary's "failed" count.
-      renderAttention();
-      ctx.persist();
-    }
+    renderTasks();
+    // Failed sessions feed the attention summary's "failed" count.
+    renderAttention();
+    ctx.persist();
+  }
   }
 
   async function loadTasks(): Promise<void> {
@@ -748,9 +783,9 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   function renderAttention(): void {
     const pending = (state.workspacePolicy?.accessRequests ?? []).filter((a) => a.status === "pending");
     const pendingQuestions = state.questions.filter((q) => q.status === "pending");
-    // M = failed SESSIONS (status flip), not attention reasons — the summary's
-    // failed count mirrors the loud rows in the Chats list directly below;
-    // those failed sessions are NOT duplicated inside the expansion.
+    // M = failed SESSIONS (status flip), not attention reasons. Failed sessions
+    // are shown in their owning task row (or in the orphan cleanup drawer), not
+    // duplicated inside the expansion.
     const failedCount = state.sessions.filter((s) => s.status === "failed").length;
 
     // Hide the whole section when nothing needs acting on.
@@ -808,17 +843,49 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     tasksList.replaceChildren();
     if (state.tasks.length === 0) {
       const empty = el("div", "empty");
-      empty.textContent = "No tasks yet. Add one to track work across chats and workspaces.";
+      empty.textContent = unassignedSessions().length > 0
+        ? "No tasks yet. Create one, then link chats that need a home."
+        : "No tasks yet. Add one to track work across chats and workspaces.";
       tasksList.append(empty);
-      return;
+    } else {
+      for (const task of state.tasks) {
+        tasksList.append(taskCard(task));
+      }
     }
-    for (const task of state.tasks) {
-      tasksList.append(taskCard(task));
+  }
+
+  function selectedTaskId(): string | undefined {
+    if (state.selectedSessionId === null) return undefined;
+    return state.tasks.find((task) => task.linkedSessionIds.includes(state.selectedSessionId as string))?.taskId;
+  }
+
+  function activeTaskId(): string | undefined {
+    const selected = selectedTaskId();
+    if (selected !== undefined) return selected;
+    return state.tasks.find((task) => task.linkedSessionIds.some((sessionId) => {
+      const session = state.sessions.find((candidate) => candidate.sessionId === sessionId);
+      return session !== undefined && (session.status === "active" || session.status === "starting");
+    }))?.taskId;
+  }
+
+  function activeTaskSession(task: WorkTaskSummary): ChatSessionSummary | undefined {
+    if (task.taskId !== activeTaskId()) return undefined;
+    if (state.selectedSessionId !== null && task.linkedSessionIds.includes(state.selectedSessionId)) {
+      return state.sessions.find((session) => session.sessionId === state.selectedSessionId);
     }
+    return task.linkedSessionIds
+      .map((sessionId) => state.sessions.find((session) => session.sessionId === sessionId))
+      .find((session): session is ChatSessionSummary =>
+        session !== undefined && (session.status === "active" || session.status === "starting"));
   }
 
   function taskCard(task: WorkTaskSummary): HTMLElement {
     const c = card("task-card");
+    const activeSession = activeTaskSession(task);
+    if (activeSession !== undefined) {
+      c.classList.add("active");
+      c.setAttribute("aria-current", "true");
+    }
 
     // --- top row: title (click → rename) · state select · delete --------------
     const top = el("div", "task-card-top");
@@ -837,6 +904,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     });
 
     const del = inlineConfirmButton("🗑", "Confirm", () => void deleteTask(task.taskId), "icon-button danger task-delete");
+    del.title = "Delete task (requires confirmation)";
 
     top.append(title, stateSelect, del);
 
@@ -855,15 +923,36 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       c.append(meta);
     }
 
-    // --- link chips row --------------------------------------------------------
-    const chips = el("div", "task-chips");
-    for (const sessionId of task.linkedSessionIds) {
-      chips.append(sessionChip(task, sessionId));
+    // --- linked chats ---------------------------------------------------------
+    if (task.linkedSessionIds.length > 0) {
+      const details = document.createElement("details");
+      details.className = "task-session-dropdown";
+      details.open = activeSession !== undefined;
+      const summary = document.createElement("summary");
+      summary.className = "task-session-summary";
+      const countLabel = el("span", "task-session-summary-label");
+      countLabel.textContent = `Chats (${String(task.linkedSessionIds.length)})`;
+      summary.append(countLabel);
+      if (activeSession !== undefined) {
+        const activeLabel = el("span", "task-session-active-label");
+        activeLabel.textContent = `Active: ${activeSession.title}`;
+        summary.append(activeLabel);
+      }
+      details.append(summary);
+      const chats = el("div", "task-session-list");
+      for (const sessionId of task.linkedSessionIds) {
+        chats.append(taskSessionRow(task, sessionId));
+      }
+      details.append(chats);
+      c.append(details);
     }
+
+    // --- workspace chips row --------------------------------------------------
+    const chips = el("div", "task-chips");
     for (const setId of task.linkedWorkspaceSetIds) {
       chips.append(...workspaceSetChip(task, setId));
     }
-    if (task.linkedSessionIds.length > 0 || task.linkedWorkspaceSetIds.length > 0) {
+    if (task.linkedWorkspaceSetIds.length > 0) {
       c.append(chips);
     }
 
@@ -905,42 +994,102 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       });
       actions.append(linkSet);
     }
-    // Activate: diff this task's linked set folders against the window (Replace /
-    // Append / Open in new window). LAST + a thin leading divider so the heaviest
-    // (window-mutating) action stops masquerading as a peer of Review. Shown only
-    // when the task links ≥1 set. The trailing ellipsis signals its modal follows.
-    if (task.linkedWorkspaceSetIds.length > 0) {
-      const divider = el("span", "task-actions-divider");
-      divider.setAttribute("aria-hidden", "true");
-      const activate = button("Activate…", "small task-activate");
-      activate.title = "Switch this window's folders to this task's workspace (Replace / Append / new window)";
+    // Activate: visible on every task for a stable action row; disabled until
+    // the task has a linked workspace set for the host to activate.
+    const divider = el("span", "task-actions-divider");
+    divider.setAttribute("aria-hidden", "true");
+    const activate = button("Activate…", "small task-activate");
+    const canActivate = task.linkedWorkspaceSetIds.length > 0;
+    activate.disabled = !canActivate;
+    activate.title = canActivate
+      ? "Switch this window's folders to this task's workspace (Replace / Append / new window)"
+      : "Link a workspace set to this task before activating it";
+    if (canActivate) {
       activate.addEventListener("click", () => {
         void activateWorkspace({ taskId: task.taskId }, activate);
       });
-      actions.append(divider, activate);
     }
+    actions.append(divider, activate);
     c.append(actions);
 
     return c;
   }
 
-  /** Chip for a linked chat session: body selects+jumps; ✕ unlinks. */
-  function sessionChip(task: WorkTaskSummary, sessionId: string): HTMLElement {
+  /** Compact linked-chat row inside a task: selects+jumps; ✕ unlinks. */
+  function taskSessionRow(task: WorkTaskSummary, sessionId: string): HTMLElement {
     const session = state.sessions.find((s) => s.sessionId === sessionId);
-    const label = session ? session.title : `${sessionId.slice(0, 8)}…`;
-    const wrap = el("span", "task-chip");
-    const body = chip(`💬 ${label}`, () => {
+    const row = el("div", "task-session-row");
+    const body = el("div", "task-session-main");
+    body.setAttribute("role", "button");
+    body.tabIndex = 0;
+    const open = (): void => {
       ctx.bridge.chat.selectSession(sessionId);
       ctx.bridge.switchTab("chat");
+    };
+    body.addEventListener("click", open);
+    body.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
     });
     body.title = "Open this chat";
+
+    if (session === undefined) {
+      const top = el("div", "task-session-top");
+      const title = el("span", "task-session-title");
+      title.textContent = `${sessionId.slice(0, 8)}…`;
+      top.append(statusDot("state-ended", "missing chat"), title);
+      const meta = el("div", "task-session-meta");
+      meta.textContent = "chat no longer listed";
+      body.append(top, meta);
+    } else {
+      const elsewhere = session.runningElsewhere === true;
+      const reasons = state.attention[session.sessionId] ?? [];
+      const chips = sessionChips(session, reasons, state.agentActivity[session.sessionId]);
+      const stateChip = chips.find((k) => k.cls === "chip-failed" || k.cls === "chip-approval" || k.cls === "chip-ready");
+      const loud = isSessionLoud(session, reasons);
+      const ready = isSessionReady(session, reasons);
+      const dot = statusDot(sessionDotClass(session), elsewhere ? "running in another window" : session.status);
+      if (loud && stateChip) {
+        dot.classList.add("attn-halo", stateChip.cls === "chip-failed" ? "attn-loud-failed" : "attn-loud-approval");
+      } else if (ready) {
+        dot.classList.add("attn-halo", "attn-ready");
+      }
+
+      const top = el("div", "task-session-top");
+      const title = el("span", "task-session-title");
+      title.textContent = session.title;
+      top.append(dot, title);
+      for (const k of chips) {
+        const chipEl = el("span", `session-chip ${k.cls}`);
+        chipEl.textContent = k.text;
+        if (k.cls === "chip-clone") chipEl.title = "Clone-mode session — changes sync into your editor";
+        top.append(chipEl);
+      }
+
+      const meta = el("div", `task-session-meta${elsewhere ? " meta-elsewhere" : ""}`);
+      const [providerModel, stateWord, timeWord] = sessionMetaSegments(session);
+      const showFailedWord = stateChip?.cls === "chip-failed";
+      if (showFailedWord) {
+        const stateEl = el("span", "meta-word-failed");
+        stateEl.textContent = stateWord ?? "";
+        meta.append(`${providerModel ?? ""} · `, stateEl, ` · ${timeWord ?? ""}`);
+      } else {
+        meta.textContent = [providerModel, stateWord, timeWord].join(" · ");
+      }
+      body.append(top, meta);
+      const agentStrip = sessionAgentStrip(state.agentActivity[session.sessionId] ?? session.agentActivity);
+      if (agentStrip !== null) body.append(agentStrip);
+    }
+
     const remove = iconButton("✕", "Unlink chat", "chip-remove");
     remove.addEventListener("click", (event) => {
       event.stopPropagation();
       unlinkTask(task.taskId, { sessionId });
     });
-    wrap.append(body, remove);
-    return wrap;
+    row.append(body, remove);
+    return row;
   }
 
   /** Chip for a linked workspace set: label · ↗ open-in-new-window · ✕ unlink. */
@@ -1169,21 +1318,30 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   function renderSessions(): void {
     sessionsList.replaceChildren();
-    if (state.sessions.length === 0) {
-      const empty = el("div", "empty");
-      empty.textContent = "No chats yet. Start one from the Chat tab.";
-      sessionsList.append(empty);
+    const unassigned = unassignedSessions();
+    unassignedSessionsSection.details.classList.toggle("hidden", unassigned.length === 0);
+    unassignedSessionsSection.summaryLabel.textContent = `Chats needing a task (${String(unassigned.length)})`;
+    if (unassigned.length === 0) {
       return;
     }
     // Ordering: loud rows (failed / waiting-on-access) first, then ready
     // rows, then the rest — stable within each group (state.sessions is already
     // newest-first, and Array.prototype.sort is stable). ONE comparator drives
     // this; the loudness rule lives in sessionLoudness().
-    const ordered = [...state.sessions].sort((a, b) =>
+    const ordered = [...unassigned].sort((a, b) =>
       sessionLoudness(a, state.attention[a.sessionId] ?? []) - sessionLoudness(b, state.attention[b.sessionId] ?? []));
     for (const session of ordered) {
       sessionsList.append(sessionCard(session));
     }
+  }
+
+  /** Legacy/orphan chats that are not owned by any task yet. */
+  function unassignedSessions(): ChatSessionSummary[] {
+    const linked = new Set<string>();
+    for (const task of state.tasks) {
+      for (const sessionId of task.linkedSessionIds) linked.add(sessionId);
+    }
+    return state.sessions.filter((session) => !linked.has(session.sessionId));
   }
 
   /** Dot state class: hollow ring for elsewhere; green pulse only for the selected session's in-flight turn. */
@@ -1245,6 +1403,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     // Delete is refused for a session running elsewhere (owned by another window).
     if (!elsewhere) {
       const del = inlineConfirmButton("🗑", "Confirm", () => void deleteSession(session.sessionId), "icon-button danger session-delete");
+      del.title = "Delete chat (requires confirmation)";
       top.append(del);
       // Prevent the delete button's click from also selecting.
       del.addEventListener("click", (event) => event.stopPropagation());
@@ -1290,7 +1449,10 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       ctx.bridge.switchTab("chat");
     });
 
-    c.append(top, meta, note);
+    const agentStrip = sessionAgentStrip(state.agentActivity[session.sessionId] ?? session.agentActivity);
+    c.append(top, meta);
+    if (agentStrip !== null) c.append(agentStrip);
+    c.append(note);
 
     // Granted-access ledger (Phase 3, B1/B3): a compact "⛨ N grant(s)" chip for
     // approved access requests on this session; clicking toggles an inline list.
@@ -1311,6 +1473,40 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       c.append(chipRow);
     }
     return c;
+  }
+
+  function sessionAgentStrip(activity: AgentActivitySummary | undefined): HTMLElement | null {
+    const agents = (activity?.agents ?? [])
+      .filter((agent) => agent.status === "running" || agent.status === "failed")
+      .slice(0, 2);
+    if (agents.length === 0) return null;
+    const strip = el("div", "session-agent-strip");
+    for (const agent of agents) {
+      const row = el("div", `session-agent-row session-agent-status-${agent.status}${isAgentIdle(agent) ? " idle" : ""}`);
+      const label = el("span", "session-agent-label");
+      label.textContent = agent.label;
+      const meta = el("span", "session-agent-meta");
+      const parts = [durationLabel(agent.startedAt, agent.endedAt)];
+      if (isAgentIdle(agent) && agent.lastActivityAt !== undefined) parts.push(`idle ${durationLabel(agent.lastActivityAt, undefined)}`);
+      if (agent.tokens !== undefined) parts.push(`${formatTokenCount(agent.tokens)} tokens`);
+      if (agent.lastCommand !== undefined) parts.push(agent.lastCommand);
+      meta.textContent = parts.filter(Boolean).join(" · ");
+      row.append(label, meta);
+      strip.append(row);
+    }
+    const hidden = (activity?.agents ?? []).filter((agent) => agent.status === "running" || agent.status === "failed").length - agents.length;
+    if (hidden > 0) {
+      const more = el("div", "session-agent-more");
+      more.textContent = `+${String(hidden)} more`;
+      strip.append(more);
+    }
+    return strip;
+  }
+
+  function isAgentIdle(agent: AgentActivityItem): boolean {
+    if (agent.status !== "running") return false;
+    const last = Date.parse(agent.lastActivityAt ?? agent.startedAt ?? "");
+    return Number.isFinite(last) && Date.now() - last >= state.agentIdleThresholdMs;
   }
 
   /**

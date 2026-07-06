@@ -18,7 +18,25 @@
   const iso = (minutesAgo) => new Date(now - minutesAgo * 60_000).toISOString();
 
   const sessions = [
-    { sessionId: "s-live", title: "Add alembic support to asset_api", description: "root cause traced to publish hooks", status: "active", providerId: "codex", model: "gpt-5.5", transport: "codex-app-server", createdAt: iso(180), updatedAt: iso(2) },
+    {
+      sessionId: "s-live",
+      title: "Add alembic support to asset_api",
+      description: "root cause traced to publish hooks",
+      status: "active",
+      providerId: "codex",
+      model: "gpt-5.5",
+      transport: "codex-app-server",
+      agentActivity: {
+        running: 2,
+        failed: 0,
+        agents: [
+          { nodeId: "task-audit", label: "Audit publish hooks", status: "running", startedAt: iso(13), lastActivityAt: iso(6), lastActivity: "grep allowlist", lastCommand: "grep", toolUses: 29, tokens: 257000 },
+          { nodeId: "task-exporter", label: "Patch alembic exporter", status: "running", startedAt: iso(3), lastActivityAt: iso(1), lastActivity: "edit exporters/alembic.py", lastCommand: "Edit", toolUses: 52, tokens: 59900 }
+        ]
+      },
+      createdAt: iso(180),
+      updatedAt: iso(2)
+    },
     { sessionId: "s-waiting", title: "Refactor farm submit retries", status: "active", providerId: "claude", model: "claude-opus-4-8", createdAt: iso(240), updatedAt: iso(35) },
     { sessionId: "s-ended", title: "Investigate USD 24 upgrade", status: "ended", providerId: "codex", model: "gpt-5.4", createdAt: iso(2000), updatedAt: iso(1900) },
     { sessionId: "s-failed", title: "Docs generation spike", status: "failed", providerId: "codex", model: "gpt-5.5", createdAt: iso(500), updatedAt: iso(480) },
@@ -47,7 +65,10 @@
     "s-live": [
       { sequence: 1, eventType: "user.message", summary: "Why does publishing alembic caches fail?", createdAt: iso(60) },
       { sequence: 2, eventType: "agent.text", summary: timelineText, createdAt: iso(58), final: true },
-      { sequence: 3, eventType: "agent.done", summary: "turn completed", createdAt: iso(58) }
+      { sequence: 3, eventType: "agent.spawn", summary: "spawned Audit publish hooks", nodeId: "task-audit", label: "Audit publish hooks", subagentType: "general-purpose", model: "gpt-5.5", nodeStatus: "running", detail: "Audit publish hooks and summarize the allowlist path.", createdAt: iso(13) },
+      { sequence: 4, eventType: "agent.command", summary: "grep allowlist [started]", toolStatus: "started", commandName: "grep", agentPath: ["task-audit"], createdAt: iso(6) },
+      { sequence: 5, eventType: "agent.spawn", summary: "spawned Patch alembic exporter", nodeId: "task-exporter", label: "Patch alembic exporter", subagentType: "general-purpose", model: "gpt-5.5", nodeStatus: "running", detail: "Patch exporters/alembic.py and report changed files.", createdAt: iso(3) },
+      { sequence: 6, eventType: "agent.tool_call", summary: "Edit started", toolStatus: "started", commandName: "Edit", agentPath: ["task-exporter"], createdAt: iso(1) }
     ],
     "s-ended": [
       { sequence: 1, eventType: "user.message", summary: "Assess a USD 24.x upgrade.", createdAt: iso(1950) },
@@ -105,7 +126,7 @@
   ];
 
   const tasks = [
-    { taskId: "t-1", title: "Alembic publish support", description: "4 repos: db, api, maya, houdini", state: "in-progress", linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: ["s-live"], createdAt: iso(200), updatedAt: iso(5), lastWorkedAt: iso(2), openReviewCommentCount: 1 },
+    { taskId: "t-1", title: "Alembic publish support", description: "4 repos: db, api, maya, houdini", state: "in-progress", linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: ["s-live", "s-clone"], createdAt: iso(200), updatedAt: iso(5), lastWorkedAt: iso(2), openReviewCommentCount: 1 },
     { taskId: "t-2", title: "Upgrade farm python to 3.12", state: "todo", linkedWorkspaceSetIds: [], linkedSessionIds: [], createdAt: iso(400), updatedAt: iso(400) }
   ];
 
@@ -242,9 +263,14 @@
             availability: { available: true, sbxDisplayPath: "C:\\tools\\sbx\\sbx.exe" },
             runtimes, providerCatalogs: catalogs,
             stateRootDisplayPath: "C:\\Users\\demo\\.drydock-hitl",
-            openFolderNames: ["demo-project", "asset_api"]
+            openFolderNames: ["demo-project", "asset_api"],
+            agentIdleThresholdMs: 300000,
+            codeBlockWordWrap: true
           }
         });
+      case "clipboard.writeText":
+        window.__harnessClipboard = payload.text;
+        return respond(requestId, { type, accepted: true });
       case "session.list": return respond(requestId, { type, sessions });
       case "session.timeline": {
         const lines = (timelines[payload.sessionId] ?? []).filter((line) => line.sequence >= (payload.fromSequence ?? 0));
@@ -281,17 +307,18 @@
       }
       case "chat.sendTurn": {
         respond(requestId, { type, accepted: true });
-        return window.__harness.scenario.streamTurn(payload.sessionId);
+        return window.__harness.scenario.streamTurn(payload.sessionId, payload.prompt);
       }
       case "chat.start": {
         const session = { sessionId: "s-new-start", title: payload.prompt.slice(0, 40), status: "active", providerId: payload.model?.providerId ?? "codex", model: payload.model?.model, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
         sessions.unshift(session);
         respond(requestId, { type, session });
-        return window.__harness.scenario.streamTurn(session.sessionId);
+        return window.__harness.scenario.streamTurn(session.sessionId, payload.prompt);
       }
       case "chat.restartBackend": {
         const session = sessions.find((candidate) => candidate.sessionId === payload.sessionId);
         if (!session) return respondError(requestId, "unknown session");
+        harnessLog(`chat.restartBackend ${payload.sessionId} ${payload.model.providerId}${payload.model.model ? `/${payload.model.model}` : ""}`);
         session.providerId = payload.model.providerId; session.model = payload.model.model;
         return respond(requestId, { type, session, providerCatalogs: catalogs });
       }
@@ -372,8 +399,8 @@
       case "diff.snapshotWorkspace": return respond(requestId, { type, baselineIds: ["b-ws"] });
       case "review.state": {
         // Task-review panel names a session: serve that session's task-review
-        // list. Otherwise keep the legacy fixtures.comments response for the main
-        // page's Changes → Comments section.
+        // list. Otherwise keep the legacy fixtures.comments response for older
+        // harness cases that still call review.state without a task-review scope.
         if (payload.sessionId !== undefined && isTaskReviewSession(payload.sessionId)) {
           return respond(requestId, { type, reviewSessionId: `rv-${String(payload.sessionId)}`, comments: taskReviewComments[payload.sessionId] ?? [] });
         }
@@ -537,13 +564,13 @@
     push,
     scenario: {
       /** Simulates a streamed turn on a session: started → text chunks → completed. */
-      streamTurn(sessionId) {
+      streamTurn(sessionId, userSummary = "(from harness)") {
         // Sequences must always rise past anything already replayed (the panel
         // dedupes on lastSequence), so draw from a high monotonic counter.
         window.__harness.eventSequence = (window.__harness.eventSequence ?? 10_000) + 10;
         const base = window.__harness.eventSequence;
         push({ type: "chat.turnStarted", sessionId, runId: "run-x" });
-        push({ type: "chat.event", sessionId, line: { sequence: base + 1, eventType: "user.message", summary: "(from harness)", createdAt: new Date().toISOString() } });
+        push({ type: "chat.event", sessionId, line: { sequence: base + 1, eventType: "user.message", summary: userSummary, createdAt: new Date().toISOString() } });
         push({ type: "chat.event", sessionId, line: { sequence: base + 2, eventType: "agent.text", summary: "Working on it — ", createdAt: new Date().toISOString(), final: false } });
         setTimeout(() => {
           push({ type: "chat.event", sessionId, line: { sequence: base + 3, eventType: "agent.text", summary: "Working on it — done.\n\n- item one\n- item two", createdAt: new Date().toISOString(), final: true } });
@@ -569,25 +596,25 @@
         push({ type: "chat.turnStarted", sessionId, runId: "run-fan" });
         line(1, { eventType: "user.message", summary: "fan out: write a haiku and list the dir (from harness)" });
         line(2, { eventType: "agent.text", summary: "Delegating to two subagents.", final: true });
-        line(3, { eventType: "agent.spawn", summary: "spawned scribe", nodeId: "t-scribe", label: "scribe", nodeStatus: "running", detail: "Write a 3-line haiku about rain to haiku.txt, then spawn a counter to count its words." });
-        line(4, { eventType: "agent.spawn", summary: "spawned lister", nodeId: "t-lister", label: "lister", nodeStatus: "running", detail: "List the working directory and report the file count." });
-        push({ type: "session.agentActivity", sessionId, running: 2, failed: 0 });
+        line(3, { eventType: "agent.spawn", summary: "spawned scribe", nodeId: "t-scribe", label: "scribe", subagentType: "general-purpose", model: "gpt-5.5", nodeStatus: "running", detail: "Write a 3-line haiku about rain to haiku.txt, then spawn a counter to count its words." });
+        line(4, { eventType: "agent.spawn", summary: "spawned lister", nodeId: "t-lister", label: "lister", subagentType: "general-purpose", model: "gpt-5.5", nodeStatus: "running", detail: "List the working directory and report the file count." });
+        push({ type: "session.agentActivity", sessionId, activity: { running: 2, failed: 0 } });
         setTimeout(() => {
           line(5, { eventType: "agent.text", summary: "Writing the haiku now.", agentPath: ["t-scribe"] });
           line(6, { eventType: "agent.file_edit", summary: "add haiku.txt", filePath: "haiku.txt", fileChangeKind: "add", agentPath: ["t-scribe"] });
-          line(7, { eventType: "agent.command", summary: "pwsh -Command ls [started]", toolStatus: "started", agentPath: ["t-lister"] });
-          line(8, { eventType: "agent.command", summary: "pwsh -Command ls [failed exit -1]", toolStatus: "failed", detail: "CreateProcess failed: the sandbox refused pwsh.", agentPath: ["t-lister"] });
+          line(7, { eventType: "agent.command", summary: "pwsh -Command ls [started]", toolStatus: "started", commandName: "ls", agentPath: ["t-lister"] });
+          line(8, { eventType: "agent.command", summary: "pwsh -Command ls [failed exit -1]", toolStatus: "failed", commandName: "ls", detail: "CreateProcess failed: the sandbox refused pwsh.", agentPath: ["t-lister"] });
         }, 300);
         setTimeout(() => {
-          line(9, { eventType: "agent.spawn", summary: "spawned counter", nodeId: "t-counter", label: "counter", nodeStatus: "running", agentPath: ["t-scribe"], detail: "Count the words in haiku.txt." });
-          push({ type: "session.agentActivity", sessionId, running: 3, failed: 0 });
+          line(9, { eventType: "agent.spawn", summary: "spawned counter", nodeId: "t-counter", label: "counter", subagentType: "general-purpose", nodeStatus: "running", agentPath: ["t-scribe"], detail: "Count the words in haiku.txt." });
+          push({ type: "session.agentActivity", sessionId, activity: { running: 3, failed: 0 } });
           line(10, { eventType: "agent.text", summary: "12 words.", agentPath: ["t-scribe", "t-counter"] });
           line(11, { eventType: "agent.node_done", summary: "subagent completed: 12 words.", nodeId: "t-counter", nodeStatus: "completed", detail: "12 words.", agentPath: ["t-scribe"] });
         }, 700);
         setTimeout(() => {
           line(12, { eventType: "agent.node_done", summary: "subagent completed: haiku written", nodeId: "t-scribe", nodeStatus: "completed", detail: "haiku written", usage: { totalTokens: 28192 } });
           line(13, { eventType: "agent.node_done", summary: "subagent failed: sandbox process failed", nodeId: "t-lister", nodeStatus: "failed", detail: "lister: unable to list directory; sandbox process failed." });
-          push({ type: "session.agentActivity", sessionId, running: 0, failed: 1 });
+          push({ type: "session.agentActivity", sessionId, activity: { running: 0, failed: 1 } });
           line(14, { eventType: "agent.text", summary: "Scribe finished; lister's sandbox died. DONE.", final: true });
           line(15, { eventType: "agent.done", summary: "done: completed", nodeStatus: "completed", usage: { totalTokens: 74219 } });
           push({ type: "chat.turnCompleted", sessionId, runId: "run-fan", status: "completed" });

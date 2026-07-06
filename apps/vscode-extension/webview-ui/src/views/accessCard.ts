@@ -1,5 +1,5 @@
 /**
- * Shared access-request approval card, used by both the Work tab
+ * Shared access-request approval card, used by both the Tasks tab
  * ("needs attention" strip) and the Chat tab (inline transcript card).
  *
  * One card-building function keeps the markup and resolve logic in one place;

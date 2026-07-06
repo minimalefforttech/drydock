@@ -112,7 +112,7 @@ path — each approval mounts a host directory into a writable runtime.
     (the way `discardAll` already forces a second deliberate act), while a
     read-only mount of an already-open sibling folder stays one click.
   - *No standing record of what was granted.* **Mitigation: a per-task
-    "granted access" ledger** visible in the Work tab, so a reviewer sees the
+    "granted access" ledger** visible in the Tasks tab, so a reviewer sees the
     task touched `\\studio\prod` even if the approver didn't notice.
 
 ### B2. The vibe coder (accepts everything, reads nothing, ships)

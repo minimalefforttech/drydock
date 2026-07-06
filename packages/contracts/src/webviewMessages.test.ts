@@ -71,6 +71,15 @@ test("provider.login validates its provider id", () => {
   assert.equal(parsePanelRequest(wrap({ type: "provider.login" })), null);
 });
 
+test("clipboard.writeText validates bounded text", () => {
+  const parsed = parsePanelRequest(wrap({ type: "clipboard.writeText", text: "copy me" }));
+  assert.ok(parsed);
+  assert.equal(parsed.payload.type, "clipboard.writeText");
+  assert.equal(parsed.payload.type === "clipboard.writeText" ? parsed.payload.text : undefined, "copy me");
+  assert.equal(parsePanelRequest(wrap({ type: "clipboard.writeText", text: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "clipboard.writeText", text: 42 })), null);
+});
+
 test("clone.state and clone.push validate their session id", () => {
   for (const type of ["clone.state", "clone.push"] as const) {
     const parsed = parsePanelRequest(wrap({ type, sessionId: "session-1" }));

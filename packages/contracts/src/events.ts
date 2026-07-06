@@ -143,6 +143,9 @@ export interface TranscriptLine {
   readonly nodeId?: string;
   /** Child label, present on agent.spawn lines. */
   readonly label?: string;
+  /** Child type/model metadata, present where the transport reports it. */
+  readonly subagentType?: string;
+  readonly model?: string;
   /**
    * Node lifecycle carried structurally: "running" on spawn, the terminal
    * status on node_done, and the ROOT agent's terminal status on agent.done.
@@ -150,6 +153,8 @@ export interface TranscriptLine {
   readonly nodeStatus?: "running" | "completed" | "failed" | "cancelled";
   /** Call status on agent.tool_call / agent.command lines (drives counts + spinners). */
   readonly toolStatus?: "started" | "completed" | "failed";
+  /** Display-safe first command/tool word for compact activity summaries. */
+  readonly commandName?: string;
   /** Capped payload preview (tool output, spawn prompt, node result) behind a disclosure. */
   readonly detail?: string;
   /** Token usage on agent.done / agent.node_done lines, where the transport reports it. */
@@ -171,15 +176,18 @@ export function summarizeAgentEvent(event: AgentEvent): TranscriptLine {
       return {
         ...transcriptLine(event, `${event.toolName} ${event.status}${event.output === undefined ? "" : `: ${event.output}`}`),
         toolStatus: event.status,
+        commandName: event.toolName,
         ...(event.output === undefined ? {} : { detail: event.output })
       };
     case "agent.command":
+      const commandName = firstCommandWord(event.command);
       return {
         ...transcriptLine(
           event,
           `${event.command.join(" ")} [${event.status}${event.exitCode === undefined ? "" : ` exit ${String(event.exitCode)}`}]`
         ),
         toolStatus: event.status,
+        ...(commandName === undefined ? {} : { commandName }),
         ...(event.output === undefined ? {} : { detail: event.output })
       };
     case "agent.file_edit":
@@ -204,6 +212,8 @@ export function summarizeAgentEvent(event: AgentEvent): TranscriptLine {
         nodeId: event.nodeId,
         label: event.label,
         nodeStatus: "running",
+        ...(event.subagentType === undefined ? {} : { subagentType: event.subagentType }),
+        ...(event.model === undefined ? {} : { model: event.model }),
         ...(event.promptPreview === undefined ? {} : { detail: event.promptPreview })
       };
     case "agent.node_done":
@@ -248,4 +258,33 @@ function clipSummary(summary: string): string {
   return summary.length > TRANSCRIPT_SUMMARY_MAX
     ? `${summary.slice(0, TRANSCRIPT_SUMMARY_MAX)}…`
     : summary;
+}
+
+function firstCommandWord(command: readonly string[]): string | undefined {
+  const raw = commandFromShell(command) ?? command[0];
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed.length === 0) return undefined;
+  const unquoted = trimmed.replace(/^["']+|["']+$/g, "");
+  return /^([^\s;&|]+)/.exec(unquoted)?.[1];
+}
+
+function commandFromShell(command: readonly string[]): string | undefined {
+  const executable = command[0]?.toLowerCase();
+  if (executable === undefined) return undefined;
+  if (executable === "bash" || executable === "sh" || executable === "zsh") {
+    const index = command.findIndex((part) => part === "-c" || part === "-lc");
+    return index >= 0 ? command[index + 1] : undefined;
+  }
+  if (executable === "pwsh" || executable === "powershell" || executable === "powershell.exe") {
+    const index = command.findIndex((part) => {
+      const normalized = part.toLowerCase();
+      return normalized === "-command" || normalized === "-c";
+    });
+    return index >= 0 ? command[index + 1] : undefined;
+  }
+  if (executable === "cmd" || executable === "cmd.exe") {
+    const index = command.findIndex((part) => part.toLowerCase() === "/c");
+    return index >= 0 ? command[index + 1] : undefined;
+  }
+  return undefined;
 }

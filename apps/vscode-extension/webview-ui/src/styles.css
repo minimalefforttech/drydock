@@ -1,11 +1,11 @@
 /* Control panel styles — VS Code theme variables only, no remote assets.
-   Redesigned for the three-tab layout (Chat | Work | System). Compact and
+   Redesigned for the three-tab layout (Tasks | Chat | System). Compact and
    quiet; usable down to ~300px panel width. Class names for moved-unchanged
    rendering (chat-log, chat-message, diagnostics-log, status, runtime-row…)
    are preserved to minimize churn. */
 
 /* Full-height chain: the chat tab fills the panel to the bottom (a flex column),
-   while the Work/System tabs keep their natural, document-scrolled height. */
+   while the Tasks/System tabs keep their natural, document-scrolled height. */
 html,
 body {
   height: 100%;
@@ -28,6 +28,40 @@ body {
 
 .hidden {
   display: none !important;
+}
+
+/* Webview scrollbars should feel native to the VS Code chrome instead of the
+   browser default. Firefox uses scrollbar-*; Chromium/WebKit uses the pseudo
+   elements below. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4)) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4));
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground, rgba(121, 121, 121, 0.55));
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background: var(--vscode-scrollbarSlider-activeBackground, rgba(191, 191, 191, 0.45));
+  background-clip: content-box;
 }
 
 /* --------------------------------------------------------------------------
@@ -76,7 +110,7 @@ body {
 }
 
 /* The chat panel fills the remaining viewport height as a flex column so its
-   transcript can absorb free space and scroll internally. Work/System keep
+   transcript can absorb free space and scroll internally. Tasks/System keep
    natural height (no panel-fill class). */
 .tab-panel.panel-fill {
   flex: 1;
@@ -119,7 +153,7 @@ body {
 }
 
 .button.danger.armed {
-  background: var(--vscode-editorError-foreground, #f14c4c);
+  background: color-mix(in srgb, var(--vscode-editorError-foreground, #f14c4c) 62%, #000000);
   color: #ffffff;
 }
 
@@ -134,6 +168,20 @@ body {
 
 .button.primary:not(:disabled):hover {
   background: var(--vscode-button-hoverBackground);
+}
+
+.button.link-button {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--vscode-textLink-foreground, var(--vscode-button-background));
+  font: inherit;
+}
+
+.button.link-button:not(:disabled):hover {
+  background: transparent;
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground, var(--vscode-button-background)));
+  text-decoration: underline;
 }
 
 .icon-button {
@@ -272,6 +320,7 @@ h3 {
   padding: 1px 6px;
   border-radius: 999px;
   font-size: 0.8em;
+  border: 1px solid transparent;
   background: var(--vscode-badge-background);
   color: var(--vscode-badge-foreground);
   white-space: nowrap;
@@ -284,8 +333,9 @@ h3 {
 .change-add,
 .approval-approved,
 .patch-applied {
-  background: var(--vscode-testing-iconPassed, #2ea043);
-  color: #ffffff;
+  background: color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 18%, transparent);
+  color: var(--vscode-testing-iconPassed, #73c991);
+  border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 42%, transparent);
 }
 
 .status-quarantined,
@@ -295,8 +345,9 @@ h3 {
 .approval-rejected,
 .patch-discarded,
 .access-denied {
-  background: var(--vscode-editorError-foreground, #f14c4c);
-  color: #ffffff;
+  background: color-mix(in srgb, var(--vscode-editorError-foreground, #f14c4c) 16%, transparent);
+  color: var(--vscode-editorError-foreground, #f14c4c);
+  border-color: color-mix(in srgb, var(--vscode-editorError-foreground, #f14c4c) 44%, transparent);
 }
 
 .approval-pending,
@@ -337,7 +388,7 @@ h3 {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 6px 0 0;
+  margin: 0 0 6px;
 }
 
 .plan-docs-pill {
@@ -426,15 +477,20 @@ h3 {
    Chat tab
    -------------------------------------------------------------------------- */
 
-/* The chat tab is itself a full-height flex column; header / context strip /
-   composer are fixed-height, the transcript region is the flex:1 scroller, and
-   the Changes / Diagnostics disclosures sit at natural height with their own
-   inner scroll caps. */
+/* The chat tab is a two-part column: one scrollable body for chat content and a
+   pinned composer at the bottom. */
 .chat-tab {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
+}
+
+.chat-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .chat-header {
@@ -480,27 +536,14 @@ h3 {
   min-width: 80px;
 }
 
-/* Context strip: provider/model selects FIRST (one row), a native collapsed
-   mounts <details> BELOW them. */
+/* Context strip: runtime context only. Send-time provider/model choices live in
+   the pinned composer. */
 .context-strip {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   flex: 0 0 auto;
-}
-
-.context-provider-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.provider-select.compact,
-.model-select.compact {
-  flex: 1 1 120px;
-  min-width: 90px;
 }
 
 /* Mounts disclosure (replaces the workspace chip + custom mounts popover). */
@@ -547,9 +590,9 @@ h3 {
 
 /* Mode chips inside the mounts list. */
 .chip.mode-read-write {
-  background: var(--vscode-testing-iconPassed, #2ea043);
-  color: #ffffff;
-  border-color: transparent;
+  background: color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 18%, transparent);
+  color: var(--vscode-testing-iconPassed, #73c991);
+  border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 42%, transparent);
 }
 
 .chip.mode-read-only {
@@ -559,9 +602,9 @@ h3 {
 
 /* Clone chip inside the mounts list: a clone repo, no live mount. */
 .chip.mode-clone {
-  background: var(--vscode-charts-purple, #9a6dd7);
-  color: #ffffff;
-  border-color: transparent;
+  background: color-mix(in srgb, var(--vscode-charts-purple, #9a6dd7) 18%, transparent);
+  color: var(--vscode-charts-purple, #c586c0);
+  border-color: color-mix(in srgb, var(--vscode-charts-purple, #9a6dd7) 42%, transparent);
 }
 
 /* Clone sync working set. */
@@ -606,7 +649,7 @@ h3 {
   padding: 2px 4px 4px;
 }
 
-/* Clone-mode chip on a Work-tab session card lives with the shared session-row
+/* Clone-mode chip on a Tasks-tab session card lives with the shared session-row
    chip vocabulary (`.session-chip.chip-clone`) below (R1/R9 consolidation). */
 
 .auth-banner {
@@ -625,16 +668,16 @@ h3 {
   word-break: break-word;
 }
 
-/* Transcript region: the flex:1 scroller that absorbs the panel's free space.
-   Holds the transcript log and inline access-request cards. */
+/* Transcript block: the outer chat-scroll owns overflow. Keep a useful minimum
+   so open questions and expanded Changes cannot squeeze the log to a sliver. */
 .transcript-region {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
+  min-height: 220px;
+  overflow: visible;
   margin: 4px 0 8px;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
   border-radius: 2px;
   padding: 6px;
+  background: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 82%, #000000);
 }
 
 /* Dev log: full-width structural entries, no online-chat bubbles. */
@@ -642,6 +685,11 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.question-cards {
+  flex: 0 0 auto;
+  margin: 0 0 8px;
 }
 
 .chat-message {
@@ -657,11 +705,32 @@ h3 {
 /* User turn: a compact tinted card, blue-accented left border. */
 .chat-user-body {
   border-left: 3px solid var(--vscode-focusBorder, var(--vscode-button-background));
-  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.08));
+  background: color-mix(in srgb, var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.08)) 76%, transparent);
   border-radius: 3px;
   padding: 6px 10px;
   word-break: break-word;
   white-space: pre-wrap;
+}
+
+.chat-file-token {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  margin: 0 2px;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  background: color-mix(in srgb, var(--vscode-badge-background, #4d4d4d) 48%, transparent);
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.92em;
+  line-height: 1.45;
+  vertical-align: 1px;
+}
+
+.chat-file-token.unmounted {
+  border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 48%, transparent);
+  color: var(--vscode-editorWarning-foreground, #cca700);
 }
 
 /* Attention stack: pending questions + access requests share ONE card slot
@@ -775,6 +844,10 @@ h3 {
   font-weight: 700;
 }
 .agent-group-chip.chip-done { color: var(--vscode-charts-green, #3fb950); opacity: 0.8; }
+.agent-group-chip.chip-idle {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  font-weight: 600;
+}
 
 .agent-group-body {
   display: flex;
@@ -866,13 +939,25 @@ h4.md-heading { font-size: 1em; }
   background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background, rgba(128, 128, 128, 0.08)));
 }
 
+.md-code-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 6px 2px 8px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
 .md-code-badge {
   display: block;
-  padding: 2px 8px;
+  min-width: 0;
+  padding: 0;
   font-size: 0.72em;
   text-transform: lowercase;
   opacity: 0.7;
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .md-pre {
@@ -882,6 +967,81 @@ h4.md-heading { font-size: 1em; }
   font-family: var(--vscode-editor-font-family);
   font-size: 0.85em;
   white-space: pre;
+}
+
+.md-pre code {
+  font-family: inherit;
+  white-space: inherit;
+}
+
+.chat-tab.code-wrap .md-pre {
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.md-code-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  padding: 0;
+  font-size: 0.86em;
+  line-height: 1;
+}
+
+.md-mermaid-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.72em;
+  line-height: 1;
+}
+
+.md-mermaid-placeholder {
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background, rgba(128, 128, 128, 0.08)));
+  opacity: 0.75;
+}
+
+.md-mermaid-figure {
+  margin: 0;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--vscode-editor-background);
+}
+
+.md-mermaid-svg-wrap {
+  padding: 10px;
+  overflow: auto;
+}
+
+.md-mermaid-svg-wrap svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.md-mermaid-source {
+  border-top: 0;
+}
+
+.md-mermaid-error {
+  margin-top: 4px;
+  color: var(--vscode-editorWarning-foreground, #d7ba7d);
+  font-size: 0.85em;
 }
 
 /* Subtle streaming affordance appended after the assistant body. */
@@ -904,8 +1064,17 @@ h4.md-heading { font-size: 1em; }
 /* Composer */
 
 .composer {
+  container-type: inline-size;
   margin: 0 0 8px;
   flex: 0 0 auto;
+  padding: 8px 10px 9px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.3)));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--vscode-input-background, var(--vscode-editor-background)) 86%, var(--vscode-editor-background));
+}
+
+.composer:focus-within {
+  border-color: var(--vscode-focusBorder, var(--vscode-inputOption-activeBorder, #007fd4));
 }
 
 .prompt-input {
@@ -913,22 +1082,119 @@ h4.md-heading { font-size: 1em; }
   box-sizing: border-box;
   resize: vertical;
   color: var(--vscode-input-foreground);
-  background: var(--vscode-input-background);
-  border: 1px solid var(--vscode-input-border, transparent);
-  border-radius: 2px;
-  padding: 6px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  min-height: 72px;
+  padding: 4px 0;
   font-family: var(--vscode-font-family);
+  line-height: 1.4;
+}
+
+.prompt-input:focus {
+  outline: none;
+}
+
+.prompt-input::placeholder {
+  color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+  opacity: 0.82;
 }
 
 .composer-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "mode spacer send cancel"
+    "controls controls controls controls";
   align-items: center;
   gap: 6px;
-  margin-top: 6px;
+  margin-top: 5px;
+}
+
+.composer-actions > .segmented {
+  grid-area: mode;
+  justify-self: start;
+}
+
+.composer-model-controls {
+  grid-area: controls;
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(66px, 0.72fr);
+  align-items: center;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  gap: 4px;
+  padding: 6px 0 0;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
 }
 
 .composer-spacer {
-  flex: 1;
+  grid-area: spacer;
+  min-width: 0;
+}
+
+.composer-send {
+  grid-area: send;
+  justify-self: end;
+}
+
+.composer-cancel {
+  grid-area: cancel;
+  justify-self: end;
+}
+
+.composer .provider-select.compact,
+.composer .model-select.compact,
+.composer .thinking-select.compact {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  padding: 3px 5px;
+}
+
+.composer .provider-select.compact:hover,
+.composer .model-select.compact:hover,
+.composer .thinking-select.compact:hover,
+.composer .provider-select.compact:focus,
+.composer .model-select.compact:focus,
+.composer .thinking-select.compact:focus {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+  color: var(--vscode-foreground);
+}
+
+@container (min-width: 430px) {
+  .composer-actions {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "mode controls send cancel";
+  }
+
+  .composer-model-controls {
+    display: flex;
+    width: auto;
+    padding: 0 0 0 6px;
+    border-top: none;
+    border-left: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  }
+
+  .composer-spacer {
+    display: none;
+  }
+
+  .composer .provider-select.compact {
+    flex: 0 1 116px;
+  }
+
+  .composer .model-select.compact {
+    flex: 0 1 150px;
+  }
+
+  .composer .thinking-select.compact {
+    flex: 0 1 86px;
+  }
 }
 
 .segmented {
@@ -960,9 +1226,9 @@ h4.md-heading { font-size: 1em; }
   padding-top: 4px;
 }
 
-/* Changes / Diagnostics disclosures sit at natural height (their inner lists
-   carry the scroll caps); they must not stretch the chat column. */
-.chat-tab > .section {
+/* Sections inside the scrolling chat body keep a readable floor; the outer
+   chat-scroll owns overflow, so these do not compress each other. */
+.chat-scroll > .section {
   flex: 0 0 auto;
   margin: 6px 0;
 }
@@ -1012,10 +1278,15 @@ h4.md-heading { font-size: 1em; }
   opacity: 0.7;
 }
 
-/* File list capped ~30vh with its own scroll. */
 .working-set-files {
-  max-height: 30vh;
-  overflow-y: auto;
+  min-height: 74px;
+  overflow-y: visible;
+}
+
+.working-set-files.scroll-capped {
+  max-height: none;
+  overflow-y: visible;
+  padding-right: 2px;
 }
 
 .working-set-row {
@@ -1101,16 +1372,100 @@ h4.md-heading { font-size: 1em; }
   font-weight: 700;
 }
 
-/* Relocated, de-emphasized Comments sub-section inside Changes. */
-.comments-section {
-  border-top: 1px dashed var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
-  margin-top: 6px;
+/* Plain task notes are task-scoped context, separate from the file-change list. */
+.task-notes-section {
+  margin: 6px 0;
 }
 
-.comments-section > summary {
-  font-weight: 500;
-  opacity: 0.8;
-  font-size: 0.9em;
+.task-notes-section > summary {
+  font-weight: 600;
+}
+
+.task-note-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 2px;
+  padding: 6px 7px 7px;
+  border-left: 2px solid var(--vscode-descriptionForeground, rgba(128, 128, 128, 0.55));
+  border-radius: 3px;
+  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.06));
+}
+
+.task-note-input {
+  width: 100%;
+  min-height: 58px;
+  resize: vertical;
+  box-sizing: border-box;
+  color: var(--vscode-input-foreground);
+  background: color-mix(in srgb, var(--vscode-input-background, transparent) 72%, transparent);
+  border: 1px dashed var(--vscode-input-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+  border-radius: 2px;
+  padding: 5px 6px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.84em;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.task-note-input:focus {
+  outline: 1px solid var(--vscode-focusBorder, var(--vscode-button-background));
+  outline-offset: -1px;
+  border-style: solid;
+}
+
+.task-note-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.task-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 6px 0;
+}
+
+.task-note-row {
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
+  border-radius: 3px;
+  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.06));
+}
+
+.task-note-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.task-note-meta {
+  flex: 1;
+  min-width: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.76em;
+}
+
+.task-note-delete {
+  flex: 0 0 auto;
+  opacity: 0.55;
+}
+
+.task-note-row:hover .task-note-delete,
+.task-note-delete:focus-visible,
+.task-note-delete.armed {
+  opacity: 1;
+}
+
+.task-note-body {
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.86em;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* --------------------------------------------------------------------------
@@ -1174,7 +1529,7 @@ h4.md-heading { font-size: 1em; }
 }
 
 /* --------------------------------------------------------------------------
-   Cards (Work tab attention + sessions)
+   Cards (Tasks tab attention + sessions)
    -------------------------------------------------------------------------- */
 
 .card {
@@ -1249,13 +1604,17 @@ h4.md-heading { font-size: 1em; }
 }
 
 /* --------------------------------------------------------------------------
-   Access-request cards (shared by Work-tab "needs attention" + inline Chat)
+   Access-request cards (shared by Tasks-tab "needs attention" + inline Chat)
    -------------------------------------------------------------------------- */
 
 .access-cards {
   display: flex;
   flex-direction: column;
   margin: 0 0 8px;
+}
+
+.access-cards:empty {
+  display: none;
 }
 
 /* Inline chat variant: same visual language as the attention card, always
@@ -1339,7 +1698,7 @@ h4.md-heading { font-size: 1em; }
 }
 
 /* --------------------------------------------------------------------------
-   Attention markers on Work-tab session rows (Phase 3; R1/R9 salience inversion)
+   Attention markers on Tasks-tab session rows (Phase 3; R1/R9 salience inversion)
    -------------------------------------------------------------------------- */
 
 /* Halo on the status dot. LOUD rows (failed / waiting-on-access) keep the 3px
@@ -1410,7 +1769,7 @@ h4.md-heading { font-size: 1em; }
 }
 .session-chip.chip-subagents-failed { color: var(--vscode-editorError-foreground, #f14c4c); }
 
-/* Agents lens: the [Log | Agents] alternate hierarchy view. */
+/* Agents lens: the [Chat | Agents] alternate hierarchy view. */
 .transcript-lens-strip {
   display: flex;
   align-items: center;
@@ -1427,32 +1786,140 @@ h4.md-heading { font-size: 1em; }
 .agents-lens {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
 }
+
+.agent-task-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-task-section-title {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.84em;
+  font-weight: 600;
+  padding: 2px 2px 0;
+}
+
+.agent-task-section-collapsible > .agent-task-section-title {
+  cursor: pointer;
+  list-style: none;
+}
+
+.agent-task-section-collapsible > .agent-task-section-title::-webkit-details-marker { display: none; }
+.agent-task-section-collapsible > .agent-task-section-title::before {
+  content: "▸";
+  opacity: 0.65;
+  padding-right: 5px;
+}
+.agent-task-section-collapsible[open] > .agent-task-section-title::before { content: "▾"; }
+
+.agent-task-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.06));
+  min-width: 0;
+}
+
+.agent-task-card.root {
+  background: transparent;
+  border-style: dashed;
+}
+
+.agent-task-card.idle {
+  border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 45%, transparent);
+}
+
+.agent-task-card.agent-status-failed {
+  border-color: color-mix(in srgb, var(--vscode-editorError-foreground, #f14c4c) 55%, transparent);
+}
+
+.agent-task-title-row,
+.agent-task-actions,
 .agents-lens-row {
   display: flex;
   align-items: baseline;
   gap: 6px;
+  min-width: 0;
+}
+
+.agent-task-actions { font-size: 0.88em; }
+
+.agents-lens-row {
   padding: 3px 4px;
   border-radius: 3px;
   font-size: 0.86em;
-  min-width: 0;
   overflow: hidden;
 }
+
 .agents-lens-row .agent-group-dot { align-self: center; flex: none; }
 .agents-lens-row.clickable { cursor: pointer; }
 .agents-lens-row.clickable:hover { background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1)); }
 .agents-lens-row.is-root { font-weight: 600; }
-.agents-lens-label {
+.agents-lens-label,
+.agent-task-title {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
 }
-.agents-lens-meta { opacity: 0.6; font-size: 0.92em; white-space: nowrap; flex: none; }
-.agents-lens-activity {
+
+.agent-task-title {
+  font-size: 0.98em;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+.agent-task-type,
+.agent-task-chip,
+.agents-lens-meta {
+  opacity: 0.7;
+  font-size: 0.84em;
+  white-space: nowrap;
+  flex: none;
+}
+
+.agent-task-chip {
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.18));
+  color: var(--vscode-badge-foreground, inherit);
+}
+
+.agent-task-chip.chip-failed {
+  opacity: 1;
+  color: var(--vscode-editorError-foreground, #f14c4c);
+  background: transparent;
+  font-weight: 600;
+}
+
+.agent-task-chip.chip-done {
+  color: var(--vscode-testing-iconPassed, #2ea043);
+  background: transparent;
+}
+
+.agent-task-chip.chip-idle {
+  opacity: 1;
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  background: transparent;
+  font-weight: 600;
+}
+
+.agent-task-meta {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.86em;
+  line-height: 1.35;
+}
+
+.agents-lens-activity,
+.agent-task-activity {
   opacity: 0.55;
-  font-size: 0.92em;
+  font-size: 0.86em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1464,11 +1931,12 @@ h4.md-heading { font-size: 1em; }
   display: inline-block;
   padding: 0 6px;
   border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--vscode-charts-purple, #9a6dd7) 42%, transparent);
   font-size: 10px;
   font-weight: 600;
   vertical-align: middle;
-  background: var(--vscode-charts-purple, #9a6dd7);
-  color: #ffffff;
+  background: color-mix(in srgb, var(--vscode-charts-purple, #9a6dd7) 18%, transparent);
+  color: var(--vscode-charts-purple, #c586c0);
   margin-left: 6px;
 }
 
@@ -1496,7 +1964,7 @@ h4.md-heading { font-size: 1em; }
 }
 
 /* --------------------------------------------------------------------------
-   Granted-access ledger (Work-tab session rows, Phase 3 B1/B3)
+   Granted-access ledger (Tasks-tab session rows, Phase 3 B1/B3)
    -------------------------------------------------------------------------- */
 
 .session-grants {
@@ -1534,8 +2002,9 @@ h4.md-heading { font-size: 1em; }
 }
 
 .session-grant-mode.mode-read-write {
-  background: var(--vscode-testing-iconPassed, #2ea043);
-  color: #ffffff;
+  background: color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 18%, transparent);
+  color: var(--vscode-testing-iconPassed, #73c991);
+  border: 1px solid color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 42%, transparent);
 }
 
 .session-grant-mode.mode-read-only {
@@ -1577,12 +2046,21 @@ h4.md-heading { font-size: 1em; }
 }
 
 /* --------------------------------------------------------------------------
-   Tasks (Work tab)
+   Tasks (Tasks tab)
    -------------------------------------------------------------------------- */
 
 .task-cards {
   display: flex;
   flex-direction: column;
+}
+
+.task-card.active {
+  border-left: 2px solid var(--vscode-focusBorder, var(--vscode-button-background));
+  background: color-mix(
+    in srgb,
+    var(--vscode-list-activeSelectionBackground, var(--vscode-editorWidget-background, transparent)) 72%,
+    var(--vscode-editorWidget-background, transparent)
+  );
 }
 
 .task-card-top {
@@ -1757,6 +2235,62 @@ h4.md-heading { font-size: 1em; }
   opacity: 0.85;
 }
 
+.session-agent-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding-left: 14px;
+}
+
+.session-agent-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 0.8em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.session-agent-row::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--vscode-charts-green, #3fb950);
+}
+
+.session-agent-row.idle::before {
+  background: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.session-agent-row.session-agent-status-failed::before {
+  background: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+.session-agent-label {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.session-agent-meta {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-agent-more {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+  padding-left: 12px;
+}
+
 .session-card-note {
   font-size: 0.85em;
   font-style: italic;
@@ -1800,7 +2334,6 @@ h4.md-heading { font-size: 1em; }
 .workspace-row,
 .changed-file-row,
 .project-row,
-.review-comment-row,
 .plan-block-row {
   display: flex;
   align-items: center;
@@ -1823,7 +2356,6 @@ h4.md-heading { font-size: 1em; }
 }
 
 .projects-list,
-.review-comments,
 .plan-blocks {
   display: flex;
   flex-direction: column;
@@ -1900,11 +2432,122 @@ h4.md-heading { font-size: 1em; }
   margin-top: 3px;
 }
 
+.task-session-dropdown {
+  margin-top: 6px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
+  padding-top: 4px;
+}
+
+.task-session-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  cursor: pointer;
+  font-size: 0.82em;
+  opacity: 0.82;
+}
+
+.task-session-summary-label {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+.task-session-active-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 2px;
+}
+
+.task-session-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.task-session-main {
+  flex: 1;
+  min-width: 0;
+  border-radius: 3px;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+
+.task-session-main:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+}
+
+.task-session-main:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, var(--vscode-button-background));
+  outline-offset: 1px;
+}
+
+.task-session-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.task-session-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.task-session-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8em;
+  opacity: 0.7;
+  margin-top: 1px;
+  padding-left: 14px;
+}
+
+.task-session-meta.meta-elsewhere {
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.task-session-row .session-agent-strip {
+  padding-left: 14px;
+  margin-top: 2px;
+}
+
+.task-session-row .session-agent-row {
+  font-size: 0.78em;
+}
+
+.task-session-row > .chip-remove {
+  flex: 0 0 auto;
+  margin-top: 5px;
+  opacity: 0.45;
+}
+
+.task-session-row:hover > .chip-remove,
+.task-session-row > .chip-remove:focus-visible {
+  opacity: 1;
+}
+
 /* --------------------------------------------------------------------------
    Touch-history hover popover
    -------------------------------------------------------------------------- */
 
-/* The hover popover is absolutely positioned relative to the Work tab root. */
+/* The hover popover is absolutely positioned relative to the Tasks tab root. */
 .work-tab {
   position: relative;
 }
@@ -2017,20 +2660,4 @@ h4.md-heading { font-size: 1em; }
 .memory-approved-row {
   word-break: break-word;
   opacity: 0.8;
-}
-
-/* --------------------------------------------------------------------------
-   Mini-task from a review comment
-   -------------------------------------------------------------------------- */
-
-.comment-to-task {
-  flex: 0 0 auto;
-  font-size: 0.78em;
-  padding: 0 6px;
-  opacity: 0.7;
-  white-space: nowrap;
-}
-
-.review-comment-row:hover .comment-to-task {
-  opacity: 1;
 }

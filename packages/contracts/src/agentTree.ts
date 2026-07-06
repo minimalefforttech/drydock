@@ -58,6 +58,8 @@ export interface AgentTreeNode {
   readonly counts: AgentTreeCounts;
   /** Clipped summary of the node's most recent event. */
   readonly lastActivity?: string;
+  readonly lastActivityAt?: string;
+  readonly lastCommand?: string;
   readonly promptPreview?: string;
   readonly resultPreview?: string;
   readonly usage?: JsonObject;
@@ -82,6 +84,7 @@ export interface AgentTreeSource {
   readonly model?: string;
   readonly nodeStatus?: "running" | "completed" | "failed" | "cancelled";
   readonly toolStatus?: "started" | "completed" | "failed";
+  readonly commandName?: string;
   readonly promptPreview?: string;
   readonly resultPreview?: string;
   readonly usage?: JsonObject;
@@ -116,9 +119,15 @@ export function treeSourceFromEvent(event: AgentEvent): AgentTreeSource {
     case "agent.done":
       return { ...base, nodeStatus: event.status, ...(event.usage === undefined ? {} : { usage: event.usage }) };
     case "agent.tool_call":
-      return { ...base, toolStatus: event.status, summary: event.toolName };
+      return { ...base, toolStatus: event.status, commandName: event.toolName, summary: event.toolName };
     case "agent.command":
-      return { ...base, toolStatus: event.status, summary: event.command.join(" ") };
+      const commandName = commandNameFromArgv(event.command);
+      return {
+        ...base,
+        toolStatus: event.status,
+        ...(commandName === undefined ? {} : { commandName }),
+        summary: event.command.join(" ")
+      };
     case "agent.file_edit":
       return { ...base, summary: `${event.changeKind} ${event.path}` };
     case "agent.error":
@@ -139,8 +148,11 @@ export function treeSourceFromLine(line: TranscriptLine): AgentTreeSource {
     ...(line.agentPath === undefined || line.agentPath.length === 0 ? {} : { agentPath: line.agentPath }),
     ...(line.nodeId === undefined ? {} : { nodeId: line.nodeId }),
     ...(line.label === undefined ? {} : { label: line.label }),
+    ...(line.subagentType === undefined ? {} : { subagentType: line.subagentType }),
+    ...(line.model === undefined ? {} : { model: line.model }),
     ...(line.nodeStatus === undefined || line.nodeStatus === "running" ? {} : { nodeStatus: line.nodeStatus }),
     ...(line.toolStatus === undefined ? {} : { toolStatus: line.toolStatus }),
+    ...(line.commandName === undefined ? {} : { commandName: line.commandName }),
     // Line `detail` is the spawn prompt on agent.spawn and the result on
     // agent.node_done — route it back to the field the reducer expects.
     ...(line.eventType === "agent.spawn" && line.detail !== undefined ? { promptPreview: line.detail } : {}),
@@ -167,6 +179,8 @@ interface MutableNode {
   fileEdits: number;
   errors: number;
   lastActivity?: string;
+  lastActivityAt?: string;
+  lastCommand?: string;
   promptPreview?: string;
   resultPreview?: string;
   usage?: JsonObject;
@@ -226,6 +240,8 @@ export function reduceAgentTree(sources: Iterable<AgentTreeSource>): SessionAgen
       if (source.subagentType !== undefined) child.subagentType = source.subagentType;
       if (source.model !== undefined) child.model = source.model;
       if (source.promptPreview !== undefined) child.promptPreview = source.promptPreview;
+      child.lastActivity = source.summary ?? `spawned ${child.label}`;
+      child.lastActivityAt = source.createdAt;
       continue;
     }
 
@@ -237,6 +253,8 @@ export function reduceAgentTree(sources: Iterable<AgentTreeSource>): SessionAgen
       }
       if (source.resultPreview !== undefined) child.resultPreview = source.resultPreview;
       if (source.usage !== undefined) child.usage = source.usage;
+      child.lastActivity = source.resultPreview ?? `subagent ${source.nodeStatus ?? "done"}`;
+      child.lastActivityAt = source.createdAt;
       continue;
     }
 
@@ -246,18 +264,23 @@ export function reduceAgentTree(sources: Iterable<AgentTreeSource>): SessionAgen
         emitter.endedAt = source.createdAt;
       }
       if (source.usage !== undefined && emitter.usage === undefined) emitter.usage = source.usage;
+      emitter.lastActivityAt = source.createdAt;
       continue;
     }
 
     // Ordinary activity, attributed to the emitting node.
     if (source.eventType === "agent.tool_call" && source.toolStatus === "started") emitter.toolCalls += 1;
     if (source.eventType === "agent.command" && source.toolStatus === "started") emitter.commands += 1;
+    if ((source.eventType === "agent.tool_call" || source.eventType === "agent.command") && source.commandName !== undefined) {
+      emitter.lastCommand = source.commandName;
+    }
     if (source.eventType === "agent.file_edit") emitter.fileEdits += 1;
     if (source.eventType === "agent.error") emitter.errors += 1;
     if (source.summary !== undefined && source.summary.length > 0) {
       emitter.lastActivity = source.summary.length > LAST_ACTIVITY_MAX
         ? `${source.summary.slice(0, LAST_ACTIVITY_MAX)}…`
         : source.summary;
+      emitter.lastActivityAt = source.createdAt;
     }
   }
 
@@ -286,10 +309,41 @@ export function reduceAgentTree(sources: Iterable<AgentTreeSource>): SessionAgen
           errors: node.errors
         },
         ...(node.lastActivity === undefined ? {} : { lastActivity: node.lastActivity }),
+        ...(node.lastActivityAt === undefined ? {} : { lastActivityAt: node.lastActivityAt }),
+        ...(node.lastCommand === undefined ? {} : { lastCommand: node.lastCommand }),
         ...(node.promptPreview === undefined ? {} : { promptPreview: node.promptPreview }),
         ...(node.resultPreview === undefined ? {} : { resultPreview: node.resultPreview }),
         ...(node.usage === undefined ? {} : { usage: node.usage })
       };
     })
   };
+}
+
+function commandNameFromArgv(command: readonly string[]): string | undefined {
+  const raw = commandFromShell(command) ?? command[0];
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed.length === 0) return undefined;
+  const unquoted = trimmed.replace(/^["']+|["']+$/g, "");
+  return /^([^\s;&|]+)/.exec(unquoted)?.[1];
+}
+
+function commandFromShell(command: readonly string[]): string | undefined {
+  const executable = command[0]?.toLowerCase();
+  if (executable === undefined) return undefined;
+  if (executable === "bash" || executable === "sh" || executable === "zsh") {
+    const index = command.findIndex((part) => part === "-c" || part === "-lc");
+    return index >= 0 ? command[index + 1] : undefined;
+  }
+  if (executable === "pwsh" || executable === "powershell" || executable === "powershell.exe") {
+    const index = command.findIndex((part) => {
+      const normalized = part.toLowerCase();
+      return normalized === "-command" || normalized === "-c";
+    });
+    return index >= 0 ? command[index + 1] : undefined;
+  }
+  if (executable === "cmd" || executable === "cmd.exe") {
+    const index = command.findIndex((part) => part.toLowerCase() === "/c");
+    return index >= 0 ? command[index + 1] : undefined;
+  }
+  return undefined;
 }

@@ -1,7 +1,7 @@
 /**
  * Control panel webview boot (chat panel redesign, Phase 1).
  *
- * Restores persisted state, builds the three-tab shell (Chat | Work | System),
+ * Restores persisted state, builds the three-tab shell (Tasks | Chat | System),
  * wires the shared bridge so views can cross tab boundaries, initializes each
  * view, and runs the boot loads (panel.init + session.list). Rendering logic
  * lives in the view modules; this file only orchestrates.
@@ -49,6 +49,7 @@ const systemTab = createSystemTab(ctx);
 
 const tabs = buildTabs(state, (tab) => {
   if (tab === "work") workTab.refresh();
+  if (tab === "system") systemTab.render();
 });
 
 bridge.switchTab = (tab) => tabs.select(tab);
@@ -111,7 +112,7 @@ void request({ type: "question.list" }).then((response) => {
   }
 });
 
-// Workspace state powers the Work tab and the Chat context strip; load once at
+// Workspace state powers the Tasks tab and the Chat context strip; load once at
 // boot so the context chip reflects any selected set immediately.
 void request({ type: "workspace.state" }).then((response) => {
   if (response.ok && response.payload.type === "workspace.state") {
@@ -121,12 +122,13 @@ void request({ type: "workspace.state" }).then((response) => {
     persist();
   }
 });
-// Internal work tasks power the Work-tab Tasks section and the session-card
-// task chips; load once at boot alongside the other Work-tab data.
+// Internal work tasks power the Tasks-tab task list and the session-card
+// task chips; load once at boot alongside the other Tasks-tab data.
 void request({ type: "task.list" }).then((response) => {
   if (response.ok && response.payload.type === "task.list") {
     state.tasks = [...response.payload.tasks];
     workTab.render();
+    chatTab.render();
     persist();
   }
 });

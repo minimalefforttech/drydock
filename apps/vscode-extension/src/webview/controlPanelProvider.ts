@@ -16,9 +16,14 @@ import * as vscode from "vscode";
 import {
   asId,
   parsePanelRequest,
+  reduceAgentTree,
   summarizeAgentEvent,
+  treeSourceFromEvent,
   WEBVIEW_PROTOCOL_VERSION,
   type AccessRequestSummary,
+  type AgentActivitySummary,
+  type AgentEvent,
+  type AgentTreeSource,
   type AgentQuestionRecord,
   type AgentQuestionSummary,
   type BackendAvailability,
@@ -125,6 +130,17 @@ function taskLinkTarget(payload: { readonly workspaceSetId?: string; readonly se
     : { sessionId: payload.sessionId as string };
 }
 
+function usageTokens(usage: unknown): number | null {
+  if (typeof usage !== "object" || usage === null) return null;
+  const record = usage as Record<string, unknown>;
+  if (typeof record["totalTokens"] === "number") return record["totalTokens"];
+  const total = record["total"];
+  if (typeof total === "object" && total !== null && typeof (total as Record<string, unknown>)["totalTokens"] === "number") {
+    return (total as Record<string, unknown>)["totalTokens"] as number;
+  }
+  return null;
+}
+
 export class ControlPanelProvider implements vscode.WebviewViewProvider {
   static readonly viewType = "drydock.controlPanel";
 
@@ -140,11 +156,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   /** Seeded once so a reloaded webview re-derives startup pending-request attention. */
   private attentionSeeded = false;
   /**
-   * Live subagent counters per session (⑂ chip), folded from the bus
-   * agent-events this host streams — sessions running in another window
-   * stream nothing here, so their chip stays empty (read-only posture).
+   * Live subagent summaries per session, folded from the bus agent-events this
+   * host streams. Sessions running in another window stream nothing here, so
+   * their chip stays empty (read-only posture).
    */
-  private readonly agentActivity = new Map<string, { running: Set<string>; failed: number }>();
+  private readonly agentActivity = new Map<string, { sources: AgentTreeSource[] }>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -276,7 +292,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
           runtimes,
           providerCatalogs: this.backend.available ? this.backend.appService.listChatProviderCatalogs() : [],
           stateRootDisplayPath: this.backend.stateRootPath,
-          openFolderNames: this.openFolderNames()
+          openFolderNames: this.openFolderNames(),
+          agentIdleThresholdMs: this.agentIdleThresholdMs(),
+          codeBlockWordWrap: this.codeBlockWordWrap()
         };
         this.respond(request.requestId, { type: "panel.init", state });
         if (this.backend.available) {
@@ -286,6 +304,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
             this.push({ type: "provider.models", providerCatalogs });
           }).catch(() => { /* logged by the service */ });
         }
+        return;
+      }
+      case "clipboard.writeText": {
+        await vscode.env.clipboard.writeText(payload.text);
+        this.respond(request.requestId, { type: "clipboard.writeText", accepted: true });
         return;
       }
       case "isolatedRun.listRuntimes": {
@@ -795,42 +818,49 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** Folds spawn/terminal events into the ⑂ chip counters and pushes on change. */
-  private foldAgentActivity(sessionId: string, event: { type: string; nodeId?: string; status?: string }): void {
-    if (event.type === "agent.spawn" && event.nodeId !== undefined) {
-      const entry = this.agentActivity.get(sessionId) ?? { running: new Set<string>(), failed: 0 };
-      entry.running.add(event.nodeId);
-      this.agentActivity.set(sessionId, entry);
-      this.pushAgentActivity(sessionId);
-      return;
-    }
-    if (event.type === "agent.node_done" && event.nodeId !== undefined) {
-      const entry = this.agentActivity.get(sessionId);
-      if (entry === undefined) return;
-      const wasRunning = entry.running.delete(event.nodeId);
-      if (event.status === "failed") entry.failed += 1;
-      if (wasRunning || event.status === "failed") this.pushAgentActivity(sessionId);
-      return;
-    }
-    if (event.type === "agent.done") {
-      // Stream over: stragglers are no longer "running" (the reducer reports
-      // them "unknown"); keep the failed tint until the next turn starts.
-      const entry = this.agentActivity.get(sessionId);
-      if (entry !== undefined && entry.running.size > 0) {
-        entry.running.clear();
-        this.pushAgentActivity(sessionId);
-      }
-    }
+  /** Folds structured agent events into the compact subagent summary push. */
+  private foldAgentActivity(sessionId: string, event: AgentEvent): void {
+    const entry = this.agentActivity.get(sessionId) ?? { sources: [] };
+    entry.sources.push(treeSourceFromEvent(event));
+    this.agentActivity.set(sessionId, entry);
+    this.pushAgentActivity(sessionId);
   }
 
   private pushAgentActivity(sessionId: string): void {
-    const entry = this.agentActivity.get(sessionId);
     this.push({
       type: "session.agentActivity",
       sessionId,
-      running: entry?.running.size ?? 0,
-      failed: entry?.failed ?? 0
+      activity: this.agentActivitySummary(sessionId)
     });
+  }
+
+  private agentActivitySummary(sessionId: string): AgentActivitySummary {
+    const entry = this.agentActivity.get(sessionId);
+    if (entry === undefined) return { running: 0, failed: 0 };
+    const tree = reduceAgentTree(entry.sources);
+    const agents = tree.nodes
+      .filter((node) => node.kind === "native")
+      .map((node) => {
+        const tokens = usageTokens(node.usage);
+        return {
+          nodeId: node.nodeId,
+          ...(node.parentId === undefined ? {} : { parentNodeId: node.parentId }),
+          label: node.label,
+          status: node.status,
+          ...(node.startedAt === undefined ? {} : { startedAt: node.startedAt }),
+          ...(node.endedAt === undefined ? {} : { endedAt: node.endedAt }),
+          ...(node.lastActivityAt === undefined ? {} : { lastActivityAt: node.lastActivityAt }),
+          ...(node.lastActivity === undefined ? {} : { lastActivity: node.lastActivity }),
+          ...(node.lastCommand === undefined ? {} : { lastCommand: node.lastCommand }),
+          toolUses: node.counts.toolCalls + node.counts.commands + node.counts.fileEdits,
+          ...(tokens === null ? {} : { tokens })
+        };
+      });
+    const running = agents.filter((agent) => agent.status === "running").length;
+    const failed = agents.filter((agent) => agent.status === "failed").length;
+    return agents.length === 0
+      ? { running, failed }
+      : { running, failed, agents };
   }
 
   private decorateSessionSummary(record: ChatSessionRecord): ChatSessionSummary {
@@ -841,10 +871,10 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       this.backend.appService.noteSessionModeFromRecord(record.sessionId, record.mode);
     }
     const summary = toChatSessionSummary(record, this.isRunningElsewhere(record));
-    const activity = this.agentActivity.get(record.sessionId);
-    return activity === undefined || (activity.running.size === 0 && activity.failed === 0)
+    const activity = this.agentActivitySummary(record.sessionId);
+    return activity.running === 0 && activity.failed === 0
       ? summary
-      : { ...summary, agentActivity: { running: activity.running.size, failed: activity.failed } };
+      : { ...summary, agentActivity: activity };
   }
 
   private isRunningElsewhere(record: ChatSessionRecord): boolean {
@@ -909,6 +939,16 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     return (vscode.workspace.workspaceFolders ?? [])
       .filter((folder) => folder.uri.scheme === "file")
       .map((folder) => folder.name);
+  }
+
+  private agentIdleThresholdMs(): number {
+    const minutes = vscode.workspace.getConfiguration("drydock").get<number>("agentIdleThresholdMinutes", 5);
+    const safeMinutes = Number.isFinite(minutes) ? Math.max(1, Math.min(120, minutes)) : 5;
+    return safeMinutes * 60_000;
+  }
+
+  private codeBlockWordWrap(): boolean {
+    return vscode.workspace.getConfiguration("drydock").get<boolean>("codeBlockWordWrap", true);
   }
 
   /** Implementation-mode sessions get per-root diff baselines at start. */
@@ -1416,20 +1456,22 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     const nonce = randomBytes(16).toString("hex");
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "main.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "main.css"));
-    // Strict CSP: no remote content, scripts only with this nonce, styles only
-    // from the extension. Model output is rendered via textContent in the
-    // webview script, never as HTML.
+    const mermaidUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "planDocsMermaid.js"));
+    // CSP deviation, THIS PANEL ONLY: mermaid's renderer injects scoped inline
+    // SVG styles. Scripts still require the nonce and the bundle is loaded
+    // lazily only when a chat transcript contains a mermaid fence. Model output
+    // is rendered via textContent except adopted, sanitized SVG diagrams.
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource};">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource};">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="${styleUri.toString()}">
   <title>Drydock</title>
 </head>
 <body>
-  <div id="app"></div>
+  <div id="app" data-nonce="${nonce}" data-mermaid-src="${mermaidUri.toString()}"></div>
   <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
 </body>
 </html>`;

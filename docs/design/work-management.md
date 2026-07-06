@@ -130,6 +130,12 @@ Workspace rules:
 
 Tasks are separate from workspace sets. A task can relate to one or more workspace sets and one or more projects.
 
+Chats belong to tasks in the primary UI. A task can link one or more chat
+sessions, and each linked chat inherits task context such as workspace set,
+notes, changed files, questions, plan blocks, and work-session provenance.
+Unlinked chats are allowed only as transitional cleanup state; they should be
+linked to a task or deleted before they become durable work records.
+
 ```ts
 interface TaskWorkspaceLink {
   taskId: TaskId;

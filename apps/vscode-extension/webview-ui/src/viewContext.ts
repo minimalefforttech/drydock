@@ -3,7 +3,7 @@
  *
  * main.ts constructs the context (state + cross-view callbacks) and hands it to
  * each view's `create*Tab` factory. Views call these callbacks to cross tab
- * boundaries (e.g. a Work card selecting a session and jumping to Chat).
+ * boundaries (e.g. a Tasks card selecting a session and jumping to Chat).
  *
  * SECURITY: no rendering happens here; views render dynamic strings via
  * textContent only (never innerHTML).

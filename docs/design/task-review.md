@@ -70,7 +70,7 @@ review surfaces that as a note rather than silently showing nothing.
 Requests (webview → host, through `parsePanelRequest` like everything else):
 
 - `taskReview.open {taskId}` — host action: open (or reveal) the task's review
-  panel. Sent by the control panel's Work tab; responds `{accepted: true}`.
+  panel. Sent by the control panel's Tasks tab; responds `{accepted: true}`.
 - `taskReview.state {taskId}` → `{state: TaskReviewState}` — the aggregated
   projection below.
 - `taskReview.submit {taskId}` → `{dispatched, sessions, errors?}` —
@@ -155,7 +155,7 @@ The panel is a **navigator + dock; review happens in native editors**.
   manual verification against the real VS Code comment gutter rather than the
   browser test harness. The dock also allows adding/resolving comments directly
   (webview path) so the loop works even without gutter interaction.
-- Opened from a **Review** button on Work-tab task cards.
+- Opened from a **Review** button on Tasks-tab task cards.
 
 ## Isolation & threat posture
 

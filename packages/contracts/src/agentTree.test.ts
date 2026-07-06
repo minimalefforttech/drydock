@@ -74,6 +74,8 @@ test("reduceAgentTree builds the probe-shaped tree from events", () => {
   assert.equal(lister.status, "failed");
   assert.equal(lister.counts.commands, 1); // started+failed pair counts once
   assert.equal(lister.resultPreview, "sandbox process failed");
+  assert.equal(lister.lastCommand, "ls");
+  assert.equal(lister.lastActivityAt, "2026-07-05T10:00:10.000Z");
 });
 
 test("line-derived and event-derived trees agree (lens/host parity)", () => {
@@ -109,8 +111,22 @@ test("depth-N paths synthesize unseen ancestors instead of dropping", () => {
   assert.equal(outer.parentId, ROOT_AGENT_NODE_ID);
   assert.equal(inner.parentId, "outer");
   assert.equal(inner.counts.toolCalls, 1);
+  assert.equal(inner.lastCommand, "Grep");
   // Synthesized nodes get a placeholder label from the id tail.
   assert.ok(outer.label.includes("outer"));
+});
+
+test("command names unwrap common shell launchers", () => {
+  const tree = reduceAgentTree([
+    event({ type: "agent.spawn", nodeId: "shell", label: "shell" }),
+    event({ type: "agent.command", command: ["bash", "-lc", "grep -R TODO ."], status: "started", agentPath: ["shell"] }),
+    event({ type: "agent.command", command: ["pwsh", "-Command", "npm test"], status: "started", agentPath: ["shell"] }),
+    event({ type: "agent.command", command: ["cmd.exe", "/c", "dir"], status: "started", agentPath: ["shell"] })
+  ].map(treeSourceFromEvent));
+
+  const shell = tree.nodes.find((node) => node.nodeId === "shell");
+  assert.equal(shell?.counts.commands, 3);
+  assert.equal(shell?.lastCommand, "dir");
 });
 
 test("terminal node status never downgrades; root end marks stragglers unknown", () => {
@@ -161,6 +177,7 @@ test("summarizeAgentEvent carries lineage and structured statuses", () => {
   assert.equal(spawn.eventType, "agent.spawn");
   assert.equal(spawn.nodeId, "n1");
   assert.equal(spawn.label, "scribe");
+  assert.equal(spawn.subagentType, "general");
   assert.equal(spawn.nodeStatus, "running");
   assert.equal(spawn.detail, "write");
   assert.ok(spawn.summary.includes("scribe"));
@@ -178,4 +195,5 @@ test("summarizeAgentEvent carries lineage and structured statuses", () => {
   }));
   assert.deepEqual(child.agentPath, ["n1"]);
   assert.equal(child.toolStatus, "started");
+  assert.equal(child.commandName, "ls");
 });

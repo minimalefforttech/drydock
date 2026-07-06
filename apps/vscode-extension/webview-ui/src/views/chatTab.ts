@@ -2,40 +2,40 @@
  * Chat tab: the default surface, styled as a DEV LOG (GitHub-Copilot-chat-like),
  * not an online chat bot.
  *
- * Full-height flex column: header (back button ‹, editable title, status dot,
- * isolation ⓘ popover, overflow ⋯ menu) → context strip (provider/model row +
- * a native collapsed mounts <details>) → transcript (flex:1, its own scroll)
- * with inline access-request cards → Changes working set (Copilot-style, with a
- * relocated Comments sub-section) → composer (with the plan-docs pill) →
- * Diagnostics. Assistant turns render full-width as structural markdown blocks
- * (shared splitter); user turns as a compact tinted card. Files dragged from the
- * VS Code explorer or the OS drop their (mount-relative) paths into the composer.
+ * Full-height flex column: scrollable chat body (header, context strip,
+ * transcript, open questions, access cards, Changes working set with Task
+ * Notes) → pinned composer (with the plan-docs pill). Assistant turns render
+ * full-width as structural markdown blocks (shared splitter); user turns as a
+ * compact tinted card. Files dragged from the VS Code explorer or the OS drop
+ * their (mount-relative) paths into the composer.
  *
  * SECURITY: all dynamic strings (agent output, titles, mounts, model names, file
  * paths) are assigned via textContent — never innerHTML — so nothing
  * agent-authored can become markup. Markdown is rendered STRUCTURALLY: the
  * splitter classifies blocks and each block is built from DOM nodes whose text
  * leaves are set with textContent, so raw HTML in output stays literal. Mermaid
- * fences render as CODE here (no diagram in chat). Re-renders use replaceChildren
- * so stale handlers cannot leak.
+ * fences render via the same lazy, sanitized SVG path as plan docs. Re-renders
+ * use replaceChildren so stale handlers cannot leak.
  */
 
 import {
+  MAX_CLIPBOARD_LENGTH,
   reduceAgentTree,
   subagentReportingForTransport,
   treeSourceFromLine,
   type AgentRole,
   type AgentTreeNode,
+  type AgentTreeSource,
   type ChatModelSelection,
+  type ChatSessionSummary,
   type ChatWorkspaceSelection,
   type CloneFileChange,
   type CloneRepoState,
   type CloneSyncResult,
   type DiffFileSummary,
   type PanelResponse,
-  type ReviewCommentSummary,
-  type ReviewThreadStatus,
-  type SequencedTranscriptLine
+  type SequencedTranscriptLine,
+  type WorkTaskSummary
 } from "@drydock/contracts";
 import {
   button,
@@ -44,12 +44,10 @@ import {
   formatTime,
   iconButton,
   inlineConfirmButton,
-  numberInput,
   option,
   popover,
   select,
-  statusDot,
-  textInput
+  statusDot
 } from "../components.js";
 import { splitBlocks, type DocBlock } from "../markdownBlocks.js";
 import { onPush, request } from "../messaging.js";
@@ -62,15 +60,65 @@ import {
   upsertAccessRequest,
   upsertQuestion,
   upsertSession,
-  upsertTask,
   type AgentGroup,
   type ChatMessage,
-  type DiagnosticEntry
+  type DiagnosticEntry,
+  type TaskNote,
+  type ThinkingEffort
 } from "../state.js";
+import { adoptSanitizedSvg } from "../svgAdopt.js";
+import type { PlanDocsMermaidApi } from "../planDocsMermaid.js";
 import type { ChatTabView, ViewContext } from "../viewContext.js";
 import { renderAttentionStack, type AttentionItem } from "./attentionStack.js";
 
-const REVIEW_STATUSES: readonly ReviewThreadStatus[] = ["open", "acknowledged", "delegated", "resolved", "wont-fix", "blocked"];
+declare global {
+  interface Window {
+    vscodeAiPlanDocsMermaid?: PlanDocsMermaidApi;
+  }
+}
+
+let mermaidLoad: Promise<PlanDocsMermaidApi> | undefined;
+let mermaidRenderSequence = 0;
+
+/** Strips a mermaid `%%{...}%%` init/config directive span (may be multi-line). */
+const MERMAID_DIRECTIVE_RE = /%%\{[\s\S]*?\}%%/g;
+
+function loadMermaid(): Promise<PlanDocsMermaidApi> {
+  if (mermaidLoad !== undefined) return mermaidLoad;
+  mermaidLoad = new Promise<PlanDocsMermaidApi>((resolve, reject) => {
+    const existing = window.vscodeAiPlanDocsMermaid;
+    if (existing !== undefined) {
+      resolve(existing);
+      return;
+    }
+    const app = document.getElementById("app");
+    const src = app?.dataset["mermaidSrc"] ?? "";
+    const nonce = app?.dataset["nonce"] ?? "";
+    if (src === "") {
+      mermaidLoad = undefined;
+      reject(new Error("Mermaid bundle source is not configured on #app."));
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = src;
+    script.nonce = nonce;
+    script.addEventListener("load", () => {
+      const api = window.vscodeAiPlanDocsMermaid;
+      if (api === undefined) {
+        mermaidLoad = undefined;
+        reject(new Error("Mermaid bundle loaded but did not expose its renderer."));
+        return;
+      }
+      resolve(api);
+    });
+    script.addEventListener("error", () => {
+      mermaidLoad = undefined;
+      reject(new Error("Failed to load the mermaid diagram bundle."));
+    });
+    document.head.append(script);
+  });
+  return mermaidLoad;
+}
 
 /** Change-kind → single-glyph badge + color class (Copilot working-set style). */
 const CHANGE_GLYPH: Record<DiffFileSummary["changeKind"], { glyph: string; cls: string }> = {
@@ -78,6 +126,18 @@ const CHANGE_GLYPH: Record<DiffFileSummary["changeKind"], { glyph: string; cls: 
   modify: { glyph: "±", cls: "kind-modify" },
   delete: { glyph: "−", cls: "kind-delete" },
   rename: { glyph: "→", cls: "kind-rename" }
+};
+
+const THINKING_EFFORT_OPTIONS: readonly { id: ThinkingEffort; label: string }[] = [
+  { id: "low", label: "Low" },
+  { id: "medium", label: "Medium" },
+  { id: "high", label: "High" }
+];
+
+type DisplayMount = {
+  readonly runtimePath: string;
+  readonly mode: "read-only" | "read-write";
+  readonly hostDisplayPath?: string;
 };
 
 export function createChatTab(ctx: ViewContext): ChatTabView {
@@ -92,11 +152,14 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   /** Expanded subagent groups: render-local so re-renders keep them open. */
   const expandedGroups = new Set<string>();
   let diffChanges: readonly DiffFileSummary[] = [];
-  let reviewComments: readonly ReviewCommentSummary[] = [];
   // Clone-mode sync working set: per-repo agent changes in the clone, shown
   // in the Changes section for a clone session INSTEAD of diffChanges. Kept as a
   // separate source so the two never tangle; cleared on every session switch.
   let cloneRepos: readonly CloneRepoState[] = [];
+  // Model can be changed on an existing provider without a runtime reload; keep
+  // that in-flight preference across model-catalog pushes until the session is
+  // switched or the next turn persists it.
+  let manualModelSessionId: string | null = null;
   // Files whose diff was opened this panel session (via diff.openFile). In-memory
   // only (not persisted) and scoped to the current selected session — cleared on
   // every session switch. Drives the "unreviewed" marker + Accept-all exposure.
@@ -123,13 +186,17 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   header.append(backButton, titleWrap, el("span", "chat-header-spacer"), infoPopover, overflowPopover);
 
   // --- context strip ----------------------------------------------------------
-  // Provider/model selects FIRST (one row); a native collapsed mounts <details>
-  // BELOW them.
+  // Runtime context stays in the scrollable body; send-time controls live in
+  // the pinned composer so the current request and its model choice sit
+  // together.
   const contextStrip = el("div", "context-strip");
-  const providerRow = el("div", "context-provider-row");
   const providerSelect = select("provider-select compact", "Provider");
   const modelSelect = select("model-select compact", "Model");
-  providerRow.append(providerSelect, modelSelect);
+  const thinkingSelect = select("thinking-select compact", "Thinking effort");
+  for (const effort of THINKING_EFFORT_OPTIONS) {
+    thinkingSelect.append(option(effort.id, effort.label));
+  }
+  thinkingSelect.value = state.thinkingEffort;
 
   const mounts = document.createElement("details");
   mounts.className = "context-mounts section";
@@ -138,17 +205,25 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const mountsBody = el("div", "context-mounts-body");
   mounts.append(mountsSummary, mountsBody);
 
-  contextStrip.append(providerRow, mounts);
+  contextStrip.append(mounts);
 
   providerSelect.addEventListener("change", () => {
+    manualModelSessionId = null;
     renderProviderControls(false);
     ctx.persist();
     void onSelectionChange();
   });
   modelSelect.addEventListener("change", () => {
+    manualModelSessionId = state.selectedSessionId;
     state.selectedModel = modelSelect.value;
     ctx.persist();
-    void onSelectionChange();
+  });
+  thinkingSelect.addEventListener("change", () => {
+    const value = thinkingSelect.value;
+    if (value === "low" || value === "medium" || value === "high") {
+      state.thinkingEffort = value;
+      ctx.persist();
+    }
   });
 
   // Auth banner (keyed off the SELECTED provider only).
@@ -192,7 +267,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   let transcriptView: "log" | "agents" = "log";
   const lensStrip = el("div", "transcript-lens-strip hidden");
   const lensControl = el("div", "segmented lens-segmented");
-  const logViewButton = button("Log", "segment active");
+  const logViewButton = button("Chat", "segment active");
   const agentsViewButton = button("Agents", "segment");
   lensControl.append(logViewButton, agentsViewButton);
   const setTranscriptView = (view: "log" | "agents"): void => {
@@ -205,9 +280,15 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   };
   logViewButton.addEventListener("click", () => setTranscriptView("log"));
   agentsViewButton.addEventListener("click", () => setTranscriptView("agents"));
+  window.setInterval(() => {
+    if (!hasLiveAgentRows()) return;
+    if (transcriptView === "agents") renderAgentsLens();
+    else renderChat(false);
+  }, 15_000);
   // Spawn-role control: placeholder-first select; choosing a role
   // spawns a child session under the selected live chat.
   const spawnRoleSelect = select("spawn-role-select");
+  spawnRoleSelect.classList.add("hidden");
   const resetSpawnRoleSelect = (): void => {
     spawnRoleSelect.replaceChildren(
       option("", "+ role…"),
@@ -236,13 +317,16 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       }
     });
   });
-  lensStrip.append(lensControl, spawnRoleSelect);
+  lensStrip.append(lensControl);
 
-  // --- inline access-request cards (appended after the transcript) -----------
+  // --- inline access-request cards (appended after the transcript log) --------
   const accessCardsWrap = el("div", "access-cards");
+  // Pending agent questions sit outside the transcript block and inside the
+  // shared chat scroller. Hidden whenever no question is open.
+  const questionCardsWrap = el("div", "question-cards hidden");
 
-  // The scrollable transcript region (transcript + access cards); flex:1 so it
-  // absorbs the panel's free vertical space and scrolls independently.
+  // Transcript block inside the chat body. The outer chat-scroll owns overflow;
+  // this block keeps a useful minimum so questions/changes cannot squeeze it.
   const transcriptRegion = el("div", "transcript-region");
   transcriptRegion.append(lensStrip, chatLog, agentsLens, accessCardsWrap);
 
@@ -263,38 +347,36 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   });
 
-  // Mode segmented control [Chat | Plan | Clone] → implementation | plan | clone.
+  // Mode segmented control [Plan | Develop]. Clone is transfer plumbing for
+  // existing clone sessions, not a composer mode.
   const modeControl = el("div", "segmented");
-  const chatModeBtn = button("Chat", "segment");
   const planModeBtn = button("Plan", "segment");
-  const cloneModeBtn = button("Clone", "segment");
-  modeControl.append(chatModeBtn, planModeBtn, cloneModeBtn);
+  const developModeBtn = button("Develop", "segment");
+  modeControl.append(planModeBtn, developModeBtn);
   const applyModeButtons = (): void => {
-    chatModeBtn.classList.toggle("active", state.composerMode === "implementation");
     planModeBtn.classList.toggle("active", state.composerMode === "plan");
-    cloneModeBtn.classList.toggle("active", state.composerMode === "clone");
+    developModeBtn.classList.toggle("active", state.composerMode !== "plan");
   };
-  chatModeBtn.addEventListener("click", () => {
-    state.composerMode = "implementation";
-    applyModeButtons();
-    ctx.persist();
-  });
   planModeBtn.addEventListener("click", () => {
     state.composerMode = "plan";
     applyModeButtons();
     ctx.persist();
   });
-  cloneModeBtn.addEventListener("click", () => {
-    state.composerMode = "clone";
+  developModeBtn.addEventListener("click", () => {
+    state.composerMode = "implementation";
     applyModeButtons();
     ctx.persist();
   });
 
   const sendButton = button("Send", "primary");
+  sendButton.classList.add("composer-send");
   const cancelButton = button("Cancel", "ghost");
+  cancelButton.classList.add("composer-cancel");
   cancelButton.classList.add("hidden");
+  const composerModelControls = el("div", "composer-model-controls");
+  composerModelControls.append(providerSelect, modelSelect, thinkingSelect);
   const composerActions = el("div", "composer-actions");
-  composerActions.append(modeControl, el("span", "composer-spacer"), sendButton, cancelButton);
+  composerActions.append(modeControl, composerModelControls, el("span", "composer-spacer"), sendButton, cancelButton);
 
   // Plan-documents pill row (compact; shown above the composer when the
   // selected session has collected plan documents — issue 7, Phase 2).
@@ -315,6 +397,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   // --- Changes: Copilot-style working set (collapsed) -------------------------
   const changes = collapsible("Changes");
+  changes.body.classList.add("changes-body");
   const workingSetHeader = el("div", "working-set-header");
   const workingSetTitle = el("span", "working-set-title");
   const refreshDiffButton = iconButton("↻", "Refresh diff", "working-set-refresh");
@@ -346,26 +429,28 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   pushButton.addEventListener("click", () => void runCloneOp(() =>
     request({ type: "clone.push", sessionId: requireSelectedSessionId() }), "push local → VM"));
 
-  // Comments moved INSIDE Changes as their own nested collapsed <details>.
-  const comments = collapsible("Comments");
-  comments.details.classList.add("comments-section");
-  const commentFileInput = textInput("file path");
-  const commentStartInput = numberInput("from", 1);
-  const commentEndInput = numberInput("to", 1);
-  const commentBodyInput = textInput("comment");
-  const addCommentButton = button("Comment", "small");
-  const reviewFormRow = el("div", "button-row");
-  reviewFormRow.append(commentFileInput, commentStartInput, commentEndInput, commentBodyInput, addCommentButton);
-  const reviewList = el("div", "review-comments");
-  comments.body.append(reviewFormRow, reviewList);
+  // Task notes are task-scoped context, not file-change review UI.
+  const taskNotes = collapsible("Task Notes");
+  taskNotes.details.classList.add("task-notes-section");
+  const taskNoteInput = document.createElement("textarea");
+  taskNoteInput.className = "task-note-input";
+  taskNoteInput.rows = 3;
+  taskNoteInput.placeholder = "Add a task note...";
+  const addTaskNoteButton = button("Add note", "small primary");
+  const taskNoteActions = el("div", "task-note-actions");
+  taskNoteActions.append(addTaskNoteButton);
+  const taskNoteForm = el("div", "task-note-form");
+  taskNoteForm.append(taskNoteInput, taskNoteActions);
+  const taskNotesList = el("div", "task-notes");
+  taskNotes.body.append(taskNotesList, taskNoteForm);
 
-  changes.body.append(cloneCaption, workingSetHeader, changedFilesList, comments.details);
+  changes.body.append(cloneCaption, workingSetHeader, changedFilesList);
 
   refreshDiffButton.addEventListener("click", () => void loadDiffStatus());
   snapshotButton.addEventListener("click", () => {
     const workspaceSetId = state.selectedWorkspaceSetId;
     if (!workspaceSetId) {
-      logChat("select a workspace set (Work tab) before snapshotting");
+      logChat("select a workspace set (Tasks tab) before snapshotting");
       return;
     }
     snapshotButton.disabled = true;
@@ -379,45 +464,26 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       void loadDiffStatus();
     });
   });
-  addCommentButton.addEventListener("click", () => {
-    const filePath = commentFileInput.value.trim();
-    const body = commentBodyInput.value.trim();
-    const startLine = Number(commentStartInput.value);
-    const endLine = Number(commentEndInput.value);
-    if (!filePath || !body || !Number.isInteger(startLine) || !Number.isInteger(endLine)) return;
-    void request({
-      type: "review.addComment",
-      ...(state.selectedSessionId ? { sessionId: state.selectedSessionId } : {}),
-      filePath,
-      startLine,
-      endLine,
-      body
-    }).then((response) => {
-      if (!response.ok) {
-        logChat(`comment failed: ${response.error.message}`);
-        return;
-      }
-      commentBodyInput.value = "";
-      void loadReviewState();
-    });
+  addTaskNoteButton.addEventListener("click", () => addTaskNote());
+  taskNoteInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      addTaskNote();
+    }
   });
 
-  // --- Diagnostics (collapsed) ------------------------------------------------
-  const diagnostics = collapsible("Diagnostics");
-  const factsGrid = el("div", "facts-grid");
-  const diagnosticsLog = el("div", "diagnostics-log");
-  diagnostics.body.append(factsGrid, diagnosticsLog);
-
-  // Owner order: transcript, Changes, composer, Diagnostics.
-  root.append(
+  // Owner order: scrollable chat body, pinned composer.
+  const chatScroll = el("div", "chat-scroll");
+  chatScroll.append(
     header,
     contextStrip,
     authBanner,
     transcriptRegion,
-    changes.details,
-    composer,
-    diagnostics.details
+    questionCardsWrap,
+    taskNotes.details,
+    changes.details
   );
+  root.append(chatScroll, composer);
 
   // --- drag-drop: file paths from the explorer/OS into the composer -----------
   wireComposerDropTarget();
@@ -526,7 +592,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function currentWorkspaceSelection(mode: "plan" | "implementation" | "clone"): ChatWorkspaceSelection | undefined {
-    // Explicit set (advanced, Work tab) wins; else auto-mount open folders; else
+    // Explicit set (advanced, Tasks tab) wins; else auto-mount open folders; else
     // omit workspace entirely so the host mounts nothing. Clone mode needs roots
     // to clone, so it rides the same set/auto resolution as the other modes.
     if (state.selectedWorkspaceSetId) {
@@ -561,7 +627,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     // Lazy spin-up: the first submitted message starts the micro-VM.
     starting = true;
     refreshControls();
-    const mode = state.composerMode;
+    const mode = state.composerMode === "plan" ? "plan" : "implementation";
     const workspace = currentWorkspaceSelection(mode);
     const workspaceNote = workspace
       ? "workspaceSetId" in workspace
@@ -584,6 +650,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (response.payload.type === "chat.start") {
       upsertSession(state, response.payload.session);
       state.selectedSessionId = response.payload.session.sessionId;
+      manualModelSessionId = null;
       state.lastSequence = 0;
       state.chatMessages = [];
       state.diagnostics = state.diagnostics.slice(-3);
@@ -603,9 +670,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   /**
-   * Provider/model change on a LIVE session restarts the backend, keeping the
-   * transcript. On failure, revert the selects to the session's actual
-   * provider/model. No live session → the selection just persists for next start.
+   * Provider change on a LIVE session restarts the backend, keeping the
+   * transcript. Model changes stay in the composer and are sent with the next
+   * turn as long as the provider stays the same. No live session → the selection
+   * just persists for next start.
    */
   async function onSelectionChange(): Promise<void> {
     if (!state.selectedSessionId || !isSessionLiveish(state, state.selectedSessionId)) return;
@@ -614,12 +682,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (!session) return;
     const selection = currentModelSelection();
     const providerChanged = normalizeProviderId(session.providerId) !== selection.providerId;
-    const modelChanged = (selection.model ?? "") !== (session.model ?? "");
-    if (!providerChanged && !modelChanged) return;
+    if (!providerChanged) return;
 
     backendBusy = true;
     refreshControls();
-    logChat(`restarting backend with ${selection.providerId}${selection.model ? `/${selection.model}` : ""} — context is replayed`);
+    logChat(`switching provider to ${selection.providerId} — restarting backend and replaying context`);
     const response = await request({ type: "chat.restartBackend", sessionId: state.selectedSessionId, model: selection });
     backendBusy = false;
     if (!response.ok) {
@@ -722,7 +789,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const resume = menuItem("Resume backend", () => void resumeBackendAction());
     const end = menuItem("End session", () => void endSessionAction());
     const del = el("div", "menu-item danger");
-    del.append(inlineConfirmButton("Delete chat", "Confirm delete", () => void deleteSessionAction(), "ghost small danger menu-danger"));
+    const deleteChat = inlineConfirmButton("Delete chat", "Confirm delete", () => void deleteSessionAction(), "ghost small danger menu-danger");
+    deleteChat.title = "Delete chat (requires confirmation)";
+    del.append(deleteChat);
     const session = currentSession(state);
     const live = state.selectedSessionId !== null && isSessionLiveish(state, state.selectedSessionId);
     const resumable = session !== undefined && (session.status === "ended" || session.status === "failed");
@@ -731,6 +800,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       resume.classList.add("disabled");
       end.classList.add("disabled");
       del.classList.add("disabled");
+      deleteChat.disabled = true;
     } else {
       if (!live) {
         restart.classList.add("disabled");
@@ -895,14 +965,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   }
 
-  async function loadReviewState(): Promise<void> {
-    const response = await request({ type: "review.state", ...(state.selectedSessionId ? { sessionId: state.selectedSessionId } : {}) });
-    if (response.ok && response.payload.type === "review.state") {
-      reviewComments = response.payload.comments;
-      renderReviewComments();
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // Clone-mode sync: the Changes section is the sync surface
   // ---------------------------------------------------------------------------
@@ -1044,8 +1106,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       ...("agentPath" in line && Array.isArray(line.agentPath) && line.agentPath.length > 0 ? { agentPath: line.agentPath } : {}),
       ...("nodeId" in line && typeof line.nodeId === "string" ? { nodeId: line.nodeId } : {}),
       ...("label" in line && typeof line.label === "string" ? { label: line.label } : {}),
+      ...("subagentType" in line && typeof line.subagentType === "string" ? { subagentType: line.subagentType } : {}),
+      ...("model" in line && typeof line.model === "string" ? { model: line.model } : {}),
       ...("nodeStatus" in line && typeof line.nodeStatus === "string" ? { nodeStatus: line.nodeStatus } : {}),
       ...("toolStatus" in line && typeof line.toolStatus === "string" ? { toolStatus: line.toolStatus } : {}),
+      ...("commandName" in line && typeof line.commandName === "string" ? { commandName: line.commandName } : {}),
       ...("detail" in line && typeof line.detail === "string" ? { detail: line.detail } : {}),
       ...("usage" in line && line.usage !== undefined ? { usage: line.usage } : {})
     };
@@ -1087,7 +1152,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   function openAgentGroup(line: SequencedTranscriptLine | DiagnosticEntry, nodeId: string, parentPath: readonly string[], shouldPersist: boolean): void {
     const group = ensureAgentGroup(nodeId, parentPath, line.createdAt);
     if ("label" in line && typeof line.label === "string") group.label = line.label;
+    if ("subagentType" in line && typeof line.subagentType === "string") group.subagentType = line.subagentType;
+    if ("model" in line && typeof line.model === "string") group.model = line.model;
     if ("detail" in line && typeof line.detail === "string") group.promptPreview = line.detail;
+    group.lastActivity = line.summary;
+    group.lastActivityAt = line.createdAt;
     appendDiagnostic(diagnosticFromLine(line), shouldPersist);
     renderChat();
     if (shouldPersist) ctx.persist();
@@ -1102,6 +1171,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
     if ("detail" in line && typeof line.detail === "string") group.resultPreview = line.detail;
     if ("usage" in line && line.usage !== undefined) group.usage = line.usage;
+    group.lastActivity = line.summary;
+    group.lastActivityAt = line.createdAt;
     appendDiagnostic(diagnosticFromLine(line, group.label), shouldPersist);
     renderChat();
     if (shouldPersist) ctx.persist();
@@ -1113,6 +1184,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const toolStatus = "toolStatus" in line ? line.toolStatus : undefined;
     if (line.eventType === "agent.tool_call" && toolStatus === "started") group.toolCalls += 1;
     if (line.eventType === "agent.command" && toolStatus === "started") group.commands += 1;
+    if ((line.eventType === "agent.tool_call" || line.eventType === "agent.command")
+      && "commandName" in line
+      && typeof line.commandName === "string") {
+      group.lastCommand = line.commandName;
+    }
     if (line.eventType === "agent.error") group.errors += 1;
     if (line.eventType === "agent.file_edit") {
       group.fileEdits += 1;
@@ -1125,6 +1201,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       }
     }
     group.lastActivity = line.summary;
+    group.lastActivityAt = line.createdAt;
     group.entries.push({
       createdAt: line.createdAt,
       eventType: line.eventType,
@@ -1208,7 +1285,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * Mounts <details>: a "1 mount · rw" style summary; expanding lists each mount
    * (mode chip + runtimePath ← hostDisplayPath). Before a session starts, the
    * summary shows the upcoming context ("Auto: <folders>" / set name / no mounts)
-   * and the body is empty.
+   * and expanding lists the planned `/workspace/root-N` mapping when workspace
+   * state is available.
    */
   function renderContextStrip(): void {
     mountsBody.replaceChildren();
@@ -1242,18 +1320,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         mountsBody.append(empty);
         return;
       }
-      for (const mount of iso.mounts) {
-        const row = el("div", "context-mount-row");
-        const modeChip = el("span", `chip mode-${mount.mode === "read-write" ? "read-write" : "read-only"}`);
-        modeChip.textContent = mount.mode === "read-write" ? "rw" : "ro";
-        const path = el("span", "context-mount-path");
-        path.textContent = `${mount.runtimePath}${mount.hostDisplayPath ? ` ← ${mount.hostDisplayPath}` : ""}`;
-        row.append(modeChip, path);
-        mountsBody.append(row);
-      }
+      appendMountRows(iso.mounts);
       return;
     }
     // Before a session starts: the summary shows the upcoming context.
+    const plannedMounts = plannedWorkspaceMounts();
     if (state.selectedWorkspaceSetId) {
       const set = state.workspacePolicy?.workspaceSets.find((s) => s.workspaceSetId === state.selectedWorkspaceSetId);
       mountsSummary.textContent = set ? `Set: ${set.name}` : "Set selected";
@@ -1262,13 +1333,56 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     } else {
       mountsSummary.textContent = "No mounts";
     }
+    if (plannedMounts.length === 0) {
+      const empty = el("div", "empty");
+      empty.textContent = state.openFolderNames.length > 0 || state.selectedWorkspaceSetId
+        ? "Workspace mappings will appear after projects are registered."
+        : "No workspace folders selected.";
+      mountsBody.append(empty);
+      return;
+    }
+    appendMountRows(plannedMounts, "planned");
+  }
+
+  function appendMountRows(mounts: readonly DisplayMount[], prefix?: string): void {
+    for (const mount of mounts) {
+      const row = el("div", "context-mount-row");
+      const modeChip = el("span", `chip mode-${mount.mode === "read-write" ? "read-write" : "read-only"}`);
+      modeChip.textContent = mount.mode === "read-write" ? "rw" : "ro";
+      const path = el("span", "context-mount-path");
+      path.textContent = `${prefix ? `${prefix} · ` : ""}${mount.runtimePath}${mount.hostDisplayPath ? ` ← ${mount.hostDisplayPath}` : ""}`;
+      row.append(modeChip, path);
+      mountsBody.append(row);
+    }
+  }
+
+  function plannedWorkspaceMounts(): DisplayMount[] {
+    const names = plannedWorkspaceProjectNames();
+    const mode = state.composerMode === "plan" ? "read-only" : "read-write";
+    return names.map((name, index) => {
+      const project = state.workspacePolicy?.projects.find((candidate) => candidate.name === name);
+      return {
+        runtimePath: `/workspace/root-${String(index + 1)}`,
+        mode,
+        hostDisplayPath: project?.displayPath ?? name
+      };
+    });
+  }
+
+  function plannedWorkspaceProjectNames(): string[] {
+    if (state.selectedWorkspaceSetId) {
+      const set = state.workspacePolicy?.workspaceSets.find((candidate) => candidate.workspaceSetId === state.selectedWorkspaceSetId);
+      return [...(set?.projectNames ?? [])];
+    }
+    return [...state.openFolderNames];
   }
 
   function renderProviderControls(preserveSelection = true): void {
     const previousProvider = normalizeProviderId(providerSelect.value || state.providerId);
     const previousModel = preserveSelection ? (modelSelect.value || state.selectedModel) : "";
     const selectedSession = currentSession(state);
-    const desiredProvider = normalizeProviderId(preserveSelection ? selectedSession?.providerId ?? previousProvider : previousProvider);
+    const selectedSessionProvider = selectedSession === undefined ? "" : normalizeProviderId(selectedSession.providerId);
+    const desiredProvider = normalizeProviderId(preserveSelection ? selectedSessionProvider || previousProvider : previousProvider);
     providerSelect.replaceChildren();
     const catalogs = state.providerCatalogs.length === 0 ? [fallbackCatalog()] : state.providerCatalogs;
     for (const catalog of catalogs) {
@@ -1291,14 +1405,16 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         if (model.description) node.title = model.description;
         modelSelect.append(node);
       }
-      const selectedModel = selectedSession?.providerId === providerSelect.value
-        ? selectedSession.model ?? previousModel
-        : previousModel;
+      const selectedProvider = normalizeProviderId(providerSelect.value);
+      const sameProviderAsSession = selectedSessionProvider === selectedProvider;
+      const manualModel = manualModelSessionId === state.selectedSessionId ? state.selectedModel || previousModel : "";
+      const selectedModel = manualModel || (sameProviderAsSession ? selectedSession?.model ?? "" : "") || previousModel;
       const defaultModel = catalog.models.find((model) => model.isDefault)?.id ?? catalog.models[0]?.id ?? "";
       modelSelect.value = catalog.models.some((model) => model.id === selectedModel) ? selectedModel : defaultModel;
       state.selectedModel = modelSelect.value;
     }
 
+    thinkingSelect.value = state.thinkingEffort;
     renderAuthBanner();
     refreshControls();
   }
@@ -1319,28 +1435,24 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     authBanner.classList.remove("hidden");
   }
 
-  function renderChat(): void {
+  function renderChat(pinToBottom = true): void {
     // The lens strip appears once a session is selected; the spawn-role
     // control only for live-in-this-window sessions (a child needs a live
     // parent to inherit mounts from).
     const session = currentSession(state);
     lensStrip.classList.toggle("hidden", session === undefined);
-    const canSpawn = session !== undefined
-      && (session.status === "active" || session.status === "starting")
-      && session.runningElsewhere !== true;
-    spawnRoleSelect.classList.toggle("hidden", !canSpawn);
+    spawnRoleSelect.classList.add("hidden");
     if (transcriptView === "agents") renderAgentsLens();
     chatLog.replaceChildren();
     if (state.chatMessages.length === 0) {
       // Empty transcript orients the first-run user: a call to action plus a dim
-      // line naming the mode consequences the [Chat|Plan|Clone] segment hides.
-      // textContent only. Clone is an "isolated copy" that reaches the
-      // user by pull — deliberately NOT a worktree.
+      // line naming the two composer modes. Clone remains a transfer/sync
+      // detail for clone sessions, not a first-run chat mode.
       const empty = el("div", "chat-empty");
       const lead = el("div", "chat-empty-lead");
       lead.textContent = "Ask the isolated agent to start.";
       const modes = el("div", "chat-empty-modes");
-      modes.textContent = "Chat = edits your files (read-write) · Plan = read-only · Clone = isolated copy, changes reach you by pull";
+      modes.textContent = "Plan = read-only · Develop = edits your files (read-write)";
       empty.append(lead, modes);
       chatLog.append(empty);
       return;
@@ -1348,8 +1460,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     for (const message of state.chatMessages) {
       chatLog.append(chatMessageRow(message));
     }
-    // Keep the transcript pinned to the newest entry as it grows/streams.
-    transcriptRegion.scrollTop = transcriptRegion.scrollHeight;
+    // Keep the scrollable chat body pinned to the newest entry as it grows/streams.
+    if (pinToBottom) chatScroll.scrollTop = chatScroll.scrollHeight;
   }
 
   /**
@@ -1371,11 +1483,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
     if (message.role === "user") {
       const body = el("div", "chat-user-body");
-      body.textContent = message.text;
+      appendTextWithFileTokens(body, message.text);
       row.append(body);
     } else {
       const body = el("div", "chat-assistant-body");
-      // Structural markdown: mermaid fences render as CODE here (no diagram).
+      // Structural markdown: mermaid fences render as sanitized diagrams here.
       for (const block of splitBlocks(message.text, "markdown")) {
         body.append(assistantBlock(block));
       }
@@ -1383,6 +1495,34 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       row.append(body);
     }
     return row;
+  }
+
+  function appendTextWithFileTokens(container: HTMLElement, text: string): void {
+    const tokenRe = /\[(file|file-unmounted):([^\]\r\n]+)\]/g;
+    let cursor = 0;
+    for (const match of text.matchAll(tokenRe)) {
+      const start = match.index ?? 0;
+      if (start > cursor) container.append(document.createTextNode(text.slice(cursor, start)));
+      const kind = match[1] === "file-unmounted" ? "file-unmounted" : "file";
+      const path = decodeFilePathToken(match[2] ?? "");
+      const chip = el("span", `chat-file-token ${kind === "file-unmounted" ? "unmounted" : ""}`.trim());
+      chip.textContent = `[${fileDisplayName(path)}]`;
+      chip.title = fileTokenTitle(kind, path);
+      container.append(chip);
+      cursor = start + match[0].length;
+    }
+    if (cursor < text.length) container.append(document.createTextNode(text.slice(cursor)));
+  }
+
+  function fileTokenTitle(kind: "file" | "file-unmounted", path: string): string {
+    if (kind === "file-unmounted") return `host: ${path}\nnot mounted in the container`;
+    const hostPath = hostPathForRuntimePath(path);
+    return hostPath === null ? `container: ${path}` : `container: ${path}\nhost: ${hostPath}`;
+  }
+
+  function fileDisplayName(path: string): string {
+    const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+    return normalized.split("/").filter(Boolean).pop() ?? path;
   }
 
   /**
@@ -1417,9 +1557,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const stats = el("span", "agent-group-stats");
     const calls = group.toolCalls + group.commands;
     const parts: string[] = [];
-    if (calls > 0) parts.push(`${String(calls)} call${calls === 1 ? "" : "s"}`);
-    if (group.fileEdits > 0) parts.push(`${String(group.fileEdits)} file${group.fileEdits === 1 ? "" : "s"}`);
     parts.push(durationLabel(group.createdAt, group.endedAt));
+    const tokens = usageTokens(group.usage);
+    if (tokens !== null) parts.push(`${formatTokenCount(tokens)} tokens`);
+    if (calls > 0) parts.push(`${String(calls)} tool use${calls === 1 ? "" : "s"}`);
+    if (group.fileEdits > 0) parts.push(`${String(group.fileEdits)} file${group.fileEdits === 1 ? "" : "s"}`);
+    if (group.lastCommand !== undefined) parts.push(group.lastCommand);
     stats.textContent = parts.join(" · ");
     summary.append(stats);
     // R1 vocabulary: failure is the loud chip; completion stays quiet.
@@ -1430,6 +1573,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     } else if (group.status === "completed") {
       const chip = el("span", "agent-group-chip chip-done");
       chip.textContent = "✓";
+      summary.append(chip);
+    } else if (group.status === "running" && isIdleSince(group.lastActivityAt ?? group.createdAt)) {
+      const chip = el("span", "agent-group-chip chip-idle");
+      chip.textContent = `idle ${durationLabel(group.lastActivityAt ?? group.createdAt, undefined)}`;
       summary.append(chip);
     } else if (group.status === "running" && group.lastActivity !== undefined) {
       const activity = el("span", "agent-group-activity");
@@ -1487,10 +1634,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       result.textContent = `result: ${group.resultPreview}`;
       body.append(result);
     }
-    const tokens = usageTokens(group.usage);
     if (tokens !== null) {
       const usageRow = el("div", "agent-group-usage");
-      usageRow.textContent = `${String(tokens)} tokens`;
+      usageRow.textContent = `${formatTokenCount(tokens)} tokens`;
       body.append(usageRow);
     }
     details.append(body);
@@ -1498,11 +1644,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   /**
-   * The Agents lens: the same feed as the Log, viewed hierarchy-first.
+   * The Agents lens: the same feed as Chat, viewed hierarchy-first.
    * Native subagents come from the contracts tree reducer over the structured
    * diagnostics; product-owned role sessions graft in from the
    * session list as `role-session` rows. Clicking a native node jumps to its
-   * expanded Log group; clicking a role session opens that session.
+   * expanded Chat group; clicking a role session opens that session.
    */
   function renderAgentsLens(): void {
     agentsLens.replaceChildren();
@@ -1513,7 +1659,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       agentsLens.append(empty);
       return;
     }
-    const tree = reduceAgentTree(state.diagnostics.map((entry) => treeSourceFromLine(entry)));
+    const tree = reduceAgentTree(state.diagnostics.map(treeSourceFromDiagnostic));
     const tier = sessionSubagentTier();
     const byParent = new Map<string | undefined, AgentTreeNode[]>();
     for (const node of tree.nodes) {
@@ -1521,72 +1667,34 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       list.push(node);
       byParent.set(node.parentId, list);
     }
-
-    const renderNode = (node: AgentTreeNode, depth: number): void => {
-      const row = el("div", `agents-lens-row status-${node.status}${node.kind === "root" ? " is-root" : ""}`);
-      row.style.paddingLeft = `${String(depth * 14)}px`;
-      const dot = el("span", `agent-group-dot status-${node.status === "running" && node.kind === "root" && !turnActive ? "completed" : node.status}`);
-      const label = el("span", "agents-lens-label");
-      label.textContent = node.kind === "root"
-        ? `${session.providerId}${session.model === undefined ? "" : `/${session.model}`}`
-        : `⑂ ${node.label}`;
-      row.append(dot, label);
-      if (node.subagentType !== undefined || node.model !== undefined) {
-        const type = el("span", "agents-lens-meta");
-        type.textContent = node.subagentType ?? node.model ?? "";
-        row.append(type);
-      }
-      const calls = node.counts.toolCalls + node.counts.commands;
-      const meta = el("span", "agents-lens-meta");
-      const bits: string[] = [];
-      if (calls > 0) bits.push(`${String(calls)} call${calls === 1 ? "" : "s"}`);
-      if (node.counts.fileEdits > 0) bits.push(`${String(node.counts.fileEdits)} file${node.counts.fileEdits === 1 ? "" : "s"}`);
-      if (node.counts.errors > 0) bits.push(`${String(node.counts.errors)} err`);
-      const tokens = usageTokens(node.usage);
-      if (tokens !== null) bits.push(`${String(tokens)} tok`);
-      meta.textContent = bits.join(" · ");
-      row.append(meta);
-      if (node.status === "failed") {
-        const chip = el("span", "agent-group-chip chip-failed");
-        chip.textContent = "· failed";
-        row.append(chip);
-      } else if (node.lastActivity !== undefined && node.status === "running") {
-        const activity = el("span", "agents-lens-activity");
-        activity.textContent = node.lastActivity;
-        row.append(activity);
-      }
-      if (node.kind !== "root") {
-        row.classList.add("clickable");
-        row.addEventListener("click", () => {
-          // Jump to the node's expanded group in the Log.
-          expandedGroups.add(node.nodeId);
-          setTranscriptView("log");
-          renderChat();
-          document.getElementById(`agent-group-${node.nodeId}`)?.scrollIntoView({ block: "center" });
-        });
-      }
-      agentsLens.append(row);
-      for (const child of byParent.get(node.nodeId) ?? []) {
-        renderNode(child, depth + 1);
-      }
+    const depthByNode = new Map<string, number>();
+    const assignDepth = (node: AgentTreeNode, depth: number): void => {
+      depthByNode.set(node.nodeId, depth);
+      for (const child of byParent.get(node.nodeId) ?? []) assignDepth(child, depth + 1);
     };
     const root = tree.nodes.find((node) => node.kind === "root");
-    if (root !== undefined) renderNode(root, 0);
-
-    // Child role sessions of this session, grafted under the root.
-    const roleChildren = state.sessions.filter((candidate) => candidate.parentSessionId === session.sessionId);
-    for (const child of roleChildren) {
-      const row = el("div", `agents-lens-row role-session status-${child.status} clickable`);
-      row.style.paddingLeft = "14px";
-      const dot = el("span", `agent-group-dot status-${child.status === "active" || child.status === "starting" ? "running" : child.status === "failed" ? "failed" : "completed"}`);
-      const label = el("span", "agents-lens-label");
-      label.textContent = `⑂ ${child.title}`;
-      const roleChip = el("span", "agents-lens-meta");
-      roleChip.textContent = `${child.spawnedRole ?? "role"} session · ${child.status}`;
-      row.append(dot, label, roleChip);
-      row.addEventListener("click", () => selectSession(child.sessionId));
-      agentsLens.append(row);
+    if (root !== undefined) {
+      assignDepth(root, 0);
+      agentsLens.append(rootAgentCard(root, session));
     }
+
+    const nativeNodes = tree.nodes.filter((node) => node.kind === "native");
+    const roleChildren = state.sessions.filter((candidate) => candidate.parentSessionId === session.sessionId);
+    const runningNative = nativeNodes.filter((node) => node.status === "running");
+    const finishedNative = nativeNodes.filter((node) => node.status !== "running");
+    const runningRoles = roleChildren.filter((child) => child.status === "active" || child.status === "starting");
+    const finishedRoles = roleChildren.filter((child) => child.status !== "active" && child.status !== "starting");
+
+    renderAgentSection(
+      "Running",
+      [...runningNative.map((node) => nativeAgentCard(node, depthByNode.get(node.nodeId) ?? 1)), ...runningRoles.map(roleAgentCard)],
+      true
+    );
+    renderAgentSection(
+      `Finished ${String(finishedNative.length + finishedRoles.length)}`,
+      [...finishedNative.map((node) => nativeAgentCard(node, depthByNode.get(node.nodeId) ?? 1)), ...finishedRoles.map(roleAgentCard)],
+      false
+    );
 
     if (tree.nodes.length <= 1 && roleChildren.length === 0) {
       const empty = el("div", "agents-lens-empty");
@@ -1601,10 +1709,156 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   }
 
+  function renderAgentSection(title: string, cards: readonly HTMLElement[], open: boolean): void {
+    if (cards.length === 0) return;
+    if (open) {
+      const section = el("div", "agent-task-section");
+      const heading = el("div", "agent-task-section-title");
+      heading.textContent = title;
+      section.append(heading, ...cards);
+      agentsLens.append(section);
+      return;
+    }
+    const details = document.createElement("details");
+    details.className = "agent-task-section agent-task-section-collapsible";
+    const summary = document.createElement("summary");
+    summary.className = "agent-task-section-title";
+    summary.textContent = title;
+    details.append(summary, ...cards);
+    agentsLens.append(details);
+  }
+
+  function rootAgentCard(node: AgentTreeNode, session: ChatSessionSummary): HTMLElement {
+    const displayStatus = node.status === "running" && !turnActive ? "completed" : node.status;
+    const card = el("div", `agent-task-card root agent-status-${displayStatus}`);
+    const title = el("div", "agent-task-title");
+    title.textContent = `${session.providerId}${session.model === undefined ? "" : `/${session.model}`}`;
+    const meta = el("div", "agent-task-meta");
+    meta.textContent = agentMetaLine("Agent", node);
+    card.append(title, meta);
+    if (node.lastActivity !== undefined) {
+      const activity = el("div", "agent-task-activity");
+      activity.textContent = node.lastActivity;
+      card.append(activity);
+    }
+    return card;
+  }
+
+  function nativeAgentCard(node: AgentTreeNode, depth: number): HTMLElement {
+    const idle = node.status === "running" && isIdleSince(node.lastActivityAt ?? node.startedAt);
+    const card = el("div", `agent-task-card agent-status-${node.status}${idle ? " idle" : ""}`);
+    card.style.marginLeft = `${String(Math.max(0, depth - 1) * 12)}px`;
+    const title = el("div", "agent-task-title-row");
+    const label = el("span", "agent-task-title");
+    label.textContent = node.label;
+    title.append(label);
+    if (node.subagentType !== undefined || node.model !== undefined) {
+      const type = el("span", "agent-task-type");
+      type.textContent = node.subagentType ?? node.model ?? "";
+      title.append(type);
+    }
+    const status = agentStatusChip(node.status, idle, node.lastActivityAt ?? node.startedAt);
+    if (status !== null) title.append(status);
+
+    const meta = el("div", "agent-task-meta");
+    meta.textContent = agentMetaLine("Agent", node);
+    const actions = el("div", "agent-task-actions");
+    const transcript = button("View transcript", "link-button agent-task-link");
+    transcript.addEventListener("click", (event) => {
+      event.stopPropagation();
+      expandedGroups.add(node.nodeId);
+      setTranscriptView("log");
+      renderChat();
+      document.getElementById(`agent-group-${node.nodeId}`)?.scrollIntoView({ block: "center" });
+    });
+    actions.append(transcript);
+    card.append(title, meta, actions);
+    if (node.lastActivity !== undefined && node.status === "running") {
+      const activity = el("div", "agent-task-activity");
+      activity.textContent = node.lastActivity;
+      card.append(activity);
+    }
+    return card;
+  }
+
+  function roleAgentCard(session: ChatSessionSummary): HTMLElement {
+    const running = session.status === "active" || session.status === "starting";
+    const card = el("div", `agent-task-card role-session agent-status-${running ? "running" : session.status === "failed" ? "failed" : "completed"}`);
+    const title = el("div", "agent-task-title-row");
+    const label = el("span", "agent-task-title");
+    label.textContent = session.title;
+    const type = el("span", "agent-task-type");
+    type.textContent = `${session.spawnedRole ?? "role"} session`;
+    title.append(label, type);
+    const meta = el("div", "agent-task-meta");
+    const end = running ? undefined : session.updatedAt;
+    meta.textContent = `Agent · ${durationLabel(session.createdAt, end)} · ${session.status}`;
+    const actions = el("div", "agent-task-actions");
+    const transcript = button("View transcript", "link-button agent-task-link");
+    transcript.addEventListener("click", (event) => {
+      event.stopPropagation();
+      selectSession(session.sessionId);
+    });
+    actions.append(transcript);
+    card.append(title, meta, actions);
+    return card;
+  }
+
+  function agentMetaLine(kind: string, node: AgentTreeNode): string {
+    const bits = [kind, durationLabel(node.startedAt ?? new Date().toISOString(), node.endedAt)];
+    const tokens = usageTokens(node.usage);
+    if (tokens !== null) bits.push(`${formatTokenCount(tokens)} tokens`);
+    const tools = toolUseCount(node);
+    if (tools > 0) bits.push(`${String(tools)} tool use${tools === 1 ? "" : "s"}`);
+    if (node.lastCommand !== undefined) bits.push(node.lastCommand);
+    return bits.join(" · ");
+  }
+
+  function agentStatusChip(status: AgentTreeNode["status"], idle: boolean, lastActivityAt: string | undefined): HTMLElement | null {
+    if (status === "failed") {
+      const chip = el("span", "agent-task-chip chip-failed");
+      chip.textContent = "failed";
+      return chip;
+    }
+    if (status === "completed") {
+      const chip = el("span", "agent-task-chip chip-done");
+      chip.textContent = "done";
+      return chip;
+    }
+    if (idle && lastActivityAt !== undefined) {
+      const chip = el("span", "agent-task-chip chip-idle");
+      chip.textContent = `idle ${durationLabel(lastActivityAt, undefined)}`;
+      return chip;
+    }
+    return null;
+  }
+
   /** Subagent reporting tier for the SELECTED session's transport. */
   function sessionSubagentTier(): string {
     const transport = currentSession(state)?.transport;
     return transport === undefined ? "none" : subagentReportingForTransport(transport);
+  }
+
+  function treeSourceFromDiagnostic(entry: DiagnosticEntry): AgentTreeSource {
+    const source = treeSourceFromLine(entry);
+    if (entry.agentPath !== undefined && entry.agentPath.length > 0) {
+      return { ...source, summary: entry.summary.replace(/^\[[^\]]+\]\s+/, "") };
+    }
+    return source;
+  }
+
+  function hasLiveAgentRows(): boolean {
+    return Object.values(state.agentGroups).some((group) => group.status === "running");
+  }
+
+  function isIdleSince(iso: string | undefined): boolean {
+    if (iso === undefined) return false;
+    const last = Date.parse(iso);
+    return Number.isFinite(last) && Date.now() - last >= state.agentIdleThresholdMs;
+  }
+
+  function toolUseCount(node: AgentTreeNode): number {
+    return node.counts.toolCalls + node.counts.commands + node.counts.fileEdits;
   }
 
   function durationLabel(startedAt: string, endedAt: string | undefined): string {
@@ -1612,6 +1866,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const seconds = Math.max(0, Math.round((end - new Date(startedAt).getTime()) / 1000));
     if (seconds < 60) return `${String(seconds)}s`;
     return `${String(Math.floor(seconds / 60))}m ${String(seconds % 60)}s`;
+  }
+
+  function formatTokenCount(tokens: number): string {
+    if (tokens < 1_000) return String(tokens);
+    if (tokens < 1_000_000) return `${(tokens / 1_000).toFixed(1)}k`;
+    return `${(tokens / 1_000_000).toFixed(1)}m`;
   }
 
   /** Duck-typed total tokens from a transport usage object, else null. */
@@ -1624,6 +1884,140 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       return (total as Record<string, unknown>)["totalTokens"] as number;
     }
     return null;
+  }
+
+  function codeBlockFigure(block: DocBlock, label?: string, extraClass = ""): HTMLElement {
+    const classes = ["md-code"];
+    if (extraClass.length > 0) classes.push(extraClass);
+    const figure = el("div", classes.join(" "));
+    const header = el("div", "md-code-header");
+    const badge = el("span", "md-code-badge");
+    badge.textContent = label ?? (block.language && block.language.length > 0 ? block.language : "code");
+    const copy = iconButton("⧉", "Copy code", "md-code-copy");
+    copy.addEventListener("click", () => copyText(block.text, copy));
+    header.append(badge, copy);
+    const pre = document.createElement("pre");
+    pre.className = "md-pre";
+    const code = document.createElement("code");
+    code.textContent = block.text;
+    pre.append(code);
+    figure.append(header, pre);
+    return figure;
+  }
+
+  function mermaidBlock(block: DocBlock): HTMLElement {
+    const placeholder = el("div", "md-mermaid-placeholder");
+    placeholder.textContent = "rendering diagram...";
+    const source = block.text.replace(MERMAID_DIRECTIVE_RE, "").trim();
+    mermaidRenderSequence += 1;
+    const renderId = `chat-mermaid-${String(Date.now())}-${String(mermaidRenderSequence)}`;
+
+    void loadMermaid()
+      .then((api) => api.render(renderId, source))
+      .then((result) => {
+        if (!placeholder.isConnected) return;
+        const svg = adoptSanitizedSvg(document, result.svg);
+        if (svg === null) {
+          placeholder.replaceWith(mermaidFallback(block, "This diagram could not be displayed; showing its source."));
+          return;
+        }
+        placeholder.replaceWith(mermaidFigure(svg, block));
+      })
+      .catch(() => {
+        if (!placeholder.isConnected) return;
+        placeholder.replaceWith(mermaidFallback(block, "This diagram could not be rendered; showing its source."));
+      });
+
+    return placeholder;
+  }
+
+  function mermaidFigure(svg: SVGSVGElement, block: DocBlock): HTMLElement {
+    const figure = el("figure", "md-mermaid-figure");
+    const toolbar = el("div", "md-code-header md-mermaid-header");
+    const badge = el("span", "md-code-badge md-mermaid-badge");
+    badge.textContent = "diagram";
+    const copy = iconButton("⧉", "Copy mermaid source", "md-code-copy");
+    copy.addEventListener("click", () => copyText(block.text, copy));
+    const toggle = iconButton("</>", "Show mermaid source", "md-mermaid-toggle");
+    toolbar.append(badge, copy, toggle);
+
+    const svgWrap = el("div", "md-mermaid-svg-wrap");
+    svgWrap.append(svg);
+    const sourceView = document.createElement("pre");
+    sourceView.className = "md-pre md-mermaid-source hidden";
+    const code = document.createElement("code");
+    code.textContent = block.text;
+    sourceView.append(code);
+
+    toggle.addEventListener("click", () => {
+      const showingSource = !sourceView.classList.contains("hidden");
+      sourceView.classList.toggle("hidden", showingSource);
+      svgWrap.classList.toggle("hidden", !showingSource);
+      badge.textContent = showingSource ? "diagram" : "mermaid";
+      const nextLabel = showingSource ? "Show mermaid source" : "Show diagram";
+      toggle.textContent = showingSource ? "</>" : "▧";
+      toggle.title = nextLabel;
+      toggle.setAttribute("aria-label", nextLabel);
+    });
+
+    figure.append(toolbar, svgWrap, sourceView);
+    return figure;
+  }
+
+  function mermaidFallback(block: DocBlock, message: string): HTMLElement {
+    const wrap = el("div", "md-mermaid-fallback");
+    wrap.append(codeBlockFigure(block, "mermaid"));
+    const error = el("div", "md-mermaid-error");
+    error.textContent = message;
+    wrap.append(error);
+    return wrap;
+  }
+
+  function copyText(text: string, copyButton: HTMLButtonElement): void {
+    const original = copyButton.textContent ?? "Copy";
+    const mark = (label: string): void => {
+      copyButton.textContent = label;
+      window.setTimeout(() => {
+        copyButton.textContent = original;
+      }, 1_500);
+    };
+    void (async () => {
+      try {
+        if (text.length <= MAX_CLIPBOARD_LENGTH) {
+          const response = await request({ type: "clipboard.writeText", text });
+          if (response.ok && response.payload.type === "clipboard.writeText") {
+            mark("✓");
+            return;
+          }
+        }
+        try {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            fallbackCopyText(text);
+          }
+        } catch {
+          fallbackCopyText(text);
+        }
+        mark("✓");
+      } catch {
+        mark("!");
+      }
+    })();
+  }
+
+  function fallbackCopyText(text: string): void {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.append(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("copy failed");
   }
 
   /** Builds one structural markdown block as DOM (textContent leaves only). */
@@ -1645,21 +2039,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         return ul;
       }
       case "code":
-      case "mermaid": {
-        // Mermaid fences show as code (with a language badge) — no diagram here.
-        const figure = el("div", "md-code");
-        const badge = el("span", "md-code-badge");
-        badge.textContent = block.kind === "mermaid"
-          ? "mermaid"
-          : (block.language && block.language.length > 0 ? block.language : "code");
-        const pre = document.createElement("pre");
-        pre.className = "md-pre";
-        const code = document.createElement("code");
-        code.textContent = block.text;
-        pre.append(code);
-        figure.append(badge, pre);
-        return figure;
-      }
+        return codeBlockFigure(block);
+      case "mermaid":
+        return mermaidBlock(block);
       case "paragraph":
       default: {
         const p = el("p", "md-paragraph");
@@ -1670,19 +2052,20 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   /**
-   * Renders the SELECTED session's pending questions + access requests as ONE
-   * stacked card with a `‹ i/N ›` pager (attention stack) instead of a pile of
-   * full cards. Oldest-first across both kinds, so the pager walks items in
-   * the order the agent raised them. Reconciles against the latest
-   * `state.workspacePolicy`/`state.questions` on every call, so items resolved
-   * elsewhere (e.g. the Work tab) never linger.
+   * Renders attention around the selected transcript. Access requests stay
+   * inline with the log; open questions are hoisted to their own fixed slot
+   * outside the transcript scroller and hidden when none are pending.
    */
-  const attentionCursor = { index: 0 };
+  const accessAttentionCursor = { index: 0 };
+  const questionAttentionCursor = { index: 0 };
   function renderAccessCards(): void {
     accessCardsWrap.replaceChildren();
+    questionCardsWrap.replaceChildren();
+    questionCardsWrap.classList.add("hidden");
     if (!state.selectedSessionId) return;
-    const items = sessionAttentionItems(state.selectedSessionId);
-    renderAttentionStack(accessCardsWrap, items, attentionCursor, {
+    const accessItems = sessionAccessItems(state.selectedSessionId);
+    const questionItems = sessionQuestionItems(state.selectedSessionId);
+    renderAttentionStack(accessCardsWrap, accessItems, accessAttentionCursor, {
       onResolved: () => {
         renderAccessCards();
         ctx.bridge.work.renderAttention();
@@ -1705,21 +2088,46 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         }
       }
     });
+    if (questionItems.length === 0) return;
+    questionCardsWrap.classList.remove("hidden");
+    renderAttentionStack(questionCardsWrap, questionItems, questionAttentionCursor, {
+      onResolved: () => {
+        renderAccessCards();
+        ctx.bridge.work.renderAttention();
+        ctx.persist();
+      },
+      onError: (message) => {
+        logChat(message);
+        renderAccessCards();
+      },
+      access: {
+        onResolved: () => {
+          // This stack only receives questions, but the renderer shares one
+          // callback contract with access-card callers.
+          renderAccessCards();
+        },
+        onError: (message) => {
+          logChat(message);
+          renderAccessCards();
+        }
+      }
+    });
   }
 
-  /** Pending questions + access requests for one session, oldest first. */
-  function sessionAttentionItems(sessionId: string): AttentionItem[] {
-    const access: AttentionItem[] = (state.workspacePolicy?.accessRequests ?? [])
+  /** Pending access requests for one session, oldest first. */
+  function sessionAccessItems(sessionId: string): AttentionItem[] {
+    return (state.workspacePolicy?.accessRequests ?? [])
       .filter((candidate) => candidate.sessionId === sessionId && candidate.status === "pending")
-      .map((candidate) => ({ kind: "access", access: candidate }));
-    const questions: AttentionItem[] = state.questions
+      .map((candidate) => ({ kind: "access" as const, access: candidate }))
+      .sort((a, b) => a.access.requestedAt < b.access.requestedAt ? -1 : 1);
+  }
+
+  /** Pending open questions for one session, oldest first. */
+  function sessionQuestionItems(sessionId: string): AttentionItem[] {
+    return state.questions
       .filter((candidate) => candidate.sessionId === sessionId && candidate.status === "pending")
-      .map((candidate) => ({ kind: "question", question: candidate }));
-    return [...access, ...questions].sort((a, b) => {
-      const aAt = a.kind === "access" ? a.access.requestedAt : a.question.createdAt;
-      const bAt = b.kind === "access" ? b.access.requestedAt : b.question.createdAt;
-      return aAt < bAt ? -1 : 1;
-    });
+      .map((candidate) => ({ kind: "question" as const, question: candidate }))
+      .sort((a, b) => a.question.createdAt < b.question.createdAt ? -1 : 1);
   }
 
   /** Refetches workspace state after a resolve so stale/resolved cards drop from both tabs. */
@@ -1734,51 +2142,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function renderDiagnostics(): void {
-    diagnosticsLog.replaceChildren();
-    if (state.diagnostics.length === 0) {
-      const empty = el("div", "empty");
-      empty.textContent = "No diagnostics.";
-      diagnosticsLog.append(empty);
-      return;
-    }
-    for (const entry of state.diagnostics) {
-      diagnosticsLog.append(diagnosticRow(entry));
-    }
-    diagnosticsLog.scrollTop = diagnosticsLog.scrollHeight;
-  }
-
-  function diagnosticRow(entry: DiagnosticEntry): HTMLElement {
-    const row = el("div", `diagnostic-row kind-${entry.eventType.replace(/\./g, "-")}`);
-    const meta = el("span", "diagnostic-meta");
-    meta.textContent = `${formatTime(entry.createdAt)} ${entry.eventType} `;
-    const text = el("span", "diagnostic-text");
-    text.textContent = entry.summary;
-    row.append(meta, text);
-    return row;
+    ctx.bridge.system.render();
   }
 
   /** Facts grid from the SELECTED session record (actual provider/model), not the picker. */
   function renderFacts(): void {
-    factsGrid.replaceChildren();
-    const session = currentSession(state);
-    const iso = state.lastIsolation;
-    const rows: [string, string][] = [];
-    rows.push(["session id", session?.sessionId ?? "—"]);
-    rows.push(["provider", session?.providerId ?? "—"]);
-    rows.push(["model", session?.model ?? "—"]);
-    if (iso) {
-      rows.push(["runtime", iso.runtimeKind]);
-      rows.push(["workspace", iso.workspaceDisplayPath]);
-      rows.push(["mounts", String(iso.mounts.length)]);
-      rows.push(["network", iso.network === "provider-scoped" ? `provider-scoped (${iso.networkAllowlist ?? ""})` : "none"]);
-    }
-    for (const [key, value] of rows) {
-      const k = el("span", "fact-key");
-      k.textContent = key;
-      const v = el("span", "fact-value");
-      v.textContent = value;
-      factsGrid.append(k, v);
-    }
+    ctx.bridge.system.render();
   }
 
   /**
@@ -1802,6 +2171,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const count = diffChanges.length > 0 ? diffChanges.length : state.changedFiles.size;
     changes.summaryLabel.textContent = `Changes (${String(count)} file${count === 1 ? "" : "s"})`;
     workingSetTitle.textContent = `Working set (${String(count)} file${count === 1 ? "" : "s"})`;
+    setChangesScrollCap(count);
     // Snapshot only makes sense in the no-session (workspace) scope.
     snapshotButton.classList.toggle("hidden", state.selectedSessionId !== null);
     const actionable = diffChanges.length > 0;
@@ -1864,6 +2234,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const total = cloneRepos.reduce((sum, repo) => sum + repo.files.length, 0);
     changes.summaryLabel.textContent = `Changes (${String(total)} file${total === 1 ? "" : "s"})`;
     workingSetTitle.textContent = `Clone sync (${String(total)} file${total === 1 ? "" : "s"})`;
+    setChangesScrollCap(total);
     refreshCloneActions();
 
     changedFilesList.replaceChildren();
@@ -1947,6 +2318,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
     row.append(glyph, name, stats, actions);
     return row;
+  }
+
+  function setChangesScrollCap(fileCount: number): void {
+    changedFilesList.classList.toggle("scroll-capped", fileCount > 3);
   }
 
   /** Stable key for a diff file (matches diff.openFile's identity). */
@@ -2127,73 +2502,77 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderChangedFiles();
   }
 
-  function renderReviewComments(): void {
-    reviewList.replaceChildren();
-    if (reviewComments.length === 0) {
-      const empty = el("div", "empty");
-      empty.textContent = "No review comments.";
-      reviewList.append(empty);
-      return;
-    }
-    for (const comment of reviewComments) {
-      const row = el("div", "review-comment-row");
-      const meta = el("span", "diagnostic-meta");
-      meta.textContent = `${comment.filePath}:${String(comment.startLine)}-${String(comment.endLine)} `;
-      const body = el("span", "diagnostic-text");
-      body.textContent = comment.body;
-      const statusSelect = select("");
-      for (const status of REVIEW_STATUSES) statusSelect.append(option(status, status));
-      statusSelect.value = comment.status;
-      statusSelect.addEventListener("change", () => {
-        const status = statusSelect.value as ReviewThreadStatus;
-        void request({ type: "review.setCommentStatus", commentId: comment.commentId, status }).then((response) => {
-          if (!response.ok) logChat(`status change failed: ${response.error.message}`);
-          void loadReviewState();
-        });
-      });
-      // Mini-task from a comment: create a task, link the current chat (if any),
-      // mark the thread delegated, then refresh comments + tasks. Disabled in flight.
-      const toTask = iconButton("→ task", "Create a task from this comment", "comment-to-task");
-      toTask.addEventListener("click", () => {
-        toTask.disabled = true;
-        void createTaskFromComment(comment).finally(() => { toTask.disabled = false; });
-      });
-      row.append(meta, body, statusSelect, toTask);
-      reviewList.append(row);
-    }
+  function selectedTaskForNotes(): WorkTaskSummary | undefined {
+    const sessionId = state.selectedSessionId;
+    if (sessionId === null) return undefined;
+    return state.tasks.find((task) => task.linkedSessionIds.includes(sessionId));
   }
 
-  /**
-   * Turns a review comment into a task: task.create {title, description} →
-   * task.link {sessionId} (when a session is selected) → review.setCommentStatus
-   * {delegated} → refresh comments + Work-tab tasks. Any step failing logs one
-   * line and stops (earlier steps stay). The new task is upserted into shared
-   * state so the Work tab shows it without a round-trip.
-   */
-  async function createTaskFromComment(comment: ReviewCommentSummary): Promise<void> {
-    const title = `Review: ${comment.body.slice(0, 60)}`;
-    const description = `From a review comment on ${comment.filePath}:${String(comment.startLine)}-${String(comment.endLine)}`;
-    const createResponse = await request({ type: "task.create", title, description });
-    if (!createResponse.ok || createResponse.payload.type !== "task.create") {
-      logChat(`comment → task failed: ${createResponse.ok ? "unexpected response" : createResponse.error.message}`);
+  function selectedTaskNotes(): readonly TaskNote[] {
+    const task = selectedTaskForNotes();
+    if (task === undefined) return [];
+    return state.taskNotes
+      .filter((note) => note.taskId === task.taskId)
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+  }
+
+  function addTaskNote(): void {
+    const task = selectedTaskForNotes();
+    if (task === undefined) return;
+    const text = taskNoteInput.value.replace(/\s+$/, "");
+    if (text.trim().length === 0) return;
+    const note: TaskNote = {
+      noteId: nextMessageId("task-note"),
+      taskId: task.taskId,
+      createdAt: new Date().toISOString(),
+      text
+    };
+    state.taskNotes = [...state.taskNotes, note];
+    taskNoteInput.value = "";
+    ctx.persist();
+    renderTaskNotes();
+  }
+
+  function deleteTaskNote(noteId: string): void {
+    state.taskNotes = state.taskNotes.filter((note) => note.noteId !== noteId);
+    ctx.persist();
+    renderTaskNotes();
+  }
+
+  function renderTaskNotes(): void {
+    const task = selectedTaskForNotes();
+    const notes = selectedTaskNotes();
+    taskNotes.summaryLabel.textContent = notes.length > 0 ? `Task Notes (${String(notes.length)})` : "Task Notes";
+    taskNoteInput.disabled = task === undefined;
+    addTaskNoteButton.disabled = task === undefined;
+    taskNoteInput.placeholder = task === undefined ? "No linked task" : "Add a task note...";
+    taskNotesList.replaceChildren();
+
+    if (task === undefined) {
+      const empty = el("div", "empty");
+      empty.textContent = "No linked task.";
+      taskNotesList.append(empty);
       return;
     }
-    const task = createResponse.payload.task;
-    upsertTask(state, task);
-    if (state.selectedSessionId) {
-      const linkResponse = await request({ type: "task.link", taskId: task.taskId, sessionId: state.selectedSessionId });
-      if (!linkResponse.ok) {
-        logChat(`comment → task link failed: ${linkResponse.error.message}`);
-      } else if (linkResponse.payload.type === "task.link") {
-        upsertTask(state, linkResponse.payload.task);
-      }
+    if (notes.length === 0) {
+      const empty = el("div", "empty");
+      empty.textContent = "No task notes.";
+      taskNotesList.append(empty);
+      return;
     }
-    const statusResponse = await request({ type: "review.setCommentStatus", commentId: comment.commentId, status: "delegated" });
-    if (!statusResponse.ok) logChat(`comment → task status update failed: ${statusResponse.error.message}`);
-    logChat(`created task from comment: ${title}`);
-    ctx.persist();
-    void loadReviewState();
-    ctx.bridge.work.render();
+    for (const note of notes) {
+      const row = el("div", "task-note-row");
+      const head = el("div", "task-note-head");
+      const meta = el("span", "task-note-meta");
+      meta.textContent = formatTime(note.createdAt);
+      const remove = iconButton("x", "Delete note", "task-note-delete danger");
+      wireInlineConfirmIcon(remove, "x", "Confirm", "Delete note", () => deleteTaskNote(note.noteId), "Confirm delete note");
+      head.append(meta, remove);
+      const body = el("div", "task-note-body");
+      body.textContent = note.text;
+      row.append(head, body);
+      taskNotesList.append(row);
+    }
   }
 
   /**
@@ -2256,6 +2635,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       cancelButton.classList.add("hidden");
       providerSelect.disabled = true;
       modelSelect.disabled = true;
+      thinkingSelect.disabled = true;
       return;
     }
     promptInput.disabled = false;
@@ -2265,34 +2645,36 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     cancelButton.classList.toggle("hidden", !turnActive);
     const hasModelOptions = modelSelect.options.length > 0 && modelSelect.options[0]?.value !== "";
     providerSelect.disabled = backendBusy || turnActive || starting;
-    modelSelect.disabled = !hasModelOptions || backendBusy || turnActive || starting;
+    modelSelect.disabled = !hasModelOptions || backendBusy || starting;
+    thinkingSelect.disabled = backendBusy || starting;
   }
 
   // ---------------------------------------------------------------------------
   // Drag-drop of file paths into the composer
   // ---------------------------------------------------------------------------
   /**
-   * Files dragged from the VS Code explorer (or the OS) onto the transcript or
-   * composer append their paths to the textarea (one per line). Paths under a
-   * known mount host root are rewritten relative to that root (what the agent can
-   * actually see); otherwise the absolute path is inserted and a diagnostics line
-   * notes that it is not mounted. Text insertion only — no new messages.
+   * Files dragged from the VS Code explorer (or the OS) onto the composer append
+   * explicit file tokens to the textarea (one per line). Mounted host paths are
+   * rewritten to the runtime path the container can see.
    */
   function wireComposerDropTarget(): void {
-    const zones = [transcriptRegion, composer];
+    const zones = [promptInput, composer];
     for (const zone of zones) {
       zone.addEventListener("dragover", (event) => {
         event.preventDefault();
+        event.stopPropagation();
         if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
         zone.classList.add("drop-active");
       });
       zone.addEventListener("dragleave", (event) => {
+        event.stopPropagation();
         // Only clear when the pointer actually leaves the zone (not a child).
         if (event.relatedTarget instanceof Node && zone.contains(event.relatedTarget)) return;
         zone.classList.remove("drop-active");
       });
       zone.addEventListener("drop", (event) => {
         event.preventDefault();
+        event.stopPropagation();
         zone.classList.remove("drop-active");
         handleDrop(event);
       });
@@ -2302,28 +2684,39 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   function handleDrop(event: DragEvent): void {
     const data = event.dataTransfer;
     if (!data) return;
-    // Prefer a uri-list (explorer/OS file drops); fall back to plain text.
-    const uriList = data.getData("text/uri-list");
-    const raw = uriList && uriList.trim().length > 0 ? uriList : data.getData("text/plain");
-    if (!raw || raw.trim().length === 0) return;
-    const paths = raw
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith("#"))
-      .map(fileUriToPath);
+    const paths = droppedPaths(data);
     if (paths.length === 0) return;
 
     const inserted: string[] = [];
     for (const path of paths) {
-      const rel = toMountRelative(path);
-      if (rel !== null) {
-        inserted.push(rel);
+      const runtimePath = hostPathToRuntimePath(path);
+      if (runtimePath !== null) {
+        inserted.push(`[file:${encodeFilePathToken(runtimePath)}]`);
       } else {
-        inserted.push(path);
+        inserted.push(`[file-unmounted:${encodeFilePathToken(path)}]`);
         logChat(`note: ${path} is not mounted — the agent can request access to it`);
       }
     }
     insertIntoComposer(inserted);
+  }
+
+  function droppedPaths(data: DataTransfer): string[] {
+    // Prefer a uri-list (VS Code explorer / OS file drops); fall back to plain
+    // text and finally Electron's File.path when available.
+    const uriList = data.getData("text/uri-list");
+    const text = uriList && uriList.trim().length > 0 ? uriList : data.getData("text/plain");
+    const paths = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"))
+      .map(fileUriToPath);
+    if (paths.length > 0) return paths;
+    return Array.from(data.files)
+      .map((file) => {
+        const maybePath = (file as File & { readonly path?: string }).path;
+        return maybePath && maybePath.length > 0 ? maybePath : file.name;
+      })
+      .filter((path) => path.length > 0);
   }
 
   /** Decodes a file:// URI to an fs path; leaves non-URI text untouched. */
@@ -2342,26 +2735,62 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   /**
-   * If `absPath` sits under a live mount's host root, returns the runtime path
-   * (mount root + relative remainder); otherwise null. Case-insensitive compare
-   * on Windows-style paths so "C:\\x" matches "c:/x".
+   * If `absPath` sits under a known host root, returns the runtime path (mount
+   * root + relative remainder); otherwise null. Case-insensitive compare on
+   * Windows-style paths so "C:\\x" matches "c:/x".
    */
-  function toMountRelative(absPath: string): string | null {
-    const iso = state.lastIsolation;
-    if (iso === null) return null;
-    const norm = (p: string): string => p.replace(/\\/g, "/").replace(/\/+$/, "");
-    const needle = norm(absPath).toLowerCase();
-    for (const mount of iso.mounts) {
+  function hostPathToRuntimePath(absPath: string): string | null {
+    const needle = normalizeComparablePath(absPath).toLowerCase();
+    for (const mount of mappableMounts()) {
       const host = mount.hostDisplayPath;
       if (host === undefined || host.length === 0) continue;
-      const root = norm(host).toLowerCase();
+      const root = normalizeComparablePath(host).toLowerCase();
       if (needle === root) return mount.runtimePath;
       if (needle.startsWith(`${root}/`)) {
-        const remainder = norm(absPath).slice(root.length).replace(/^\/+/, "");
+        const remainder = normalizeComparablePath(absPath).slice(root.length).replace(/^\/+/, "");
         return `${mount.runtimePath.replace(/\/+$/, "")}/${remainder}`;
       }
     }
     return null;
+  }
+
+  function hostPathForRuntimePath(runtimePath: string): string | null {
+    const needle = normalizeComparablePath(runtimePath);
+    for (const mount of mappableMounts()) {
+      if (mount.hostDisplayPath === undefined || mount.hostDisplayPath.length === 0) continue;
+      const root = normalizeComparablePath(mount.runtimePath);
+      if (needle === root) return mount.hostDisplayPath;
+      if (needle.startsWith(`${root}/`)) {
+        const remainder = needle.slice(root.length).replace(/^\/+/, "");
+        const separator = mount.hostDisplayPath.includes("\\") ? "\\" : "/";
+        return `${mount.hostDisplayPath.replace(/[\\/]+$/, "")}${separator}${remainder.replace(/\//g, separator)}`;
+      }
+    }
+    return null;
+  }
+
+  function mappableMounts(): readonly DisplayMount[] {
+    const session = currentSession(state);
+    if (session !== undefined && isSessionLiveish(state, session.sessionId) && state.lastIsolation !== null) {
+      return state.lastIsolation.mounts;
+    }
+    return plannedWorkspaceMounts();
+  }
+
+  function normalizeComparablePath(path: string): string {
+    return path.replace(/\\/g, "/").replace(/\/+$/, "");
+  }
+
+  function encodeFilePathToken(path: string): string {
+    return encodeURI(path).replace(/\[/g, "%5B").replace(/\]/g, "%5D");
+  }
+
+  function decodeFilePathToken(path: string): string {
+    try {
+      return decodeURI(path);
+    } catch {
+      return path;
+    }
   }
 
   /** Appends the given paths to the composer, one per line, and refocuses it. */
@@ -2382,6 +2811,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // ---------------------------------------------------------------------------
   function selectSession(sessionId: string | null): void {
     state.selectedSessionId = sessionId;
+    manualModelSessionId = null;
     state.chatMessages = [];
     state.diagnostics = [];
     state.agentGroups = {};
@@ -2391,7 +2821,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     state.changedFiles.clear();
     diffChanges = [];
     cloneRepos = [];
-    reviewComments = [];
     openedDiffKeys = new Set();
     setTurnActive(false);
     // Drop the previous session's pill immediately; loadPlanDocs refreshes it.
@@ -2402,7 +2831,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderChat();
     renderDiagnostics();
     renderChangedFiles();
-    renderReviewComments();
+    renderTaskNotes();
     renderFacts();
     renderAccessCards();
     renderPlanDocs();
@@ -2416,13 +2845,13 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       } else {
         void loadDiffStatus();
       }
-      void loadReviewState();
       void loadPlanDocs();
     }
   }
 
   function resetToNewChat(): void {
     state.selectedSessionId = null;
+    manualModelSessionId = null;
     state.chatMessages = [];
     state.diagnostics = [];
     state.agentGroups = {};
@@ -2432,7 +2861,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     state.changedFiles.clear();
     diffChanges = [];
     cloneRepos = [];
-    reviewComments = [];
     openedDiffKeys = new Set();
     state.planDocs = null;
     setTurnActive(false);
@@ -2442,7 +2870,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderChat();
     renderDiagnostics();
     renderChangedFiles();
-    renderReviewComments();
+    renderTaskNotes();
     renderFacts();
     renderAccessCards();
     renderPlanDocs();
@@ -2450,6 +2878,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function render(): void {
+    root.classList.toggle("code-wrap", state.codeBlockWordWrap);
     applyModeButtons();
     renderHeader();
     renderContextStrip();
@@ -2457,7 +2886,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderChat();
     renderDiagnostics();
     renderChangedFiles();
-    renderReviewComments();
+    renderTaskNotes();
     renderFacts();
     renderAccessCards();
     renderPlanDocs();
@@ -2477,7 +2906,8 @@ function wireInlineConfirmIcon(
   glyph: string,
   confirmGlyph: string,
   title: string,
-  onConfirm: () => void
+  onConfirm: () => void,
+  confirmTitle = "Confirm"
 ): void {
   let armed = false;
   let timer = 0;
@@ -2485,6 +2915,7 @@ function wireInlineConfirmIcon(
     armed = false;
     node.textContent = glyph;
     node.title = title;
+    node.setAttribute("aria-label", title);
     node.classList.remove("armed");
     if (timer) window.clearTimeout(timer);
   };
@@ -2493,7 +2924,8 @@ function wireInlineConfirmIcon(
     if (!armed) {
       armed = true;
       node.textContent = confirmGlyph;
-      node.title = "Confirm discard?";
+      node.title = confirmTitle;
+      node.setAttribute("aria-label", confirmTitle);
       node.classList.add("armed");
       timer = window.setTimeout(disarm, 3_000);
       return;

@@ -4,8 +4,8 @@
  * - Availability banner + tools (probe app-server, refresh status).
  * - Runtimes list (stop buttons) + a "show removed (24h)" checkbox that
  *   re-requests isolatedRun.listRuntimes with includeRemoved.
- * - Global event log: non-session lines (probe/run/runtime/cleanup) route here;
- *   per-session turn events stay in the Chat tab diagnostics feed.
+ * - Chat diagnostics: selected-session facts + per-session turn/tool feed.
+ * - Global event log: non-session lines (probe/run/runtime/cleanup) route here.
  * - Footer facts (state root, sbx path).
  *
  * SECURITY: dynamic strings render via textContent — never innerHTML. Lists
@@ -15,7 +15,7 @@
 import { type RuntimeSummary } from "@drydock/contracts";
 import { badge, button, el, formatTime } from "../components.js";
 import { onPush, request } from "../messaging.js";
-import { type DiagnosticEntry } from "../state.js";
+import { currentSession, type DiagnosticEntry } from "../state.js";
 import type { SystemTabView, ViewContext } from "../viewContext.js";
 
 export function createSystemTab(ctx: ViewContext): SystemTabView {
@@ -45,9 +45,27 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
   logHeading.textContent = "Event log";
   const systemLogEl = el("div", "diagnostics-log");
 
+  const chatDiagnosticsHeading = el("h3");
+  chatDiagnosticsHeading.textContent = "Chat diagnostics";
+  const chatFactsGrid = el("div", "facts-grid");
+  const chatDiagnosticsLogEl = el("div", "diagnostics-log");
+
   const footer = el("div", "footer");
 
-  root.append(banner, toolsHeading, toolsRow, runtimesHeading, showRemovedLabel, runtimesList, logHeading, systemLogEl, footer);
+  root.append(
+    banner,
+    toolsHeading,
+    toolsRow,
+    runtimesHeading,
+    showRemovedLabel,
+    runtimesList,
+    chatDiagnosticsHeading,
+    chatFactsGrid,
+    chatDiagnosticsLogEl,
+    logHeading,
+    systemLogEl,
+    footer
+  );
 
   // ---------------------------------------------------------------------------
   // Actions
@@ -157,15 +175,61 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
       return;
     }
     for (const entry of state.systemLog) {
-      const rowEl = el("div", `diagnostic-row kind-${entry.eventType.replace(/\./g, "-")}`);
-      const meta = el("span", "diagnostic-meta");
-      meta.textContent = `${formatTime(entry.createdAt)} ${entry.eventType} `;
-      const text = el("span", "diagnostic-text");
-      text.textContent = entry.summary;
-      rowEl.append(meta, text);
-      systemLogEl.append(rowEl);
+      systemLogEl.append(diagnosticRow(entry));
     }
     systemLogEl.scrollTop = systemLogEl.scrollHeight;
+  }
+
+  function renderChatDiagnostics(): void {
+    chatFactsGrid.replaceChildren();
+    const session = currentSession(state);
+    const iso = state.lastIsolation;
+    const rows: [string, string][] = [
+      ["session id", session?.sessionId ?? "—"],
+      ["provider", session?.providerId ?? "—"],
+      ["model", session?.model ?? "—"]
+    ];
+    if (iso) {
+      rows.push(["runtime", iso.runtimeKind]);
+      rows.push(["workspace", iso.workspaceDisplayPath]);
+      rows.push(["mounts", String(iso.mounts.length)]);
+      rows.push(["network", iso.network === "provider-scoped" ? `provider-scoped (${iso.networkAllowlist ?? ""})` : "none"]);
+    }
+    for (const [key, value] of rows) {
+      const k = el("span", "fact-key");
+      k.textContent = key;
+      const v = el("span", "fact-value");
+      v.textContent = value;
+      chatFactsGrid.append(k, v);
+    }
+
+    chatDiagnosticsLogEl.replaceChildren();
+    if (state.selectedSessionId === null) {
+      const empty = el("div", "empty");
+      empty.textContent = "No chat selected.";
+      chatDiagnosticsLogEl.append(empty);
+      return;
+    }
+    if (state.diagnostics.length === 0) {
+      const empty = el("div", "empty");
+      empty.textContent = "No diagnostics for the selected chat.";
+      chatDiagnosticsLogEl.append(empty);
+      return;
+    }
+    for (const entry of state.diagnostics) {
+      chatDiagnosticsLogEl.append(diagnosticRow(entry));
+    }
+    chatDiagnosticsLogEl.scrollTop = chatDiagnosticsLogEl.scrollHeight;
+  }
+
+  function diagnosticRow(entry: DiagnosticEntry): HTMLElement {
+    const rowEl = el("div", `diagnostic-row kind-${entry.eventType.replace(/\./g, "-")}`);
+    const meta = el("span", "diagnostic-meta");
+    meta.textContent = `${formatTime(entry.createdAt)} ${entry.eventType} `;
+    const text = el("span", "diagnostic-text");
+    text.textContent = entry.summary;
+    rowEl.append(meta, text);
+    return rowEl;
   }
 
   function logSystem(entry: DiagnosticEntry): void {
@@ -188,6 +252,7 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
 
   function render(): void {
     renderRuntimes();
+    renderChatDiagnostics();
     renderLog();
   }
 

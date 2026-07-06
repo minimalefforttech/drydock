@@ -44,6 +44,8 @@
       --vscode-editorWarning-foreground: #cca700;
       --vscode-notifications-background: #252526;
       --vscode-scrollbarSlider-background: rgba(121, 121, 121, 0.4);
+      --vscode-scrollbarSlider-hoverBackground: rgba(121, 121, 121, 0.55);
+      --vscode-scrollbarSlider-activeBackground: rgba(191, 191, 191, 0.45);
     }
     html, body { margin: 0; height: 100%; background: #1b1b1b; }
     body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
@@ -62,7 +64,7 @@
 </head>
 <body class="vscode-dark">
   <div id="stage">
-    <div id="app"></div>
+    <div id="app" data-nonce="" data-mermaid-src="/assets/planDocsMermaid.js"></div>
   </div>
   <div id="stage-note">
     <p><strong>Webview visual-test harness.</strong> Real bundled panel, mock host, dummy fixtures.</p>

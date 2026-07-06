@@ -121,6 +121,18 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "**Not recommended.** By default, sensitive home-directory config roots (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.azure`, `~/.docker`) are merged into `#drydock.deniedPaths#` so the agent can never mount them, even via an approved access request. Enabling this removes that protection \u2014 an agent could then be granted read or write access to your SSH keys, cloud credentials, and other secrets. Leave this off unless you have a specific reason and understand the risk. Changing this requires a window reload."
+        },
+        "drydock.agentIdleThresholdMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 120,
+          "markdownDescription": "Minutes without delegated-agent activity before Drydock labels that agent idle in the visibility UI."
+        },
+        "drydock.codeBlockWordWrap": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Wrap long lines inside chat transcript code blocks. Disable to keep horizontal scrolling."
         }
       }
     }
