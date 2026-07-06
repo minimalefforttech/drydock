@@ -11,6 +11,7 @@ import type {
   AgentQuestionId,
   BaselineId,
   ChatId,
+  ColumnId,
   EventId,
   MemoryCandidateId,
   MountId,
@@ -21,6 +22,7 @@ import type {
   RuntimeGenerationId,
   RuntimeId,
   SessionId,
+  SubtaskId,
   TaskId,
   WorkspaceSetId
 } from "@drydock/contracts";
@@ -44,6 +46,8 @@ export interface IdGenerator {
   reviewCommentId(): ReviewCommentId;
   taskId(): TaskId;
   memoryCandidateId(): MemoryCandidateId;
+  columnId(): ColumnId;
+  subtaskId(): SubtaskId;
 }
 
 export class RandomIdGenerator implements IdGenerator {
@@ -113,6 +117,14 @@ export class RandomIdGenerator implements IdGenerator {
 
   memoryCandidateId(): MemoryCandidateId {
     return asId<"MemoryCandidateId">(`memory-${shortUuid()}`);
+  }
+
+  columnId(): ColumnId {
+    return asId<"ColumnId">(`col-${shortUuid()}`);
+  }
+
+  subtaskId(): SubtaskId {
+    return asId<"SubtaskId">(`subtask-${shortUuid()}`);
   }
 }
 

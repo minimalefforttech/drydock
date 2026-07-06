@@ -56,6 +56,16 @@ test("resolve approves/rejects once and lists approved contents newest-first", a
   assert.deepEqual(await service.listApprovedContents(1), ["third"]);
 });
 
+test("getCandidate fetches by id and returns null when unknown", async () => {
+  const store = new MemoryMemoryStore();
+  const service = new MemoryService(options(store));
+  const [created] = await service.captureCandidates("session-1", ["run the linter"]);
+
+  const found = await service.getCandidate(created!.memoryCandidateId);
+  assert.deepEqual(found, created);
+  assert.equal(await service.getCandidate("memory-missing"), null);
+});
+
 function options(store: MemoryCandidateStore): {
   ids: RandomIdGenerator;
   clock: Clock;

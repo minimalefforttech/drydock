@@ -147,4 +147,6 @@ class FixedIds implements IdGenerator {
   reviewCommentId() { return asId<"ReviewCommentId">("comment-fixed"); }
   taskId() { return asId<"TaskId">("task-fixed"); }
   memoryCandidateId() { return asId<"MemoryCandidateId">("memory-fixed"); }
+  columnId() { return asId<"ColumnId">("col-fixed"); }
+  subtaskId() { return asId<"SubtaskId">("subtask-fixed"); }
 }

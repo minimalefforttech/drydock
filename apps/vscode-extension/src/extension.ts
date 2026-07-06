@@ -17,7 +17,9 @@ import { createBackend } from "./compositionRoot.js";
 import { OutputChannelLogger } from "./outputChannelLogger.js";
 import { BASELINE_SCHEME, BaselineContentProvider } from "./webview/baselineContentProvider.js";
 import { ControlPanelProvider } from "./webview/controlPanelProvider.js";
+import { MEMORY_SCHEME, MemoryContentProvider } from "./webview/memoryContentProvider.js";
 import { PlanDocsPanelProvider } from "./webview/planDocsPanelProvider.js";
+import { TaskBoardPanelProvider } from "./webview/taskBoardPanelProvider.js";
 import { TaskReviewCommentsController } from "./webview/taskReviewCommentsController.js";
 import { TaskReviewPanelProvider } from "./webview/taskReviewPanelProvider.js";
 
@@ -40,6 +42,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.workspace.registerTextDocumentContentProvider(
         BASELINE_SCHEME,
         new BaselineContentProvider(backend.workspaceReview)
+      )
+    );
+    // Serves the read-only memory document opened from the Work tab's Memories list.
+    context.subscriptions.push(
+      vscode.workspace.registerTextDocumentContentProvider(
+        MEMORY_SCHEME,
+        new MemoryContentProvider(backend.memory)
       )
     );
   }
@@ -118,6 +127,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       title = tasks.find((task) => task.taskId === resolvedId)?.title ?? title;
     }
     await taskReviewPanels.open(resolvedId, title);
+  }));
+  // Task Board: single global panel, so the command takes no arguments — it
+  // opens (or reveals) the one instance. The control panel's taskBoard.open
+  // relay routes here.
+  const taskBoardPanel = new TaskBoardPanelProvider(context.extensionUri, backend, logger);
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.taskBoard.open", async () => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    await taskBoardPanel.open();
   }));
   registerIsolatedRunCommands(context, output, backend);
 

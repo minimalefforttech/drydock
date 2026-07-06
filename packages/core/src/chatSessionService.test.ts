@@ -841,6 +841,8 @@ class FixedIds implements IdGenerator {
   }
   taskId() { return asId<"TaskId">("task-test"); }
   memoryCandidateId() { return asId<"MemoryCandidateId">("memory-test"); }
+  columnId() { return asId<"ColumnId">("col-test"); }
+  subtaskId() { return asId<"SubtaskId">("subtask-test"); }
 }
 
 class NullLogger implements Logger {

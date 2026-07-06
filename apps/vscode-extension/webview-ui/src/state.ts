@@ -17,7 +17,9 @@ import type {
   AgentActivitySummary,
   AgentModelCatalog,
   AgentQuestionSummary,
+  BoardColumnSummary,
   ChatSessionSummary,
+  ColumnCategory,
   IsolationSummary,
   JsonObject,
   MemoryCandidateSummary,
@@ -26,6 +28,7 @@ import type {
   WorkspacePolicyState,
   WorkTaskSummary
 } from "@drydock/contracts";
+import { COLUMN_CATEGORIES } from "@drydock/contracts";
 
 interface VsCodeApi {
   postMessage(message: unknown): void;
@@ -179,6 +182,8 @@ export interface AppState {
   openFolderNames: readonly string[];
   /** Internal work tasks, newest-first by updatedAt. */
   tasks: WorkTaskSummary[];
+  /** Board columns (task board and subtasks); ordered by sortOrder at render time. */
+  boardColumns: BoardColumnSummary[];
   /**
    * Plan documents collected for the selected session (drives the "Plan
    * documents (N)" pill above the composer); null when the selected session has
@@ -196,7 +201,7 @@ export interface AppState {
   attention: Record<string, readonly string[]>;
   /**
    * Agent-proposed memory candidates. All statuses are kept so
-   * the Memory section can render pending cards plus a dim "Approved (N)"
+   * the Memory section can render pending cards plus a dim "Memories (N)"
    * sub-list; newest-first is imposed at render time. Persisted so the section
    * survives a reload until `memory.list` re-hydrates it; a legacy blob without
    * it migrates to [].
@@ -234,6 +239,7 @@ function freshState(): AppState {
     selectedSessionMode: "implementation",
     openFolderNames: [],
     tasks: [],
+    boardColumns: [],
     planDocs: null,
     attention: {},
     memoryCandidates: [],
@@ -252,6 +258,19 @@ function isTaskNote(value: unknown): value is TaskNote {
     && typeof note["taskId"] === "string"
     && typeof note["createdAt"] === "string"
     && typeof note["text"] === "string";
+}
+
+function isColumnCategory(value: unknown): value is ColumnCategory {
+  return typeof value === "string" && (COLUMN_CATEGORIES as readonly string[]).includes(value);
+}
+
+function isBoardColumnSummary(value: unknown): value is BoardColumnSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const column = value as Record<string, unknown>;
+  return typeof column["columnId"] === "string"
+    && typeof column["name"] === "string"
+    && isColumnCategory(column["category"])
+    && typeof column["sortOrder"] === "number";
 }
 
 /**
@@ -331,6 +350,11 @@ export function restore(): AppState {
   }
   // `tasks` is new for Phase 2; a legacy blob without it defaults to [].
   if (Array.isArray(raw["tasks"])) state.tasks = [...(raw["tasks"] as WorkTaskSummary[])];
+  // `boardColumns` is newer than some persisted blobs; validate array-of-objects
+  // shape defensively, else drop to [] (board.state re-hydrates it regardless).
+  if (Array.isArray(raw["boardColumns"]) && raw["boardColumns"].every(isBoardColumnSummary)) {
+    state.boardColumns = [...(raw["boardColumns"] as BoardColumnSummary[])];
+  }
   // `planDocs` is new for Phase 2; validate its shape or drop to null.
   const planDocs = raw["planDocs"];
   if (typeof planDocs === "object" && planDocs !== null) {
@@ -392,6 +416,7 @@ export function persist(state: AppState): void {
     selectedSessionMode: state.selectedSessionMode,
     openFolderNames: state.openFolderNames,
     tasks: state.tasks,
+    boardColumns: state.boardColumns,
     planDocs: state.planDocs,
     attention: state.attention,
     memoryCandidates: state.memoryCandidates,
@@ -427,6 +452,11 @@ export function upsertTask(state: AppState, task: WorkTaskSummary): void {
     state.tasks[index] = task;
   }
   state.tasks.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+}
+
+/** Upserts every task in `tasks` (e.g. a `board.moveCard`/`board.state` response). */
+export function upsertTasks(state: AppState, tasks: readonly WorkTaskSummary[]): void {
+  for (const task of tasks) upsertTask(state, task);
 }
 
 /**

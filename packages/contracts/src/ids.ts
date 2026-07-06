@@ -29,6 +29,8 @@ export type MemoryCandidateId = Brand<string, "MemoryCandidateId">;
 export type BaselineId = Brand<string, "BaselineId">;
 export type ReviewSessionId = Brand<string, "ReviewSessionId">;
 export type ReviewCommentId = Brand<string, "ReviewCommentId">;
+export type ColumnId = Brand<string, "ColumnId">;
+export type SubtaskId = Brand<string, "SubtaskId">;
 
 export type AgentRole = "researcher" | "planner" | "worker" | "tester" | "reviewer" | "memory-extractor";
 

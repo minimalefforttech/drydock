@@ -15,6 +15,8 @@ import type {
   PlanDocRecord,
   RunId,
   SessionId,
+  SubtaskId,
+  TaskId,
   TranscriptLine,
   TurnTerminalStatus
 } from "@drydock/contracts";
@@ -30,7 +32,9 @@ export type ProductBusEvent =
   | { readonly kind: "question-asked"; readonly question: AgentQuestionRecord }
   | { readonly kind: "memory-candidate-added"; readonly candidate: MemoryCandidateRecord }
   | { readonly kind: "plan-docs-updated"; readonly sessionId: SessionId; readonly docs: readonly PlanDocRecord[] }
-  | { readonly kind: "inventory-changed" };
+  | { readonly kind: "inventory-changed" }
+  | { readonly kind: "card-entered-done"; readonly taskId: TaskId; readonly subtaskId: SubtaskId }
+  | { readonly kind: "board-changed" };
 
 export type ProductBusHandler = (event: ProductBusEvent) => void;
 

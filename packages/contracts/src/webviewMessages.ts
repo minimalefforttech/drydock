@@ -18,7 +18,7 @@ import type { TranscriptLine } from "./events.js";
 import type { AgentRole } from "./ids.js";
 import type { MemoryCandidateStatus } from "./memory.js";
 import type { PlanDocFormat } from "./planDocs.js";
-import { WORK_TASK_STATES, type WorkTaskState } from "./tasks.js";
+import { COLUMN_CATEGORIES, WORK_TASK_STATES, type ColumnCategory, type WorkTaskState } from "./tasks.js";
 import type { AccessRequestStatus } from "./workspaces.js";
 
 export const WEBVIEW_PROTOCOL_VERSION = 1;
@@ -88,6 +88,7 @@ export type PanelRequestPayload =
   | { readonly type: "work.history"; readonly workspaceSetId?: string; readonly projectId?: string }
   | { readonly type: "memory.list" }
   | { readonly type: "memory.resolve"; readonly memoryCandidateId: string; readonly approve: boolean }
+  | { readonly type: "memory.open"; readonly memoryCandidateId: string }
   | { readonly type: "workspace.state" }
   | { readonly type: "workspace.registerOpenFolders" }
   | { readonly type: "workspace.createSet"; readonly name: string }
@@ -110,7 +111,33 @@ export type PanelRequestPayload =
   | { readonly type: "clone.discard"; readonly sessionId: string; readonly repo: string; readonly path: string }
   | { readonly type: "taskReview.open"; readonly taskId: string }
   | { readonly type: "taskReview.state"; readonly taskId: string }
-  | { readonly type: "taskReview.submit"; readonly taskId: string };
+  | { readonly type: "taskReview.submit"; readonly taskId: string }
+  | { readonly type: "board.state" }
+  | { readonly type: "board.moveCard"; readonly cardKind: "task" | "subtask"; readonly id: string; readonly columnId: string }
+  | { readonly type: "board.columns.update"; readonly columns: readonly BoardColumnUpdateInput[]; readonly deletedColumnIds?: readonly string[] }
+  | { readonly type: "subtask.create"; readonly taskId: string; readonly title: string; readonly description?: string; readonly prompt?: string; readonly autoStart?: boolean }
+  | { readonly type: "subtask.update"; readonly subtaskId: string; readonly title?: string; readonly description?: string; readonly prompt?: string; readonly autoStart?: boolean; readonly columnId?: string }
+  | { readonly type: "subtask.delete"; readonly subtaskId: string }
+  | { readonly type: "subtask.dependency.add"; readonly taskId: string; readonly fromSubtaskId: string; readonly toSubtaskId: string }
+  | { readonly type: "subtask.dependency.remove"; readonly taskId: string; readonly fromSubtaskId: string; readonly toSubtaskId: string }
+  | { readonly type: "subtask.start"; readonly subtaskId: string; readonly force?: boolean }
+  | { readonly type: "task.start"; readonly taskId: string }
+  | { readonly type: "taskBoard.open" };
+
+/**
+ * One column entry in a `board.columns.update` request: `columnId` present
+ * updates that column, absent creates a new one. The service reconciles the
+ * full set (add/rename/reorder) against what is currently stored. A sibling
+ * `deletedColumnIds` on the request (not per-entry) names columns to remove —
+ * the service moves their cards to the nearest same-category column and
+ * rejects deleting the last column of a category.
+ */
+export interface BoardColumnUpdateInput {
+  readonly columnId?: string;
+  readonly name: string;
+  readonly category: ColumnCategory;
+  readonly sortOrder: number;
+}
 
 export interface PanelRequest {
   readonly protocolVersion: typeof WEBVIEW_PROTOCOL_VERSION;
@@ -349,16 +376,56 @@ export interface AgentQuestionSummary {
   readonly createdAt: string;
 }
 
+/** Display-safe projection of a board column (task board and subtasks). */
+export interface BoardColumnSummary {
+  readonly columnId: string;
+  readonly name: string;
+  readonly category: ColumnCategory;
+  readonly sortOrder: number;
+}
+
+/** Display-safe projection of a subtask, including its computed blocked state. */
+export interface SubtaskSummary {
+  readonly subtaskId: string;
+  readonly taskId: string;
+  readonly title: string;
+  readonly description?: string;
+  readonly prompt?: string;
+  readonly autoStart: boolean;
+  readonly origin: "manual" | "review";
+  readonly columnId: string;
+  readonly sortOrder: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly doneAt?: string;
+  /** Computed: any upstream dependency not currently in a done-category column. */
+  readonly isBlocked: boolean;
+  /** Upstream dependency subtask ids (each edge points upstream → this subtask). */
+  readonly dependsOn: readonly string[];
+  /** Computed: a chat spawned for this subtask is in flight (in-memory; resets on host restart). */
+  readonly isRunning: boolean;
+  /** Timestamp of the most recent failed/cancelled run, if any (in-memory; resets on host restart). */
+  readonly lastFailureAt?: string;
+  readonly linkedSessionIds: readonly string[];
+}
+
 /** Display-safe projection of an internal work task with its links. */
 export interface WorkTaskSummary {
   readonly taskId: string;
   readonly title: string;
   readonly description?: string;
+  /**
+   * transitional: kept alongside columnId until the board UI fully replaces
+   * the flat state select. Derived fresh from columnId's category.
+   */
   readonly state: WorkTaskState;
+  readonly columnId: string;
   readonly linkedWorkspaceSetIds: readonly string[];
   readonly linkedSessionIds: readonly string[];
   readonly createdAt: string;
   readonly updatedAt: string;
+  /** Stamped when the card enters a done-category column; cleared on exit. */
+  readonly doneAt?: string;
   /** Latest linked-session activity (derived from work sessions); absent when never worked. */
   readonly lastWorkedAt?: string;
   /**
@@ -367,6 +434,14 @@ export interface WorkTaskSummary {
    * task.updated pushes may omit it until the next list.
    */
   readonly openReviewCommentCount?: number;
+  /** This task's subtasks, ordered by sortOrder. */
+  readonly subtasks: readonly SubtaskSummary[];
+}
+
+/** Everything the Task Board panel renders: all columns, all tasks (with their subtasks). */
+export interface BoardState {
+  readonly columns: readonly BoardColumnSummary[];
+  readonly tasks: readonly WorkTaskSummary[];
 }
 
 /** One touch-history entry: who worked a workspace, through which chat, when. */
@@ -485,6 +560,7 @@ export type PanelResponsePayload =
   | { readonly type: "work.history"; readonly entries: readonly WorkHistoryEntry[] }
   | { readonly type: "memory.list"; readonly candidates: readonly MemoryCandidateSummary[] }
   | { readonly type: "memory.resolve"; readonly candidate: MemoryCandidateSummary }
+  | { readonly type: "memory.open"; readonly accepted: true }
   | { readonly type: "workspace.state"; readonly state: WorkspacePolicyState }
   | { readonly type: "workspace.registerOpenFolders"; readonly projects: readonly ProjectSummary[] }
   | { readonly type: "workspace.createSet"; readonly workspaceSet: WorkspaceSetSummary }
@@ -507,7 +583,18 @@ export type PanelResponsePayload =
   | { readonly type: "clone.discard"; readonly repos: readonly CloneRepoState[] }
   | { readonly type: "taskReview.open"; readonly accepted: true }
   | { readonly type: "taskReview.state"; readonly state: TaskReviewState }
-  | { readonly type: "taskReview.submit"; readonly dispatched: number; readonly sessions: number; readonly sentSessions?: readonly TaskReviewSessionRef[]; readonly errors?: readonly string[] };
+  | { readonly type: "taskReview.submit"; readonly dispatched: number; readonly sessions: number; readonly sentSessions?: readonly TaskReviewSessionRef[]; readonly errors?: readonly string[] }
+  | { readonly type: "board.state"; readonly board: BoardState }
+  | { readonly type: "board.moveCard"; readonly board: BoardState }
+  | { readonly type: "board.columns.update"; readonly board: BoardState }
+  | { readonly type: "subtask.create"; readonly task: WorkTaskSummary }
+  | { readonly type: "subtask.update"; readonly task: WorkTaskSummary }
+  | { readonly type: "subtask.delete"; readonly task: WorkTaskSummary }
+  | { readonly type: "subtask.dependency.add"; readonly task: WorkTaskSummary }
+  | { readonly type: "subtask.dependency.remove"; readonly task: WorkTaskSummary }
+  | { readonly type: "subtask.start"; readonly accepted: true }
+  | { readonly type: "task.start"; readonly accepted: true }
+  | { readonly type: "taskBoard.open"; readonly accepted: true };
 
 export interface PanelResponseOk {
   readonly protocolVersion: typeof WEBVIEW_PROTOCOL_VERSION;
@@ -548,7 +635,8 @@ export type PanelPushPayload =
   | { readonly type: "task.deleted"; readonly taskId: string }
   | { readonly type: "memory.candidateAdded"; readonly candidate: MemoryCandidateSummary }
   | { readonly type: "planDocs.updated"; readonly sessionId: string; readonly docs: readonly PlanDocSummary[] }
-  | { readonly type: "taskReview.updated"; readonly taskId: string };
+  | { readonly type: "taskReview.updated"; readonly taskId: string }
+  | { readonly type: "board.changed" };
 
 export interface PanelPush {
   readonly protocolVersion: typeof WEBVIEW_PROTOCOL_VERSION;
@@ -631,6 +719,106 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
       return { type: payload["type"], taskId };
     }
+    case "board.state":
+    case "taskBoard.open":
+      return { type: payload["type"] };
+    case "board.moveCard": {
+      const cardKind = payload["cardKind"];
+      const id = payload["id"];
+      const columnId = payload["columnId"];
+      if (cardKind !== "task" && cardKind !== "subtask") return null;
+      if (!isBoundedString(id, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(columnId, MAX_ID_LENGTH)) return null;
+      return { type: "board.moveCard", cardKind, id, columnId };
+    }
+    case "board.columns.update": {
+      const columns = payload["columns"];
+      const parsedColumns = parseBoardColumnUpdates(columns);
+      if (parsedColumns === null) return null;
+      const deletedColumnIds = payload["deletedColumnIds"];
+      const parsedDeletedIds = parseDeletedColumnIds(deletedColumnIds);
+      if (parsedDeletedIds === null) return null;
+      return {
+        type: "board.columns.update",
+        columns: parsedColumns,
+        ...(parsedDeletedIds === undefined ? {} : { deletedColumnIds: parsedDeletedIds })
+      };
+    }
+    case "subtask.create": {
+      const taskId = payload["taskId"];
+      const title = payload["title"];
+      const description = payload["description"];
+      const prompt = payload["prompt"];
+      const autoStart = payload["autoStart"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(title, MAX_NAME_LENGTH)) return null;
+      if (description !== undefined && !isBoundedString(description, MAX_COMMENT_LENGTH)) return null;
+      if (prompt !== undefined && !isBoundedString(prompt, MAX_PROMPT_LENGTH)) return null;
+      if (autoStart !== undefined && typeof autoStart !== "boolean") return null;
+      return {
+        type: "subtask.create",
+        taskId,
+        title,
+        ...(description === undefined ? {} : { description }),
+        ...(prompt === undefined ? {} : { prompt }),
+        ...(autoStart === undefined ? {} : { autoStart })
+      };
+    }
+    case "subtask.update": {
+      const subtaskId = payload["subtaskId"];
+      const title = payload["title"];
+      const description = payload["description"];
+      const prompt = payload["prompt"];
+      const autoStart = payload["autoStart"];
+      const columnId = payload["columnId"];
+      if (!isBoundedString(subtaskId, MAX_ID_LENGTH)) return null;
+      if (title !== undefined && !isBoundedString(title, MAX_NAME_LENGTH)) return null;
+      // Empty string is allowed and clears description/prompt.
+      if (description !== undefined && (typeof description !== "string" || description.length > MAX_COMMENT_LENGTH)) return null;
+      if (prompt !== undefined && (typeof prompt !== "string" || prompt.length > MAX_PROMPT_LENGTH)) return null;
+      if (autoStart !== undefined && typeof autoStart !== "boolean") return null;
+      if (columnId !== undefined && !isBoundedString(columnId, MAX_ID_LENGTH)) return null;
+      if (
+        title === undefined && description === undefined && prompt === undefined
+        && autoStart === undefined && columnId === undefined
+      ) return null;
+      return {
+        type: "subtask.update",
+        subtaskId,
+        ...(title === undefined ? {} : { title }),
+        ...(description === undefined ? {} : { description }),
+        ...(prompt === undefined ? {} : { prompt }),
+        ...(autoStart === undefined ? {} : { autoStart }),
+        ...(columnId === undefined ? {} : { columnId })
+      };
+    }
+    case "subtask.delete": {
+      const subtaskId = payload["subtaskId"];
+      if (!isBoundedString(subtaskId, MAX_ID_LENGTH)) return null;
+      return { type: "subtask.delete", subtaskId };
+    }
+    case "subtask.dependency.add":
+    case "subtask.dependency.remove": {
+      const taskId = payload["taskId"];
+      const fromSubtaskId = payload["fromSubtaskId"];
+      const toSubtaskId = payload["toSubtaskId"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(fromSubtaskId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(toSubtaskId, MAX_ID_LENGTH)) return null;
+      return { type: payload["type"], taskId, fromSubtaskId, toSubtaskId };
+    }
+    case "subtask.start": {
+      const subtaskId = payload["subtaskId"];
+      const force = payload["force"];
+      if (!isBoundedString(subtaskId, MAX_ID_LENGTH)) return null;
+      if (force !== undefined && typeof force !== "boolean") return null;
+      return { type: "subtask.start", subtaskId, ...(force === undefined ? {} : { force }) };
+    }
+    case "task.start": {
+      const taskId = payload["taskId"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      return { type: "task.start", taskId };
+    }
     case "task.link":
     case "task.unlink": {
       const taskId = payload["taskId"];
@@ -687,6 +875,11 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (!isBoundedString(memoryCandidateId, MAX_ID_LENGTH)) return null;
       if (typeof approve !== "boolean") return null;
       return { type: "memory.resolve", memoryCandidateId, approve };
+    }
+    case "memory.open": {
+      const memoryCandidateId = payload["memoryCandidateId"];
+      if (!isBoundedString(memoryCandidateId, MAX_ID_LENGTH)) return null;
+      return { type: "memory.open", memoryCandidateId };
     }
     case "isolatedRun.listRuntimes": {
       const includeRemoved = payload["includeRemoved"];
@@ -935,6 +1128,42 @@ function isReviewThreadStatus(value: unknown): value is ReviewThreadStatus {
 
 function isWorkTaskState(value: unknown): value is WorkTaskState {
   return typeof value === "string" && (WORK_TASK_STATES as readonly string[]).includes(value);
+}
+
+function isColumnCategory(value: unknown): value is ColumnCategory {
+  return typeof value === "string" && (COLUMN_CATEGORIES as readonly string[]).includes(value);
+}
+
+/** Validates a `board.columns.update` request's column array; null on any malformed entry. */
+function parseBoardColumnUpdates(value: unknown): BoardColumnUpdateInput[] | null {
+  if (!Array.isArray(value)) return null;
+  const result: BoardColumnUpdateInput[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const record = entry as Record<string, unknown>;
+    const columnId = record["columnId"];
+    const name = record["name"];
+    const category = record["category"];
+    const sortOrder = record["sortOrder"];
+    if (columnId !== undefined && !isBoundedString(columnId, MAX_ID_LENGTH)) return null;
+    if (!isBoundedString(name, MAX_NAME_LENGTH)) return null;
+    if (!isColumnCategory(category)) return null;
+    if (typeof sortOrder !== "number" || !Number.isFinite(sortOrder)) return null;
+    result.push({ ...(columnId === undefined ? {} : { columnId }), name, category, sortOrder });
+  }
+  return result;
+}
+
+/** Validates a `board.columns.update` request's optional `deletedColumnIds`; null on any malformed entry. */
+function parseDeletedColumnIds(value: unknown): string[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return null;
+  const result: string[] = [];
+  for (const entry of value) {
+    if (!isBoundedString(entry, MAX_ID_LENGTH)) return null;
+    result.push(entry);
+  }
+  return result;
 }
 
 function isLineNumber(value: unknown): value is number {

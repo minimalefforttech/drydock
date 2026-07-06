@@ -15,15 +15,17 @@
  */
 
 import {
-  WORK_TASK_STATES,
+  COLUMN_CATEGORIES,
   type AccessRequestSummary,
   type AgentActivityItem,
   type AgentActivitySummary,
+  type BoardColumnSummary,
   type ChatSessionSummary,
+  type ColumnCategory,
   type MemoryCandidateSummary,
+  type SubtaskSummary,
   type WorkHistoryEntry,
   type WorkspaceActivateResult,
-  type WorkTaskState,
   type WorkTaskSummary
 } from "@drydock/contracts";
 import {
@@ -46,7 +48,8 @@ import {
   applySessionAttention,
   upsertMemoryCandidate,
   upsertSession,
-  upsertTask
+  upsertTask,
+  upsertTasks
 } from "../state.js";
 import type { ViewContext, WorkTabView } from "../viewContext.js";
 import { renderAttentionStack, type AttentionItem } from "./attentionStack.js";
@@ -176,12 +179,18 @@ function formatTokenCount(tokens: number): string {
   return `${(tokens / 1_000_000).toFixed(1)}m`;
 }
 
-const TASK_STATE_LABELS: Record<WorkTaskState, string> = {
-  "todo": "To do",
-  "in-progress": "In progress",
-  "blocked": "Blocked",
-  "review": "Review",
-  "done": "Done"
+/**
+ * CSS class suffix per column category, driving the tinted column-pill /
+ * subtask status-pill treatment (§Column Model in the design doc). Reuses the
+ * palette already established for chip tinting elsewhere in this file:
+ * mode-read-write green for done, charts-purple-esque warning-free blue for
+ * in-progress, the warning accent for pending, and a quiet neutral for backlog.
+ */
+const CATEGORY_TINT_CLASS: Record<ColumnCategory, string> = {
+  "backlog": "column-tint-backlog",
+  "pending": "column-tint-pending",
+  "in-progress": "column-tint-in-progress",
+  "done": "column-tint-done"
 };
 
 /** One-line log summary of a workspace.activate outcome. */
@@ -221,8 +230,20 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // inline form (description + workspace picker + Create / Create & start chat).
   // The form also expands when the title input gains focus, so the fast path
   // (type a title, Enter) still works without any extra click.
+  const tasksHeadingRow = el("div", "tasks-heading-row");
   const tasksHeading = el("h3");
   tasksHeading.textContent = "Tasks";
+  // Board button: opens the Task Board panel (drydock.taskBoard). The panel
+  // command isn't registered yet this phase — this always errors today
+  // ("Task Board panel not available yet."); that is expected/correct.
+  const openBoardButton = button("Board", "small ghost tasks-board-button");
+  openBoardButton.title = "Open the Task Board panel";
+  openBoardButton.addEventListener("click", () => {
+    void request({ type: "taskBoard.open" }).then((response) => {
+      if (!response.ok) ctx.bridge.chat.logChat(`open task board failed: ${response.error.message}`);
+    });
+  });
+  tasksHeadingRow.append(tasksHeading, openBoardButton);
 
   const taskCreateForm = el("div", "task-create-form");
   const taskCreateRow = el("div", "button-row");
@@ -399,19 +420,20 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   // --- Memory (collapsed) -----------------------------------------------------
   // Agent-proposed memory candidates: pending cards (Approve / Reject) plus a dim
-  // collapsed "Approved (N)" sub-list. Memory is not urgent — no toast/attention.
+  // collapsed "Memories (N)" sub-list of approved, openable entries. Memory is
+  // not urgent — no toast/attention.
   const memorySection = collapsible("Memory");
   const memoryPending = el("div", "memory-pending");
-  const memoryApproved = collapsible("Approved (0)");
+  const memoryApproved = collapsible("Memories (0)");
   memoryApproved.details.classList.add("memory-approved");
   const memoryApprovedList = el("div", "memory-approved-list");
   memoryApproved.body.append(memoryApprovedList);
   memorySection.body.append(memoryPending, memoryApproved.details);
 
-  // --- Chats needing a task --------------------------------------------------
+  // --- Orphaned Chats --------------------------------------------------------
   // Chats are owned by a task in the main UI. This collapsed cleanup drawer is
   // only for legacy/orphan sessions that have not been linked yet.
-  const unassignedSessionsSection = collapsible("Chats needing a task");
+  const unassignedSessionsSection = collapsible("Orphaned Chats");
   const sessionsList = el("div", "session-cards");
   unassignedSessionsSection.body.append(sessionsList);
 
@@ -462,6 +484,11 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       void loadWorkspaceState();
     });
   });
+
+  // Subtasks: the currently-expanded (inline-editing) subtaskId per task,
+  // webview-session-local (not persisted). One at a time per task — expanding a
+  // row collapses any other open one in the same task.
+  const expandedSubtaskByTask = new Map<string, string>();
 
   // ---------------------------------------------------------------------------
   // Touch-history hover (work item 3)
@@ -617,7 +644,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // orphan-chat cleanup → Memory → Workspace sets (advanced).
   root.append(
     attentionSection,
-    tasksHeading,
+    tasksHeadingRow,
     taskCreateForm,
     tasksList,
     unassignedSessionsSection.details,
@@ -719,6 +746,19 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     ctx.persist();
   });
 
+  // --- push: board.changed -----------------------------------------------------
+  // Coarse board-mutation signal (orchestrator cascade, board-panel edits,
+  // column changes). Bursts collapse into one board.state refetch so pills,
+  // checklists, and blocked states track without thrash.
+  let boardChangedTimer = 0;
+  onPush("board.changed", () => {
+    if (boardChangedTimer) window.clearTimeout(boardChangedTimer);
+    boardChangedTimer = window.setTimeout(() => {
+      boardChangedTimer = 0;
+      void loadBoardColumns();
+    }, 300);
+  });
+
   // ---------------------------------------------------------------------------
   // Loaders
   // ---------------------------------------------------------------------------
@@ -750,6 +790,17 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       state.tasks = [...response.payload.tasks];
       renderTasks();
       renderSessions();
+      ctx.persist();
+    }
+  }
+
+  /** Fetches board columns (+ tasks, kept in sync) for the column-pill dropdown. */
+  async function loadBoardColumns(): Promise<void> {
+    const response = await request({ type: "board.state" });
+    if (response.ok && response.payload.type === "board.state") {
+      state.boardColumns = [...response.payload.board.columns];
+      upsertTasks(state, response.payload.board.tasks);
+      renderTasks();
       ctx.persist();
     }
   }
@@ -879,6 +930,67 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         session !== undefined && (session.status === "active" || session.status === "starting"));
   }
 
+  // ---------------------------------------------------------------------------
+  // Column pill (task/subtask card, replacing the old flat state select)
+  // ---------------------------------------------------------------------------
+  function findColumn(columnId: string): BoardColumnSummary | undefined {
+    return state.boardColumns.find((column) => column.columnId === columnId);
+  }
+
+  /** Columns grouped by category, each group ordered by sortOrder, category order backlog→done. */
+  function columnsByCategory(): { category: ColumnCategory; columns: BoardColumnSummary[] }[] {
+    const groups: { category: ColumnCategory; columns: BoardColumnSummary[] }[] = COLUMN_CATEGORIES.map((category) => ({
+      category,
+      columns: state.boardColumns
+        .filter((column) => column.category === category)
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+    }));
+    return groups.filter((group) => group.columns.length > 0);
+  }
+
+  const CATEGORY_LABELS: Record<ColumnCategory, string> = {
+    "backlog": "Backlog",
+    "pending": "Pending",
+    "in-progress": "In Progress",
+    "done": "Done"
+  };
+
+  /**
+   * Column pill + dropdown: a small button showing `columnId`'s name (tinted by
+   * category); clicking opens a `<details>` popover listing every column grouped
+   * by category (sortOrder within group). Picking a column calls `onPick` and
+   * closes the popover. Mirrors the `.task-session-dropdown` `<details>` pattern.
+   */
+  function columnPill(columnId: string, onPick: (columnId: string) => void): HTMLElement {
+    const column = findColumn(columnId);
+    const details = document.createElement("details");
+    details.className = "column-pill-dropdown";
+    const summary = document.createElement("summary");
+    summary.className = `column-pill ${column ? CATEGORY_TINT_CLASS[column.category] : ""}`.trim();
+    summary.textContent = column ? column.name : "(no column)";
+    summary.title = "Move to a different column";
+    details.append(summary);
+
+    const menu = el("div", "column-pill-menu");
+    for (const group of columnsByCategory()) {
+      const groupHeader = el("div", "column-pill-group-header");
+      groupHeader.textContent = CATEGORY_LABELS[group.category];
+      menu.append(groupHeader);
+      for (const candidate of group.columns) {
+        const optionButton = el("button", `column-pill-option ${CATEGORY_TINT_CLASS[candidate.category]}${candidate.columnId === columnId ? " selected" : ""}`);
+        optionButton.textContent = candidate.name;
+        optionButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          details.open = false;
+          if (candidate.columnId !== columnId) onPick(candidate.columnId);
+        });
+        menu.append(optionButton);
+      }
+    }
+    details.append(menu);
+    return details;
+  }
+
   function taskCard(task: WorkTaskSummary): HTMLElement {
     const c = card("task-card");
     const activeSession = activeTaskSession(task);
@@ -887,26 +999,19 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       c.setAttribute("aria-current", "true");
     }
 
-    // --- top row: title (click → rename) · state select · delete --------------
+    // --- top row: title (click → rename) · column pill · delete ---------------
     const top = el("div", "task-card-top");
     const title = el("span", "task-card-title");
     title.textContent = task.title;
     title.title = "Click to rename";
     title.addEventListener("click", () => beginTaskRename(task, title));
 
-    const stateSelect = select("task-state-select", "Task state");
-    for (const value of WORK_TASK_STATES) {
-      stateSelect.append(option(value, TASK_STATE_LABELS[value]));
-    }
-    stateSelect.value = task.state;
-    stateSelect.addEventListener("change", () => {
-      updateTask(task.taskId, { state: stateSelect.value as WorkTaskState });
-    });
+    const pill = columnPill(task.columnId, (columnId) => moveCard("task", task.taskId, columnId));
 
     const del = inlineConfirmButton("🗑", "Confirm", () => void deleteTask(task.taskId), "icon-button danger task-delete");
     del.title = "Delete task (requires confirmation)";
 
-    top.append(title, stateSelect, del);
+    top.append(title, pill, del);
 
     // --- description / notes line ---------------------------------------------
     const hasNote = task.description !== undefined && task.description.length > 0;
@@ -946,6 +1051,9 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       details.append(chats);
       c.append(details);
     }
+
+    // --- subtasks ---------------------------------------------------------------
+    c.append(subtasksSection(task));
 
     // --- workspace chips row --------------------------------------------------
     const chips = el("div", "task-chips");
@@ -1010,9 +1118,275 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       });
     }
     actions.append(divider, activate);
+
+    // Open on board: minor/secondary text link, always visible (bare open —
+    // the contract carries no taskId to deep-link to this specific card).
+    const openOnBoard = button("Open on board ▸", "ghost small task-open-board");
+    openOnBoard.title = "Open the Task Board panel";
+    openOnBoard.addEventListener("click", () => {
+      void request({ type: "taskBoard.open" }).then((response) => {
+        if (!response.ok) ctx.bridge.chat.logChat(`open task board failed: ${response.error.message}`);
+      });
+    });
+    actions.append(openOnBoard);
     c.append(actions);
 
     return c;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Subtasks (task card checklist)
+  // ---------------------------------------------------------------------------
+
+  /** True when `columnId` maps to a known column in the "done" category. */
+  function isDoneColumn(columnId: string): boolean {
+    return findColumn(columnId)?.category === "done";
+  }
+
+  /**
+   * SUBTASKS block: "SUBTASKS · x of y done" header, one row per subtask
+   * (sortOrder ascending, click-to-expand inline editor), and an add-subtask
+   * input at the bottom. `boardColumns` may not have loaded yet — done-count
+   * degrades to 0 in that case, but the total and rows still render.
+   */
+  function subtasksSection(task: WorkTaskSummary): HTMLElement {
+    const section = el("div", "subtasks-section");
+    const header = el("div", "subtasks-header");
+    const doneCount = task.subtasks.filter((subtask) => isDoneColumn(subtask.columnId)).length;
+    header.textContent = `SUBTASKS · ${String(doneCount)} of ${String(task.subtasks.length)} done`;
+    section.append(header);
+
+    const list = el("div", "subtasks-list");
+    const ordered = [...task.subtasks].sort((a, b) => a.sortOrder - b.sortOrder);
+    for (const subtask of ordered) {
+      list.append(subtaskRow(task, subtask));
+    }
+    section.append(list);
+
+    // Add-subtask row: single inline input, Enter (or the button) submits.
+    const addRow = el("div", "subtask-add-row");
+    const addInput = textInput("＋ Add subtask");
+    const addButton = button("Add", "ghost small");
+    const submitAdd = (): void => {
+      const title = addInput.value.trim();
+      if (!title) return;
+      addInput.disabled = true;
+      addButton.disabled = true;
+      void request({ type: "subtask.create", taskId: task.taskId, title }).then((response) => {
+        if (!response.ok) {
+          ctx.bridge.chat.logChat(`add subtask failed: ${response.error.message}`);
+          addInput.disabled = false;
+          addButton.disabled = false;
+          return;
+        }
+        if (response.payload.type === "subtask.create") {
+          upsertTask(state, response.payload.task);
+          renderTasks();
+          ctx.persist();
+        }
+      });
+    };
+    addButton.addEventListener("click", submitAdd);
+    addInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); submitAdd(); }
+    });
+    addRow.append(addInput, addButton);
+    section.append(addRow);
+
+    return section;
+  }
+
+  /**
+   * One subtask row: title, column status pill, blocked lock glyph, auto chip.
+   * Clicking the row (outside the pill/lock/chip) toggles the inline editor,
+   * collapsing any other open row in the same task.
+   */
+  function subtaskRow(task: WorkTaskSummary, subtask: SubtaskSummary): HTMLElement {
+    const row = el("div", "subtask-row");
+    const expanded = expandedSubtaskByTask.get(task.taskId) === subtask.subtaskId;
+    row.classList.toggle("expanded", expanded);
+
+    const summaryLine = el("div", "subtask-summary-line");
+    summaryLine.setAttribute("role", "button");
+    summaryLine.tabIndex = 0;
+    const toggle = (): void => {
+      if (expandedSubtaskByTask.get(task.taskId) === subtask.subtaskId) {
+        expandedSubtaskByTask.delete(task.taskId);
+      } else {
+        expandedSubtaskByTask.set(task.taskId, subtask.subtaskId);
+      }
+      renderTasks();
+    };
+    summaryLine.addEventListener("click", toggle);
+    summaryLine.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); }
+    });
+
+    const title = el("span", "subtask-title");
+    title.textContent = subtask.title;
+    summaryLine.append(title);
+
+    if (subtask.isBlocked) {
+      const lock = el("span", "subtask-lock");
+      lock.textContent = "🔒";
+      lock.title = "Blocked — an upstream dependency has not finished yet";
+      summaryLine.append(lock);
+    }
+    if (subtask.autoStart) {
+      const auto = chip("auto");
+      auto.classList.add("subtask-auto-chip");
+      auto.title = "Auto-starts when its dependencies finish";
+      summaryLine.append(auto);
+    }
+    const column = findColumn(subtask.columnId);
+    const statusPill = el("span", `subtask-status-pill ${column ? CATEGORY_TINT_CLASS[column.category] : ""}`.trim());
+    statusPill.textContent = column ? column.name : "(no column)";
+    summaryLine.append(statusPill);
+
+    row.append(summaryLine);
+    if (expanded) {
+      row.append(subtaskEditor(task, subtask));
+    }
+    return row;
+  }
+
+  /**
+   * Inline subtask editor: title/description/prompt fields (commit on blur or
+   * Enter, revert on Escape — mirroring `beginTaskRename`/`beginTaskNoteEdit`
+   * exactly), an auto-start checkbox (commits immediately on change), a column
+   * pill scoped to this subtask, and a Delete button (inline-confirm).
+   */
+  function subtaskEditor(task: WorkTaskSummary, subtask: SubtaskSummary): HTMLElement {
+    const editor = el("div", "subtask-editor");
+
+    const titleInput = textInput("Title");
+    titleInput.classList.add("subtask-editor-title");
+    titleInput.value = subtask.title;
+    bindCommitOnBlurOrEnter(titleInput, () => {
+      const next = titleInput.value.trim();
+      if (next.length > 0 && next !== subtask.title) {
+        updateSubtask(subtask.subtaskId, { title: next });
+      } else {
+        renderTasks();
+      }
+    });
+
+    const descriptionInput = document.createElement("textarea");
+    descriptionInput.className = "note-input subtask-editor-description";
+    descriptionInput.rows = 2;
+    descriptionInput.placeholder = "Description (optional)";
+    descriptionInput.value = subtask.description ?? "";
+    bindCommitOnBlurOrEnter(descriptionInput, () => {
+      const next = descriptionInput.value.trim();
+      if (next !== (subtask.description ?? "")) {
+        updateSubtask(subtask.subtaskId, { description: next });
+      } else {
+        renderTasks();
+      }
+    }, true);
+
+    const promptInput = document.createElement("textarea");
+    promptInput.className = "note-input subtask-editor-prompt";
+    promptInput.rows = 2;
+    promptInput.placeholder = "Prompt (leave empty — not startable)";
+    promptInput.value = subtask.prompt ?? "";
+    bindCommitOnBlurOrEnter(promptInput, () => {
+      const next = promptInput.value.trim();
+      if (next !== (subtask.prompt ?? "")) {
+        updateSubtask(subtask.subtaskId, { prompt: next });
+      } else {
+        renderTasks();
+      }
+    }, true);
+
+    const autoLabel = el("label", "checkbox-row subtask-auto-checkbox-row");
+    const autoCheckbox = document.createElement("input");
+    autoCheckbox.type = "checkbox";
+    autoCheckbox.checked = subtask.autoStart;
+    autoCheckbox.addEventListener("change", () => {
+      updateSubtask(subtask.subtaskId, { autoStart: autoCheckbox.checked });
+    });
+    const autoLabelText = el("span");
+    autoLabelText.textContent = "Auto-start when dependencies finish";
+    autoLabel.append(autoCheckbox, autoLabelText);
+
+    const columnRow = el("div", "subtask-editor-column-row");
+    const columnLabel = el("span", "subtask-editor-column-label");
+    columnLabel.textContent = "Column:";
+    const pill = columnPill(subtask.columnId, (columnId) => moveCard("subtask", subtask.subtaskId, columnId));
+    columnRow.append(columnLabel, pill);
+
+    const del = inlineConfirmButton("🗑", "Confirm", () => void deleteSubtask(subtask.subtaskId), "icon-button danger subtask-delete");
+    del.title = "Delete subtask (requires confirmation)";
+
+    editor.append(titleInput, descriptionInput, promptInput, autoLabel, columnRow, del);
+    return editor;
+  }
+
+  /**
+   * Wires the exact commit-on-blur-or-Enter, revert-on-Escape gesture shared by
+   * `beginTaskRename`/`beginTaskNoteEdit` onto an arbitrary input/textarea.
+   * `multiline` (textarea) commits on plain Enter without Shift, like the task
+   * note editor; a plain text input commits on any Enter.
+   */
+  function bindCommitOnBlurOrEnter(
+    field: HTMLInputElement | HTMLTextAreaElement,
+    commit: () => void,
+    multiline = false
+  ): void {
+    let done = false;
+    const runCommit = (save: boolean): void => {
+      if (done) return;
+      done = true;
+      if (save) {
+        commit();
+      } else {
+        renderTasks();
+      }
+    };
+    field.addEventListener("keydown", ((event: KeyboardEvent) => {
+      event.stopPropagation();
+      if (event.key === "Enter" && (!multiline || !event.shiftKey)) {
+        event.preventDefault();
+        runCommit(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        runCommit(false);
+      }
+    }) as EventListener);
+    field.addEventListener("blur", () => runCommit(true));
+  }
+
+  /** Sends `subtask.update` for the changed field(s); re-renders from the refreshed parent task. */
+  function updateSubtask(
+    subtaskId: string,
+    patch: { title?: string; description?: string; prompt?: string; autoStart?: boolean; columnId?: string }
+  ): void {
+    void request({ type: "subtask.update", subtaskId, ...patch }).then((response) => {
+      if (!response.ok) {
+        ctx.bridge.chat.logChat(`update subtask failed: ${response.error.message}`);
+        renderTasks();
+        return;
+      }
+      if (response.payload.type === "subtask.update") {
+        upsertTask(state, response.payload.task);
+        renderTasks();
+        ctx.persist();
+      }
+    });
+  }
+
+  async function deleteSubtask(subtaskId: string): Promise<void> {
+    const response = await request({ type: "subtask.delete", subtaskId });
+    if (!response.ok) {
+      ctx.bridge.chat.logChat(`delete subtask failed: ${response.error.message}`);
+      return;
+    }
+    if (response.payload.type === "subtask.delete") {
+      upsertTask(state, response.payload.task);
+      renderTasks();
+      ctx.persist();
+    }
   }
 
   /** Compact linked-chat row inside a task: selects+jumps; ✕ unlinks. */
@@ -1171,7 +1545,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     textarea.focus();
   }
 
-  function updateTask(taskId: string, patch: { title?: string; description?: string; state?: WorkTaskState }): void {
+  function updateTask(taskId: string, patch: { title?: string; description?: string }): void {
     void request({ type: "task.update", taskId, ...patch }).then((response) => {
       if (!response.ok) {
         ctx.bridge.chat.logChat(`task update failed: ${response.error.message}`);
@@ -1180,6 +1554,27 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       }
       if (response.payload.type === "task.update") {
         upsertTask(state, response.payload.task);
+        renderTasks();
+        renderSessions();
+        ctx.persist();
+      }
+    });
+  }
+
+  /**
+   * Moves a task or subtask card to a different column (the column-pill
+   * dropdown's pick handler). The response carries the whole refreshed board —
+   * upsert every task (there is no single-task shape here) then re-render.
+   */
+  function moveCard(cardKind: "task" | "subtask", id: string, columnId: string): void {
+    void request({ type: "board.moveCard", cardKind, id, columnId }).then((response) => {
+      if (!response.ok) {
+        ctx.bridge.chat.logChat(`move card failed: ${response.error.message}`);
+        renderTasks();
+        return;
+      }
+      if (response.payload.type === "board.moveCard") {
+        upsertTasks(state, response.payload.board.tasks);
         renderTasks();
         renderSessions();
         ctx.persist();
@@ -1270,14 +1665,29 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       for (const candidate of pending) memoryPending.append(memoryCard(candidate));
     }
 
-    memoryApproved.summaryLabel.textContent = `Approved (${String(approved.length)})`;
+    memoryApproved.summaryLabel.textContent = `Memories (${String(approved.length)})`;
     memoryApproved.details.classList.toggle("hidden", approved.length === 0);
     memoryApprovedList.replaceChildren();
     for (const candidate of approved) {
-      const row = el("div", "memory-approved-row");
-      row.textContent = candidate.content;
-      memoryApprovedList.append(row);
+      memoryApprovedList.append(memoryApprovedRow(candidate));
     }
+  }
+
+  /** One approved memory row: content snippet + an Open affordance for the read-only virtual doc. */
+  function memoryApprovedRow(candidate: MemoryCandidateSummary): HTMLElement {
+    const row = el("div", "memory-approved-row");
+    const content = el("span", "memory-approved-content");
+    content.textContent = candidate.content;
+    const open = button("Open", "ghost small");
+    open.addEventListener("click", () => {
+      void request({ type: "memory.open", memoryCandidateId: candidate.memoryCandidateId }).then((response) => {
+        if (!response.ok) {
+          ctx.bridge.chat.logChat(`open memory failed: ${response.error.message}`);
+        }
+      });
+    });
+    row.append(content, open);
+    return row;
   }
 
   /** One pending memory candidate: content + source session + Approve / Reject. */
@@ -1320,7 +1730,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     sessionsList.replaceChildren();
     const unassigned = unassignedSessions();
     unassignedSessionsSection.details.classList.toggle("hidden", unassigned.length === 0);
-    unassignedSessionsSection.summaryLabel.textContent = `Chats needing a task (${String(unassigned.length)})`;
+    unassignedSessionsSection.summaryLabel.textContent = `Orphaned Chats (${String(unassigned.length)})`;
     if (unassigned.length === 0) {
       return;
     }
@@ -1707,10 +2117,14 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     void loadSessions();
     void loadTasks();
     void loadMemory();
+    void loadBoardColumns();
   }
 
   // Boot-load memory candidates (also re-hydrated on every tab refresh).
   void loadMemory();
+  // Boot-load board columns (also re-hydrated on every tab refresh); drives the
+  // column pill on task/subtask rows.
+  void loadBoardColumns();
 
   return { root, render, refresh, renderAttention };
 }

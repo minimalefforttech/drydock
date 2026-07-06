@@ -42,6 +42,7 @@ import {
   applyMigrations,
   SqliteAccessRequestStore,
   SqliteAgentQuestionStore,
+  SqliteBoardColumnStore,
   SqliteChatSessionStore,
   SqliteConnection,
   SqliteDiffBaselineStore,
@@ -51,13 +52,15 @@ import {
   SqliteProjectCatalogStore,
   SqliteReviewStore,
   SqliteRuntimeInventoryStore,
+  SqliteSubtaskStore,
   SqliteWorkSessionStore,
   SqliteWorkspaceSetStore,
   SqliteWorkTaskStore
 } from "@drydock/storage-sqlite";
-import { MemoryService, ProjectCatalogService, TaskService, WorkspaceSetService } from "@drydock/work-management";
+import { BoardService, MemoryService, ProjectCatalogService, SubtaskOrchestrator, SubtaskService, TaskService, WorkspaceSetService } from "@drydock/work-management";
 import { PlanDocsAppService } from "./services/planDocsAppService.js";
 import { IsolatedRunService } from "./services/isolatedRunService.js";
+import { createSubtaskRunBridge } from "./services/subtaskRunBridge.js";
 import { TaskReviewAppService } from "./services/taskReviewAppService.js";
 import { WorkInsightsAppService } from "./services/workInsightsAppService.js";
 import { WorkspaceReviewAppService } from "./services/workspaceReviewAppService.js";
@@ -69,6 +72,9 @@ export interface BackendReady {
   readonly planDocs: PlanDocsAppService;
   readonly taskReview: TaskReviewAppService;
   readonly tasks: TaskService;
+  readonly board: BoardService;
+  readonly subtasks: SubtaskService;
+  readonly orchestrator: SubtaskOrchestrator;
   readonly questions: AgentQuestionService;
   readonly memory: MemoryService;
   readonly workInsights: WorkInsightsAppService;
@@ -214,11 +220,29 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   const accessRequests = new AccessRequestService({ ids, clock, store: new SqliteAccessRequestStore(connection), deniedPaths });
   // Agent questions (attention stack): same protocol family as access requests.
   const questions = new AgentQuestionService({ ids, clock, store: new SqliteAgentQuestionStore(connection) });
+  // Task board and subtasks: board columns are global, seeded with six
+  // defaults by the migration; subtasks are child work items of exactly one
+  // task. Both share the same connection as every other store.
+  const workTaskStore = new SqliteWorkTaskStore(connection);
+  const boardColumnStore = new SqliteBoardColumnStore(connection);
+  const subtaskStore = new SqliteSubtaskStore(connection);
+  const board = new BoardService({ ids, store: boardColumnStore, tasks: workTaskStore, subtasks: subtaskStore });
+  // The bus lets moveCard announce "card-entered-done" (cascade trigger) and
+  // board mutations announce "board-changed" for the panel to re-fetch.
+  const subtasks = new SubtaskService({ ids, clock, store: subtaskStore, tasks: workTaskStore, columns: boardColumnStore, bus });
   // Internal work tasks (chat-panel redesign, Phase 2). Shares the same
   // ids/clock/connection as every other service so ids stay uniform and links
   // reference live workspace-set and session rows. The work-session store
-  // powers touch history and each task's lastWorkedAt.
-  const tasks = new TaskService({ ids, clock, store: new SqliteWorkTaskStore(connection), workSessions: workSessionStore });
+  // powers touch history and each task's lastWorkedAt; the subtask store
+  // powers cascading subtask deletion when a task is deleted.
+  const tasks = new TaskService({
+    ids,
+    clock,
+    store: workTaskStore,
+    columns: boardColumnStore,
+    workSessions: workSessionStore,
+    subtasks: subtaskStore
+  });
   const workInsights = new WorkInsightsAppService({ workSessions: workSessionStore, tasks, chatService, workspaceSets });
   const diff = new SessionDiffService({
     ids,
@@ -244,6 +268,24 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   // routes the reviewer's comments back as revision turns. It reads only
   // projections and satisfies its ports structurally from the concrete services.
   const taskReview = new TaskReviewAppService({ logger, tasks, sessions: appService, diffs: workspaceReview, review });
+  // Subtask auto-start orchestration (task board, Orchestration phase): the
+  // bridge starts an isolated chat session exactly like the panel's chat.start
+  // flow (session + baselines + detached first turn); the orchestrator
+  // subscribes to the bus, moves cards on completion, and cascades to
+  // autoStart dependents. Its link port pairs TaskService.link (records the
+  // session->subtask link) with the store's listLinks (resolves a completed
+  // session back to its subtask).
+  const orchestrator = new SubtaskOrchestrator({
+    subtasks,
+    board,
+    links: {
+      link: (taskId, target) => tasks.link(taskId, target),
+      listLinks: () => workTaskStore.listLinks()
+    },
+    bus,
+    startRun: createSubtaskRunBridge({ logger, sessions: appService, workspaces: workspaceReview, taskLinks: workTaskStore }),
+    logger
+  });
 
   // Agent final-text detection: a session's final agent text may carry fenced
   // access-request blocks (mount asks) and/or memory-candidate blocks (durable
@@ -393,6 +435,9 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     planDocs,
     taskReview,
     tasks,
+    board,
+    subtasks,
+    orchestrator,
     memory,
     workInsights,
     bus,
@@ -400,8 +445,10 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     sbxDisplayPath: sbxPath,
     stateRootPath,
     dispose: () => {
-      // Stop the heartbeat before closing the DB so no tick writes to a closed
-      // connection during window teardown.
+      // Drop the orchestrator's bus subscription and stop the heartbeat before
+      // closing the DB so no handler or tick writes to a closed connection
+      // during window teardown.
+      orchestrator.dispose();
       stopHeartbeats();
       try {
         connection.close();

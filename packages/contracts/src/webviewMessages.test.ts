@@ -411,3 +411,178 @@ test("memory.list and memory.resolve validate their fields", () => {
   assert.equal(parsePanelRequest(wrap({ type: "memory.resolve", memoryCandidateId: "", approve: true })), null);
   assert.equal(parsePanelRequest(wrap({ type: "memory.resolve", approve: true })), null);
 });
+
+test("memory.open validates a bounded memoryCandidateId", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "memory.open", memoryCandidateId: "memory-1" })));
+  assert.equal(parsePanelRequest(wrap({ type: "memory.open" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "memory.open", memoryCandidateId: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "memory.open", memoryCandidateId: 42 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "memory.open", memoryCandidateId: "x".repeat(201) })), null);
+});
+
+test("board.state and taskBoard.open take no payload fields", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "board.state" })));
+  assert.ok(parsePanelRequest(wrap({ type: "taskBoard.open" })));
+});
+
+test("board.moveCard validates cardKind, id, and columnId", () => {
+  const task = parsePanelRequest(wrap({ type: "board.moveCard", cardKind: "task", id: "task-1", columnId: "col-todo" }));
+  assert.ok(task);
+  assert.deepEqual(
+    task.payload.type === "board.moveCard" ? task.payload : undefined,
+    { type: "board.moveCard", cardKind: "task", id: "task-1", columnId: "col-todo" }
+  );
+  assert.ok(parsePanelRequest(wrap({ type: "board.moveCard", cardKind: "subtask", id: "subtask-1", columnId: "col-todo" })));
+  // An unknown cardKind, missing id, or missing columnId is rejected.
+  assert.equal(parsePanelRequest(wrap({ type: "board.moveCard", cardKind: "epic", id: "task-1", columnId: "col-todo" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "board.moveCard", cardKind: "task", columnId: "col-todo" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "board.moveCard", cardKind: "task", id: "task-1" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "board.moveCard", cardKind: "task", id: "", columnId: "col-todo" })), null);
+});
+
+test("board.columns.update validates every column entry in the array", () => {
+  const parsed = parsePanelRequest(wrap({
+    type: "board.columns.update",
+    columns: [
+      { columnId: "col-backlog", name: "Backlog", category: "backlog", sortOrder: 0 },
+      { name: "New Column", category: "pending", sortOrder: 1 }
+    ]
+  }));
+  assert.ok(parsed);
+  assert.deepEqual(
+    parsed.payload.type === "board.columns.update" ? [...parsed.payload.columns] : undefined,
+    [
+      { columnId: "col-backlog", name: "Backlog", category: "backlog", sortOrder: 0 },
+      { name: "New Column", category: "pending", sortOrder: 1 }
+    ]
+  );
+  // Not an array, an empty name, an unknown category, or a non-numeric sortOrder
+  // anywhere in the list rejects the whole request.
+  assert.equal(parsePanelRequest(wrap({ type: "board.columns.update", columns: "nope" })), null);
+  assert.equal(parsePanelRequest(wrap({
+    type: "board.columns.update",
+    columns: [{ name: "", category: "backlog", sortOrder: 0 }]
+  })), null);
+  assert.equal(parsePanelRequest(wrap({
+    type: "board.columns.update",
+    columns: [{ name: "Weird", category: "someday", sortOrder: 0 }]
+  })), null);
+  assert.equal(parsePanelRequest(wrap({
+    type: "board.columns.update",
+    columns: [{ name: "Weird", category: "backlog", sortOrder: "first" }]
+  })), null);
+});
+
+test("board.columns.update accepts an optional deletedColumnIds array", () => {
+  const parsed = parsePanelRequest(wrap({
+    type: "board.columns.update",
+    columns: [{ columnId: "col-backlog", name: "Backlog", category: "backlog", sortOrder: 0 }],
+    deletedColumnIds: ["col-blocked", "col-review"]
+  }));
+  assert.ok(parsed);
+  assert.deepEqual(
+    parsed.payload.type === "board.columns.update" ? parsed.payload.deletedColumnIds : undefined,
+    ["col-blocked", "col-review"]
+  );
+
+  // Absent deletedColumnIds is fine (undefined, not required).
+  const withoutDeletes = parsePanelRequest(wrap({
+    type: "board.columns.update",
+    columns: [{ columnId: "col-backlog", name: "Backlog", category: "backlog", sortOrder: 0 }]
+  }));
+  assert.ok(withoutDeletes);
+  assert.equal(
+    withoutDeletes.payload.type === "board.columns.update" ? withoutDeletes.payload.deletedColumnIds : "missing",
+    undefined
+  );
+
+  // Not an array, or any non-bounded-string entry, rejects the whole request.
+  assert.equal(parsePanelRequest(wrap({
+    type: "board.columns.update",
+    columns: [{ columnId: "col-backlog", name: "Backlog", category: "backlog", sortOrder: 0 }],
+    deletedColumnIds: "col-blocked"
+  })), null);
+  assert.equal(parsePanelRequest(wrap({
+    type: "board.columns.update",
+    columns: [{ columnId: "col-backlog", name: "Backlog", category: "backlog", sortOrder: 0 }],
+    deletedColumnIds: ["col-blocked", ""]
+  })), null);
+});
+
+test("subtask.create validates taskId, title, and the optional prompt/autoStart fields", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "subtask.create", taskId: "task-1", title: "Draft outline" })));
+  const full = parsePanelRequest(wrap({
+    type: "subtask.create",
+    taskId: "task-1",
+    title: "Draft outline",
+    description: "notes",
+    prompt: "Write the outline",
+    autoStart: true
+  }));
+  assert.ok(full);
+  assert.deepEqual(
+    full.payload.type === "subtask.create" ? full.payload : undefined,
+    {
+      type: "subtask.create",
+      taskId: "task-1",
+      title: "Draft outline",
+      description: "notes",
+      prompt: "Write the outline",
+      autoStart: true
+    }
+  );
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.create", taskId: "task-1", title: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.create", title: "Draft outline" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.create", taskId: "task-1", title: "Draft outline", autoStart: "yes" })), null);
+});
+
+test("subtask.update requires at least one field and clears description/prompt with empty string", () => {
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1" })), null);
+  assert.ok(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", title: "Renamed" })));
+  const clearedPrompt = parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", prompt: "" }));
+  assert.ok(clearedPrompt);
+  assert.equal(clearedPrompt.payload.type === "subtask.update" ? clearedPrompt.payload.prompt : undefined, "");
+  const clearedDescription = parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", description: "" }));
+  assert.ok(clearedDescription);
+  assert.equal(clearedDescription.payload.type === "subtask.update" ? clearedDescription.payload.description : undefined, "");
+  assert.ok(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", autoStart: false })));
+  assert.ok(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", columnId: "col-todo" })));
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", autoStart: "true" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "" , title: "Renamed" })), null);
+});
+
+test("subtask.delete validates a bounded subtaskId", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "subtask.delete", subtaskId: "subtask-1" })));
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.delete" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.delete", subtaskId: "" })), null);
+});
+
+test("subtask.dependency.add/remove validate taskId and both subtask ids", () => {
+  for (const type of ["subtask.dependency.add", "subtask.dependency.remove"] as const) {
+    const parsed = parsePanelRequest(wrap({ type, taskId: "task-1", fromSubtaskId: "sub-a", toSubtaskId: "sub-b" }));
+    assert.ok(parsed);
+    assert.equal(parsed.payload.type, type);
+    assert.deepEqual(
+      parsed.payload.type === type ? parsed.payload : undefined,
+      { type, taskId: "task-1", fromSubtaskId: "sub-a", toSubtaskId: "sub-b" }
+    );
+    assert.equal(parsePanelRequest(wrap({ type, fromSubtaskId: "sub-a", toSubtaskId: "sub-b" })), null);
+    assert.equal(parsePanelRequest(wrap({ type, taskId: "task-1", toSubtaskId: "sub-b" })), null);
+    assert.equal(parsePanelRequest(wrap({ type, taskId: "task-1", fromSubtaskId: "sub-a" })), null);
+  }
+});
+
+test("subtask.start accepts an optional force flag", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "subtask.start", subtaskId: "subtask-1" })));
+  const forced = parsePanelRequest(wrap({ type: "subtask.start", subtaskId: "subtask-1", force: true }));
+  assert.ok(forced);
+  assert.equal(forced.payload.type === "subtask.start" ? forced.payload.force : undefined, true);
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.start", subtaskId: "subtask-1", force: "yes" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.start" })), null);
+});
+
+test("task.start validates a bounded taskId", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "task.start", taskId: "task-1" })));
+  assert.equal(parsePanelRequest(wrap({ type: "task.start" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "task.start", taskId: "" })), null);
+});

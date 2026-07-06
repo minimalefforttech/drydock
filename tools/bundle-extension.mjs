@@ -76,6 +76,22 @@ await esbuild([
   `--outfile=${path.join(distRoot, "webview", "taskReview.css")}`
 ]);
 
+// Task-board panel: browser IIFE + styles. Same shape as the plan-docs
+// pair — a standalone editor-panel entry, contracts bundled in.
+await esbuild([
+  path.join(extensionRoot, "webview-ui", "src", "taskBoard.ts"),
+  "--bundle",
+  "--platform=browser",
+  "--format=iife",
+  "--target=es2022",
+  `--outfile=${path.join(distRoot, "webview", "taskBoard.js")}`
+]);
+await esbuild([
+  path.join(extensionRoot, "webview-ui", "src", "taskBoard.css"),
+  "--bundle",
+  `--outfile=${path.join(distRoot, "webview", "taskBoard.css")}`
+]);
+
 // Mermaid renderer: a separate, minified bundle the plan-docs webview injects
 // lazily (nonce via data attribute) only when a document contains a diagram —
 // keeping the ~MB parse cost out of every panel open.

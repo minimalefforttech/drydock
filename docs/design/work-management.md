@@ -12,7 +12,7 @@ Product state lives in configured state stores. VS Code workspace folders are on
 - `WorkspaceSet`: a named set of projects used together for a body of work. This is product-owned and not the same thing as a VS Code `.code-workspace` file.
 - `WorkspaceProjection`: the currently active VS Code folders derived from a workspace set.
 - `Task`: work item from the internal task tracker or an external provider.
-- `MiniTask`: a scoped child work item created from review comments, repeated feedback, or a blocked verification step.
+- `MiniTask`: a scoped child work item created from review comments, repeated feedback, or a blocked verification step. Absorbed by `Subtask` (`origin: "review"`) — see `task-board-and-subtasks.md`.
 - `TaskWorkspaceLink`: relation between a task and one or more workspace sets or projects.
 - `TaskWorkSession`: a durable record that a task was worked on in a workspace set during a time range.
 - `DayPlan`: a dated plan that schedules tasks, multi-day spans, notes, pushes, and interruptions.
@@ -158,6 +158,9 @@ When a user works on a task:
 
 Review-driven mini tasks:
 
+- Implementation note: mini tasks ship as subtasks with `origin: "review"` on
+  the task board (`task-board-and-subtasks.md`); the rules below describe the
+  review-driven creation flow, not a separate record type.
 - A mini task belongs to a parent task and links back to one or more review threads.
 - Mini tasks are used for scoped follow-up work, such as "apply this review comment across similar files" or "update docs to reflect this new expectation."
 - Mini tasks inherit the workspace set, review scope, and runtime policy of the parent work unless explicitly narrowed.

@@ -2161,6 +2161,270 @@ h4.md-heading { font-size: 1em; }
   background: var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
 }
 
+/* --------------------------------------------------------------------------
+   Task Board / subtasks: column pill, category tinting, subtask checklist,
+   and the Board entry points.
+   -------------------------------------------------------------------------- */
+
+.tasks-heading-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tasks-heading-row h3 {
+  flex: 1;
+  margin: 0;
+}
+
+.tasks-board-button {
+  flex: 0 0 auto;
+}
+
+.task-open-board {
+  opacity: 0.7;
+}
+
+.task-open-board:hover {
+  opacity: 1;
+}
+
+/* Category tint palette — one CSS var per category, reusing accents already
+   established elsewhere in this file (mode-read-write green for done, the
+   warning accent for pending, charts-blue for in-progress, a quiet neutral
+   for backlog). Applied to both the column pill and the subtask status pill. */
+.column-tint-backlog {
+  background: var(--vscode-badge-background);
+  color: var(--vscode-descriptionForeground, var(--vscode-badge-foreground));
+  border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+}
+
+.column-tint-pending {
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 16%, transparent);
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 42%, transparent);
+}
+
+.column-tint-in-progress {
+  background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 18%, transparent);
+  color: var(--vscode-charts-blue, #3794ff);
+  border-color: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 42%, transparent);
+}
+
+.column-tint-done {
+  background: color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 18%, transparent);
+  color: var(--vscode-testing-iconPassed, #73c991);
+  border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 42%, transparent);
+}
+
+/* Column pill: a small tinted button (task card top row / subtask row) that
+   opens a grouped dropdown on click, mirroring the `.task-session-dropdown`
+   `<details>` pattern used for the linked-chats disclosure. */
+.column-pill-dropdown {
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.column-pill {
+  display: inline-block;
+  cursor: pointer;
+  list-style: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  font-size: 0.8em;
+  white-space: nowrap;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.column-pill::-webkit-details-marker {
+  display: none;
+}
+
+.column-pill:hover {
+  filter: brightness(1.1);
+}
+
+.column-pill-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 2px);
+  right: 0;
+  min-width: 160px;
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.column-pill-group-header {
+  font-size: 0.72em;
+  font-weight: 600;
+  opacity: 0.6;
+  padding: 3px 6px 1px;
+  text-transform: uppercase;
+}
+
+.column-pill-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 0.85em;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.column-pill-option:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.column-pill-option.selected {
+  font-weight: 600;
+}
+
+/* Subtasks checklist block inside a task card. */
+.subtasks-section {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
+}
+
+.subtasks-header {
+  font-size: 0.72em;
+  font-weight: 600;
+  opacity: 0.65;
+  letter-spacing: 0.02em;
+  margin-bottom: 4px;
+}
+
+.subtasks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.subtask-row {
+  border-radius: 3px;
+}
+
+.subtask-row.expanded {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.08));
+}
+
+.subtask-summary-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 4px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.subtask-summary-line:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+}
+
+.subtask-summary-line:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, var(--vscode-button-background));
+  outline-offset: 1px;
+}
+
+.subtask-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9em;
+}
+
+.subtask-lock {
+  flex: 0 0 auto;
+  font-size: 0.85em;
+  opacity: 0.85;
+}
+
+.subtask-auto-chip {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  font-size: 0.72em;
+  opacity: 0.8;
+}
+
+.subtask-status-pill {
+  flex: 0 0 auto;
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.75em;
+  white-space: nowrap;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.subtask-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 4px 8px 22px;
+}
+
+.subtask-editor-title {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.subtask-editor-description,
+.subtask-editor-prompt {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.subtask-auto-checkbox-row {
+  margin: 0;
+}
+
+.subtask-editor-column-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.subtask-editor-column-label {
+  font-size: 0.82em;
+  opacity: 0.7;
+}
+
+.subtask-delete {
+  align-self: flex-start;
+}
+
+.subtask-add-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.subtask-add-row .text-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .session-card-tasks {
   margin-top: 4px;
 }
@@ -2658,6 +2922,14 @@ h4.md-heading { font-size: 1em; }
 }
 
 .memory-approved-row {
-  word-break: break-word;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   opacity: 0.8;
+}
+
+.memory-approved-content {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
 }

@@ -29,6 +29,13 @@ What's shipped and what's next for Drydock.
 - **Attention stack** — agent questions and access requests share one paged
   card slot (question plus recommended answers plus free-text, or the
   typed-confirm access flow), wired to badges and toasts.
+- **Task board & subtasks** — tasks and per-task subtasks as independent
+  cards on a configurable kanban panel (fixed behaviour categories, an age
+  filter over finished work, Review→Finished as a manual gate); same-task
+  dependency edges drawn dot-to-dot with live boundary grey-out and cycle
+  rejection; per-subtask auto-start flags cascade prompt-backed runs in
+  parallel as upstream chats finish (Backlog never auto-starts, Force start
+  is manual-only). Work-tab memories open as read-only documents.
 
 ## Next
 
@@ -54,3 +61,7 @@ What's shipped and what's next for Drydock.
   routing.
 - Legacy cleanup: retire the old sidebar plan-block approval flow and the
   docs-review backend once their replacements fully cover the same ground.
+- Bring the plan-docs surface visually closer to the task-board design
+  language: kicker/eyebrow hierarchy, annotated mockups with numbered
+  callouts, behaviour tables, and phased delivery lists (see
+  `docs/design/task-board-and-subtasks.md`).

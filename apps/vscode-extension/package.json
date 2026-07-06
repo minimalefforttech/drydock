@@ -77,6 +77,10 @@
         "title": "Drydock: Open Task Review"
       },
       {
+        "command": "drydock.taskBoard.open",
+        "title": "Drydock: Open Task Board"
+      },
+      {
         "command": "drydock.taskReview.addComment",
         "title": "Task Review: Add Review Comment"
       },

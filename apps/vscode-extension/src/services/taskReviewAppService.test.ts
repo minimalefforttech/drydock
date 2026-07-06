@@ -161,15 +161,17 @@ async function makeHarness(): Promise<Harness> {
 /** Registers a task record + summary linking the given sessions. */
 function seedTask(harness: Harness, taskId: string, title: string, linkedSessionIds: string[]): void {
   const now = new Date().toISOString();
-  harness.tasks.tasks.set(taskId, { taskId: asId<"TaskId">(taskId), title, state: "todo", createdAt: now, updatedAt: now });
+  harness.tasks.tasks.set(taskId, { taskId: asId<"TaskId">(taskId), title, state: "todo", columnId: asId<"ColumnId">("col-todo"), createdAt: now, updatedAt: now });
   harness.tasks.summaries.push({
     taskId: asId<"TaskId">(taskId),
     title,
     state: "todo",
+    columnId: asId<"ColumnId">("col-todo"),
     linkedWorkspaceSetIds: [],
     linkedSessionIds: linkedSessionIds.map((id) => asId<"SessionId">(id)),
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    subtasks: []
   });
 }
 

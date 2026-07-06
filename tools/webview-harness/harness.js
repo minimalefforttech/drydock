@@ -125,9 +125,46 @@
     }
   ];
 
+  // Board columns (task board and subtasks): the 6 seeded defaults,
+  // sortOrder 0..5 in this order.
+  const boardColumns = [
+    { columnId: "col-backlog", name: "Backlog", category: "backlog", sortOrder: 0 },
+    { columnId: "col-todo", name: "ToDo", category: "pending", sortOrder: 1 },
+    { columnId: "col-blocked", name: "Blocked", category: "pending", sortOrder: 2 },
+    { columnId: "col-in-progress", name: "In Progress", category: "in-progress", sortOrder: 3 },
+    { columnId: "col-review", name: "Review", category: "done", sortOrder: 4 },
+    { columnId: "col-finished", name: "Finished", category: "done", sortOrder: 5 }
+  ];
+
   const tasks = [
-    { taskId: "t-1", title: "Alembic publish support", description: "4 repos: db, api, maya, houdini", state: "in-progress", linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: ["s-live", "s-clone"], createdAt: iso(200), updatedAt: iso(5), lastWorkedAt: iso(2), openReviewCommentCount: 1 },
-    { taskId: "t-2", title: "Upgrade farm python to 3.12", state: "todo", linkedWorkspaceSetIds: [], linkedSessionIds: [], createdAt: iso(400), updatedAt: iso(400) }
+    {
+      taskId: "t-1", title: "Alembic publish support", description: "4 repos: db, api, maya, houdini", state: "in-progress", columnId: "col-in-progress", linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: ["s-live", "s-clone"], createdAt: iso(200), updatedAt: iso(5), lastWorkedAt: iso(2), openReviewCommentCount: 1,
+      subtasks: [
+        { subtaskId: "st-1", taskId: "t-1", title: "Patch alembic exporter", description: "exporters/alembic.py", prompt: "Patch exporters/alembic.py to support alembic caches.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(190), updatedAt: iso(5), isBlocked: false, dependsOn: [], isRunning: true, linkedSessionIds: ["s-live"] },
+        { subtaskId: "st-2", taskId: "t-1", title: "Update allowlist config", description: "", prompt: "", autoStart: true, origin: "manual", columnId: "col-todo", sortOrder: 1, createdAt: iso(188), updatedAt: iso(188), isBlocked: true, dependsOn: ["st-1"], isRunning: false, linkedSessionIds: [] },
+        { subtaskId: "st-3", taskId: "t-1", title: "Review sweep", description: "", origin: "review", autoStart: false, columnId: "col-review", sortOrder: 2, createdAt: iso(100), updatedAt: iso(20), doneAt: iso(20), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [] }
+      ]
+    },
+    {
+      taskId: "t-2", title: "Upgrade farm python to 3.12", state: "todo", columnId: "col-backlog", linkedWorkspaceSetIds: [], linkedSessionIds: [], createdAt: iso(400), updatedAt: iso(400),
+      subtasks: [
+        { subtaskId: "st-4", taskId: "t-2", title: "Audit farm_submit for py2-only syntax", description: "", prompt: "", autoStart: false, origin: "manual", columnId: "col-backlog", sortOrder: 0, createdAt: iso(400), updatedAt: iso(400), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [] }
+      ]
+    },
+    // Task-board cast (taskBoard.html): a task sitting in Review (recent doneAt
+    // → visible at the default 1-day age filter) with one startable subtask
+    // still in flight and one finished ~2 days ago (col-finished, aged doneAt →
+    // hides behind the per-column "1 hidden · Show" counter by default).
+    {
+      taskId: "t-3", title: "Task board rollout", state: "review", columnId: "col-review", doneAt: iso(45), linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: [], createdAt: iso(3200), updatedAt: iso(45),
+      subtasks: [
+        // st-5 depends on the already-finished st-6 (an edge to a done sibling
+        // is allowed — instantly satisfied) and wears a failed chip from a
+        // cancelled earlier run; drives the board's edge + failed visuals.
+        { subtaskId: "st-5", taskId: "t-3", title: "Draft board announcement", description: "", prompt: "Write the internal rollout note for the task board.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(3100), updatedAt: iso(60), isBlocked: false, dependsOn: ["st-6"], isRunning: false, lastFailureAt: iso(55), linkedSessionIds: [] },
+        { subtaskId: "st-6", taskId: "t-3", title: "Spike column persistence", description: "", prompt: "", autoStart: false, origin: "manual", columnId: "col-finished", sortOrder: 1, createdAt: iso(3100), updatedAt: iso(2980), doneAt: iso(2980), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [] }
+      ]
+    }
   ];
 
   // Attention-stack questions: two pending on s-live (stacks with the two
@@ -230,6 +267,17 @@
     };
   }
 
+  /** Recomputes each subtask's isBlocked from dependsOn, mirroring the host. */
+  function recomputeBlocked(task) {
+    const doneColumns = new Set(boardColumns.filter((c) => c.category === "done").map((c) => c.columnId));
+    for (const subtask of task.subtasks) {
+      subtask.isBlocked = (subtask.dependsOn ?? []).some((id) => {
+        const upstream = task.subtasks.find((s) => s.subtaskId === id);
+        return upstream !== undefined && !doneColumns.has(upstream.columnId);
+      });
+    }
+  }
+
   /** Appends a line to the harness log (console + a queryable buffer for tests). */
   function harnessLog(line) {
     (window.__harness.log ??= []).push(line);
@@ -248,7 +296,11 @@
     dispatch({ protocolVersion: PROTOCOL, kind: "push", sequence: pushSequence, payload });
   }
   function dispatch(message) {
-    setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: message })), 25);
+    // Deep-copy the payload: the real webview boundary structured-clones every
+    // message, so panels must never share object references with the host
+    // fixtures (console fixture surgery would otherwise mutate panel state).
+    const detached = JSON.parse(JSON.stringify(message));
+    setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: detached })), 25);
   }
 
   function summaryOfTask(task) { return task; }
@@ -439,7 +491,7 @@
       }
       case "task.list": return respond(requestId, { type, tasks });
       case "task.create": {
-        const task = { taskId: `t-${String(tasks.length + 1)}`, title: payload.title, ...(payload.description ? { description: payload.description } : {}), state: "todo", linkedWorkspaceSetIds: [], linkedSessionIds: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+        const task = { taskId: `t-${String(tasks.length + 1)}`, title: payload.title, ...(payload.description ? { description: payload.description } : {}), state: "todo", columnId: "col-backlog", linkedWorkspaceSetIds: [], linkedSessionIds: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), subtasks: [] };
         tasks.unshift(task);
         return respond(requestId, { type, task: summaryOfTask(task) });
       }
@@ -476,6 +528,160 @@
         push({ type: "task.updated", task });
         return respond(requestId, { type, task });
       }
+      case "board.state":
+        return respond(requestId, { type, board: { columns: boardColumns, tasks } });
+      case "board.moveCard": {
+        // Mirrors the host: doneAt is stamped when a card enters a
+        // done-category column and cleared when it leaves.
+        const targetIsDone = boardColumns.find((c) => c.columnId === payload.columnId)?.category === "done";
+        if (payload.cardKind === "task") {
+          const task = tasks.find((candidate) => candidate.taskId === payload.id);
+          if (!task) return respondError(requestId, "unknown task");
+          task.columnId = payload.columnId;
+          if (targetIsDone) task.doneAt = new Date().toISOString(); else delete task.doneAt;
+          task.updatedAt = new Date().toISOString();
+          push({ type: "task.updated", task });
+        } else {
+          const task = tasks.find((candidate) => candidate.subtasks.some((s) => s.subtaskId === payload.id));
+          if (!task) return respondError(requestId, "unknown subtask");
+          const subtask = task.subtasks.find((s) => s.subtaskId === payload.id);
+          subtask.columnId = payload.columnId;
+          if (targetIsDone) subtask.doneAt = new Date().toISOString(); else delete subtask.doneAt;
+          subtask.updatedAt = new Date().toISOString();
+          recomputeBlocked(task);
+          push({ type: "task.updated", task });
+        }
+        harnessLog(`board.moveCard ${String(payload.cardKind)} ${String(payload.id)} -> ${String(payload.columnId)}`);
+        return respond(requestId, { type, board: { columns: boardColumns, tasks } });
+      }
+      case "board.columns.update": {
+        // Real reconcile simulation so the settings modal's add / rename /
+        // reorder / delete flows are exercisable in the harness. Deletes go
+        // first (mirroring boardShared.reconcileColumns): last-of-category is
+        // rejected with the service's message; a deleted column's cards move
+        // to the nearest remaining same-category column.
+        for (const deletedId of payload.deletedColumnIds ?? []) {
+          const victim = boardColumns.find((c) => c.columnId === deletedId);
+          if (!victim) return respondError(requestId, `Column ${String(deletedId)} was not found.`);
+          const siblings = boardColumns.filter((c) => c.category === victim.category && c.columnId !== victim.columnId);
+          if (siblings.length === 0) {
+            return respondError(requestId, `Cannot delete the last ${String(victim.category)} column; every category needs at least one.`);
+          }
+          const nearest = siblings.reduce((closest, candidate) => (
+            Math.abs(candidate.sortOrder - victim.sortOrder) < Math.abs(closest.sortOrder - victim.sortOrder) ? candidate : closest
+          ));
+          for (const task of tasks) {
+            if (task.columnId === victim.columnId) task.columnId = nearest.columnId;
+            for (const subtask of task.subtasks) {
+              if (subtask.columnId === victim.columnId) subtask.columnId = nearest.columnId;
+            }
+          }
+          boardColumns.splice(boardColumns.indexOf(victim), 1);
+        }
+        for (const entry of payload.columns) {
+          if (entry.columnId === undefined) {
+            boardColumns.push({ columnId: `col-new-${String(boardColumns.length + 1)}`, name: entry.name, category: entry.category, sortOrder: entry.sortOrder });
+            continue;
+          }
+          const existing = boardColumns.find((c) => c.columnId === entry.columnId);
+          if (!existing) return respondError(requestId, `Column ${String(entry.columnId)} was not found.`);
+          existing.name = entry.name;
+          existing.sortOrder = entry.sortOrder;
+        }
+        boardColumns.sort((a, b) => a.sortOrder - b.sortOrder);
+        harnessLog(`board.columns.update columns=${String(payload.columns.length)} deleted=${String((payload.deletedColumnIds ?? []).length)}`);
+        return respond(requestId, { type, board: { columns: boardColumns, tasks } });
+      }
+      case "subtask.create": {
+        const task = tasks.find((candidate) => candidate.taskId === payload.taskId);
+        if (!task) return respondError(requestId, "unknown task");
+        const subtask = {
+          subtaskId: `st-${String(now)}-${String(task.subtasks.length + 1)}`,
+          taskId: payload.taskId,
+          title: payload.title,
+          ...(payload.description ? { description: payload.description } : {}),
+          ...(payload.prompt ? { prompt: payload.prompt } : {}),
+          autoStart: payload.autoStart ?? false,
+          origin: "manual",
+          columnId: boardColumns.find((c) => c.category === "backlog")?.columnId ?? "col-backlog",
+          sortOrder: task.subtasks.length,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          isBlocked: false,
+          dependsOn: [],
+          isRunning: false,
+          linkedSessionIds: []
+        };
+        task.subtasks.push(subtask);
+        task.updatedAt = new Date().toISOString();
+        push({ type: "task.updated", task });
+        return respond(requestId, { type, task });
+      }
+      case "subtask.update": {
+        const task = tasks.find((candidate) => candidate.subtasks.some((s) => s.subtaskId === payload.subtaskId));
+        if (!task) return respondError(requestId, "unknown subtask");
+        const subtask = task.subtasks.find((s) => s.subtaskId === payload.subtaskId);
+        if (payload.title !== undefined) subtask.title = payload.title;
+        if (payload.description !== undefined) { if (payload.description === "") delete subtask.description; else subtask.description = payload.description; }
+        if (payload.prompt !== undefined) { if (payload.prompt === "") delete subtask.prompt; else subtask.prompt = payload.prompt; }
+        if (payload.autoStart !== undefined) subtask.autoStart = payload.autoStart;
+        if (payload.columnId !== undefined) subtask.columnId = payload.columnId;
+        subtask.updatedAt = new Date().toISOString();
+        task.updatedAt = new Date().toISOString();
+        push({ type: "task.updated", task });
+        return respond(requestId, { type, task });
+      }
+      case "subtask.delete": {
+        const task = tasks.find((candidate) => candidate.subtasks.some((s) => s.subtaskId === payload.subtaskId));
+        if (!task) return respondError(requestId, "unknown subtask");
+        task.subtasks = task.subtasks.filter((s) => s.subtaskId !== payload.subtaskId);
+        task.updatedAt = new Date().toISOString();
+        push({ type: "task.updated", task });
+        return respond(requestId, { type, task });
+      }
+      case "subtask.start": {
+        // Mirrors the host: the orchestrator accepts and the board refreshes
+        // via board.changed; here the log line is the observable effect.
+        harnessLog(`subtask.start ${String(payload.subtaskId)}${payload.force ? " (force)" : ""}`);
+        return respond(requestId, { type, accepted: true });
+      }
+      case "task.start": {
+        harnessLog(`task.start ${String(payload.taskId)}`);
+        return respond(requestId, { type, accepted: true });
+      }
+      case "subtask.dependency.add": {
+        const task = tasks.find((candidate) => candidate.taskId === payload.taskId);
+        const subtask = task?.subtasks.find((s) => s.subtaskId === payload.toSubtaskId);
+        if (!task || !subtask) return respondError(requestId, "unknown task or subtask");
+        // Cheap cycle probe so the shake/rejection path is exercisable: a
+        // direct reverse edge is refused like the real DFS validation.
+        const from = task.subtasks.find((s) => s.subtaskId === payload.fromSubtaskId);
+        if (!from) return respondError(requestId, "dependency endpoints must share the task");
+        if ((from.dependsOn ?? []).includes(payload.toSubtaskId)) {
+          return respondError(requestId, "dependency would create a cycle");
+        }
+        if (!subtask.dependsOn.includes(payload.fromSubtaskId)) subtask.dependsOn.push(payload.fromSubtaskId);
+        recomputeBlocked(task);
+        push({ type: "task.updated", task });
+        harnessLog(`subtask.dependency.add ${String(payload.fromSubtaskId)} -> ${String(payload.toSubtaskId)}`);
+        return respond(requestId, { type, task });
+      }
+      case "subtask.dependency.remove": {
+        const task = tasks.find((candidate) => candidate.taskId === payload.taskId);
+        const subtask = task?.subtasks.find((s) => s.subtaskId === payload.toSubtaskId);
+        if (!task || !subtask) return respondError(requestId, "unknown task or subtask");
+        subtask.dependsOn = subtask.dependsOn.filter((id) => id !== payload.fromSubtaskId);
+        recomputeBlocked(task);
+        push({ type: "task.updated", task });
+        harnessLog(`subtask.dependency.remove ${String(payload.fromSubtaskId)} -> ${String(payload.toSubtaskId)}`);
+        return respond(requestId, { type, task });
+      }
+      case "taskBoard.open":
+        // The Task Board panel + command exist, so the relay succeeds (in the
+        // browser harness there is no editor area to reveal — the log line is
+        // the observable effect).
+        harnessLog(`taskBoard.open`);
+        return respond(requestId, { type, accepted: true });
       case "work.history": return respond(requestId, { type, entries: workHistory });
       case "memory.list": return respond(requestId, { type, candidates: memoryCandidates });
       case "memory.resolve": {
@@ -484,6 +690,10 @@
         candidate.status = payload.approve ? "approved" : "rejected";
         return respond(requestId, { type, candidate });
       }
+      case "memory.open":
+        // Log the send so a visual check can assert the Memories "Open" row wiring.
+        harnessLog(`memory.open ${String(payload.memoryCandidateId)}`);
+        return respond(requestId, { type, accepted: true });
       case "planDocs.state": return respond(requestId, { type, sessionId: payload.sessionId, docs: planDocs[payload.sessionId] ?? [] });
       case "planDocs.open": return respond(requestId, { type, accepted: true });
       case "planDocs.sendComments": return respond(requestId, { type, accepted: true, sentCount: 0 });
@@ -557,7 +767,7 @@
   };
 
   window.__harness = {
-    fixtures: { sessions, catalogs, workspacePolicy, diffChanges, cloneRepos, tasks, memoryCandidates, workHistory, taskReviewProjects, taskReviewSessions, taskReviewComments, comments: [
+    fixtures: { sessions, catalogs, workspacePolicy, diffChanges, cloneRepos, tasks, boardColumns, memoryCandidates, workHistory, taskReviewProjects, taskReviewSessions, taskReviewComments, comments: [
       { commentId: "c-1", filePath: "publish_hooks.py", startLine: 12, endLine: 14, body: "Guard the allowlist behind config.", author: "user", status: "open", createdAt: iso(30) }
     ] },
     log: [],
@@ -647,6 +857,14 @@
       /** Fires the task-review refetch push for a task (turn-boundary simulation). */
       taskReviewUpdated(taskId) {
         push({ type: "taskReview.updated", taskId });
+      },
+      /**
+       * Fires the coarse board.changed push (turn-completed / board mutation
+       * simulation) — an open task-board panel refetches board.state. Mutate
+       * `__harness.fixtures.tasks`/`boardColumns` first to see a delta land.
+       */
+      boardChanged() {
+        push({ type: "board.changed" });
       },
       /**
        * Simulates an agent revision so R11's meaningful-refetch announcement is

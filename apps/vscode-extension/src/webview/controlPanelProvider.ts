@@ -44,8 +44,9 @@ import {
   type WorkTaskSummary
 } from "@drydock/contracts";
 import { normalizePathKey, type AgentQuestionService, type Logger, type ProductBusEvent } from "@drydock/core";
-import type { MemoryService, TaskService } from "@drydock/work-management";
-import type { Backend } from "../compositionRoot.js";
+import type { BoardService, MemoryService, SubtaskService, TaskService } from "@drydock/work-management";
+import type { Backend, BackendReady } from "../compositionRoot.js";
+import { buildBoardState, decorateTaskSummary, joinOpenCommentCounts, reconcileColumns } from "./boardShared.js";
 import {
   toRuntimeSummary,
   type ChatWorkspaceContext,
@@ -55,6 +56,7 @@ import type { PlanDocsAppService } from "../services/planDocsAppService.js";
 import type { WorkHistoryFilter, WorkInsightsAppService } from "../services/workInsightsAppService.js";
 import { toAccessRequestSummary, type WorkspaceReviewAppService } from "../services/workspaceReviewAppService.js";
 import { openBaselineDiff } from "./baselineDiff.js";
+import { memoryUri } from "./memoryContentProvider.js";
 import { composePlanDocsSend, toPlanDocDetail, toPlanDocSummary } from "./planDocsShared.js";
 
 export function toChatSessionSummary(record: ChatSessionRecord, runningElsewhere = false): ChatSessionSummary {
@@ -99,10 +101,13 @@ function toFreshWorkTaskSummary(record: WorkTaskRecord): WorkTaskSummary {
     title: record.title,
     ...(record.description === undefined ? {} : { description: record.description }),
     state: record.state,
+    columnId: record.columnId,
+    ...(record.doneAt === undefined ? {} : { doneAt: record.doneAt }),
     linkedWorkspaceSetIds: [],
     linkedSessionIds: [],
     createdAt: record.createdAt,
-    updatedAt: record.updatedAt
+    updatedAt: record.updatedAt,
+    subtasks: []
   };
 }
 
@@ -243,6 +248,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // A proposed memory is not urgent: forward the display-safe summary as
         // its own push, but do NOT flag the session for attention.
         this.push({ type: "memory.candidateAdded", candidate: toMemoryCandidateSummary(event.candidate) });
+        return;
+      case "board-changed":
+        // Coarse board-mutation signal (subtask service, orchestrator cascade,
+        // board panel edits): the Work tab refetches board.state off this push.
+        this.push({ type: "board.changed" });
         return;
       case "inventory-changed":
         if (this.backend.available) {
@@ -513,8 +523,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "task.list": {
-        const tasks = await this.requireTasks().listTaskSummaries();
-        this.respond(request.requestId, { type: "task.list", tasks: await this.joinOpenCommentCounts(tasks) });
+        const backend = this.requireBackendReady();
+        const tasks = await joinOpenCommentCounts(backend, this.logger, await this.requireTasks().listTaskSummaries());
+        const columnsById = new Map((await this.requireBoard().listColumns()).map((column) => [column.columnId, column]));
+        const decorated = await Promise.all(tasks.map((task) => decorateTaskSummary(backend, task, columnsById)));
+        this.respond(request.requestId, { type: "task.list", tasks: decorated });
         return;
       }
       case "task.create": {
@@ -629,6 +642,16 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "memory.resolve": {
         const record = await this.requireMemory().resolve(payload.memoryCandidateId, payload.approve);
         this.respond(request.requestId, { type: "memory.resolve", candidate: toMemoryCandidateSummary(record) });
+        return;
+      }
+      case "memory.open": {
+        const candidate = await this.requireMemory().getCandidate(payload.memoryCandidateId);
+        if (candidate === null) {
+          throw new Error(`Memory candidate ${payload.memoryCandidateId} was not found.`);
+        }
+        const document = await vscode.workspace.openTextDocument(memoryUri(candidate.memoryCandidateId));
+        await vscode.window.showTextDocument(document, { preview: true });
+        this.respond(request.requestId, { type: "memory.open", accepted: true });
         return;
       }
       case "workspace.state": {
@@ -778,6 +801,120 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.respond(request.requestId, { type: "clone.discard", repos });
         return;
       }
+      case "board.state": {
+        const board = await buildBoardState(this.requireBackendReady(), this.logger);
+        this.respond(request.requestId, { type: "board.state", board });
+        return;
+      }
+      case "board.moveCard": {
+        const backend = this.requireBackendReady();
+        if (payload.cardKind === "task") {
+          await this.requireTasks().updateTask(payload.id, { columnId: payload.columnId });
+        } else {
+          await this.requireSubtasks().moveCard({ subtaskId: payload.id }, payload.columnId);
+        }
+        const board = await buildBoardState(backend, this.logger);
+        this.respond(request.requestId, { type: "board.moveCard", board });
+        return;
+      }
+      case "board.columns.update": {
+        const backend = this.requireBackendReady();
+        await reconcileColumns(backend.board, payload.columns, payload.deletedColumnIds);
+        const board = await buildBoardState(backend, this.logger);
+        this.respond(request.requestId, { type: "board.columns.update", board });
+        return;
+      }
+      case "subtask.create": {
+        this.requireBackend();
+        await this.requireSubtasks().createSubtask(payload.taskId, {
+          title: payload.title,
+          ...(payload.description === undefined ? {} : { description: payload.description }),
+          ...(payload.prompt === undefined ? {} : { prompt: payload.prompt }),
+          ...(payload.autoStart === undefined ? {} : { autoStart: payload.autoStart })
+        });
+        const summary = await this.requireTaskSummary(this.requireTasks(), payload.taskId);
+        this.respond(request.requestId, { type: "subtask.create", task: summary });
+        this.push({ type: "task.updated", task: summary });
+        return;
+      }
+      case "subtask.update": {
+        this.requireBackend();
+        const existing = await this.requireSubtasks().getSubtask(payload.subtaskId);
+        if (existing === null) {
+          throw new Error(`Subtask ${payload.subtaskId} was not found.`);
+        }
+        const hasFieldUpdate = payload.title !== undefined || payload.description !== undefined
+          || payload.prompt !== undefined || payload.autoStart !== undefined;
+        if (hasFieldUpdate) {
+          await this.requireSubtasks().updateSubtask(payload.subtaskId, {
+            ...(payload.title === undefined ? {} : { title: payload.title }),
+            ...(payload.description === undefined ? {} : { description: payload.description }),
+            ...(payload.prompt === undefined ? {} : { prompt: payload.prompt }),
+            ...(payload.autoStart === undefined ? {} : { autoStart: payload.autoStart })
+          });
+        }
+        if (payload.columnId !== undefined) {
+          await this.requireSubtasks().moveCard({ subtaskId: payload.subtaskId }, payload.columnId);
+        }
+        const summary = await this.requireTaskSummary(this.requireTasks(), existing.taskId);
+        this.respond(request.requestId, { type: "subtask.update", task: summary });
+        this.push({ type: "task.updated", task: summary });
+        return;
+      }
+      case "subtask.delete": {
+        this.requireBackend();
+        const existing = await this.requireSubtasks().getSubtask(payload.subtaskId);
+        if (existing === null) {
+          throw new Error(`Subtask ${payload.subtaskId} was not found.`);
+        }
+        await this.requireSubtasks().deleteSubtask(payload.subtaskId);
+        const summary = await this.requireTaskSummary(this.requireTasks(), existing.taskId);
+        this.respond(request.requestId, { type: "subtask.delete", task: summary });
+        this.push({ type: "task.updated", task: summary });
+        return;
+      }
+      case "subtask.dependency.add": {
+        this.requireBackend();
+        await this.requireSubtasks().addDependency(payload.fromSubtaskId, payload.toSubtaskId);
+        const summary = await this.requireTaskSummary(this.requireTasks(), payload.taskId);
+        this.respond(request.requestId, { type: "subtask.dependency.add", task: summary });
+        this.push({ type: "task.updated", task: summary });
+        return;
+      }
+      case "subtask.dependency.remove": {
+        this.requireBackend();
+        await this.requireSubtasks().removeDependency(payload.fromSubtaskId, payload.toSubtaskId);
+        const summary = await this.requireTaskSummary(this.requireTasks(), payload.taskId);
+        this.respond(request.requestId, { type: "subtask.dependency.remove", task: summary });
+        this.push({ type: "task.updated", task: summary });
+        return;
+      }
+      case "subtask.start": {
+        // force is the manual-only override for a BLOCKED subtask; typed
+        // StartSubtaskError messages surface verbatim via the error-response path.
+        const backend = this.requireBackendReady();
+        await backend.orchestrator.startSubtask(payload.subtaskId, { force: payload.force === true });
+        this.respond(request.requestId, { type: "subtask.start", accepted: true });
+        return;
+      }
+      case "task.start": {
+        const backend = this.requireBackendReady();
+        await backend.orchestrator.startTask(payload.taskId);
+        this.respond(request.requestId, { type: "task.start", accepted: true });
+        return;
+      }
+      case "taskBoard.open": {
+        this.requireBackend();
+        try {
+          await vscode.commands.executeCommand("drydock.taskBoard.open");
+          this.respond(request.requestId, { type: "taskBoard.open", accepted: true });
+        } catch {
+          // Defensive: the command registers during activation; surface a
+          // readable error if the relay ever beats registration.
+          this.respondError(request.requestId, "Task Board panel not available yet.");
+        }
+        return;
+      }
     }
   }
 
@@ -897,34 +1034,6 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     // The `auto` selection mounts the window's open file-scheme folders; the
     // service throws when none are open.
     return this.requireWorkspaceReview().resolveWorkspaceSelection(selection, this.openFolderRoots());
-  }
-
-  /**
-   * Joins each task's open review-comment count (cheap review-store reads via
-   * TaskReviewAppService — no tree walks) into the summaries so the Work-tab
-   * Review button can read "(N open comments)". Best-effort: a failed join
-   * returns the summaries unchanged. task.updated pushes do NOT carry the
-   * count; it refreshes on the next task.list.
-   */
-  private async joinOpenCommentCounts(tasks: readonly WorkTaskSummary[]): Promise<readonly WorkTaskSummary[]> {
-    if (!this.backend.available) {
-      return tasks;
-    }
-    try {
-      const counts = await this.backend.taskReview.openCommentCountsByTask();
-      if (counts.size === 0) {
-        return tasks;
-      }
-      return tasks.map((task) => {
-        const openReviewCommentCount = counts.get(task.taskId);
-        return openReviewCommentCount === undefined ? task : { ...task, openReviewCommentCount };
-      });
-    } catch (error) {
-      this.logger.warn("task review comment-count join failed", {
-        error: error instanceof Error ? error.message : String(error)
-      });
-      return tasks;
-    }
   }
 
   /** Absolute fsPath roots of the window's open file-scheme folders. */
@@ -1385,6 +1494,14 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     return this.backend.appService;
   }
 
+  /** The full available-backend value, for the boardShared helpers (which take Backend, not one service at a time). */
+  private requireBackendReady(): BackendReady {
+    if (!this.backend.available) {
+      throw new Error(this.backend.reason);
+    }
+    return this.backend;
+  }
+
   private requireWorkspaceReview(): WorkspaceReviewAppService {
     if (!this.backend.available) {
       throw new Error(this.backend.reason);
@@ -1397,6 +1514,20 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       throw new Error(this.backend.reason);
     }
     return this.backend.tasks;
+  }
+
+  private requireBoard(): BoardService {
+    if (!this.backend.available) {
+      throw new Error(this.backend.reason);
+    }
+    return this.backend.board;
+  }
+
+  private requireSubtasks(): SubtaskService {
+    if (!this.backend.available) {
+      throw new Error(this.backend.reason);
+    }
+    return this.backend.subtasks;
   }
 
   private requireMemory(): MemoryService {
@@ -1420,13 +1551,13 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     return this.backend.planDocs;
   }
 
-  /** Refreshed summary (with current links) for one task after a mutation. */
+  /** Refreshed summary (with current links, columnId/doneAt, and subtasks) for one task after a mutation. */
   private async requireTaskSummary(tasks: TaskService, taskId: string): Promise<WorkTaskSummary> {
     const summary = (await tasks.listTaskSummaries()).find((candidate) => candidate.taskId === taskId);
     if (summary === undefined) {
       throw new Error(`Task ${taskId} was not found.`);
     }
-    return summary;
+    return decorateTaskSummary(this.requireBackendReady(), summary);
   }
 
   private availability(): BackendAvailability {

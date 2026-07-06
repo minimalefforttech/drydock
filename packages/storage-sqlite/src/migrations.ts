@@ -293,6 +293,8 @@ export function applyMigrations(connection: SqliteConnection): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_work_task_links_unique
       ON work_task_links(task_id, COALESCE(workspace_set_id, ''), COALESCE(session_id, ''));
   `);
+  // Session-target links may additionally name the subtask they belong to.
+  ensureColumn(connection, "work_task_links", "subtask_id", "TEXT NULL");
 
   // Chat-panel redesign (Phase 2, plan mode v2): collected plan documents. The
   // table is named plan_docs, not plan_documents — the Stage 5 plans table
@@ -339,7 +341,127 @@ export function applyMigrations(connection: SqliteConnection): void {
     CREATE INDEX IF NOT EXISTS idx_memory_candidates_status
       ON memory_candidates(status);
   `);
+
+  // Task board and subtasks: board columns are global and user-configurable;
+  // subtasks are child work items of exactly one task; dependencies are
+  // directed edges between two subtasks of the SAME task (never cross-task,
+  // never cyclic — enforced by TaskService/SubtaskService, not the schema).
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS board_columns (
+      column_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      sort_order INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS subtasks (
+      subtask_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NULL,
+      prompt TEXT NULL,
+      origin TEXT NOT NULL,
+      auto_start INTEGER NOT NULL DEFAULT 0,
+      column_id TEXT NOT NULL,
+      sort_order INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      done_at TEXT NULL,
+      FOREIGN KEY(task_id) REFERENCES work_tasks(task_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_subtasks_task
+      ON subtasks(task_id);
+
+    -- Both endpoints are always within the same taskId (denormalised guard,
+    -- validated by the service layer); PK(from, to) rejects duplicate edges.
+    CREATE TABLE IF NOT EXISTS subtask_dependencies (
+      task_id TEXT NOT NULL,
+      from_subtask_id TEXT NOT NULL,
+      to_subtask_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (from_subtask_id, to_subtask_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_subtask_dependencies_task
+      ON subtask_dependencies(task_id);
+  `);
+  // Migrations here are idempotent DDL, not a keyed step ledger, so the
+  // auto_start column lives in the CREATE TABLE above for fresh DBs AND is
+  // ensured here for any DB whose subtasks table predates the flag. A
+  // dependent auto-starts only when auto_start is set, all upstreams are
+  // done, it has a prompt, and it is not in a backlog-category column;
+  // manual start never cascades (explicit Force start override, manual only).
+  ensureColumn(connection, "subtasks", "auto_start", "INTEGER NOT NULL DEFAULT 0");
+  // work_tasks.state is replaced by column_id (+ optional done_at); state is
+  // kept transitionally (see WorkTaskRecord doc comment) until the board UI
+  // lands and the webview stops reading it.
+  ensureColumn(connection, "work_tasks", "column_id", "TEXT NULL");
+  ensureColumn(connection, "work_tasks", "done_at", "TEXT NULL");
+  seedDefaultColumnsAndBackfill(connection);
 }
+
+/**
+ * Seeds the six default board columns (once) and backfills work_tasks.column_id
+ * from the legacy state for any row that predates the column model. Both steps
+ * are idempotent so re-running migrations on an already-migrated DB is a no-op.
+ */
+function seedDefaultColumnsAndBackfill(connection: SqliteConnection): void {
+  const columnCount = connection.database.prepare(`SELECT COUNT(*) AS count FROM board_columns`).get() as { readonly count: number };
+  if (columnCount.count === 0) {
+    const insertColumn = connection.database.prepare(`
+      INSERT INTO board_columns (column_id, name, category, sort_order)
+      VALUES (?, ?, ?, ?)
+    `);
+    for (const column of DEFAULT_BOARD_COLUMNS) {
+      insertColumn.run(column.columnId, column.name, column.category, column.sortOrder);
+    }
+  }
+
+  // Backfill: every work_tasks row without a column_id yet maps from its
+  // (legacy) state to the matching default column.
+  const backfill = connection.database.prepare(`
+    UPDATE work_tasks
+    SET column_id = ?
+    WHERE state = ? AND column_id IS NULL
+  `);
+  for (const [state, columnId] of Object.entries(STATE_TO_DEFAULT_COLUMN_ID)) {
+    backfill.run(columnId, state);
+  }
+  // Any row with an unrecognised/missing state still falls back to ToDo so
+  // column_id is never left NULL after migration.
+  connection.database.prepare(`
+    UPDATE work_tasks
+    SET column_id = ?
+    WHERE column_id IS NULL
+  `).run(DEFAULT_COLUMN_ID_TODO);
+}
+
+const DEFAULT_COLUMN_ID_BACKLOG = "col-backlog";
+const DEFAULT_COLUMN_ID_TODO = "col-todo";
+const DEFAULT_COLUMN_ID_BLOCKED = "col-blocked";
+const DEFAULT_COLUMN_ID_IN_PROGRESS = "col-in-progress";
+const DEFAULT_COLUMN_ID_REVIEW = "col-review";
+const DEFAULT_COLUMN_ID_FINISHED = "col-finished";
+
+/** Migration-seeded defaults: Backlog, ToDo, Blocked, In Progress, Review, Finished. */
+const DEFAULT_BOARD_COLUMNS: readonly { readonly columnId: string; readonly name: string; readonly category: string; readonly sortOrder: number }[] = [
+  { columnId: DEFAULT_COLUMN_ID_BACKLOG, name: "Backlog", category: "backlog", sortOrder: 0 },
+  { columnId: DEFAULT_COLUMN_ID_TODO, name: "ToDo", category: "pending", sortOrder: 1 },
+  { columnId: DEFAULT_COLUMN_ID_BLOCKED, name: "Blocked", category: "pending", sortOrder: 2 },
+  { columnId: DEFAULT_COLUMN_ID_IN_PROGRESS, name: "In Progress", category: "in-progress", sortOrder: 3 },
+  { columnId: DEFAULT_COLUMN_ID_REVIEW, name: "Review", category: "done", sortOrder: 4 },
+  { columnId: DEFAULT_COLUMN_ID_FINISHED, name: "Finished", category: "done", sortOrder: 5 }
+];
+
+/** Legacy WorkTaskState -> seeded default BoardColumnRecord.columnId. */
+const STATE_TO_DEFAULT_COLUMN_ID: Readonly<Record<string, string>> = {
+  todo: DEFAULT_COLUMN_ID_TODO,
+  "in-progress": DEFAULT_COLUMN_ID_IN_PROGRESS,
+  blocked: DEFAULT_COLUMN_ID_BLOCKED,
+  review: DEFAULT_COLUMN_ID_REVIEW,
+  done: DEFAULT_COLUMN_ID_FINISHED
+};
 
 function ensureColumn(connection: SqliteConnection, table: string, column: string, definition: string): void {
   const rows = connection.database.prepare(`PRAGMA table_info(${table})`).all() as { readonly name: string }[];

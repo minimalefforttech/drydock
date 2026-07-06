@@ -102,6 +102,7 @@ function task(taskId: string, title: string, updatedAt: string, description?: st
     title,
     ...(description === undefined ? {} : { description }),
     state: "todo",
+    columnId: asId<"ColumnId">("col-todo"),
     createdAt: "2026-07-03T00:00:00.000Z",
     updatedAt
   };

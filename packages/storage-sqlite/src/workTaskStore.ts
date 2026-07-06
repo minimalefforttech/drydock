@@ -8,7 +8,9 @@
  */
 
 import type {
+  ColumnId,
   SessionId,
+  SubtaskId,
   TaskId,
   WorkTaskLinkRecord,
   WorkTaskRecord,
@@ -29,16 +31,20 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
         title,
         description,
         state,
+        column_id,
         created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        updated_at,
+        done_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.taskId,
       record.title,
       record.description ?? null,
       record.state,
+      record.columnId,
       record.createdAt,
-      record.updatedAt
+      record.updatedAt,
+      record.doneAt ?? null
     );
   }
 
@@ -59,6 +65,15 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
     if (update.state !== undefined) {
       assignments.push("state = ?");
       values.push(update.state);
+    }
+    if (update.columnId !== undefined) {
+      assignments.push("column_id = ?");
+      values.push(update.columnId);
+    }
+    if (update.doneAt !== undefined) {
+      // null clears doneAt; a string stamps it.
+      assignments.push("done_at = ?");
+      values.push(update.doneAt);
     }
     this.connection.database.prepare(`
       UPDATE work_tasks
@@ -102,17 +117,21 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
   async insertLink(record: WorkTaskLinkRecord): Promise<void> {
     // INSERT OR IGNORE relies on the COALESCE unique index over (task_id,
     // workspace_set_id, session_id) to make duplicate links a no-op.
+    // subtask_id is only meaningful alongside session_id (session-target
+    // links); it rides along on the same row rather than a separate index.
     this.connection.database.prepare(`
       INSERT OR IGNORE INTO work_task_links (
         task_id,
         workspace_set_id,
         session_id,
+        subtask_id,
         created_at
-      ) VALUES (?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?)
     `).run(
       record.taskId,
       record.workspaceSetId ?? null,
       record.sessionId ?? null,
+      record.subtaskId ?? null,
       record.createdAt
     );
   }
@@ -149,6 +168,14 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
         `).all(taskId) as unknown as WorkTaskLinkRow[];
     return rows.map(mapLink);
   }
+
+  async reassignTasksColumn(fromColumnId: ColumnId, toColumnId: ColumnId): Promise<void> {
+    this.connection.database.prepare(`
+      UPDATE work_tasks
+      SET column_id = ?
+      WHERE column_id = ?
+    `).run(toColumnId, fromColumnId);
+  }
 }
 
 interface WorkTaskRow {
@@ -156,14 +183,17 @@ interface WorkTaskRow {
   readonly title: string;
   readonly description: string | null;
   readonly state: WorkTaskState;
+  readonly column_id: string;
   readonly created_at: string;
   readonly updated_at: string;
+  readonly done_at: string | null;
 }
 
 interface WorkTaskLinkRow {
   readonly task_id: string;
   readonly workspace_set_id: string | null;
   readonly session_id: string | null;
+  readonly subtask_id: string | null;
   readonly created_at: string;
 }
 
@@ -173,8 +203,10 @@ function mapTask(row: WorkTaskRow): WorkTaskRecord {
     title: row.title,
     ...(row.description === null ? {} : { description: row.description }),
     state: row.state,
+    columnId: row.column_id as ColumnId,
     createdAt: row.created_at,
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
+    ...(row.done_at === null ? {} : { doneAt: row.done_at })
   };
 }
 
@@ -183,6 +215,7 @@ function mapLink(row: WorkTaskLinkRow): WorkTaskLinkRecord {
     taskId: row.task_id as TaskId,
     ...(row.workspace_set_id === null ? {} : { workspaceSetId: row.workspace_set_id as WorkspaceSetId }),
     ...(row.session_id === null ? {} : { sessionId: row.session_id as SessionId }),
+    ...(row.subtask_id === null ? {} : { subtaskId: row.subtask_id as SubtaskId }),
     createdAt: row.created_at
   };
 }

@@ -88,6 +88,11 @@ export class MemoryService {
     return this.options.store.listCandidates(status);
   }
 
+  /** Fetches one candidate by id, or null when it does not exist. */
+  getCandidate(memoryCandidateId: string): Promise<MemoryCandidateRecord | null> {
+    return this.options.store.getCandidate(asId<"MemoryCandidateId">(memoryCandidateId));
+  }
+
   /** Newest-first approved contents for briefings, capped at `limit`. */
   async listApprovedContents(limit: number): Promise<string[]> {
     const approved = await this.options.store.listCandidates("approved");
