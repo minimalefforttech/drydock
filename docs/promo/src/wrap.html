@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  /* Landscape promo frame: the REAL bundled control panel (in an iframe) sits
+     in a faux editor window on the left; a caption sits on the right. The
+     recorder fills the caption and drives the panel's __harness scenarios.
+     Served from the harness origin so the iframe is same-origin. */
+  :root {
+    --bg: #14181c; --panel: #1a1f24; --ink: #e3eaf1; --muted: #9fb0bf;
+    --dim: #6e7b89; --edge: #45c4cf; --line: #2b333b;
+    --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    width: 1160px; height: 720px; background:
+      radial-gradient(1200px 600px at 78% -10%, #1c2530 0%, var(--bg) 55%);
+    font-family: var(--font); color: var(--ink); overflow: hidden;
+  }
+  .stage { display: flex; align-items: center; height: 100%; padding: 0 56px; gap: 56px; }
+
+  /* Faux editor window around the panel iframe. */
+  .win { flex: none; width: 372px; border-radius: 12px; overflow: hidden;
+    background: #1e1e1e; border: 1px solid #2c2c2c;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.55); }
+  .win-bar { height: 34px; display: flex; align-items: center; gap: 7px;
+    padding: 0 13px; background: #23272b; border-bottom: 1px solid #2c2c2c; }
+  .win-bar i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .win-bar .r { background: #e06c5b; } .win-bar .y { background: #e0b24e; } .win-bar .g { background: #5bbb5b; }
+  .win-bar .lbl { margin-left: 8px; font-size: 11.5px; color: #9aa4ad; letter-spacing: 0.01em; }
+  .win iframe { display: block; width: 372px; height: 604px; border: 0; background: #252526; }
+
+  /* Caption. */
+  .cap { flex: 1; max-width: 560px; }
+  .brand { font-size: 12px; font-weight: 650; letter-spacing: 0.16em; text-transform: uppercase; color: var(--dim); }
+  .brand b { color: var(--ink); } .brand .pip { color: var(--edge); }
+  .kicker { margin-top: 30px; font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--edge); font-weight: 700; }
+  h1 { font-size: 40px; line-height: 1.08; font-weight: 650; letter-spacing: -0.02em; margin: 12px 0 16px; text-wrap: balance; }
+  .desc { font-size: 17px; line-height: 1.6; color: var(--muted); margin: 0 0 22px; }
+  ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+  li { font-size: 14.5px; color: var(--ink); display: flex; align-items: baseline; gap: 10px; }
+  li::before { content: ""; flex: none; width: 6px; height: 6px; margin-top: 6px; border-radius: 50%; background: var(--edge); }
+  li.off { color: var(--dim); } li.off::before { background: var(--dim); }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="win">
+    <div class="win-bar"><i class="r"></i><i class="y"></i><i class="g"></i><span class="lbl" id="win-label">Drydock — Control Panel</span></div>
+    <iframe id="panel" src="/index.html" title="Drydock panel"></iframe>
+  </div>
+  <div class="cap">
+    <div class="brand"><b>Drydock</b><span class="pip">.</span> &nbsp;the engineering AI workbench</div>
+    <div class="kicker" id="cap-kicker">Feature</div>
+    <h1 id="cap-title">Title</h1>
+    <p class="desc" id="cap-desc">Description.</p>
+    <ul id="cap-points"></ul>
+  </div>
+</div>
+<script>
+  // Same-origin iframe: strip the harness's side note + body padding so only
+  // the real panel shows, filling the faux window.
+  const frame = document.getElementById("panel");
+  frame.addEventListener("load", () => {
+    try {
+      const d = frame.contentDocument;
+      const note = d.getElementById("stage-note"); if (note) note.style.display = "none";
+      d.body.style.margin = "0"; d.body.style.padding = "0";
+      const stage = d.getElementById("stage");
+      if (stage) { stage.style.height = "604px"; stage.style.width = "372px"; stage.style.border = "0"; }
+      window.__panelReady = true;
+    } catch (e) { window.__panelReady = true; }
+  });
+  // Driver API for the recorder's timeline steps (all act inside the panel iframe).
+  window.P = {
+    win() { return frame.contentWindow; },
+    doc() { return frame.contentDocument; },
+    get scenario() { return frame.contentWindow.__harness.scenario; },
+    tab(name) {
+      const t = [...this.doc().querySelectorAll("[role=tab]")].find((e) => e.textContent.trim() === name);
+      if (t) t.click(); return !!t;
+    },
+    selectSession(fragment) {
+      const row = [...this.doc().querySelectorAll(".task-session-title")].find((e) => e.textContent.includes(fragment));
+      const target = row && (row.closest("button,[role=button],.task-session,li") || row);
+      if (target) target.click(); return !!target;
+    },
+    clickText(selector, text) {
+      const el = [...this.doc().querySelectorAll(selector)].find((e) => (e.textContent || "").trim().includes(text));
+      if (el) el.click(); return !!el;
+    },
+    click(selector) { const el = this.doc().querySelector(selector); if (el) el.click(); return !!el; },
+    setScroll(selector, px) { const el = this.doc().querySelector(selector); if (el) el.scrollTop = px; return !!el; },
+    // Smoothly animate a scroller from its current position to toPx (clamped to
+    // its max; pass a big number for "to bottom") over durationMs — runs in the
+    // panel in real time and is sampled by the frame capture.
+    panScroll(selector, toPx, durationMs) {
+      const el = this.doc().querySelector(selector); if (!el) return false;
+      const max = el.scrollHeight - el.clientHeight;
+      const to = Math.max(0, Math.min(toPx, max));
+      const from = el.scrollTop, start = performance.now();
+      const ease = (u) => (u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2);
+      const step = (now) => {
+        const u = Math.min(1, (now - start) / durationMs);
+        el.scrollTop = from + (to - from) * ease(u);
+        if (u < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step); return true;
+    }
+  };
+
+  // Caption API for the recorder.
+  window.setCaption = ({ kicker, title, desc, points = [], label }) => {
+    document.getElementById("cap-kicker").textContent = kicker;
+    document.getElementById("cap-title").textContent = title;
+    document.getElementById("cap-desc").textContent = desc;
+    if (label) document.getElementById("win-label").textContent = label;
+    const ul = document.getElementById("cap-points");
+    ul.replaceChildren();
+    for (const p of points) {
+      const li = document.createElement("li");
+      if (p.off) li.className = "off";
+      li.textContent = p.text || p;
+      ul.appendChild(li);
+    }
+  };
+</script>
+</body>
+</html>

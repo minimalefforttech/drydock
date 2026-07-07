@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drydock — feature reel</title>
+<style>
+  :root {
+    --bg: #14181c; --panel: #1a1f24; --card: #21272d; --line: #2b333b;
+    --ink: #e3eaf1; --muted: #9fb0bf; --dim: #6e7b89; --edge: #45c4cf;
+    --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font); }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 56px 24px 96px; }
+  header { border-bottom: 1px solid var(--line); padding-bottom: 28px; margin-bottom: 20px; }
+  .brand { font-size: 15px; font-weight: 650; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); }
+  .brand b { color: var(--ink); } .brand .pip { color: var(--edge); }
+  h1 { font-size: 34px; font-weight: 650; letter-spacing: -0.015em; margin: 14px 0 10px; }
+  .lede { color: var(--muted); font-size: 16px; max-width: 66ch; margin: 0; line-height: 1.6; }
+  h2 { font-size: 13px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--edge); font-weight: 700;
+       margin: 52px 0 22px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+  figure { margin: 0 0 44px; }
+  .shot { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #0f1317; box-shadow: 0 14px 40px rgba(0,0,0,0.4); }
+  .shot img { display: block; width: 100%; height: auto; }
+  figcaption { padding: 16px 4px 0; }
+  .kicker { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--edge); font-weight: 600; }
+  .cap-title { font-size: 19px; font-weight: 650; margin: 6px 0 4px; }
+  .cap-desc { color: var(--muted); font-size: 14.5px; line-height: 1.55; max-width: 74ch; margin: 0; }
+  footer { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 20px; color: var(--dim); font-size: 13px; line-height: 1.7; }
+  code { font-family: "Cascadia Code", Consolas, monospace; font-size: 0.9em; background: var(--card); padding: 1px 6px; border-radius: 5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><b>Drydock</b><span class="pip">.</span> &nbsp;feature reel</div>
+    <h1>The engineering AI workbench</h1>
+    <p class="lede">Short, looping captures of Drydock's core workflows and its task board. The core clips are the <strong>real bundled panel</strong> driven through live workflows; the task-board clips are rendered in the same design language. Each mirrors a webview harness scenario or visual test.</p>
+  </header>
+
+  <h2>Core functionality</h2>
+
+  <figure>
+    <div class="shot"><img src="core-session.gif" alt="A tour of a contained agent session: conversation, code and diagram output, a subagent hierarchy, an approval card, an open question, and the working-set changes."></div>
+    <figcaption>
+      <div class="kicker">Contained sessions</div>
+      <div class="cap-title">Coding agents, safely contained</div>
+      <p class="cap-desc">Every chat runs in its own disposable runtime — Claude Code or Codex. One session surface holds the conversation, rich output, the subagent hierarchy, pending approvals, open questions, and the working set.</p>
+    </figcaption>
+  </figure>
+
+  <figure>
+    <div class="shot"><img src="core-approvals.gif" alt="An agent requests read-write access to a host path; the card shows the risk, and approving a sensitive root requires typing the path to confirm."></div>
+    <figcaption>
+      <div class="kicker">Blast-radius approvals</div>
+      <div class="cap-title">You approve every path</div>
+      <p class="cap-desc">Agents start default-denied. When one needs a file or a host path it asks, with the risk spelled out — and a sensitive root takes a typed confirmation before anything is granted.</p>
+    </figcaption>
+  </figure>
+
+  <figure>
+    <div class="shot"><img src="core-subagents.gif" alt="A live subagent fan-out: the agent delegates to two subagents, one nests a grandchild, one fails, all rendered as a hierarchy with per-agent status and tokens."></div>
+    <figcaption>
+      <div class="kicker">Subagent fan-out</div>
+      <div class="cap-title">Delegate, and watch every child</div>
+      <p class="cap-desc">Native fan-outs render as a live hierarchy — each child agent's files, tools, tokens, and status, including the ones that fail. Child mounts are always a subset of the parent's.</p>
+    </figcaption>
+  </figure>
+
+  <h2>Task board &amp; subtasks</h2>
+
+  <figure>
+    <div class="shot"><img src="drag.gif" alt="A subtask card dragged from Backlog into In Progress; the target column highlights and column counts update."></div>
+    <figcaption>
+      <div class="kicker">Move work · V42</div>
+      <div class="cap-title">Drag across the board</div>
+      <p class="cap-desc">Tasks and subtasks are independent cards. Drag one between columns — the drop target highlights and the column counts update live.</p>
+    </figcaption>
+  </figure>
+
+  <figure>
+    <div class="shot"><img src="depend.gif" alt="Dragging a dependency from one subtask's output dot; other tasks grey out; the connection lands and the target becomes blocked."></div>
+    <figcaption>
+      <div class="kicker">Dependencies · V48 / V49</div>
+      <div class="cap-title">Wire up dependencies</div>
+      <p class="cap-desc">Drag dot-to-dot to connect subtasks. Everything outside the parent task greys out — connections can't cross the task boundary — and the downstream card is now blocked.</p>
+    </figcaption>
+  </figure>
+
+  <figure>
+    <div class="shot"><img src="cascade.gif" alt="A running card finishes and lands in Review; its two blocked dependents unblock and start running in parallel."></div>
+    <figcaption>
+      <div class="kicker">Orchestration · V47</div>
+      <div class="cap-title">Auto-start cascades</div>
+      <p class="cap-desc">When a run finishes, its card lands in Review and every dependent that opted into auto-start begins — in parallel — the moment its dependencies are done.</p>
+    </figcaption>
+  </figure>
+
+  <figure>
+    <div class="shot"><img src="unblock.gif" alt="Moving the upstream card into Review instantly clears the downstream card's blocked state."></div>
+    <figcaption>
+      <div class="kicker">Computed state</div>
+      <div class="cap-title">Blocked clears itself</div>
+      <p class="cap-desc">Blocked is computed, never stored. Finish the upstream and the dependent's lock and dashed border clear the instant it reaches a done column — no manual step.</p>
+    </figcaption>
+  </figure>
+
+  <figure>
+    <div class="shot"><img src="memory.gif" alt="The Work tab sidebar showing the renamed Orphaned Chats drawer and a saved memory opening as a read-only document."></div>
+    <figcaption>
+      <div class="kicker">Work tab · V40</div>
+      <div class="cap-title">Orphaned Chats &amp; openable memories</div>
+      <p class="cap-desc">The drawer formerly called "Chats needing a task" is now <b>Orphaned Chats</b>, and approved memories open as read-only <code>drydock-memory:</code> documents.</p>
+    </figcaption>
+  </figure>
+
+  <footer>
+    Core clips: <code>node docs/promo/record.mjs</code> (drives the real bundled panel in headless Chrome, records via CDP → ffmpeg).
+    Task-board clips: <code>node docs/promo/build.mjs</code> (deterministic per-frame render → ffmpeg). See <code>docs/promo/README.md</code>.
+  </footer>
+</div>
+</body>
+</html>

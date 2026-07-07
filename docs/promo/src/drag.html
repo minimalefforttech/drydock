@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="common.css">
+<style>
+  /* drag scene stage: three-column slice. */
+  #stage { width: 960px; height: 540px; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <div class="top">
+    <span class="brand">Drydock<span class="dot">.</span></span>
+    <span class="eyebrow">Task Board</span>
+  </div>
+
+  <div class="rail">
+    <section class="col cat-backlog">
+      <div class="col-head"><span class="col-name">Backlog</span><span class="col-cat">backlog</span><span class="col-count" id="c-backlog">2</span></div>
+      <div class="col-body" id="body-backlog">
+        <div class="card sub stripe-h3"><div class="title">Update API docs</div><div class="parent">Payment provider integration</div></div>
+      </div>
+    </section>
+
+    <section class="col cat-pending" id="col-todo">
+      <div class="col-head"><span class="col-name">ToDo</span><span class="col-cat">pending</span><span class="col-count" id="c-todo">1</span></div>
+      <div class="col-body" id="body-todo">
+        <div class="card sub stripe-h4"><div class="title">A/B test setup</div><div class="parent">Onboarding flow revamp</div></div>
+      </div>
+    </section>
+
+    <section class="col cat-progress" id="col-prog">
+      <div class="col-head"><span class="col-name">In Progress</span><span class="col-cat">in progress</span><span class="col-count" id="c-prog">1</span></div>
+      <div class="col-body" id="body-prog">
+        <div class="card sub stripe-h0"><div class="title">Implement webhook handler</div><div class="parent">Payment provider integration</div></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- The travelling card (absolutely positioned, driven per frame). -->
+  <div class="card sub stripe-h0 lift" id="mover">
+    <div class="title">Design webhook schema</div>
+    <div class="parent">Payment provider integration</div>
+  </div>
+
+  <!-- Cursor sprite. -->
+  <svg class="cursor" id="cursor" viewBox="0 0 24 24"><path d="M4 2 L4 20 L9 15 L12.5 22 L15 21 L11.5 14 L18 14 Z" fill="#fff" stroke="#1b2733" stroke-width="1"/></svg>
+
+  <div class="caption"><span class="kbd">Drag</span><span class="say" id="say">Move work across the board</span></div>
+</div>
+
+<script src="frame.js"></script>
+<script>
+function renderFrame() {
+  const { t, lerp, eseg, seg } = PROMO;
+  const mover = document.getElementById("mover");
+  const cursor = document.getElementById("cursor");
+  const say = document.getElementById("say");
+
+  // Rest position: inside Backlog's body. Destination: In Progress body (below
+  // the existing card). Coordinates are stage-space (px).
+  const start = { x: 34, y: 172 };
+  const dest  = { x: 730, y: 150 };
+
+  // Timeline: 0.00–0.12 rest, 0.12–0.62 travel, 0.62–0.74 settle, hold.
+  const travel = eseg(0.12, 0.62);
+  const x = lerp(start.x, dest.x, travel);
+  // Slight lift arc: rise then fall.
+  const arc = Math.sin(seg(0.12, 0.62) * Math.PI) * -16;
+  const y = lerp(start.y, dest.y, travel) + arc;
+  mover.style.left = x + "px";
+  mover.style.top = y + "px";
+
+  const grabbing = t > 0.1 && t < 0.66;
+  mover.style.transform = grabbing ? "scale(1.03)" : "scale(1)";
+  mover.style.boxShadow = grabbing ? "0 14px 30px rgba(0,0,0,0.55)" : "0 4px 12px rgba(0,0,0,0.3)";
+
+  // Cursor rides the card's top-left grab handle.
+  cursor.style.left = (x + 150) + "px";
+  cursor.style.top = (y + 14) + "px";
+  cursor.classList.toggle("grab", grabbing);
+
+  // Drop-target highlight: In Progress column glows while the card is over it.
+  const overProg = x > 470;
+  const overTodo = x > 250 && x <= 470;
+  document.getElementById("col-prog").classList.toggle("drop", overProg && grabbing);
+  document.getElementById("col-todo").classList.toggle("drop", overTodo && grabbing);
+
+  // Counts flip at the drop moment (t ~0.64).
+  const dropped = t > 0.64;
+  document.getElementById("c-backlog").textContent = dropped ? "1" : "2";
+  document.getElementById("c-prog").textContent = dropped ? "2" : "1";
+
+  say.innerHTML = dropped
+    ? 'Dropped into <b>In&nbsp;Progress</b>'
+    : 'Move work across the board';
+}
+PROMO.go(renderFrame);
+</script>
+</body>
+</html>

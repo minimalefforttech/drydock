@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="common.css">
+<style>
+  /* unblock scene stage: tight two-column-plus-target composition. */
+  #stage { width: 820px; height: 470px; }
+  #stage .rail { padding: 16px 16px; gap: 14px; }
+  #stage .col { width: 246px; min-height: 340px; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <div class="top">
+    <span class="brand">Drydock<span class="dot">.</span></span>
+    <span class="eyebrow">Task Board</span>
+  </div>
+
+  <div class="rail">
+    <section class="col cat-progress" id="col-prog">
+      <div class="col-head"><span class="col-name">In Progress</span><span class="col-cat">in progress</span><span class="col-count" id="c-prog">1</span></div>
+      <div class="col-body" id="body-prog">
+        <!-- Placeholder kept empty while the real card is the absolutely
+             positioned #mover riding on top; occupies the layout slot. -->
+        <div class="card sub stripe-h0" id="ghost-slot" style="visibility:hidden;">
+          <div class="title">Design webhook schema</div>
+          <div class="parent">Payment provider integration</div>
+          <span class="dot out"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="col cat-pending" id="col-todo">
+      <div class="col-head"><span class="col-name">ToDo</span><span class="col-cat">pending</span><span class="col-count">1</span></div>
+      <div class="col-body">
+        <div class="card sub stripe-h0" id="card-downstream">
+          <div class="title">Add retry queue</div>
+          <div class="parent">Payment provider integration</div>
+          <!-- metarow height is constant (chip swapped for an invisible
+               same-size placeholder) so the card's rendered height — and thus
+               the dot's top:50% position — never shifts across frames. -->
+          <div class="metarow"><span class="chip blocked" id="downstream-chip"><span class="lock">🔒</span> blocked</span></div>
+          <span class="dot in" id="dot-in"></span>
+          <span class="dot out"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="col cat-done" id="col-review">
+      <div class="col-head"><span class="col-name">Review</span><span class="col-cat">done</span><span class="col-count" id="c-review">0</span></div>
+      <div class="col-body" id="body-review"></div>
+    </section>
+  </div>
+
+  <!-- The travelling upstream card (absolutely positioned, driven per frame).
+       Metarow is always present (chip swapped for an invisible placeholder)
+       so its rendered height matches the downstream card's at every frame. -->
+  <div class="card sub stripe-h0 lift" id="mover">
+    <div class="title">Design webhook schema</div>
+    <div class="parent">Payment provider integration</div>
+    <div class="metarow"><span class="chip review" id="mover-chip">done</span></div>
+    <span class="dot out" id="dot-out"></span>
+  </div>
+
+  <!-- Dependency edge overlay: stage-space paths recomputed every frame. -->
+  <svg class="edges" id="edges" width="820" height="470">
+    <path class="edge" id="edge-solid" d=""></path>
+    <path class="edge-arrow" id="edge-arrowhead" d=""></path>
+  </svg>
+
+  <div class="caption"><span class="kbd">Auto</span><span class="say" id="say">This subtask is blocked by its dependency</span></div>
+</div>
+
+<script src="frame.js"></script>
+<script>
+function renderFrame() {
+  const { t, lerp, seg, eseg, during, edgePath } = PROMO;
+
+  const mover = document.getElementById("mover");
+  const dotOut = document.getElementById("dot-out");
+  const dotIn = document.getElementById("dot-in");
+  const cardDownstream = document.getElementById("card-downstream");
+  const downstreamChip = document.getElementById("downstream-chip");
+  const moverChip = document.getElementById("mover-chip");
+  const edgeSolid = document.getElementById("edge-solid");
+  const edgeArrow = document.getElementById("edge-arrowhead");
+  const say = document.getElementById("say");
+  const cProg = document.getElementById("c-prog");
+  const cReview = document.getElementById("c-review");
+
+  // Stage-space slot coordinates, matching the fixed rail/column layout above.
+  // Col1 "In Progress" x:16-262, Col2 "ToDo" x:276-522, Col3 "Review" x:536-782.
+  const start = { x: 16 + 10, y: 98 };   // In Progress body slot (mover uses card padding offset)
+  const dest  = { x: 536 + 10, y: 98 };  // Review body first slot
+
+  // Timeline windows:
+  //  0.00-0.15 rest | 0.15-0.50 move | 0.50-0.64 unblock moment | 0.64-1.00 hold.
+  const moveU = eseg(0.15, 0.50);
+  const x = lerp(start.x, dest.x, moveU);
+  // Gentle lift arc while travelling.
+  const arc = Math.sin(seg(0.15, 0.50) * Math.PI) * -14;
+  const y = lerp(start.y, dest.y, moveU) + arc;
+  mover.style.left = x + "px";
+  mover.style.top = y + "px";
+
+  const travelling = t > 0.15 && t < 0.50;
+  mover.style.transform = travelling ? "scale(1.03)" : "scale(1)";
+  mover.style.boxShadow = travelling
+    ? "0 14px 30px rgba(0,0,0,0.55)"
+    : "0 4px 12px rgba(0,0,0,0.3)";
+
+  // The upstream is considered "in Review" (done category) once it has landed.
+  const landed = t >= 0.50;
+
+  // Column counts flip the instant the card lands in Review.
+  cProg.textContent = landed ? "0" : "1";
+  cReview.textContent = landed ? "1" : "0";
+
+  // Small "done" chip on the upstream once it is resting in Review. Toggled
+  // via visibility (not removed from flow) so the card's height — and thus
+  // the dot's top:50% position — stays fixed across every frame.
+  moverChip.style.visibility = landed ? "visible" : "hidden";
+
+  // --- Downstream unblock: computed-blocked clears the instant the upstream
+  // lands in the done column (t = 0.50), no separate manual step. Same
+  // visibility trick keeps the downstream card's height constant too.
+  cardDownstream.classList.toggle("blocked", !landed);
+  downstreamChip.style.visibility = !landed ? "visible" : "hidden";
+
+  // Brief emphasis glow on the downstream input dot right at the unblock
+  // moment, matching the .glow treatment used during connection drags.
+  dotIn.classList.toggle("glow", during(0.50, 0.64) === 1);
+
+  // --- Dependency edge: recomputed every frame from the CURRENT rendered
+  // position of each dot (measured live via getBoundingClientRect, not
+  // hand-computed offsets), so it stays pixel-exact on the dots even as the
+  // mover's card height/content and position change frame to frame. This is
+  // still fully deterministic for a given t — no animation, no timers. ---
+  const stageRect = document.getElementById("stage").getBoundingClientRect();
+  const outRect = dotOut.getBoundingClientRect();
+  const inRect = dotIn.getBoundingClientRect();
+  const edgeX0 = outRect.left + outRect.width / 2 - stageRect.left;
+  const edgeY0 = outRect.top + outRect.height / 2 - stageRect.top;
+  const edgeX1 = inRect.left + inRect.width / 2 - stageRect.left;
+  const edgeY1 = inRect.top + inRect.height / 2 - stageRect.top;
+  edgeSolid.setAttribute("d", edgePath(edgeX0, edgeY0, edgeX1, edgeY1));
+  edgeSolid.style.stroke = "#4da3e8";
+  const ax = edgeX1, ay = edgeY1;
+  edgeArrow.setAttribute("d", `M ${ax} ${ay} L ${ax - 9} ${ay - 4} L ${ax - 9} ${ay + 4} Z`);
+  edgeArrow.style.fill = "#4da3e8";
+
+  // --- Caption copy per window. ---
+  if (t < 0.15) {
+    say.innerHTML = "This subtask is blocked by its dependency";
+  } else if (t < 0.50) {
+    say.innerHTML = "Finish the upstream&hellip;";
+  } else {
+    say.innerHTML = "Blocked clears the moment its dependency is <b>done</b>";
+  }
+}
+PROMO.go(renderFrame);
+</script>
+</body>
+</html>

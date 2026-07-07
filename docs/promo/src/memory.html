@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="common.css">
+<style>
+  /* memory scene stage: sidebar + editor pane, exact capture size. */
+  #stage { width: 900px; height: 520px; display: flex; flex-direction: column; }
+  #stage .sidebar { border-right: 1px solid var(--line-soft); }
+  #main { flex: 1; display: flex; min-height: 0; }
+  #editor {
+    flex: 1;
+    background: #191e24;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+  #empty-hint { font-size: 12px; color: var(--faint); }
+  #doc {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+  }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <div class="top">
+    <span class="brand">Drydock<span class="dot">.</span></span>
+    <span class="eyebrow">Work tab</span>
+  </div>
+
+  <div id="main">
+    <div class="sidebar">
+      <div class="side-head">TASKS</div>
+      <div class="side-row" style="opacity:0.55"><span class="disc">▾</span><span>Payment provider integration</span></div>
+      <div class="side-row" style="opacity:0.55"><span class="disc">▸</span><span>Onboarding flow revamp</span></div>
+      <div class="side-row" id="orphan-row"><span class="disc">▸</span><span id="orphan-label">Orphaned Chats (2)</span></div>
+
+      <div class="side-head" style="margin-top:6px">MEMORY</div>
+      <div class="side-head" style="padding-top:0;font-size:9px">SUGGESTIONS (1)</div>
+      <div class="mem-row" style="margin-bottom:10px">
+        <div class="mtext">Use eseg() for all enter/exit transitions</div>
+        <div style="font-size:10px;color:var(--dim);white-space:nowrap">Approve&nbsp;·&nbsp;Reject</div>
+      </div>
+
+      <div class="side-head" style="padding-top:0;font-size:9px">MEMORIES (12)</div>
+      <div class="mem-row" id="row1">
+        <div class="mtext">Prefer strict CSP for panels (no unsafe-inline)</div>
+        <div class="open">Open ↗</div>
+      </div>
+      <div class="mem-row" style="margin-top:8px">
+        <div class="mtext">State lives in ~/.drydock/state.sqlite</div>
+        <div class="open">Open ↗</div>
+      </div>
+      <div class="mem-row" style="margin-top:8px">
+        <div class="mtext">Approved memories brief new sessions (max 10)</div>
+        <div class="open">Open ↗</div>
+      </div>
+    </div>
+
+    <div id="editor">
+      <div id="empty-hint">No document open</div>
+      <div class="doc" id="doc">
+        <h1>Drydock memory</h1>
+        <div class="body">Prefer strict CSP for panels (no unsafe-inline). mermaid is the only sanctioned exception.</div>
+        <div class="meta">
+          Status: approved<br>
+          Created: 2026-07-06<br>
+          Source chat: webhook handler run
+        </div>
+        <div class="scheme" style="margin-top:14px">drydock-memory:m-2</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cursor sprite. -->
+  <svg class="cursor" id="cursor" viewBox="0 0 24 24"><path d="M4 2 L4 20 L9 15 L12.5 22 L15 21 L11.5 14 L18 14 Z" fill="#fff" stroke="#1b2733" stroke-width="1"/></svg>
+
+  <div class="caption"><span class="kbd">Memory</span><span class="say" id="say">Renamed: <b>Orphaned Chats</b></span></div>
+</div>
+
+<script src="frame.js"></script>
+<script>
+function renderFrame() {
+  const { t, lerp, eseg } = PROMO;
+  const say = document.getElementById("say");
+  const cursor = document.getElementById("cursor");
+  const row1 = document.getElementById("row1");
+  const doc = document.getElementById("doc");
+  const emptyHint = document.getElementById("empty-hint");
+
+  // Cursor rest position: near the sidebar's TASKS header, idle.
+  const restPos = { x: 120, y: 96 };
+  // Target: row1's "Open" link. Sidebar flow (top-to-bottom, stage-space px):
+  // top bar 46 + sidebar pad 12 -> TASKS head ~20 -> 2 dim rows ~28 each ->
+  // Orphaned Chats row ~28 -> MEMORY head ~26 -> SUGGESTIONS head ~13 ->
+  // suggestion row ~31 (+10 margin) -> MEMORIES head ~13 -> row1 starts ~255,
+  // row1 height ~31 -> vertical center ~270. Horizontal: sidebar is 320px wide,
+  // row margin 12px + padding-right 10px -> "Open" link sits near x~278.
+  const openPos = { x: 278, y: 270 };
+
+  // --- Window 1: 0.00-0.18 rest ---
+  // --- Window 2: 0.18-0.40 hover+click ---
+  const moveU = eseg(0.18, 0.36);
+  const cx = lerp(restPos.x, openPos.x, moveU);
+  const cy = lerp(restPos.y, openPos.y, moveU);
+  cursor.style.left = cx + "px";
+  cursor.style.top = cy + "px";
+
+  const clicked = t >= 0.36 && t < 0.70;
+  cursor.classList.toggle("grab", clicked);
+
+  const hot = t >= 0.30 && t < 0.70;
+  row1.classList.toggle("hot", hot);
+
+  // --- Window 3: 0.40-0.70 open (doc fades/slides in) ---
+  const openU = eseg(0.40, 0.70);
+  doc.style.opacity = String(openU);
+  doc.style.transform = "translateX(" + lerp(20, 0, openU) + "px)";
+  // Hide the doc entirely before it starts appearing so it doesn't paint at opacity 0
+  // sitting on top of the empty hint's flex centering (harmless either way, but explicit).
+  doc.style.visibility = t < 0.40 ? "hidden" : "visible";
+  emptyHint.style.opacity = String(1 - openU);
+
+  // --- Caption text per window ---
+  let text;
+  if (t < 0.18) {
+    text = 'Renamed: <b>Orphaned Chats</b>';
+  } else if (t < 0.40) {
+    text = 'Open any saved memory';
+  } else {
+    text = 'Opens as a <b>read-only document</b>';
+  }
+  say.innerHTML = text;
+}
+PROMO.go(renderFrame);
+</script>
+</body>
+</html>

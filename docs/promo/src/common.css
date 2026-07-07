@@ -1,0 +1,247 @@
+/* Drydock promo kit — shared component library.
+ *
+ * A faithful, self-contained miniature of the Task Board's visual language
+ * (dark VS Code-style ground, category-accented columns, parent-task stripe
+ * hues, the chip/dot/edge vocabulary). Scenes compose these classes and drive
+ * per-frame state from frame.js — no live CSS transitions run during capture,
+ * so every frame is a deterministic static layout. Colours are the design
+ * artifact's palette, not theme variables (there is no VS Code host here). */
+
+:root {
+  --bg: #14181c;
+  --panel: #1a1f24;
+  --col: #262c33;
+  --card: #2d3540;
+  --card-2: #313a44;
+  --line: #2e3742;
+  --line-soft: #242b32;
+  --ink: #e3eaf1;
+  --muted: #9fb0bf;
+  --dim: #6e7b89;
+  --faint: #4a5663;
+
+  --cat-backlog: #7d8590;
+  --cat-pending: #c99420;
+  --cat-progress: #4da3e8;
+  --cat-done: #3ba55d;
+
+  --edge: #45c4cf;
+  --amber: #e0b550;
+  --amber-line: #c99420;
+  --accent: #3e8fd6;
+  --danger: #f48771;
+
+  --h0: #4da3e8; --h1: #63c583; --h2: #cca700; --h3: #d18616;
+  --h4: #b180d7; --h5: #f14c4c; --h6: #45c4cf; --h7: #d7ba7d;
+
+  --r: 7px;
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); font-family: var(--font); color: var(--ink); }
+
+/* The capture surface. Scenes override width/height to their canonical size. */
+.stage {
+  position: relative;
+  width: 960px;
+  height: 540px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* Header + caption band -------------------------------------------------- */
+.top {
+  height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line-soft);
+}
+.brand { font-size: 14px; font-weight: 650; letter-spacing: -0.01em; }
+.brand .dot { color: var(--edge); }
+.top .eyebrow {
+  font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--dim); font-weight: 600;
+}
+.caption {
+  position: absolute;
+  left: 18px; bottom: 16px;
+  display: flex; align-items: center; gap: 10px;
+}
+.caption .kbd {
+  font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: #0b1622; background: var(--edge); font-weight: 700;
+  padding: 3px 9px; border-radius: 999px;
+}
+.caption .say { font-size: 15px; color: var(--ink); font-weight: 550; }
+.caption .say b { color: var(--edge); font-weight: 650; }
+
+/* Column rail ------------------------------------------------------------ */
+.rail { display: flex; gap: 12px; padding: 16px 18px; align-items: flex-start; }
+.col {
+  width: 224px; flex: none;
+  background: var(--col);
+  border-radius: var(--r);
+  border-top: 3px solid var(--faint);
+  padding: 10px;
+  min-height: 380px;
+}
+.col.cat-backlog { border-top-color: var(--cat-backlog); }
+.col.cat-pending { border-top-color: var(--cat-pending); }
+.col.cat-progress { border-top-color: var(--cat-progress); }
+.col.cat-done { border-top-color: var(--cat-done); }
+.col-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.col-name { font-size: 13px; font-weight: 600; }
+.col-cat {
+  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600;
+}
+.cat-backlog .col-cat { color: var(--cat-backlog); }
+.cat-pending .col-cat { color: var(--cat-pending); }
+.cat-progress .col-cat { color: var(--cat-progress); }
+.cat-done .col-cat { color: var(--cat-done); }
+.col-count {
+  margin-left: auto; font-size: 11px; min-width: 20px; text-align: center;
+  padding: 1px 7px; border-radius: 999px;
+  background: #313a44; color: var(--muted);
+}
+.col-body { display: flex; flex-direction: column; gap: 8px; }
+.col.drop { outline: 2px dashed var(--cat-progress); outline-offset: -3px; }
+
+/* Cards ------------------------------------------------------------------ */
+.card {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--faint);
+}
+.card .tag {
+  position: absolute; top: 8px; right: 10px;
+  font-size: 8px; letter-spacing: 0.1em; color: var(--dim);
+}
+.card .title { font-size: 12px; font-weight: 600; line-height: 1.3; }
+.card.sub .title { font-weight: 550; }
+.card .parent { font-size: 9.5px; color: var(--dim); margin-top: 3px; }
+.card .metarow { display: flex; align-items: center; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+.card .ws {
+  font-size: 9px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; padding: 0 7px;
+}
+.card .prog { font-size: 9.5px; color: var(--dim); }
+
+.card.stripe-h0 { border-left-color: var(--h0); }
+.card.stripe-h1 { border-left-color: var(--h1); }
+.card.stripe-h2 { border-left-color: var(--h2); }
+.card.stripe-h3 { border-left-color: var(--h3); }
+.card.stripe-h4 { border-left-color: var(--h4); }
+.card.stripe-h5 { border-left-color: var(--h5); }
+.card.stripe-h6 { border-left-color: var(--h6); }
+.card.stripe-h7 { border-left-color: var(--h7); }
+
+/* Blocked subtask: dashed amber on three sides, stripe stays solid. */
+.card.blocked {
+  border-top: 1px dashed var(--amber-line);
+  border-right: 1px dashed var(--amber-line);
+  border-bottom: 1px dashed var(--amber-line);
+}
+
+/* A card being dragged (scene sets .lift + absolute position). */
+.card.lift {
+  position: absolute;
+  width: 204px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+  z-index: 40;
+  cursor: grabbing;
+}
+
+/* Chips ------------------------------------------------------------------ */
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 1px 6px; border-radius: 999px; border: 1px solid transparent;
+}
+.chip.running { color: var(--cat-progress); border-color: var(--cat-progress); }
+.chip.running::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--cat-progress);
+}
+.chip.auto { color: var(--cat-progress); border-color: var(--cat-progress); }
+.chip.blocked { color: var(--amber); border-color: var(--amber-line); }
+.chip.failed { color: var(--danger); border-color: var(--danger); }
+.chip.review { color: var(--cat-done); border-color: var(--cat-done); }
+.prompt-glyph { font-size: 10px; }
+.lock { font-size: 10px; }
+
+/* Buttons (start / force / ghost) ---------------------------------------- */
+.btn {
+  font-size: 10px; padding: 2px 8px; border-radius: 5px;
+  border: 1px solid var(--faint); color: var(--muted); background: transparent;
+}
+.btn.start { color: var(--muted); }
+.btn.disabled { opacity: 0.45; }
+.btn.force { color: var(--amber); border-color: var(--amber-line); }
+.btn.primary { background: var(--accent); color: #0b1622; border-color: transparent; font-weight: 650; }
+.btn.ghost-done { color: var(--cat-done); border-color: var(--cat-done); }
+
+/* Dependency dots + SVG edge overlay. Scoped to `.card .dot` so the generic
+   `.dot` class does not collide with the brand period (`.brand .dot`), which
+   would otherwise inherit absolute-positioned-circle styling. */
+.card .dot {
+  position: absolute; top: 50%; width: 10px; height: 10px; margin-top: -5px;
+  border-radius: 50%; border: 1.5px solid var(--muted); background: var(--card);
+}
+.card .dot.in { left: -6px; }
+.card .dot.out { right: -6px; background: var(--muted); }
+.card .dot.glow {
+  border-color: var(--edge);
+  box-shadow: 0 0 0 4px rgba(69, 196, 207, 0.28);
+}
+.edges { position: absolute; inset: 0; pointer-events: none; z-index: 30; overflow: visible; }
+.edges path { fill: none; }
+.edge { stroke: var(--edge); stroke-width: 2; opacity: 0.7; }
+.edge.ghost { stroke-dasharray: 7 5; }
+.edge-arrow { fill: var(--edge); opacity: 0.85; }
+
+/* Dimmed (out-of-boundary during a connection drag). */
+.dim { opacity: 0.24; filter: grayscale(0.8); }
+.dim .dot { display: none; }
+
+/* Cursor sprite ---------------------------------------------------------- */
+.cursor {
+  position: absolute; z-index: 60; width: 22px; height: 22px;
+  margin: -2px 0 0 -2px; pointer-events: none;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+}
+.cursor.grab { transform: scale(0.9); }
+
+/* Sidebar (memory scene) ------------------------------------------------- */
+.sidebar { width: 320px; background: var(--panel); height: 100%; padding: 12px 0; }
+.side-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 16px; font-size: 12px; color: var(--muted);
+}
+.side-row .disc { color: var(--dim); font-size: 10px; }
+.side-head {
+  font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--dim); font-weight: 600; padding: 6px 16px 2px;
+}
+.mem-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 12px; padding: 8px 10px; border-radius: 6px;
+  background: var(--card); border: 1px solid var(--line);
+}
+.mem-row .mtext { font-size: 11px; color: var(--muted); flex: 1; line-height: 1.35; }
+.mem-row .open { font-size: 11px; color: var(--cat-progress); }
+.mem-row.hot { border-color: var(--cat-progress); }
+
+/* An opened editor document (memory scene). */
+.doc { flex: 1; background: #191e24; height: 100%; padding: 22px 26px; }
+.doc h1 { font-size: 17px; margin: 0 0 14px; font-weight: 600; }
+.doc .body { font-size: 12.5px; color: var(--muted); line-height: 1.7; max-width: 46ch; }
+.doc .meta { margin-top: 18px; font-size: 11px; color: var(--dim); line-height: 1.8; }
+.doc .scheme { color: var(--edge); font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; }

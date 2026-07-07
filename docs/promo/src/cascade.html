@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="common.css">
+<style>
+  /* cascade scene stage: three-column slice (ToDo / In Progress / Review). */
+  #stage { width: 960px; height: 540px; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <div class="top">
+    <span class="brand">Drydock<span class="dot">.</span></span>
+    <span class="eyebrow">Task Board</span>
+  </div>
+
+  <div class="rail">
+    <section class="col cat-pending" id="col-todo">
+      <div class="col-head"><span class="col-name">ToDo</span><span class="col-cat">pending</span><span class="col-count" id="c-todo">2</span></div>
+      <div class="col-body" id="body-todo">
+        <div class="card sub stripe-h0 blocked" id="card-retry">
+          <div class="title">Add retry queue</div>
+          <div class="parent">Payment provider integration</div>
+          <div class="metarow">
+            <span class="chip auto">auto</span>
+            <span class="chip blocked" id="chip-blocked-retry"><span class="lock">🔒</span> blocked</span>
+          </div>
+        </div>
+        <div class="card sub stripe-h0 blocked" id="card-tests">
+          <div class="title">Integration tests</div>
+          <div class="parent">Payment provider integration</div>
+          <div class="metarow">
+            <span class="chip auto">auto</span>
+            <span class="chip blocked" id="chip-blocked-tests"><span class="lock">🔒</span> blocked</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="col cat-progress" id="col-prog">
+      <div class="col-head"><span class="col-name">In Progress</span><span class="col-cat">in progress</span><span class="col-count" id="c-prog">1</span></div>
+      <div class="col-body" id="body-prog">
+        <div class="card sub stripe-h0" id="card-webhook-static">
+          <div class="title">Implement webhook handler</div>
+          <div class="parent">Payment provider integration</div>
+          <div class="metarow">
+            <span class="chip running" id="chip-running-webhook">running</span>
+            <span class="chip review" id="chip-review-webhook" style="display:none">run finished</span>
+          </div>
+        </div>
+        <!-- Settled copies of the two dependents, shown once they land here. -->
+        <div class="card sub stripe-h0" id="card-retry-settled" style="display:none">
+          <div class="title">Add retry queue</div>
+          <div class="parent">Payment provider integration</div>
+          <div class="metarow">
+            <span class="chip auto">auto</span>
+            <span class="chip running">running</span>
+          </div>
+        </div>
+        <div class="card sub stripe-h0" id="card-tests-settled" style="display:none">
+          <div class="title">Integration tests</div>
+          <div class="parent">Payment provider integration</div>
+          <div class="metarow">
+            <span class="chip auto">auto</span>
+            <span class="chip running">running</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="col cat-done" id="col-done">
+      <div class="col-head"><span class="col-name">Review</span><span class="col-cat">done</span><span class="col-count" id="c-done">0</span></div>
+      <div class="col-body" id="body-done">
+        <div class="card sub stripe-h0" id="card-webhook-settled" style="display:none">
+          <div class="title">Implement webhook handler</div>
+          <div class="parent">Payment provider integration</div>
+          <div class="metarow">
+            <span class="chip review">run finished</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Travelling cards (absolutely positioned, driven per frame). -->
+  <div class="card sub stripe-h0 lift" id="lift-webhook" style="display:none">
+    <div class="title">Implement webhook handler</div>
+    <div class="parent">Payment provider integration</div>
+    <div class="metarow"><span class="chip review">run finished</span></div>
+  </div>
+
+  <div class="card sub stripe-h0 lift" id="lift-retry" style="display:none">
+    <div class="title">Add retry queue</div>
+    <div class="parent">Payment provider integration</div>
+    <div class="metarow"><span class="chip auto">auto</span><span class="chip running">running</span></div>
+  </div>
+
+  <div class="card sub stripe-h0 lift" id="lift-tests" style="display:none">
+    <div class="title">Integration tests</div>
+    <div class="parent">Payment provider integration</div>
+    <div class="metarow"><span class="chip auto">auto</span><span class="chip running">running</span></div>
+  </div>
+
+  <div class="caption"><span class="kbd">Auto-start</span><span class="say" id="say">A run finishes&hellip;</span></div>
+</div>
+
+<script src="frame.js"></script>
+<script>
+function renderFrame() {
+  const { t, lerp, eseg, seg } = PROMO;
+  const say = document.getElementById("say");
+
+  // The in-flow cards are visible at the top of every fresh per-frame load
+  // (lift/settled copies start display:none), so measure real on-stage
+  // positions from them — robust against font/metric drift, no hand-computed
+  // header offsets — before any display changes below.
+  const staticWebhook = document.getElementById("card-webhook-static");
+  const cardRetry = document.getElementById("card-retry");
+  const cardTests = document.getElementById("card-tests");
+  const r = (el) => el.getBoundingClientRect();
+  const rW = r(staticWebhook), rR = r(cardRetry), rT = r(cardTests);
+  const colPitch = 236;             // column width 224 + gap 12
+  const pitch = rT.top - rR.top;    // real slot pitch from the two ToDo cards
+
+  // Webhook: In Progress slot 0 → Review slot 0 (one column to the right).
+  const webhookStart = { x: rW.left, y: rW.top };
+  const webhookDest  = { x: rW.left + colPitch, y: rW.top };
+  // Dependents: ToDo slots 0/1 → In Progress slots 0/1 (vacated by the webhook).
+  const retryStart = { x: rR.left, y: rR.top };
+  const testsStart = { x: rT.left, y: rT.top };
+  const retryDest  = { x: rW.left, y: rW.top };
+  const testsDest  = { x: rW.left, y: rW.top + pitch };
+
+  // --- Timeline windows ----------------------------------------------------
+  const finished  = t >= 0.16; // review chip appears from 0.16 onward and stays
+  const moveU     = eseg(0.30, 0.50);
+  const moving    = t > 0.30 && t < 0.50;
+  const landed    = t >= 0.50;
+  const cascadeU  = eseg(0.60, 0.82);
+  const cascading = t > 0.60 && t < 0.82;
+  const cascaded  = t >= 0.82;
+
+  // === Upstream card (webhook) ============================================
+  const chipRunningWebhook = document.getElementById("chip-running-webhook");
+  const chipReviewWebhook  = document.getElementById("chip-review-webhook");
+  chipRunningWebhook.style.display = finished ? "none" : "";
+  chipReviewWebhook.style.display  = finished ? "" : "none";
+
+  const settledWebhook = document.getElementById("card-webhook-settled");
+  const liftWebhook    = document.getElementById("lift-webhook");
+
+  if (moving) {
+    // Hide both static copies, show the lift copy travelling.
+    staticWebhook.style.display = "none";
+    settledWebhook.style.display = "none";
+    liftWebhook.style.display = "";
+    const x = lerp(webhookStart.x, webhookDest.x, moveU);
+    const arc = Math.sin(seg(0.30, 0.50) * Math.PI) * -14;
+    const y = lerp(webhookStart.y, webhookDest.y, moveU) + arc;
+    liftWebhook.style.left = x + "px";
+    liftWebhook.style.top = y + "px";
+  } else if (landed) {
+    // Settled in Review; static In-Progress copy stays hidden.
+    staticWebhook.style.display = "none";
+    settledWebhook.style.display = "";
+    liftWebhook.style.display = "none";
+  } else {
+    // Rest: still sitting in In Progress.
+    staticWebhook.style.display = "";
+    settledWebhook.style.display = "none";
+    liftWebhook.style.display = "none";
+  }
+
+  // === Dependents: blocked look ===========================================
+  const chipBlockedRetry = document.getElementById("chip-blocked-retry");
+  const chipBlockedTests = document.getElementById("chip-blocked-tests");
+
+  // Blocked look (dashed border + lock chip) persists through rest/finish/move,
+  // then is removed once the upstream has landed in Review (unblock window).
+  const showBlocked = t < 0.62;
+  cardRetry.classList.toggle("blocked", showBlocked);
+  cardTests.classList.toggle("blocked", showBlocked);
+  chipBlockedRetry.style.display = showBlocked ? "" : "none";
+  chipBlockedTests.style.display = showBlocked ? "" : "none";
+
+  // === Dependents: cascade move into In Progress ==========================
+  const liftRetry = document.getElementById("lift-retry");
+  const liftTests = document.getElementById("lift-tests");
+  const settledRetry = document.getElementById("card-retry-settled");
+  const settledTests = document.getElementById("card-tests-settled");
+
+  if (cascading) {
+    // Both travel simultaneously — identical timing function/window.
+    cardRetry.style.display = "none";
+    cardTests.style.display = "none";
+    settledRetry.style.display = "none";
+    settledTests.style.display = "none";
+    liftRetry.style.display = "";
+    liftTests.style.display = "";
+
+    const u = cascadeU;
+    const rx = lerp(retryStart.x, retryDest.x, u);
+    const ry = lerp(retryStart.y, retryDest.y, u) + Math.sin(seg(0.60, 0.82) * Math.PI) * -14;
+    liftRetry.style.left = rx + "px";
+    liftRetry.style.top = ry + "px";
+
+    const tx = lerp(testsStart.x, testsDest.x, u);
+    const ty = lerp(testsStart.y, testsDest.y, u) + Math.sin(seg(0.60, 0.82) * Math.PI) * -14;
+    liftTests.style.left = tx + "px";
+    liftTests.style.top = ty + "px";
+  } else if (cascaded) {
+    // Landed: settled copies shown in In Progress body.
+    cardRetry.style.display = "none";
+    cardTests.style.display = "none";
+    liftRetry.style.display = "none";
+    liftTests.style.display = "none";
+    settledRetry.style.display = "";
+    settledTests.style.display = "";
+  } else {
+    // Still resting in ToDo (rest, finish, move, unblock windows).
+    cardRetry.style.display = "";
+    cardTests.style.display = "";
+    liftRetry.style.display = "none";
+    liftTests.style.display = "none";
+    settledRetry.style.display = "none";
+    settledTests.style.display = "none";
+  }
+
+  // === Column counts =======================================================
+  // ToDo drops to 0 as soon as the cascade move begins (both dependents leave
+  // together); In Progress reflects webhook presence + arrived dependents;
+  // Review flips once the webhook card lands.
+  const todoLeft = cascading || cascaded ? 0 : 2;
+  document.getElementById("c-todo").textContent = String(todoLeft);
+
+  let progCount = 1; // webhook resting
+  if (moving || landed) progCount = 0; // webhook has left (mid-flight or arrived in Review)
+  if (cascading || cascaded) progCount += 2; // dependents arrive (mid-flight lift counts as "in transit into" the column)
+  document.getElementById("c-prog").textContent = String(progCount);
+
+  const doneCount = landed ? 1 : 0;
+  document.getElementById("c-done").textContent = String(doneCount);
+
+  // === Caption =============================================================
+  if (t < 0.16) {
+    say.innerHTML = 'A run finishes&hellip;';
+  } else if (t < 0.60) {
+    say.innerHTML = 'Its card lands in <b>Review</b>';
+  } else {
+    say.innerHTML = 'Dependents auto-start <b>in parallel</b>';
+  }
+}
+PROMO.go(renderFrame);
+</script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="common.css">
+<style>
+  #stage { width: 960px; height: 540px; }
+  /* Push the other-task column's cards into the lower band so the source→target
+     edge sweeps across an empty top band and never crosses a card. */
+  #col-other .col-body { padding-top: 64px; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <div class="top">
+    <span class="brand">Drydock<span class="dot">.</span></span>
+    <span class="eyebrow">Task Board</span>
+  </div>
+
+  <div class="rail">
+    <section class="col cat-progress">
+      <div class="col-head"><span class="col-name">In Progress</span><span class="col-cat">in progress</span><span class="col-count">1</span></div>
+      <div class="col-body">
+        <div class="card sub stripe-h0" id="card-source">
+          <div class="title">Design webhook schema</div>
+          <div class="parent">Payment provider integration</div>
+          <span class="dot in"></span>
+          <span class="dot out" id="dot-out"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="col cat-pending" id="col-other">
+      <div class="col-head"><span class="col-name">ToDo</span><span class="col-cat">pending</span><span class="col-count">2</span></div>
+      <div class="col-body">
+        <div class="card sub stripe-h4" id="card-ab">
+          <div class="title">A/B test setup</div>
+          <div class="parent">Onboarding flow revamp</div>
+          <span class="dot in"></span><span class="dot out"></span>
+        </div>
+        <div class="card sub stripe-h4" id="card-signup">
+          <div class="title">New signup screens</div>
+          <div class="parent">Onboarding flow revamp</div>
+          <span class="dot in"></span><span class="dot out"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="col cat-backlog">
+      <div class="col-head"><span class="col-name">Backlog</span><span class="col-cat">backlog</span><span class="col-count">1</span></div>
+      <div class="col-body">
+        <div class="card sub stripe-h0" id="card-target">
+          <div class="title">Implement webhook handler</div>
+          <div class="parent">Payment provider integration</div>
+          <div class="metarow" id="target-meta"></div>
+          <span class="dot in" id="dot-in"></span>
+          <span class="dot out"></span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <svg class="edges" id="edges" width="960" height="540">
+    <path class="edge ghost" id="edge-ghost" d=""></path>
+    <path class="edge" id="edge-solid" d=""></path>
+    <path class="edge-arrow" id="edge-arrow" d=""></path>
+  </svg>
+
+  <svg class="cursor" id="cursor" viewBox="0 0 24 24"><path d="M4 2 L4 20 L9 15 L12.5 22 L15 21 L11.5 14 L18 14 Z" fill="#fff" stroke="#1b2733" stroke-width="1"/></svg>
+
+  <div class="caption"><span class="kbd">Connect</span><span class="say" id="say">Connect subtasks with a drag</span></div>
+</div>
+
+<script src="frame.js"></script>
+<script>
+// Centre of an element in stage space (stage fills the window, body margin 0).
+function centre(el) {
+  const b = el.getBoundingClientRect();
+  return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
+}
+// A dependency connector with a downward belly, hopping column to column.
+function bow(x0, y0, x1, y1) {
+  return `M ${x0} ${y0} C ${x0 + 92} ${y0 + 34}, ${x1 - 92} ${y1 + 34}, ${x1} ${y1}`;
+}
+
+function renderFrame() {
+  const { t, lerp, eseg } = PROMO;
+  const cardAB = document.getElementById("card-ab");
+  const cardSignup = document.getElementById("card-signup");
+  const cardTarget = document.getElementById("card-target");
+  const dotIn = document.getElementById("dot-in");
+  const cursor = document.getElementById("cursor");
+  const say = document.getElementById("say");
+  const eGhost = document.getElementById("edge-ghost");
+  const eSolid = document.getElementById("edge-solid");
+  const eArrow = document.getElementById("edge-arrow");
+
+  const dragging = t >= 0.12 && t < 0.55;
+  const dropped = t >= 0.55;
+  const settled = t >= 0.66;
+
+  // Boundary grey-out: every card that is not a same-task (h0) subtask dims
+  // while a connection is being dragged. Toggle BEFORE measuring dots so the
+  // measured source/target (both h0, never dimmed) stay valid.
+  cardAB.classList.toggle("dim", dragging);
+  cardSignup.classList.toggle("dim", dragging);
+  dotIn.classList.toggle("glow", dragging);
+
+  const src = centre(document.getElementById("dot-out"));
+  const tgt = centre(dotIn);
+
+  // Cursor: rest by the source dot, drag toward the target dot, settle on it.
+  let cx, cy, grab;
+  if (t < 0.12) { cx = src.x + 16; cy = src.y - 10; grab = false; }
+  else if (t < 0.55) { const u = eseg(0.12, 0.55); cx = lerp(src.x + 16, tgt.x - 10, u); cy = lerp(src.y - 10, tgt.y - 8, u); grab = true; }
+  else if (t < 0.66) { const u = eseg(0.55, 0.66); cx = lerp(tgt.x - 10, tgt.x, u); cy = lerp(tgt.y - 8, tgt.y, u); grab = u < 0.5; }
+  else { cx = tgt.x; cy = tgt.y; grab = false; }
+  cursor.style.left = cx + "px";
+  cursor.style.top = cy + "px";
+  cursor.classList.toggle("grab", grab);
+
+  // Edge: ghost follows the cursor while dragging; solid + arrow after drop.
+  if (dragging) {
+    eGhost.setAttribute("d", bow(src.x, src.y, cx, cy));
+    eGhost.style.stroke = "var(--h0)";
+    eSolid.setAttribute("d", "");
+    eArrow.setAttribute("d", "");
+  } else if (dropped) {
+    eGhost.setAttribute("d", "");
+    eSolid.setAttribute("d", bow(src.x, src.y, tgt.x, tgt.y));
+    eSolid.style.stroke = "#4da3e8";
+    eArrow.setAttribute("d", `M ${tgt.x} ${tgt.y} L ${tgt.x - 9} ${tgt.y - 4} L ${tgt.x - 9} ${tgt.y + 4} Z`);
+    eArrow.style.fill = "#4da3e8";
+  } else {
+    eGhost.setAttribute("d", ""); eSolid.setAttribute("d", ""); eArrow.setAttribute("d", "");
+  }
+
+  cardTarget.classList.toggle("blocked", settled);
+  document.getElementById("target-meta").innerHTML =
+    settled ? '<span class="chip blocked"><span class="lock">🔒</span> blocked</span>' : "";
+
+  say.innerHTML = t < 0.12 ? "Connect subtasks with a drag"
+    : t < 0.66 ? "Connections stay inside <b>one task</b>"
+    : 'Now <b>Implement webhook handler</b> waits on it';
+}
+PROMO.go(renderFrame);
+</script>
+</body>
+</html>

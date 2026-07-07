@@ -47,6 +47,10 @@ pnpm-debug.log*
 prevalidation.json
 docs/prevalidation-report.md
 
+# Promo GIF capture scratch (only the .gif files are committed)
+docs/promo/.frames/
+docs/promo/.check/
+
 # Editor and OS noise
 .vscode/*
 !.vscode/extensions.json
