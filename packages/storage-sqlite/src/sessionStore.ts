@@ -41,10 +41,12 @@ export class SqliteChatSessionStore implements ChatSessionStore {
         mode,
         parent_session_id,
         spawned_role,
+        workspace_roots,
+        read_only_roots,
         created_at,
         updated_at,
         ended_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.sessionId,
       record.chatId,
@@ -60,6 +62,8 @@ export class SqliteChatSessionStore implements ChatSessionStore {
       record.mode ?? null,
       record.parentSessionId ?? null,
       record.spawnedRole ?? null,
+      record.workspaceRoots === undefined ? null : JSON.stringify(record.workspaceRoots),
+      record.readOnlyRoots === undefined ? null : JSON.stringify(record.readOnlyRoots),
       record.createdAt,
       record.updatedAt,
       record.endedAt ?? null
@@ -162,6 +166,8 @@ interface ChatSessionRow {
   readonly mode: string | null;
   readonly parent_session_id: string | null;
   readonly spawned_role: string | null;
+  readonly workspace_roots: string | null;
+  readonly read_only_roots: string | null;
   readonly created_at: string;
   readonly updated_at: string;
   readonly ended_at: string | null;
@@ -183,8 +189,24 @@ function mapSession(row: ChatSessionRow): ChatSessionRecord {
     ...(row.mode === null ? {} : { mode: row.mode as SessionMode }),
     ...(row.parent_session_id === null ? {} : { parentSessionId: row.parent_session_id as SessionId }),
     ...(row.spawned_role === null ? {} : { spawnedRole: row.spawned_role as AgentRole }),
+    ...spreadStringArray("workspaceRoots", row.workspace_roots),
+    ...spreadStringArray("readOnlyRoots", row.read_only_roots),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.ended_at === null ? {} : { endedAt: row.ended_at })
   };
+}
+
+/** Parses a JSON string-array column into `{ [key]: string[] }`, or {} when null/invalid. */
+function spreadStringArray(key: "workspaceRoots" | "readOnlyRoots", value: string | null): Record<string, readonly string[]> {
+  if (value === null || value === "") return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string") && parsed.length > 0) {
+      return { [key]: parsed as string[] };
+    }
+  } catch {
+    // Malformed JSON (shouldn't happen): treat as absent rather than throwing.
+  }
+  return {};
 }

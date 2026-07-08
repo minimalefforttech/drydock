@@ -121,6 +121,32 @@ test("event appends return durable idempotent sequences and support resume", asy
   }
 });
 
+test("chat session workspace roots round-trip so a resume re-mounts the project", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  const dbPath = path.join(dir, "stage2-roots.sqlite");
+  try {
+    const connection = new SqliteConnection(dbPath);
+    applyMigrations(connection);
+    const sessions = new SqliteChatSessionStore(connection);
+    await sessions.insertSession({
+      ...sessionRecord("session-roots", "2026-07-01T00:00:00.000Z"),
+      workspaceRoots: ["C:\\proj\\app", "C:\\proj\\shared"],
+      readOnlyRoots: ["C:\\proj\\shared"]
+    });
+
+    // Reopen to prove the JSON columns persist across a restart.
+    connection.close();
+    const reopened = new SqliteConnection(dbPath);
+    applyMigrations(reopened);
+    const stored = await new SqliteChatSessionStore(reopened).getSession(asId<"SessionId">("session-roots"));
+    assert.deepEqual(stored?.workspaceRoots, ["C:\\proj\\app", "C:\\proj\\shared"]);
+    assert.deepEqual(stored?.readOnlyRoots, ["C:\\proj\\shared"]);
+    reopened.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("chat session description round-trips, clears with null, and delete removes the row", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
   const dbPath = path.join(dir, "stage2-description.sqlite");

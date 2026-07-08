@@ -21,6 +21,7 @@ import {
   treeSourceFromEvent,
   WEBVIEW_PROTOCOL_VERSION,
   type AccessRequestSummary,
+  type ActiveEditorRef,
   type AgentActivitySummary,
   type AgentEvent,
   type AgentTreeSource,
@@ -43,7 +44,7 @@ import {
   type WorkTaskRecord,
   type WorkTaskSummary
 } from "@drydock/contracts";
-import { normalizePathKey, type AgentQuestionService, type Logger, type ProductBusEvent } from "@drydock/core";
+import { normalizePathKey, sandboxRuntimePath, type AgentQuestionService, type Logger, type ProductBusEvent } from "@drydock/core";
 import type { BoardService, MemoryService, SubtaskService, TaskService } from "@drydock/work-management";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import { buildBoardState, decorateTaskSummary, joinOpenCommentCounts, reconcileColumns } from "./boardShared.js";
@@ -123,6 +124,48 @@ function toMemoryCandidateSummary(record: MemoryCandidateRecord): MemoryCandidat
 }
 
 /**
+ * Opens a file reference the agent emitted in a markdown link. Handles a trailing
+ * `:line[:col]`, external http(s) URLs (open in browser), and the sandbox
+ * drive-mirror path form (`/c/Users/...` → `C:\Users\...`) so links to mounted
+ * host folders open in the editor at the right line.
+ */
+async function openAgentFileRef(ref: string): Promise<boolean> {
+  const trimmed = ref.trim();
+  if (/^https?:\/\//i.test(trimmed)) {
+    await vscode.env.openExternal(vscode.Uri.parse(trimmed));
+    return true;
+  }
+  // Strip a trailing :line[:col] (anchored at the end so a Windows drive colon is safe).
+  const suffix = /:(\d+)(?::(\d+))?$/.exec(trimmed);
+  const rawPath = suffix ? trimmed.slice(0, suffix.index) : trimmed;
+  const line = suffix ? Number(suffix[1]) : undefined;
+  const col = suffix && suffix[2] !== undefined ? Number(suffix[2]) : undefined;
+  const hostPath = runtimePathToHostPath(rawPath);
+  try {
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(hostPath));
+    const editor = await vscode.window.showTextDocument(doc, { preview: true });
+    if (line !== undefined && Number.isFinite(line)) {
+      const position = new vscode.Position(Math.max(0, line - 1), Math.max(0, (col ?? 1) - 1));
+      editor.selection = new vscode.Selection(position, position);
+      editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+    }
+    return true;
+  } catch (error) {
+    void vscode.window.showWarningMessage(`Couldn't open ${hostPath}: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+/** Maps a sandbox drive-mirror path (`/c/Users/x`) back to its host path (`C:\Users\x`). */
+function runtimePathToHostPath(runtimePath: string): string {
+  const mirror = /^\/([a-zA-Z])\/(.*)$/.exec(runtimePath);
+  if (mirror) {
+    return `${mirror[1]!.toUpperCase()}:\\${mirror[2]!.replace(/\//g, "\\")}`;
+  }
+  return runtimePath;
+}
+
+/**
  * The single link target from a task.link/unlink payload. Contracts guarantee
  * exactly one of workspaceSetId/sessionId is present, so workspaceSetId is
  * preferred and sessionId is the else branch.
@@ -177,6 +220,18 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       // while the view is hidden/disposed.
       backend.bus.subscribe((event) => this.onBusEvent(event));
     }
+    // Surface the active editor so the composer can offer it as a one-click
+    // attachment. push() no-ops while the view is hidden, so this is cheap.
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      this.push({ type: "editor.active", editor: this.activeEditorRef() ?? null });
+    });
+  }
+
+  /** The active file-scheme editor as a display-safe ref, or undefined. */
+  private activeEditorRef(): ActiveEditorRef | undefined {
+    const uri = vscode.window.activeTextEditor?.document.uri;
+    if (uri === undefined || uri.scheme !== "file") return undefined;
+    return { path: uri.fsPath, name: path.basename(uri.fsPath) };
   }
 
   private onBusEvent(event: ProductBusEvent): void {
@@ -297,12 +352,14 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         const runtimes = this.backend.available
           ? (await this.backend.appService.listPanelRuntimes()).map(toRuntimeSummary)
           : [];
+        const activeEditor = this.activeEditorRef();
         const state: PanelInitState = {
           availability: this.availability(),
           runtimes,
           providerCatalogs: this.backend.available ? this.backend.appService.listChatProviderCatalogs() : [],
           stateRootDisplayPath: this.backend.stateRootPath,
           openFolderNames: this.openFolderNames(),
+          ...(activeEditor !== undefined ? { activeEditor } : {}),
           agentIdleThresholdMs: this.agentIdleThresholdMs(),
           codeBlockWordWrap: this.codeBlockWordWrap()
         };
@@ -325,6 +382,24 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         const appService = this.requireBackend();
         const runtimes = (await appService.listPanelRuntimes(payload.includeRemoved ?? false)).map(toRuntimeSummary);
         this.respond(request.requestId, { type: "isolatedRun.listRuntimes", runtimes });
+        return;
+      }
+      case "runtime.stats": {
+        const appService = this.requireBackend();
+        const stats = await appService.sampleRuntimeStats(payload.runtimeIds);
+        this.respond(request.requestId, { type: "runtime.stats", stats });
+        return;
+      }
+      case "runtime.reconcile": {
+        const appService = this.requireBackend();
+        if (!this.backend.available) {
+          throw new Error("Docker Sandbox is not available in this window.");
+        }
+        // Reconciles inventory against `sbx ls`: reaps orphaned quarantined/lost
+        // rows (their sandbox is gone) and purges old removed rows.
+        await this.backend.reconcileOnActivate();
+        this.respond(request.requestId, { type: "runtime.reconcile", accepted: true });
+        await this.pushInventory(appService);
         return;
       }
       case "isolatedRun.stopRuntime": {
@@ -362,7 +437,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "chat.startSession": {
         const appService = this.requireBackend();
         const workspace = await this.resolveWorkspace(payload.workspace);
-        const started = await appService.startChatSession(payload.model, undefined, workspace);
+        const started = await appService.startChatSession(payload.model, payload.title, workspace);
         await this.baselineWorkspaceSession(started.session.sessionId, workspace);
         this.push({ type: "run.started", isolation: started.isolation });
         this.push({ type: "provider.models", providerCatalogs: started.providerCatalogs });
@@ -409,7 +484,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
           throw new Error("This session is already live.");
         }
         const workspace = await this.resolveWorkspace(payload.workspace);
-        const resumed = await appService.resumeChatSession(payload.sessionId, payload.model, workspace);
+        const approvedRoots = await this.requireWorkspaceReview().approvedAccessRoots(payload.sessionId);
+        const resumed = await appService.resumeChatSession(payload.sessionId, payload.model, workspace, false, approvedRoots);
         await this.baselineWorkspaceSession(resumed.session.sessionId, workspace);
         this.push({ type: "run.started", isolation: resumed.isolation });
         this.push({ type: "provider.models", providerCatalogs: resumed.providerCatalogs });
@@ -421,10 +497,49 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         await this.pushInventory(appService);
         return;
       }
+      case "chat.reclaim": {
+        const appService = this.requireBackend();
+        if (appService.isChatSessionLive(payload.sessionId)) {
+          // Already ours in this window — nothing to take over.
+          throw new Error("This session is already live in this window.");
+        }
+        const approvedRoots = await this.requireWorkspaceReview().approvedAccessRoots(payload.sessionId);
+        // A model carries only for a forced provider switch of an active session;
+        // omitted, reclaim keeps the session's own provider.
+        const reclaimed = await appService.reclaimChatSession(payload.sessionId, payload.model, approvedRoots);
+        await this.baselineWorkspaceSession(reclaimed.session.sessionId, undefined);
+        this.push({ type: "run.started", isolation: reclaimed.isolation });
+        this.push({ type: "provider.models", providerCatalogs: reclaimed.providerCatalogs });
+        this.respond(request.requestId, {
+          type: "chat.reclaim",
+          session: this.decorateSessionSummary(reclaimed.session),
+          providerCatalogs: reclaimed.providerCatalogs
+        });
+        await this.pushInventory(appService);
+        return;
+      }
       case "chat.cancelTurn": {
         const appService = this.requireBackend();
         await appService.cancelChatTurn(payload.sessionId);
         this.respond(request.requestId, { type: "chat.cancelTurn", accepted: true });
+        return;
+      }
+      case "ui.confirm": {
+        // Native modal confirmation for a destructive/irreversible webview action.
+        const choice = await vscode.window.showWarningMessage(
+          payload.message,
+          { modal: true, ...(payload.detail === undefined ? {} : { detail: payload.detail }) },
+          payload.confirmLabel
+        );
+        this.respond(request.requestId, { type: "ui.confirm", confirmed: choice === payload.confirmLabel });
+        return;
+      }
+      case "chat.poke": {
+        const appService = this.requireBackend();
+        // Soft nudge for a quiet turn — a graceful turn/interrupt that keeps the
+        // session/container alive. `poked` is false when there's nothing to poke.
+        const poked = await appService.pokeChatTurn(payload.sessionId);
+        this.respond(request.requestId, { type: "chat.poke", poked });
         return;
       }
       case "chat.endSession": {
@@ -508,6 +623,64 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         });
         terminal.show();
         this.respond(request.requestId, { type: "provider.login", providerId: payload.providerId, launched: login.display });
+        return;
+      }
+      case "runtime.sbxLogin": {
+        if (!this.backend.available) {
+          throw new Error("Docker Sandbox is not available in this window.");
+        }
+        // Interactive Docker Sandbox sign-in in a visible terminal: `sbx login`
+        // drives its own OAuth flow; no secret passes through the extension.
+        const sbxPath = this.backend.sbxDisplayPath;
+        const terminal = vscode.window.createTerminal({ name: "Docker Sandbox login", shellPath: sbxPath, shellArgs: ["login"] });
+        terminal.show();
+        this.respond(request.requestId, { type: "runtime.sbxLogin", launched: `${sbxPath} login` });
+        return;
+      }
+      case "runtime.openTerminal": {
+        const appService = this.requireBackend();
+        if (!this.backend.available) {
+          throw new Error("Docker Sandbox is not available in this window.");
+        }
+        // A real VS Code terminal INTO the chat's container, so the developer can
+        // watch/interrupt what the agent is running (e.g. a hung command).
+        const runtime = (await appService.listRuntimes())
+          .find((record) => record.sessionId === payload.sessionId && record.status === "running");
+        if (runtime === undefined) {
+          throw new Error("This chat has no running container yet. Send a message to start it, then open the terminal.");
+        }
+        const terminal = vscode.window.createTerminal({
+          name: `Container · ${runtime.externalName}`,
+          shellPath: this.backend.sbxDisplayPath,
+          shellArgs: ["exec", runtime.externalName, "/bin/bash"]
+        });
+        terminal.show();
+        this.respond(request.requestId, { type: "runtime.openTerminal", accepted: true });
+        return;
+      }
+      case "chat.rawStream": {
+        if (!this.backend.available) {
+          throw new Error("Docker Sandbox is not available in this window.");
+        }
+        // Debug view: the current (or last) turn's raw agent stream, captured
+        // in-memory only. Null snapshot = no turn has run in this window yet.
+        const snapshot = this.backend.rawStreamStore.snapshot(payload.sessionId);
+        this.respond(request.requestId, {
+          type: "chat.rawStream",
+          text: snapshot?.text ?? "",
+          lastChunkAt: snapshot?.lastChunkAt ?? null
+        });
+        return;
+      }
+      case "chat.runtimeStats": {
+        const appService = this.requireBackend();
+        const stats = await appService.sampleSessionStats(payload.sessionId);
+        this.respond(request.requestId, { type: "chat.runtimeStats", stats });
+        return;
+      }
+      case "chat.openFile": {
+        const opened = await openAgentFileRef(payload.path);
+        this.respond(request.requestId, { type: "chat.openFile", opened });
         return;
       }
       case "session.timeline": {
@@ -673,8 +846,28 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "workspace.createSet": {
-        const workspaceSet = await this.requireWorkspaceReview().createWorkspaceSetFromCatalog(payload.name);
-        this.respond(request.requestId, { type: "workspace.createSet", workspaceSet });
+        const state = await this.requireWorkspaceReview().createWorkspaceSet(payload.name, payload.members);
+        this.respond(request.requestId, { type: "workspace.createSet", state });
+        return;
+      }
+      case "workspace.updateSet": {
+        const state = await this.requireWorkspaceReview().updateWorkspaceSet(payload.workspaceSetId, payload.name, payload.members);
+        this.respond(request.requestId, { type: "workspace.updateSet", state });
+        return;
+      }
+      case "workspace.deleteSet": {
+        const state = await this.requireWorkspaceReview().deleteWorkspaceSet(payload.workspaceSetId);
+        this.respond(request.requestId, { type: "workspace.deleteSet", state });
+        return;
+      }
+      case "workspace.removeProject": {
+        const state = await this.requireWorkspaceReview().removeProject(payload.projectId);
+        this.respond(request.requestId, { type: "workspace.removeProject", state });
+        return;
+      }
+      case "workspace.updateProjectPath": {
+        const state = await this.requireWorkspaceReview().updateProjectPath(payload.projectId, payload.path);
+        this.respond(request.requestId, { type: "workspace.updateProjectPath", state });
         return;
       }
       case "policy.requestAccess": {
@@ -689,14 +882,10 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         const workspaceReview = this.requireWorkspaceReview();
         const accessRequest = await workspaceReview.resolveAccess(payload.accessRequestId, payload.approve, payload.editedHostPath);
         this.respond(request.requestId, { type: "policy.resolveAccess", accessRequest });
-        // The access-request attention persists until the session has no PENDING
-        // requests left; then it clears. Turn attention is untouched here.
-        await this.clearAccessAttentionIfResolved(workspaceReview, accessRequest.sessionId);
-        // Approval restarts the session with the new mount and denial leaves it
-        // as-is; either way, nudge a live idle session to continue the task with
-        // the outcome. The runtime path mirrors prepareApproval's deterministic
-        // `/approved/<id>` mount point.
-        this.autoContinueAfterAccess(payload.approve, accessRequest);
+        // Approval already applied the mount before marking the request approved;
+        // denial is persisted immediately. Once no pending requests remain, clear
+        // attention and nudge the live session with the outcome.
+        await this.onAccessResolved(workspaceReview, accessRequest, payload.approve);
         return;
       }
       case "diff.snapshotWorkspace": {
@@ -844,13 +1033,14 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
           throw new Error(`Subtask ${payload.subtaskId} was not found.`);
         }
         const hasFieldUpdate = payload.title !== undefined || payload.description !== undefined
-          || payload.prompt !== undefined || payload.autoStart !== undefined;
+          || payload.prompt !== undefined || payload.autoStart !== undefined || payload.colorOverride !== undefined;
         if (hasFieldUpdate) {
           await this.requireSubtasks().updateSubtask(payload.subtaskId, {
             ...(payload.title === undefined ? {} : { title: payload.title }),
             ...(payload.description === undefined ? {} : { description: payload.description }),
             ...(payload.prompt === undefined ? {} : { prompt: payload.prompt }),
-            ...(payload.autoStart === undefined ? {} : { autoStart: payload.autoStart })
+            ...(payload.autoStart === undefined ? {} : { autoStart: payload.autoStart }),
+            ...(payload.colorOverride === undefined ? {} : { colorOverride: payload.colorOverride })
           });
         }
         if (payload.columnId !== undefined) {
@@ -931,15 +1121,6 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     return appService;
   }
 
-  /**
-   * Projects a session record to its display-safe summary, decorated with
-   * `runningElsewhere`. A session runs "elsewhere" when it is stored
-   * active/starting, is NOT live in this host's process, carries a FRESH
-   * heartbeat, and is owned by a DIFFERENT host instance. All four conditions
-   * must hold: not-live rules out our own live sessions cheaply; the foreign
-   * owner + fresh heartbeat is the same signal core reconcile uses to leave the
-   * session untouched. When the backend is unavailable the flag is simply false.
-   */
   private requireQuestions(): AgentQuestionService {
     if (!this.backend.available) {
       throw new Error(`Backend unavailable: ${this.backend.reason}`);
@@ -1000,6 +1181,12 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       : { running, failed, agents };
   }
 
+  /**
+   * Projects a session record to its display-safe summary, decorated with
+   * `runningElsewhere`. A session runs "elsewhere" when it is stored
+   * active/starting, is not live in this host process, carries a fresh heartbeat,
+   * and is owned by a different host instance.
+   */
   private decorateSessionSummary(record: ChatSessionRecord): ChatSessionSummary {
     // Backfill the fast-path mode map from the durable record so a clone session
     // stays recognizable after a reload (its sessionClones map is still lost, so
@@ -1007,7 +1194,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     if (this.backend.available) {
       this.backend.appService.noteSessionModeFromRecord(record.sessionId, record.mode);
     }
-    const summary = toChatSessionSummary(record, this.isRunningElsewhere(record));
+    const live = this.backend.available && this.backend.appService.isChatSessionLive(record.sessionId);
+    const summary = { ...toChatSessionSummary(record, this.isRunningElsewhere(record)), live };
     const activity = this.agentActivitySummary(record.sessionId);
     return activity.running === 0 && activity.failed === 0
       ? summary
@@ -1283,10 +1471,38 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Called after each access decision. While the session still has pending
+   * requests, attention persists. Once the queue drains, attention clears and a
+   * single continuation turn tells a live idle agent the outcome.
+   */
+  private async onAccessResolved(
+    workspaceReview: WorkspaceReviewAppService,
+    accessRequest: AccessRequestSummary,
+    approve: boolean
+  ): Promise<void> {
+    let stillPending: boolean;
+    try {
+      const state = await workspaceReview.getPolicyState();
+      stillPending = state.accessRequests.some(
+        (candidate) => candidate.sessionId === accessRequest.sessionId && candidate.status === "pending"
+      );
+    } catch (error) {
+      this.logger.warn("access resolution follow-up failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+    if (stillPending) {
+      return;
+    }
+    this.clearAttention(accessRequest.sessionId, ["access-request"]);
+    this.autoContinueAfterAccess(approve, accessRequest);
+  }
+
+  /**
    * Auto-sends a continuation turn that tells the agent the access-request
-   * outcome, but only when the session is live and idle — a busy or dead
-   * session is left alone (the outcome is still visible in the panel). The
-   * mount point is `/approved/<id>`, matching AccessRequestService.prepareApproval.
+   * outcome, but only when the session is live and idle. The approval path has
+   * already restarted the backend with the new mount by the time this runs.
    */
   private autoContinueAfterAccess(approve: boolean, accessRequest: AccessRequestSummary): void {
     if (!this.backend.available) {
@@ -1297,7 +1513,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       return;
     }
     const message = approve
-      ? `[host] Access request approved: "${accessRequest.displayPath}" is mounted at "/approved/${accessRequest.accessRequestId}" (${accessRequest.mode}). Continue the task.`
+      ? `[host] Access request approved: "${accessRequest.displayPath}" is mounted at "${sandboxRuntimePath(accessRequest.displayPath)}" (${accessRequest.mode}). Continue the task.`
       : `[host] Access request for "${accessRequest.displayPath}" was denied. Continue without it.`;
     this.runTurnDetached(appService, accessRequest.sessionId, message);
   }
@@ -1376,26 +1592,6 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     }
     this.pushAttention(sessionId);
     this.refreshAttentionBadge();
-  }
-
-  /**
-   * Clears a session's access-request attention once no PENDING requests remain
-   * for it. Turn-attention is untouched. Queries current policy state.
-   */
-  private async clearAccessAttentionIfResolved(workspaceReview: WorkspaceReviewAppService, sessionId: string): Promise<void> {
-    try {
-      const state = await workspaceReview.getPolicyState();
-      const stillPending = state.accessRequests.some(
-        (accessRequest) => accessRequest.sessionId === sessionId && accessRequest.status === "pending"
-      );
-      if (!stillPending) {
-        this.clearAttention(sessionId, ["access-request"]);
-      }
-    } catch (error) {
-      this.logger.warn("access attention clear failed", {
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
   }
 
   /**

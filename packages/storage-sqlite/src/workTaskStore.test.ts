@@ -96,6 +96,64 @@ test("deleting a task cascades its links and links dedupe on insert", async () =
   }
 });
 
+test("listSessionIdsBySubtask returns only session-target links carrying that subtaskId, in link order", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  const dbPath = path.join(dir, "work-task-links-by-subtask.sqlite");
+  try {
+    const connection = new SqliteConnection(dbPath);
+    applyMigrations(connection);
+    const store = new SqliteWorkTaskStore(connection);
+
+    await store.insertTask(task("task-1", "Linked", "2026-07-03T00:00:00.000Z"));
+    // A workspace-set link (no subtaskId) never shows up in the by-subtask query.
+    await store.insertLink({
+      taskId: asId<"TaskId">("task-1"),
+      workspaceSetId: asId<"WorkspaceSetId">("set-1"),
+      createdAt: "2026-07-03T00:00:00.500Z"
+    });
+    // A session link with no subtaskId (task-level chat) is excluded too.
+    await store.insertLink({
+      taskId: asId<"TaskId">("task-1"),
+      sessionId: asId<"SessionId">("session-task-level"),
+      createdAt: "2026-07-03T00:00:00.700Z"
+    });
+    await store.insertLink({
+      taskId: asId<"TaskId">("task-1"),
+      sessionId: asId<"SessionId">("session-1"),
+      subtaskId: asId<"SubtaskId">("sub-1"),
+      createdAt: "2026-07-03T00:00:01.000Z"
+    });
+    await store.insertLink({
+      taskId: asId<"TaskId">("task-1"),
+      sessionId: asId<"SessionId">("session-2"),
+      subtaskId: asId<"SubtaskId">("sub-1"),
+      createdAt: "2026-07-03T00:00:02.000Z"
+    });
+    await store.insertLink({
+      taskId: asId<"TaskId">("task-1"),
+      sessionId: asId<"SessionId">("session-3"),
+      subtaskId: asId<"SubtaskId">("sub-2"),
+      createdAt: "2026-07-03T00:00:03.000Z"
+    });
+    connection.close();
+
+    // The read survives a reopen (round-trip through the subtask_id column).
+    const reopened = new SqliteConnection(dbPath);
+    applyMigrations(reopened);
+    const reopenedStore = new SqliteWorkTaskStore(reopened);
+    const sub1Sessions = await reopenedStore.listSessionIdsBySubtask(asId<"SubtaskId">("sub-1"));
+    const sub2Sessions = await reopenedStore.listSessionIdsBySubtask(asId<"SubtaskId">("sub-2"));
+    const sub3Sessions = await reopenedStore.listSessionIdsBySubtask(asId<"SubtaskId">("sub-3"));
+    reopened.close();
+
+    assert.deepEqual(sub1Sessions, ["session-1", "session-2"]);
+    assert.deepEqual(sub2Sessions, ["session-3"]);
+    assert.deepEqual(sub3Sessions, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 function task(taskId: string, title: string, updatedAt: string, description?: string): WorkTaskRecord {
   return {
     taskId: asId<"TaskId">(taskId),

@@ -8,7 +8,7 @@
 
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
-import type { ProjectCatalogStore, ProjectRecord } from "@drydock/contracts";
+import type { ProjectCatalogStore, ProjectId, ProjectRecord } from "@drydock/contracts";
 import { normalizePathKey, type Clock, type IdGenerator } from "@drydock/core";
 
 export interface ProjectCatalogServiceOptions {
@@ -45,6 +45,40 @@ export class ProjectCatalogService {
     };
     await this.options.store.insertProject(record, pathKey);
     return record;
+  }
+
+  /**
+   * Repoints a project at a new host folder. The new path must be an existing
+   * directory that no other project already owns (path is the identity key).
+   * Re-derives kind and bumps updatedAt.
+   */
+  async updateProjectPath(projectId: ProjectId, newPath: string): Promise<ProjectRecord> {
+    const existing = await this.options.store.getProject(projectId);
+    if (existing === null) {
+      throw new Error(`Project ${projectId} is not in the catalog.`);
+    }
+    const absolute = path.resolve(newPath);
+    if (!existsSync(absolute) || !statSync(absolute).isDirectory()) {
+      throw new Error(`Project path is not an existing directory: ${absolute}`);
+    }
+    const pathKey = normalizePathKey(absolute);
+    const owner = await this.options.store.getProjectByPathKey(pathKey);
+    if (owner !== null && owner.projectId !== projectId) {
+      throw new Error(`Another project already uses ${absolute}.`);
+    }
+    const record: ProjectRecord = {
+      ...existing,
+      path: absolute,
+      kind: existsSync(path.join(absolute, ".git")) ? "git" : "folder",
+      updatedAt: this.options.clock.isoNow()
+    };
+    await this.options.store.updateProject(record, pathKey);
+    return record;
+  }
+
+  /** Removes a project from the catalog and every set that referenced it. */
+  async removeProject(projectId: ProjectId): Promise<void> {
+    await this.options.store.deleteProject(projectId);
   }
 
   listProjects(): Promise<ProjectRecord[]> {

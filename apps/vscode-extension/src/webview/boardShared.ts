@@ -71,7 +71,8 @@ export function toSubtaskSummary(
       .map((edge) => edge.fromSubtaskId as string),
     isRunning: runtime.isRunning,
     ...(runtime.lastFailureAt === undefined ? {} : { lastFailureAt: runtime.lastFailureAt }),
-    linkedSessionIds
+    linkedSessionIds,
+    ...(record.colorOverride === undefined ? {} : { colorOverride: record.colorOverride })
   };
 }
 
@@ -125,18 +126,29 @@ export async function decorateTaskSummary(
   const dependencies = await subtaskService.listDependenciesForTask(summary.taskId);
   const subtasksById = new Map(subtaskRecords.map((subtask) => [subtask.subtaskId, subtask]));
   // Session links can carry a subtaskId (the orchestrator records one per
-  // spawned run), but TaskService exposes no per-subtask link accessor, so
-  // each subtask's linkedSessionIds stays empty for now — the isRunning /
-  // lastFailureAt projections below carry the live run state instead.
+  // spawned run); TaskService.listSessionIdsBySubtask resolves each subtask's
+  // own linked chats, fetched in parallel across the task's subtasks.
+  const linkedSessionIdsBySubtask = await Promise.all(
+    subtaskRecords.map((subtask) => backend.tasks.listSessionIdsBySubtask(subtask.subtaskId))
+  );
+  const linkedSessionIdsById = new Map(subtaskRecords.map((subtask, index) => [subtask.subtaskId, linkedSessionIdsBySubtask[index] ?? []]));
   const subtasks = subtaskRecords
     .slice()
     .sort((a, b) => a.sortOrder - b.sortOrder)
     .map((subtask) => {
       const failure = backend.orchestrator.lastFailure(subtask.subtaskId);
-      return toSubtaskSummary(subtask, subtaskService, dependencies, subtasksById, resolvedColumnsById, [], {
-        isRunning: backend.orchestrator.isRunning(subtask.subtaskId),
-        ...(failure === undefined ? {} : { lastFailureAt: failure.at })
-      });
+      return toSubtaskSummary(
+        subtask,
+        subtaskService,
+        dependencies,
+        subtasksById,
+        resolvedColumnsById,
+        linkedSessionIdsById.get(subtask.subtaskId) ?? [],
+        {
+          isRunning: backend.orchestrator.isRunning(subtask.subtaskId),
+          ...(failure === undefined ? {} : { lastFailureAt: failure.at })
+        }
+      );
     });
   return {
     ...summary,

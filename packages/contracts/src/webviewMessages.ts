@@ -57,13 +57,23 @@ export type PanelRequestPayload =
   | { readonly type: "panel.init" }
   | { readonly type: "isolatedRun.probeAppServer" }
   | { readonly type: "isolatedRun.listRuntimes"; readonly includeRemoved?: boolean }
+  | { readonly type: "runtime.stats"; readonly runtimeIds?: readonly string[] }
+  | { readonly type: "runtime.reconcile" }
   | { readonly type: "isolatedRun.stopRuntime"; readonly runtimeId: string }
+  | { readonly type: "runtime.sbxLogin" }
+  | { readonly type: "runtime.openTerminal"; readonly sessionId: string }
+  | { readonly type: "chat.rawStream"; readonly sessionId: string }
+  | { readonly type: "chat.runtimeStats"; readonly sessionId: string }
+  | { readonly type: "chat.openFile"; readonly path: string }
   | { readonly type: "chat.start"; readonly prompt: string; readonly model?: ChatModelSelection; readonly workspace?: ChatWorkspaceSelection }
-  | { readonly type: "chat.startSession"; readonly model: ChatModelSelection; readonly workspace?: ChatWorkspaceSelection }
+  | { readonly type: "chat.startSession"; readonly model: ChatModelSelection; readonly workspace?: ChatWorkspaceSelection; readonly title?: string }
   | { readonly type: "chat.sendTurn"; readonly sessionId: string; readonly prompt: string; readonly model?: ChatModelSelection }
   | { readonly type: "chat.restartBackend"; readonly sessionId: string; readonly model: ChatModelSelection }
   | { readonly type: "chat.resumeSession"; readonly sessionId: string; readonly model?: ChatModelSelection; readonly workspace?: ChatWorkspaceSelection }
+  | { readonly type: "chat.reclaim"; readonly sessionId: string; readonly model?: ChatModelSelection }
+  | { readonly type: "ui.confirm"; readonly message: string; readonly detail?: string; readonly confirmLabel: string }
   | { readonly type: "chat.cancelTurn"; readonly sessionId: string }
+  | { readonly type: "chat.poke"; readonly sessionId: string }
   | { readonly type: "chat.endSession"; readonly sessionId: string }
   | { readonly type: "chat.spawnRole"; readonly sessionId: string; readonly role: AgentRole }
   | { readonly type: "question.list" }
@@ -91,7 +101,11 @@ export type PanelRequestPayload =
   | { readonly type: "memory.open"; readonly memoryCandidateId: string }
   | { readonly type: "workspace.state" }
   | { readonly type: "workspace.registerOpenFolders" }
-  | { readonly type: "workspace.createSet"; readonly name: string }
+  | { readonly type: "workspace.createSet"; readonly name: string; readonly members: readonly WorkspaceSetMemberInput[] }
+  | { readonly type: "workspace.updateSet"; readonly workspaceSetId: string; readonly name: string; readonly members: readonly WorkspaceSetMemberInput[] }
+  | { readonly type: "workspace.deleteSet"; readonly workspaceSetId: string }
+  | { readonly type: "workspace.removeProject"; readonly projectId: string }
+  | { readonly type: "workspace.updateProjectPath"; readonly projectId: string; readonly path: string }
   | { readonly type: "policy.requestAccess"; readonly sessionId: string; readonly hostPath: string; readonly mode: "read-only" | "read-write"; readonly reason: string }
   | { readonly type: "policy.resolveAccess"; readonly accessRequestId: string; readonly approve: boolean; readonly editedHostPath?: string }
   | { readonly type: "diff.snapshotWorkspace"; readonly workspaceSetId: string }
@@ -116,7 +130,7 @@ export type PanelRequestPayload =
   | { readonly type: "board.moveCard"; readonly cardKind: "task" | "subtask"; readonly id: string; readonly columnId: string }
   | { readonly type: "board.columns.update"; readonly columns: readonly BoardColumnUpdateInput[]; readonly deletedColumnIds?: readonly string[] }
   | { readonly type: "subtask.create"; readonly taskId: string; readonly title: string; readonly description?: string; readonly prompt?: string; readonly autoStart?: boolean }
-  | { readonly type: "subtask.update"; readonly subtaskId: string; readonly title?: string; readonly description?: string; readonly prompt?: string; readonly autoStart?: boolean; readonly columnId?: string }
+  | { readonly type: "subtask.update"; readonly subtaskId: string; readonly title?: string; readonly description?: string; readonly prompt?: string; readonly autoStart?: boolean; readonly columnId?: string; readonly colorOverride?: number | null }
   | { readonly type: "subtask.delete"; readonly subtaskId: string }
   | { readonly type: "subtask.dependency.add"; readonly taskId: string; readonly fromSubtaskId: string; readonly toSubtaskId: string }
   | { readonly type: "subtask.dependency.remove"; readonly taskId: string; readonly fromSubtaskId: string; readonly toSubtaskId: string }
@@ -137,6 +151,12 @@ export interface BoardColumnUpdateInput {
   readonly name: string;
   readonly category: ColumnCategory;
   readonly sortOrder: number;
+}
+
+/** One ordered set member as sent from the workspace editor. */
+export interface WorkspaceSetMemberInput {
+  readonly projectId: string;
+  readonly readOnly: boolean;
 }
 
 export interface PanelRequest {
@@ -183,6 +203,24 @@ export interface RuntimeSummary {
   readonly agentRole?: string;
 }
 
+/**
+ * Live resource sample for one running sandbox, read from cgroup v2 + /proc
+ * inside the container. Rate fields (cpu/io) are null until a second sample
+ * exists to diff against; `available` is false when the probe couldn't run.
+ */
+export interface RuntimeStatsSummary {
+  readonly runtimeId: string;
+  readonly available: boolean;
+  /** CPU busy as a percentage of ONE core (top-style; can exceed 100 on multi-core). */
+  readonly cpuPercent: number | null;
+  /** Anonymous (workload) memory in bytes. */
+  readonly memBytes: number | null;
+  readonly ioReadBytesPerSec: number | null;
+  readonly ioWriteBytesPerSec: number | null;
+  readonly loadAvg1: number | null;
+  readonly threads: number | null;
+}
+
 /** Display-safe projection of a durable chat session. */
 export interface ChatSessionSummary {
   readonly sessionId: string;
@@ -192,6 +230,12 @@ export interface ChatSessionSummary {
   readonly status: string;
   readonly providerId: string;
   readonly model?: string;
+  /**
+   * Authoritative liveness: the backend is live in THIS host right now. The
+   * stored `status` can read "active" long after a reload killed the backend, so
+   * the UI keys drivability + the online/offline dot off this, not off status.
+   */
+  readonly live?: boolean;
   /** Active in another VS Code window (fresh foreign heartbeat): view-only here. */
   readonly runningElsewhere?: boolean;
   /** Session mode recorded at start; clone sessions drive the sync UI. */
@@ -336,11 +380,21 @@ export interface ProjectSummary {
   readonly kind: string;
 }
 
+/** Display-safe projection of one project's membership in a set. */
+export interface WorkspaceSetMemberSummary {
+  readonly projectId: string;
+  readonly name: string;
+  readonly displayPath: string;
+  readonly readOnly: boolean;
+}
+
 /** Display-safe projection of a workspace set. */
 export interface WorkspaceSetSummary {
   readonly workspaceSetId: string;
   readonly name: string;
+  /** Member display names, kept for existing consumers; see `members`. */
   readonly projectNames: readonly string[];
+  readonly members: readonly WorkspaceSetMemberSummary[];
 }
 
 /** Display-safe projection of an access request. */
@@ -407,6 +461,8 @@ export interface SubtaskSummary {
   /** Timestamp of the most recent failed/cancelled run, if any (in-memory; resets on host restart). */
   readonly lastFailureAt?: string;
   readonly linkedSessionIds: readonly string[];
+  /** 0-7 palette index overriding the parent task's stripe hue; absent uses the task hue. */
+  readonly colorOverride?: number;
 }
 
 /** Display-safe projection of an internal work task with its links. */
@@ -512,6 +568,14 @@ export interface PlanDocDetail extends PlanDocSummary {
   readonly content: string;
 }
 
+/** The window's active text editor, surfaced so the composer can offer it as a
+ * one-click attachment. `path` is the host fs path (mapped to a runtime path in
+ * the webview); `name` is the basename for display. */
+export interface ActiveEditorRef {
+  readonly path: string;
+  readonly name: string;
+}
+
 export interface PanelInitState {
   readonly availability: BackendAvailability;
   readonly runtimes: readonly RuntimeSummary[];
@@ -519,6 +583,8 @@ export interface PanelInitState {
   readonly stateRootDisplayPath: string;
   /** Folder names open in this window; the `auto` workspace selection mounts these. */
   readonly openFolderNames: readonly string[];
+  /** The active editor at init, if any (a file-scheme document). */
+  readonly activeEditor?: ActiveEditorRef;
   /** Idle label threshold for delegated agents. */
   readonly agentIdleThresholdMs: number;
   /** Wrap long lines inside chat transcript code blocks. */
@@ -529,13 +595,23 @@ export type PanelResponsePayload =
   | { readonly type: "panel.init"; readonly state: PanelInitState }
   | { readonly type: "isolatedRun.probeAppServer"; readonly accepted: true }
   | { readonly type: "isolatedRun.listRuntimes"; readonly runtimes: readonly RuntimeSummary[] }
+  | { readonly type: "runtime.stats"; readonly stats: readonly RuntimeStatsSummary[] }
+  | { readonly type: "runtime.reconcile"; readonly accepted: true }
   | { readonly type: "isolatedRun.stopRuntime"; readonly runtimeId: string; readonly status: string; readonly diagnostics: readonly string[] }
+  | { readonly type: "runtime.sbxLogin"; readonly launched: string }
+  | { readonly type: "runtime.openTerminal"; readonly accepted: true }
+  | { readonly type: "chat.rawStream"; readonly text: string; readonly lastChunkAt: string | null }
+  | { readonly type: "chat.runtimeStats"; readonly stats: RuntimeStatsSummary | null }
+  | { readonly type: "chat.openFile"; readonly opened: boolean }
   | { readonly type: "chat.start"; readonly session: ChatSessionSummary }
   | { readonly type: "chat.startSession"; readonly session: ChatSessionSummary; readonly providerCatalogs: readonly AgentModelCatalog[] }
   | { readonly type: "chat.sendTurn"; readonly accepted: true }
   | { readonly type: "chat.restartBackend"; readonly session: ChatSessionSummary; readonly providerCatalogs: readonly AgentModelCatalog[] }
   | { readonly type: "chat.resumeSession"; readonly session: ChatSessionSummary; readonly providerCatalogs: readonly AgentModelCatalog[] }
+  | { readonly type: "chat.reclaim"; readonly session: ChatSessionSummary; readonly providerCatalogs: readonly AgentModelCatalog[] }
+  | { readonly type: "ui.confirm"; readonly confirmed: boolean }
   | { readonly type: "chat.cancelTurn"; readonly accepted: true }
+  | { readonly type: "chat.poke"; readonly poked: boolean }
   | { readonly type: "clipboard.writeText"; readonly accepted: true }
   | { readonly type: "chat.endSession"; readonly session: ChatSessionSummary }
   | { readonly type: "chat.spawnRole"; readonly session: ChatSessionSummary }
@@ -563,7 +639,11 @@ export type PanelResponsePayload =
   | { readonly type: "memory.open"; readonly accepted: true }
   | { readonly type: "workspace.state"; readonly state: WorkspacePolicyState }
   | { readonly type: "workspace.registerOpenFolders"; readonly projects: readonly ProjectSummary[] }
-  | { readonly type: "workspace.createSet"; readonly workspaceSet: WorkspaceSetSummary }
+  | { readonly type: "workspace.createSet"; readonly state: WorkspacePolicyState }
+  | { readonly type: "workspace.updateSet"; readonly state: WorkspacePolicyState }
+  | { readonly type: "workspace.deleteSet"; readonly state: WorkspacePolicyState }
+  | { readonly type: "workspace.removeProject"; readonly state: WorkspacePolicyState }
+  | { readonly type: "workspace.updateProjectPath"; readonly state: WorkspacePolicyState }
   | { readonly type: "policy.requestAccess"; readonly accessRequest: AccessRequestSummary }
   | { readonly type: "policy.resolveAccess"; readonly accessRequest: AccessRequestSummary }
   | { readonly type: "diff.snapshotWorkspace"; readonly baselineIds: readonly string[] }
@@ -636,6 +716,7 @@ export type PanelPushPayload =
   | { readonly type: "memory.candidateAdded"; readonly candidate: MemoryCandidateSummary }
   | { readonly type: "planDocs.updated"; readonly sessionId: string; readonly docs: readonly PlanDocSummary[] }
   | { readonly type: "taskReview.updated"; readonly taskId: string }
+  | { readonly type: "editor.active"; readonly editor: ActiveEditorRef | null }
   | { readonly type: "board.changed" };
 
 export interface PanelPush {
@@ -675,12 +756,20 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
   switch (payload["type"]) {
     case "panel.init":
     case "isolatedRun.probeAppServer":
+    case "runtime.sbxLogin":
     case "provider.list":
     case "session.list":
     case "task.list":
     case "workspace.state":
     case "workspace.registerOpenFolders":
+    case "runtime.reconcile":
       return { type: payload["type"] };
+    case "runtime.stats": {
+      const ids = payload["runtimeIds"];
+      if (ids === undefined) return { type: "runtime.stats" };
+      if (!Array.isArray(ids) || !ids.every((id) => isBoundedString(id, MAX_ID_LENGTH))) return null;
+      return { type: "runtime.stats", runtimeIds: ids };
+    }
     case "task.create": {
       const title = payload["title"];
       const description = payload["description"];
@@ -771,6 +860,7 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const prompt = payload["prompt"];
       const autoStart = payload["autoStart"];
       const columnId = payload["columnId"];
+      const colorOverride = payload["colorOverride"];
       if (!isBoundedString(subtaskId, MAX_ID_LENGTH)) return null;
       if (title !== undefined && !isBoundedString(title, MAX_NAME_LENGTH)) return null;
       // Empty string is allowed and clears description/prompt.
@@ -778,9 +868,10 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (prompt !== undefined && (typeof prompt !== "string" || prompt.length > MAX_PROMPT_LENGTH)) return null;
       if (autoStart !== undefined && typeof autoStart !== "boolean") return null;
       if (columnId !== undefined && !isBoundedString(columnId, MAX_ID_LENGTH)) return null;
+      if (colorOverride !== undefined && colorOverride !== null && !isStripeIndex(colorOverride)) return null;
       if (
         title === undefined && description === undefined && prompt === undefined
-        && autoStart === undefined && columnId === undefined
+        && autoStart === undefined && columnId === undefined && colorOverride === undefined
       ) return null;
       return {
         type: "subtask.update",
@@ -789,7 +880,8 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
         ...(description === undefined ? {} : { description }),
         ...(prompt === undefined ? {} : { prompt }),
         ...(autoStart === undefined ? {} : { autoStart }),
-        ...(columnId === undefined ? {} : { columnId })
+        ...(columnId === undefined ? {} : { columnId }),
+        ...(colorOverride === undefined ? {} : { colorOverride })
       };
     }
     case "subtask.delete": {
@@ -906,10 +998,13 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (parsedModel === null || parsedModel === undefined) return null;
       const parsedWorkspace = parseWorkspaceSelection(payload["workspace"]);
       if (parsedWorkspace === null) return null;
+      const title = payload["title"];
+      if (title !== undefined && !isBoundedString(title, MAX_NAME_LENGTH)) return null;
       return {
         type: "chat.startSession",
         model: parsedModel,
-        ...(parsedWorkspace === undefined ? {} : { workspace: parsedWorkspace })
+        ...(parsedWorkspace === undefined ? {} : { workspace: parsedWorkspace }),
+        ...(title === undefined ? {} : { title })
       };
     }
     case "isolatedRun.stopRuntime": {
@@ -947,8 +1042,33 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
         ...(parsedWorkspace === undefined ? {} : { workspace: parsedWorkspace })
       };
     }
+    case "chat.reclaim": {
+      const sessionId = payload["sessionId"];
+      if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      const parsedModel = parseModelSelection(payload["model"]);
+      if (parsedModel === null) return null;
+      return { type: "chat.reclaim", sessionId, ...(parsedModel === undefined ? {} : { model: parsedModel }) };
+    }
+    case "chat.openFile": {
+      const path = payload["path"];
+      if (!isBoundedString(path, 2048)) return null;
+      return { type: "chat.openFile", path };
+    }
+    case "ui.confirm": {
+      const message = payload["message"];
+      const confirmLabel = payload["confirmLabel"];
+      if (!isBoundedString(message, MAX_PROMPT_LENGTH)) return null;
+      if (!isBoundedString(confirmLabel, MAX_NAME_LENGTH)) return null;
+      const detail = payload["detail"];
+      if (detail !== undefined && !isBoundedString(detail, MAX_PROMPT_LENGTH)) return null;
+      return { type: "ui.confirm", message, confirmLabel, ...(detail === undefined ? {} : { detail }) };
+    }
     case "chat.cancelTurn":
+    case "chat.poke":
+    case "chat.rawStream":
+    case "chat.runtimeStats":
     case "chat.endSession":
+    case "runtime.openTerminal":
     case "session.delete":
     case "planDocs.state":
     case "planDocs.open":
@@ -1038,7 +1158,35 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
     case "workspace.createSet": {
       const name = payload["name"];
       if (!isBoundedString(name, MAX_NAME_LENGTH)) return null;
-      return { type: "workspace.createSet", name };
+      const members = parseMemberInputs(payload["members"]);
+      if (members === null) return null;
+      return { type: "workspace.createSet", name, members };
+    }
+    case "workspace.updateSet": {
+      const workspaceSetId = payload["workspaceSetId"];
+      const name = payload["name"];
+      if (!isBoundedString(workspaceSetId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(name, MAX_NAME_LENGTH)) return null;
+      const members = parseMemberInputs(payload["members"]);
+      if (members === null) return null;
+      return { type: "workspace.updateSet", workspaceSetId, name, members };
+    }
+    case "workspace.deleteSet": {
+      const workspaceSetId = payload["workspaceSetId"];
+      if (!isBoundedString(workspaceSetId, MAX_ID_LENGTH)) return null;
+      return { type: "workspace.deleteSet", workspaceSetId };
+    }
+    case "workspace.removeProject": {
+      const projectId = payload["projectId"];
+      if (!isBoundedString(projectId, MAX_ID_LENGTH)) return null;
+      return { type: "workspace.removeProject", projectId };
+    }
+    case "workspace.updateProjectPath": {
+      const projectId = payload["projectId"];
+      const projectPath = payload["path"];
+      if (!isBoundedString(projectId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(projectPath, MAX_PATH_LENGTH)) return null;
+      return { type: "workspace.updateProjectPath", projectId, path: projectPath };
     }
     case "provider.login": {
       const providerId = payload["providerId"];
@@ -1134,6 +1282,22 @@ function isColumnCategory(value: unknown): value is ColumnCategory {
   return typeof value === "string" && (COLUMN_CATEGORIES as readonly string[]).includes(value);
 }
 
+/** Validates a workspace set's member array; null on empty or any malformed entry. */
+function parseMemberInputs(value: unknown): WorkspaceSetMemberInput[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const result: WorkspaceSetMemberInput[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const record = entry as Record<string, unknown>;
+    const projectId = record["projectId"];
+    const readOnly = record["readOnly"];
+    if (!isBoundedString(projectId, MAX_ID_LENGTH)) return null;
+    if (typeof readOnly !== "boolean") return null;
+    result.push({ projectId, readOnly });
+  }
+  return result;
+}
+
 /** Validates a `board.columns.update` request's column array; null on any malformed entry. */
 function parseBoardColumnUpdates(value: unknown): BoardColumnUpdateInput[] | null {
   if (!Array.isArray(value)) return null;
@@ -1168,6 +1332,11 @@ function parseDeletedColumnIds(value: unknown): string[] | undefined | null {
 
 function isLineNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 1_000_000;
+}
+
+/** A dependency-edge/stripe palette index: integer 0-7 (matches --dd-stripe-0..7). */
+function isStripeIndex(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 7;
 }
 
 function parseWorkspaceSelection(value: unknown): ChatWorkspaceSelection | undefined | null {

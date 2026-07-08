@@ -398,6 +398,12 @@ class MemoryWorkTaskStore implements WorkTaskStore {
     return Promise.resolve(taskId === undefined ? [...this.links] : this.links.filter((link) => link.taskId === taskId));
   }
 
+  listSessionIdsBySubtask(subtaskId: SubtaskId): Promise<SessionId[]> {
+    return Promise.resolve(
+      this.links.filter((link) => link.subtaskId === subtaskId && link.sessionId !== undefined).map((link) => link.sessionId as SessionId)
+    );
+  }
+
   reassignTasksColumn(fromColumnId: ColumnId, toColumnId: ColumnId): Promise<void> {
     for (const [taskId, record] of this.tasks) {
       if (record.columnId === fromColumnId) {

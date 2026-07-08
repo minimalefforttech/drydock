@@ -5,7 +5,7 @@
  * remains visible after process restarts.
  */
 
-import type { CleanupMode, CleanupResult, RuntimeId, RuntimeInventoryStore } from "@drydock/contracts";
+import type { CleanupMode, CleanupResult, CommandResult, RuntimeId, RuntimeInventoryStore } from "@drydock/contracts";
 import type { Clock } from "./clock.js";
 import type { Logger } from "./logger.js";
 import type { RuntimeAdapter } from "./runtimeAdapter.js";
@@ -53,11 +53,14 @@ export class RuntimeCleanupService {
       await this.options.inventory.updateRuntimeStatus(runtimeId, "removing", this.options.clock.isoNow());
       const remove = await this.options.runtimeAdapter.removeRuntime(handle, true);
       diagnostics.push(`remove exit: ${String(remove.exitCode)}`);
-      if (remove.exitCode !== 0) {
+      // A remove that fails because the sandbox is ALREADY GONE is a success, not
+      // a quarantine — otherwise every cleanup of a sandbox that `sbx reset` (or a
+      // prior removal) already deleted leaves a permanently quarantined row.
+      if (remove.exitCode !== 0 && !isAlreadyGone(remove)) {
         throw new Error(remove.stderr || remove.error || remove.stdout || "remove failed");
       }
       await this.options.inventory.updateRuntimeStatus(runtimeId, "removed", this.options.clock.isoNow());
-      this.options.logger.info("runtime removed", { runtimeId, externalName: record.externalName });
+      this.options.logger.info("runtime removed", { runtimeId, externalName: record.externalName, alreadyGone: remove.exitCode !== 0 });
       return { runtimeId, status: "removed", mode, diagnostics };
     } catch (error) {
       await this.options.inventory.updateCleanupAttempt(runtimeId, this.options.clock.isoNow(), true);
@@ -67,4 +70,10 @@ export class RuntimeCleanupService {
       return { runtimeId, status: "failed", mode, diagnostics };
     }
   }
+}
+
+/** True when a remove failed only because the sandbox no longer exists. */
+function isAlreadyGone(result: CommandResult): boolean {
+  const detail = `${result.stderr} ${result.error ?? ""} ${result.stdout}`.toLowerCase();
+  return /not found|no such|does not exist|unknown sandbox|no container/.test(detail);
 }

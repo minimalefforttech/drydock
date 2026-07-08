@@ -41,6 +41,33 @@ test("reconciliation marks db-active missing runtimes lost and reports external-
   assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-present")))?.metadata["lastReconciledAt"], "2026-07-02T00:00:00.000Z");
 });
 
+test("reconciliation reaps orphaned quarantined/lost/stopped rows to removed", async () => {
+  const inventory = new MemoryRuntimeInventoryStore([
+    runtimeRecord("runtime-quarantined", "drydock-q-worker", "quarantined"),
+    runtimeRecord("runtime-lost", "drydock-lost-worker", "lost"),
+    runtimeRecord("runtime-stopped", "drydock-stopped-worker", "stopped"),
+    runtimeRecord("runtime-live-q", "drydock-live-q-worker", "quarantined"),
+    runtimeRecord("runtime-removed", "drydock-removed-worker", "removed")
+  ]);
+  // Only the live-q sandbox still exists externally.
+  const runtimeAdapter = new ListingRuntimeAdapter(["drydock-live-q-worker"]);
+  const service = new RuntimeReconcileService({
+    clock: new FixedClock(),
+    inventory,
+    runtimeAdapter,
+    logger: new NullLogger()
+  });
+
+  await service.reconcile();
+
+  // Orphaned non-active rows are reaped so they stop piling up.
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-quarantined")))?.status, "removed");
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-lost")))?.status, "removed");
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-stopped")))?.status, "removed");
+  // A quarantined row whose sandbox STILL exists is left untouched.
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-live-q")))?.status, "quarantined");
+});
+
 class ListingRuntimeAdapter implements RuntimeAdapter {
   readonly adapter = "docker-sandbox" as const;
 

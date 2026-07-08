@@ -17,6 +17,14 @@ export interface ChatTabView {
   render(): void;
   /** Selects a session (loads timeline/diff/review) and renders. */
   selectSession(sessionId: string | null): void;
+  /**
+   * Shows (or clears) a transient "Starting the chat backend…" placeholder in
+   * place of the transcript, for callers that switch to the Chat tab before a
+   * session exists yet (e.g. "Create and start chat"). Cleared automatically by
+   * the next `selectSession` call, or pass `false` to clear early (e.g. on
+   * failure).
+   */
+  showStarting(active: boolean): void;
   /** Resets to the new-chat state (used after deleting the selected session). */
   resetToNewChat(): void;
   /** Appends a line to the per-session chat diagnostics feed. */

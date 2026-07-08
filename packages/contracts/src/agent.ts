@@ -102,6 +102,8 @@ export interface AgentAdapter {
   sendPrompt(connection: AgentConnection, prompt: AgentPrompt): Promise<RunId>;
   streamEvents(connection: AgentConnection, runId: RunId): AsyncIterable<AgentEvent>;
   cancel(connection: AgentConnection, runId: RunId): Promise<void>;
+  /** Optional soft nudge for a quiet turn (see CodexAdapter.poke); no-op adapters omit it. */
+  poke?(connection: AgentConnection, runId: RunId): Promise<void>;
   stop(connection: AgentConnection, reason: string): Promise<void>;
   summarizeCapabilities(): Promise<AgentCapabilities>;
 }

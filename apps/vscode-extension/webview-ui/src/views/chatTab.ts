@@ -33,7 +33,9 @@ import {
   type CloneRepoState,
   type CloneSyncResult,
   type DiffFileSummary,
+  type IsolationSummary,
   type PanelResponse,
+  type RuntimeStatsSummary,
   type SequencedTranscriptLine,
   type WorkTaskSummary
 } from "@drydock/contracts";
@@ -148,7 +150,46 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   let turnActive = false;
   let starting = false;
   let backendBusy = false;
+  // A reconnect (resume/reclaim) or provider switch is booting a fresh runtime
+  // before the turn can send. Drives a live indicator so the gap isn't silent.
+  let reconnecting = false;
+  let reconnectStartedAt: number | undefined;
+  let reconnectLabel = "Reconnecting…";
+  // Whether the current turn has streamed any assistant text yet — drives the
+  // "finished without output" notice so a silent turn no longer looks stuck.
+  let sawAssistantTextThisTurn = false;
+  // The last prompt actually submitted, for the Retry button on error notices.
+  let lastSentPrompt: string | null = null;
+  // Set by a caller (e.g. workTab's "Create and start chat") right after it
+  // switches to this tab, BEFORE chat.startSession has resolved — there is no
+  // session yet to select. Drives a transcript placeholder distinct from
+  // `starting` (the lazy first-send spin-up on an already-selected new chat).
+  let pendingSessionStart = false;
+  // FIX 4: when the current turn started (for the elapsed-seconds counter on
+  // the "Assistant is working…" indicator); undefined while no turn is active.
+  let turnStartedAt: number | undefined;
+  // When the selected session last produced any streamed output — drives the
+  // "seconds since last response" running indicator (a growing value flags a
+  // stuck turn). Reset at turn start, bumped on each transcript push.
+  let lastActivityAt: number | undefined;
+  let workingIndicatorTimer: number | undefined;
+  // 1s poll of the backend raw-stream buffer; runs ONLY while the raw panel is
+  // open, so idle sessions cost nothing.
+  let rawStreamTimer: number | undefined;
+  // Seconds of streamed silence before the working indicator offers a poke.
+  const POKE_AFTER_SECONDS = 30;
+  // Auto-expand the Changes section when the file count grows within a session.
+  let lastChangeCount = 0;
+  let lastChangeSessionId: string | null = null;
   let activeAssistantId: string | null = null;
+  // Correlates a command's "started" row with its terminal update, keyed by the
+  // command text, so a command shows once and gains its exit code + output.
+  const runningCommands = new Map<string, string>();
+  // Live "Thinking" disclosure: accumulates agent.reasoning text for the
+  // running turn. Reset at chat.turnStarted; frozen (not cleared) once the
+  // turn ends so "Thought for Ns" stays readable until the next turn starts.
+  let reasoningText = "";
+  let reasoningActive = false;
   /** Expanded subagent groups: render-local so re-renders keep them open. */
   const expandedGroups = new Set<string>();
   let diffChanges: readonly DiffFileSummary[] = [];
@@ -170,12 +211,27 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const backButton = iconButton("‹", "Back to sessions", "chat-back");
   backButton.addEventListener("click", () => ctx.bridge.switchTab("work"));
   const titleWrap = el("div", "chat-title-wrap");
+  // CH·hierarchy: an optional small muted line above the title naming the
+  // parent task, shown only when the selected session belongs to a subtask
+  // (see renderHeader). Hidden (empty) otherwise.
+  const titleTextWrap = el("div", "chat-title-text");
+  const titleParentLabel = el("span", "chat-title-parent hidden");
   const titleLabel = el("span", "chat-title");
   titleLabel.title = "Click to rename";
+  titleTextWrap.append(titleParentLabel, titleLabel);
   const statusDotEl = statusDot("state-ended", "no live session");
-  titleWrap.append(statusDotEl, titleLabel);
+  titleWrap.append(statusDotEl, titleTextWrap);
 
   titleLabel.addEventListener("click", () => beginRename());
+
+  // Notes live in the pinned top bar: an icon with a small count badge that
+  // opens a popover holding the notes list + add-note form (built fresh on each
+  // open by buildNotesPopover). Notes scope to the active subtask when the chat
+  // is a subtask session, otherwise to the linked task.
+  const notesButton = iconButton("✎", "Notes", "chat-notes-button");
+  const notesBadge = el("span", "notes-badge hidden");
+  notesButton.append(notesBadge);
+  const notesPopover = popover(notesButton, (content) => buildNotesPopover(content));
 
   const infoButton = iconButton("ⓘ", "Isolation summary");
   const infoPopover = popover(infoButton, (content) => buildIsolationPopover(content));
@@ -183,7 +239,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const overflowButton = iconButton("⋯", "More actions");
   const overflowPopover = popover(overflowButton, (content) => buildOverflowMenu(content));
 
-  header.append(backButton, titleWrap, el("span", "chat-header-spacer"), infoPopover, overflowPopover);
+  header.append(backButton, titleWrap, el("span", "chat-header-spacer"), notesPopover, infoPopover, overflowPopover);
 
   // --- context strip ----------------------------------------------------------
   // Runtime context stays in the scrollable body; send-time controls live in
@@ -205,7 +261,26 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const mountsBody = el("div", "context-mounts-body");
   mounts.append(mountsSummary, mountsBody);
 
-  contextStrip.append(mounts);
+  // Debug: the raw agent stream for the current/last turn, fetched on demand.
+  // Collapsed by default; opening it starts a 1s poll, closing it stops it.
+  const rawStream = document.createElement("details");
+  rawStream.className = "context-raw section";
+  const rawStreamSummary = document.createElement("summary");
+  rawStreamSummary.className = "context-raw-summary";
+  rawStreamSummary.textContent = "Raw stream (last response)";
+  const rawStreamMeta = el("span", "context-raw-meta");
+  rawStreamSummary.append(rawStreamMeta);
+  const rawStreamBody = el("pre", "context-raw-body");
+  rawStream.append(rawStreamSummary, rawStreamBody);
+  rawStream.addEventListener("toggle", () => {
+    stopRawStreamPolling();
+    if (rawStream.open) {
+      void pollRawStream();
+      rawStreamTimer = window.setInterval(() => void pollRawStream(), 1_000);
+    }
+  });
+
+  contextStrip.append(mounts, rawStream);
 
   providerSelect.addEventListener("change", () => {
     manualModelSessionId = null;
@@ -232,6 +307,44 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const loginButton = button("Log in", "small primary");
   const recheckAuthButton = button("Recheck", "ghost small");
   authBanner.append(authBannerText, loginButton, recheckAuthButton);
+
+  // Reclaim banner: a session marked "running in another window" is read-only
+  // here. Most often it's THIS window right after a reload — the old instance's
+  // heartbeat has not gone stale yet — so "Take over here" reclaims + revives it
+  // in this window (transcript replayed). If it really is another live window,
+  // this takes control here regardless.
+  const reclaimBanner = el("div", "reclaim-banner hidden");
+  const reclaimBannerText = el("span", "reclaim-banner-text");
+  const reclaimButton = button("Take over here", "small primary");
+  reclaimBanner.append(reclaimBannerText, reclaimButton);
+
+  reclaimButton.addEventListener("click", () => {
+    const sessionId = state.selectedSessionId;
+    if (sessionId === null) return;
+    reclaimButton.disabled = true;
+    reclaimBannerText.textContent = "Taking over…";
+    void request({ type: "chat.reclaim", sessionId }).then((response) => {
+      reclaimButton.disabled = false;
+      if (!response.ok) {
+        appendSystemMessage(`Couldn't take over this chat: ${response.error.message}`, "error");
+        renderHeader();
+        refreshControls();
+        return;
+      }
+      if (response.payload.type === "chat.reclaim") {
+        upsertSession(state, response.payload.session);
+        state.providerCatalogs = [...response.payload.providerCatalogs];
+        state.selectedSessionId = response.payload.session.sessionId;
+        setTurnActive(false);
+        appendSystemMessage("Took this chat over in this window. History and project mounts were restored from the saved session.");
+      }
+      renderHeader();
+      renderProviderControls();
+      renderChat();
+      refreshControls();
+      ctx.persist();
+    });
+  });
 
   loginButton.addEventListener("click", () => {
     const providerId = normalizeProviderId(providerSelect.value);
@@ -368,22 +481,52 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     ctx.persist();
   });
 
-  const sendButton = button("Send", "primary");
+  const sendButton = button("⏎", "primary");
   sendButton.classList.add("composer-send");
-  const cancelButton = button("Cancel", "ghost");
+  sendButton.title = "Send (Ctrl+Enter)";
+  sendButton.setAttribute("aria-label", "Send");
+  const cancelButton = button("Stop", "ghost");
   cancelButton.classList.add("composer-cancel");
   cancelButton.classList.add("hidden");
-  const composerModelControls = el("div", "composer-model-controls");
-  composerModelControls.append(providerSelect, modelSelect, thinkingSelect);
+
+  // Model button + popup tree (providers → models). The native provider/model
+  // <select>s stay in the DOM (hidden) as the source of truth so all the
+  // existing selection/restart logic keeps working; the tree drives them.
+  const modelButton = button("Model", "composer-model-button");
+  const modelButtonChevron = el("span", "composer-model-chevron");
+  modelButtonChevron.textContent = "▾";
+  modelButton.append(modelButtonChevron);
+  const modelPopover = popover(modelButton, (content, close) => buildModelTree(content, close));
+  const hiddenModelControls = el("div", "composer-hidden-controls hidden");
+  hiddenModelControls.append(providerSelect, modelSelect);
+
   const composerActions = el("div", "composer-actions");
-  composerActions.append(modeControl, composerModelControls, el("span", "composer-spacer"), sendButton, cancelButton);
+  composerActions.append(
+    modeControl,
+    modelPopover,
+    thinkingSelect,
+    el("span", "composer-spacer"),
+    sendButton,
+    cancelButton,
+    hiddenModelControls
+  );
 
   // Plan-documents pill row (compact; shown above the composer when the
   // selected session has collected plan documents — issue 7, Phase 2).
   const planDocsRow = el("div", "plan-docs-row hidden");
 
+  // Attachment chips: dropped files + the (clickable) active editor. VS
+  // Code-style removable chips; converted to [file:…] tokens on send.
+  const attachmentsRow = el("div", "composer-attachments hidden");
+  type ComposerAttachment = { readonly hostPath: string; readonly runtimePath: string | null; readonly name: string };
+  const attachments: ComposerAttachment[] = [];
+
   const composer = el("div", "composer");
-  composer.append(planDocsRow, promptInput, composerActions);
+  composer.append(planDocsRow, attachmentsRow, promptInput, composerActions);
+
+  // Live sandbox usage for the selected chat, pinned just below the transcript —
+  // the "is this agent actually working" signal right where you're watching it.
+  const sandboxStatsBar = el("div", "sandbox-stats hidden");
 
   sendButton.addEventListener("click", () => void onSend());
   cancelButton.addEventListener("click", () => {
@@ -429,20 +572,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   pushButton.addEventListener("click", () => void runCloneOp(() =>
     request({ type: "clone.push", sessionId: requireSelectedSessionId() }), "push local → VM"));
 
-  // Task notes are task-scoped context, not file-change review UI.
-  const taskNotes = collapsible("Task Notes");
-  taskNotes.details.classList.add("task-notes-section");
-  const taskNoteInput = document.createElement("textarea");
-  taskNoteInput.className = "task-note-input";
-  taskNoteInput.rows = 3;
-  taskNoteInput.placeholder = "Add a task note...";
-  const addTaskNoteButton = button("Add note", "small primary");
-  const taskNoteActions = el("div", "task-note-actions");
-  taskNoteActions.append(addTaskNoteButton);
-  const taskNoteForm = el("div", "task-note-form");
-  taskNoteForm.append(taskNoteInput, taskNoteActions);
-  const taskNotesList = el("div", "task-notes");
-  taskNotes.body.append(taskNotesList, taskNoteForm);
+  // Notes moved to the pinned top bar (see notesButton / buildNotesPopover); the
+  // list + add-note form are built inside the popover, fresh on each open.
 
   changes.body.append(cloneCaption, workingSetHeader, changedFilesList);
 
@@ -464,26 +595,22 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       void loadDiffStatus();
     });
   });
-  addTaskNoteButton.addEventListener("click", () => addTaskNote());
-  taskNoteInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-      event.preventDefault();
-      addTaskNote();
-    }
-  });
-
-  // Owner order: scrollable chat body, pinned composer.
+  // Owner order: pinned top bar → scrollable chat body → docked composer. The
+  // header sits OUTSIDE chat-scroll so it stays pinned while the transcript
+  // scrolls under it. The Changes tray (changes.details) is docked directly
+  // above the composer — collapsed by default, hidden entirely when empty.
   const chatScroll = el("div", "chat-scroll");
   chatScroll.append(
-    header,
     contextStrip,
     authBanner,
+    reclaimBanner,
     transcriptRegion,
-    questionCardsWrap,
-    taskNotes.details,
-    changes.details
+    questionCardsWrap
   );
-  root.append(chatScroll, composer);
+  changes.details.classList.add("changes-tray");
+  const composerDock = el("div", "composer-dock");
+  composerDock.append(changes.details, composer);
+  root.append(header, chatScroll, sandboxStatsBar, composerDock);
 
   // --- drag-drop: file paths from the explorer/OS into the composer -----------
   wireComposerDropTarget();
@@ -505,12 +632,17 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   onPush("chat.event", (payload) => {
     if (payload.sessionId === state.selectedSessionId && payload.line.sequence > state.lastSequence) {
       state.lastSequence = payload.line.sequence;
+      // Streamed output arrived: reset the "since last output" running indicator.
+      if (turnActive) lastActivityAt = Date.now();
       applyTranscriptLine(payload.line);
     }
   });
   onPush("chat.turnStarted", (payload) => {
     if (payload.sessionId === state.selectedSessionId) {
       activeAssistantId = null;
+      sawAssistantTextThisTurn = false;
+      reasoningText = "";
+      reasoningActive = false;
       setTurnActive(true);
     }
   });
@@ -519,6 +651,15 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       activeAssistantId = null;
       logChat(`turn ${payload.status}`);
       setTurnActive(false);
+      // Make the outcome visible in the transcript. A failed turn's reason is
+      // already shown from its agent.error line; here we cover cancelled turns
+      // and turns that completed without producing any output (the "did nothing,
+      // looked stuck" case), which otherwise leave no trace in the chat.
+      if (payload.status === "cancelled") {
+        appendSystemMessage("You stopped this turn. Send another message to continue, or End the session to shut the agent down.");
+      } else if (payload.status === "completed" && !sawAssistantTextThisTurn) {
+        appendSystemMessage("The agent finished this turn without producing any output. If this keeps happening, check the Launch command in the session menu and the System tab — the backend may not be running correctly.", "info", true);
+      }
       // SEEN SIGNAL: the user is watching this session, so pull any lines we
       // missed AND tell the host we've seen the completed turn (a timeline
       // request clears this session's turn attention → the badge clears). Cheap:
@@ -573,6 +714,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderPlanDocs();
     logChat(`plan documents updated (${String(payload.docs.length)})`);
   });
+  onPush("editor.active", (payload) => {
+    state.activeEditor = payload.editor;
+    renderAttachments();
+  });
 
   // ---------------------------------------------------------------------------
   // Actions
@@ -583,12 +728,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       providerId: normalizeProviderId(providerSelect.value),
       ...(model === "" ? {} : { model })
     };
-  }
-
-  function isSelectedBackendReady(): boolean {
-    if (!state.selectedSessionId || !isSessionLiveish(state, state.selectedSessionId)) return false;
-    const session = currentSession(state);
-    return session !== undefined && normalizeProviderId(session.providerId) === normalizeProviderId(providerSelect.value);
   }
 
   function currentWorkspaceSelection(mode: "plan" | "implementation" | "clone"): ChatWorkspaceSelection | undefined {
@@ -607,24 +746,58 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   async function onSend(): Promise<void> {
     // A session running elsewhere is read-only here; refuse sends outright.
     if (selectedRunsElsewhere()) return;
-    const prompt = promptInput.value.trim();
-    if (!prompt || turnActive || starting || backendBusy) return;
+    const basePrompt = promptInput.value.trim();
+    if (!basePrompt || starting || backendBusy) return;
+    if (turnActive) {
+      // A turn is still running — don't silently swallow the message (the old
+      // behaviour, which made the chat look dead after a Stop that didn't take).
+      appendSystemMessage("A turn is still running. Press Stop to interrupt it — or End the session to shut the agent down — then send again.");
+      return;
+    }
     const model = currentModelSelection();
+    // Fold attachment chips into the prompt as [file:…] tokens (rendered as
+    // chips in the transcript), then clear them for the next message.
+    const tokenLines = attachmentTokenLines();
+    const prompt = tokenLines.length > 0 ? `${basePrompt}\n${tokenLines.join("\n")}` : basePrompt;
     promptInput.value = "";
     state.promptDraft = "";
+    clearAttachments();
+    lastSentPrompt = prompt;
     ctx.persist();
 
-    if (state.selectedSessionId && isSelectedBackendReady()) {
+    // Send to the selected session whenever it is live in this window — even if
+    // the composer's provider dropdown differs (the host surfaces a genuine
+    // provider mismatch as a visible error). Previously a mismatch fell through
+    // and silently started a BRAND-NEW chat, which looked like "nothing happened".
+    const selected = state.selectedSessionId
+      ? state.sessions.find((candidate) => candidate.sessionId === state.selectedSessionId)
+      : undefined;
+
+    if (selected !== undefined && isSessionLiveish(state, selected.sessionId)) {
       setTurnActive(true);
-      const response = await request({ type: "chat.sendTurn", sessionId: state.selectedSessionId, prompt, model });
-      if (!response.ok) {
-        logChat(`could not send: ${response.error.message}`);
-        setTurnActive(false);
+      const response = await request({ type: "chat.sendTurn", sessionId: selected.sessionId, prompt, model });
+      if (response.ok) return;
+      setTurnActive(false);
+      // The backend died since we last heard (a reload race where `live` was
+      // briefly stale). Hide the raw "no longer live" error and revive instead.
+      if (/no longer live|not live/i.test(response.error.message)) {
+        await reviveAndSend(selected, prompt, model);
+      } else {
+        appendSystemMessage(`Couldn't send: ${response.error.message}`, "error", true);
       }
       return;
     }
 
-    // Lazy spin-up: the first submitted message starts the micro-VM.
+    // A SELECTED but offline session (ended/failed, or its backend was lost on
+    // reload) is REVIVED, not replaced — its durable transcript + context survive
+    // the new backend. Only a brand-new chat (nothing selected) clears the log.
+    if (selected !== undefined) {
+      await reviveAndSend(selected, prompt, model);
+      return;
+    }
+
+    // Lazy spin-up: the FIRST message of a brand-new chat (nothing selected)
+    // starts the micro-VM. This is the ONLY path that clears the transcript.
     starting = true;
     refreshControls();
     const mode = state.composerMode === "plan" ? "plan" : "implementation";
@@ -643,7 +816,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     });
     starting = false;
     if (!response.ok) {
-      logChat(`could not start chat: ${response.error.message}`);
+      appendSystemMessage(`Couldn't start the chat backend: ${response.error.message}`, "error", true);
       refreshControls();
       return;
     }
@@ -653,12 +826,15 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       manualModelSessionId = null;
       state.lastSequence = 0;
       state.chatMessages = [];
+    runningCommands.clear();
       state.diagnostics = state.diagnostics.slice(-3);
       state.agentGroups = {};
       expandedGroups.clear();
       state.changedFiles.clear();
       openedDiffKeys = new Set();
       activeAssistantId = null;
+      reasoningText = "";
+      reasoningActive = false;
       renderHeader();
       renderProviderControls();
       renderChat();
@@ -666,6 +842,89 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       renderFacts();
       setTurnActive(true);
       ctx.persist();
+    }
+  }
+
+  /**
+   * Revives an offline session HERE — replaying its durable transcript so the
+   * chat history + context survive the new backend (restarting the container is
+   * fine) — then sends the queued prompt. An `active`/`starting` row (backend
+   * lost on reload, or "owned" by another window) is force-reclaimed; an
+   * ended/failed row resumes normally, re-mounting the open folders.
+   */
+  /** Native modal confirm via the host; false on cancel or any error. */
+  async function confirmHost(message: string, detail: string, confirmLabel: string): Promise<boolean> {
+    const response = await request({ type: "ui.confirm", message, detail, confirmLabel });
+    return response.ok && response.payload.type === "ui.confirm" && response.payload.confirmed;
+  }
+
+  /** Confirms a provider switch that will tear down and reboot a running container. */
+  function confirmProviderSwitch(fromProvider: string, toProvider: string): Promise<boolean> {
+    return confirmHost(
+      `This chat is running with ${providerLabel(fromProvider)}. Switch to ${providerLabel(toProvider)}?`,
+      "This starts a new container, and some in-progress context may be lost.",
+      `Switch to ${providerLabel(toProvider)}`
+    );
+  }
+
+  async function reviveAndSend(session: ChatSessionSummary, prompt: string, model: ChatModelSelection): Promise<void> {
+    // A provider switch reboots on the NEW provider's sandbox; same-provider is a
+    // plain reconnect. Both keep the durable transcript + project mounts.
+    const providerChanged = normalizeProviderId(session.providerId) !== model.providerId;
+    const isActive = session.status === "active" || session.status === "starting";
+    // Force-switching a session that's still running (active) destroys its live
+    // container — confirm first. Ended/failed sessions are already down, so a
+    // provider change on revive needs no prompt.
+    if (providerChanged && isActive) {
+      if (!(await confirmProviderSwitch(session.providerId, model.providerId))) {
+        promptInput.value = prompt;
+        state.promptDraft = prompt;
+        appendSystemMessage(`Kept this chat on ${providerLabel(session.providerId)}. Its model dropdown is unchanged.`);
+        renderProviderControls();
+        return;
+      }
+    }
+    starting = true;
+    reconnecting = true;
+    reconnectStartedAt = Date.now();
+    reconnectLabel = providerChanged ? `Switching to ${providerLabel(model.providerId)}…` : "Reconnecting…";
+    setWorkingIndicatorTicking(true);
+    refreshControls();
+    appendSystemMessage(providerChanged
+      ? `Switching this chat to ${providerLabel(model.providerId)} — restarting the backend and replaying context…`
+      : "Reconnecting the chat — history, context, and project mounts are kept…");
+    // Send the composer model so a provider switch rebuilds the sandbox for the
+    // NEW agent (resuming without it booted the OLD provider, then the turn failed
+    // with a provider mismatch). Send NO workspace: the host re-mounts the
+    // session's ORIGINAL persisted project roots so the revived agent can still
+    // edit the project (an auto/open-folders override would remount the wrong ones).
+    // Active sessions revive via reclaim (it force-takes-over + reboots); a
+    // provider switch adds the model so reclaim rebuilds on the new agent. Ended/
+    // failed sessions resume (which already rebuilds for the model's provider).
+    const reviveResponse = isActive
+      ? await request({ type: "chat.reclaim", sessionId: session.sessionId, ...(providerChanged ? { model } : {}) })
+      : await request({ type: "chat.resumeSession", sessionId: session.sessionId, model });
+    starting = false;
+    reconnecting = false;
+    if (!reviveResponse.ok) {
+      setWorkingIndicatorTicking(false);
+      appendSystemMessage(`Couldn't ${providerChanged ? "switch" : "reconnect"} the chat: ${reviveResponse.error.message}`, "error", true);
+      refreshControls();
+      return;
+    }
+    if (reviveResponse.payload.type === "chat.resumeSession" || reviveResponse.payload.type === "chat.reclaim") {
+      upsertSession(state, reviveResponse.payload.session);
+      state.providerCatalogs = [...reviveResponse.payload.providerCatalogs];
+      renderHeader();
+      renderProviderControls();
+      renderFacts();
+      ctx.persist();
+    }
+    setTurnActive(true);
+    const sendResponse = await request({ type: "chat.sendTurn", sessionId: session.sessionId, prompt, model });
+    if (!sendResponse.ok) {
+      setTurnActive(false);
+      appendSystemMessage(`Couldn't send: ${sendResponse.error.message}`, "error", true);
     }
   }
 
@@ -682,15 +941,28 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (!session) return;
     const selection = currentModelSelection();
     const providerChanged = normalizeProviderId(session.providerId) !== selection.providerId;
+    // A model-only change (same provider) needs no restart — it rides the next
+    // turn. Only a provider change reboots the container, so confirm that first.
     if (!providerChanged) return;
+    if (!(await confirmProviderSwitch(session.providerId, selection.providerId))) {
+      renderProviderControls();
+      return;
+    }
 
     backendBusy = true;
+    // Visible switching indicator + notice (was a silent dev-log line).
+    reconnecting = true;
+    reconnectStartedAt = Date.now();
+    reconnectLabel = `Switching to ${providerLabel(selection.providerId)}…`;
+    setWorkingIndicatorTicking(true);
     refreshControls();
-    logChat(`switching provider to ${selection.providerId} — restarting backend and replaying context`);
+    appendSystemMessage(`Switching this chat to ${providerLabel(selection.providerId)} — restarting the backend and replaying context…`);
     const response = await request({ type: "chat.restartBackend", sessionId: state.selectedSessionId, model: selection });
     backendBusy = false;
+    reconnecting = false;
+    setWorkingIndicatorTicking(false);
     if (!response.ok) {
-      logChat(`restart failed: ${response.error.message}`);
+      appendSystemMessage(`Couldn't switch to ${providerLabel(selection.providerId)}: ${response.error.message}`, "error", true);
       // Revert the selects to the session's actual provider/model.
       renderProviderControls();
       refreshControls();
@@ -704,6 +976,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       renderFacts();
       ctx.persist();
     }
+    appendSystemMessage(`Switched to ${providerLabel(selection.providerId)}. Send a message to continue.`);
     refreshControls();
   }
 
@@ -763,7 +1036,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     content.append(kind, mountsLine);
     for (const mount of iso.mounts) {
       const row = el("div", "popover-mount");
-      row.textContent = `${mount.mode === "read-write" ? "rw" : "ro"} ${mount.runtimePath}${mount.hostDisplayPath ? ` ← ${mount.hostDisplayPath}` : ""}`;
+      const { text, title } = mountPathText(mount);
+      row.textContent = `${mount.mode === "read-write" ? "rw" : "ro"} ${text}`;
+      if (title) row.title = title;
       content.append(row);
     }
     const net = el("div", "popover-line");
@@ -771,16 +1046,58 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       ? `Network: provider-scoped (${iso.networkAllowlist ?? ""})`
       : "Network: none";
     content.append(net);
+    content.append(buildLaunchCommandDisclosure(iso));
+  }
+
+  /**
+   * Reconstructs the `sbx create` invocation the docker-sandbox adapter issued
+   * for the live run, so the isolation popover can show it as copyable text
+   * (CH·3). The sandbox name is not known client-side (it is composed from
+   * internal session/generation ids server-side), so it is approximated from
+   * the session id and called out as illustrative; the agent, workspace, and
+   * mount list/flags are reconstructed exactly the way
+   * DockerSandboxRuntimeAdapter.createRuntime builds them (see
+   * packages/runtime-adapters/src/dockerSandboxRuntimeAdapter.ts): the
+   * workspace path is the positional arg, and every other mount whose
+   * hostDisplayPath differs from it is appended as `path` (read-write) or
+   * `path:ro` (read-only).
+   */
+  function buildLaunchCommandDisclosure(iso: IsolationSummary): HTMLElement {
+    const disclosure = document.createElement("details");
+    disclosure.className = "launch-command-detail";
+    const summary = document.createElement("summary");
+    summary.textContent = "Launch command";
+    disclosure.append(summary);
+
+    const session = currentSession(state);
+    const agent = session !== undefined && normalizeProviderId(session.providerId) === "claude" ? "claude" : "codex";
+    const sessionId = state.selectedSessionId ?? "session";
+    const sandboxName = `drydock-${sessionId.slice(0, 8)}`;
+    const extraMounts = iso.mounts
+      .filter((mount) => mount.hostDisplayPath !== undefined && mount.hostDisplayPath !== iso.workspaceDisplayPath)
+      .map((mount) => mount.mode === "read-only" ? `${mount.hostDisplayPath}:ro` : mount.hostDisplayPath);
+    const commandLine = [
+      "sbx", "create", "--name", sandboxName, agent, iso.workspaceDisplayPath, ...extraMounts
+    ].join(" ");
+
+    const pre = document.createElement("pre");
+    pre.className = "launch-command-pre";
+    pre.textContent = commandLine;
+    const caption = el("div", "launch-command-caption");
+    caption.textContent = `Sandbox name is illustrative (actual name is server-assigned); agent, workspace, and mounts are exact.`;
+    disclosure.append(pre, caption);
+    return disclosure;
   }
 
   function buildOverflowMenu(content: HTMLElement): void {
     const newChat = menuItem("New chat", () => resetToNewChat());
     // A session running elsewhere is owned by another window: Restart/End/Delete
-    // are refused, and Resume makes no sense (it is active). Only New chat shows.
+    // are refused. "Take over here" reclaims it into this window; New chat too.
     if (selectedRunsElsewhere()) {
       const note = el("div", "menu-item disabled");
       note.textContent = "Running in another window (read-only)";
-      content.append(note, newChat);
+      const takeOver = menuItem("Take over here", () => reclaimButton.click());
+      content.append(note, takeOver, newChat);
       return;
     }
     const restart = menuItem("Restart backend", () => void restartBackendAction());
@@ -788,6 +1105,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     // enabled only when the selected session is resumable.
     const resume = menuItem("Resume backend", () => void resumeBackendAction());
     const end = menuItem("End session", () => void endSessionAction());
+    const openTerminal = menuItem("Open container terminal", () => void openContainerTerminalAction());
     const del = el("div", "menu-item danger");
     const deleteChat = inlineConfirmButton("Delete chat", "Confirm delete", () => void deleteSessionAction(), "ghost small danger menu-danger");
     deleteChat.title = "Delete chat (requires confirmation)";
@@ -805,10 +1123,20 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       if (!live) {
         restart.classList.add("disabled");
         end.classList.add("disabled");
+        openTerminal.classList.add("disabled");
       }
       if (!resumable || backendBusy) resume.classList.add("disabled");
     }
-    content.append(restart, resume, end, del, newChat);
+    content.append(restart, resume, end, openTerminal, del, newChat);
+  }
+
+  /** Opens a VS Code terminal shelled into the selected chat's live container. */
+  async function openContainerTerminalAction(): Promise<void> {
+    if (!state.selectedSessionId || !isSessionLiveish(state, state.selectedSessionId)) return;
+    const response = await request({ type: "runtime.openTerminal", sessionId: state.selectedSessionId });
+    if (!response.ok) {
+      appendSystemMessage(`Couldn't open the container terminal: ${response.error.message}`, "error");
+    }
   }
 
   function menuItem(label: string, onClick: () => void): HTMLElement {
@@ -851,14 +1179,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (backendBusy || starting || turnActive) return;
     backendBusy = true;
     refreshControls();
-    logChat("resuming backend on a fresh runtime — context is replayed (takes a few seconds)…");
-    const workspace = state.openFolderNames.length > 0
-      ? { auto: true as const, mode: "implementation" as const }
-      : undefined;
+    logChat("resuming backend on a fresh runtime — context + original project mounts are replayed (takes a few seconds)…");
     const response = await request({
       type: "chat.resumeSession",
-      sessionId: session.sessionId,
-      ...(workspace ? { workspace } : {})
+      sessionId: session.sessionId
     });
     backendBusy = false;
     if (!response.ok) {
@@ -914,11 +1238,19 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (!response.ok || response.payload.type !== "session.timeline") return;
     if (state.selectedSessionId !== sessionId) return;
     state.chatMessages = [];
+    runningCommands.clear();
     state.diagnostics = [];
     state.agentGroups = {};
     expandedGroups.clear();
     state.changedFiles.clear();
     activeAssistantId = null;
+    // Reset before replay: applyTranscriptLine below re-accumulates reasoning
+    // from this session's own stored agent.reasoning lines (via
+    // appendReasoning), so without this reset a switch away from a session
+    // that was mid-turn would leave its "Thinking…" leftover showing under
+    // the newly selected (unrelated) session.
+    reasoningText = "";
+    reasoningActive = false;
     for (const line of response.payload.lines) {
       applyTranscriptLine(line, false);
       if (line.sequence > state.lastSequence) state.lastSequence = line.sequence;
@@ -1073,6 +1405,26 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       appendAssistantText(line.summary, "final" in line && line.final === true, line.createdAt, shouldPersist);
       return;
     }
+    if (line.eventType === "agent.reasoning") {
+      appendReasoning(line.summary, shouldPersist);
+      return;
+    }
+    if (line.eventType === "agent.error") {
+      // Surface the failure in the chat, not just the Diagnostics feed. The
+      // detail (when present) carries the real reason; fall back to the summary.
+      const detail = "detail" in line && typeof line.detail === "string" && line.detail.length > 0 ? line.detail : line.summary;
+      appendSystemMessage(`The agent hit an error: ${detail}`, "error", true);
+      appendDiagnostic(diagnosticFromLine(line), shouldPersist);
+      return;
+    }
+    if (line.eventType === "agent.command") {
+      // The shell commands the agent runs in the container are the "docker shell"
+      // activity — render them inline (a dev needs to watch them), not just in
+      // the hidden Diagnostics feed. Still diagnose for the flat debug truth.
+      appendCommand(line);
+      appendDiagnostic(diagnosticFromLine(line), shouldPersist);
+      return;
+    }
     if (line.eventType === "agent.file_edit") {
       const filePath = "filePath" in line && typeof line.filePath === "string"
         ? line.filePath
@@ -1216,6 +1568,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function appendAssistantText(text: string, final: boolean, createdAt: string, shouldPersist = true): void {
+    sawAssistantTextThisTurn = true;
     const currentIndex = activeAssistantId === null
       ? -1
       : state.chatMessages.findIndex((message) => message.id === activeAssistantId);
@@ -1236,11 +1589,123 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (shouldPersist) ctx.persist();
   }
 
+  /**
+   * Accumulates streamed agent.reasoning text into the live "Thinking"
+   * disclosure (see workingIndicatorRow). Not persisted into
+   * state.chatMessages — it is a live-turn affordance only, so a reload
+   * loses in-flight reasoning the same way it already loses the working
+   * indicator itself; the shouldPersist param is accepted for symmetry with
+   * the other appendX functions (replay calls it with false).
+   */
+  function appendReasoning(text: string, shouldPersist = true): void {
+    reasoningActive = true;
+    reasoningText += text;
+    if (turnActive && transcriptView === "log") {
+      const existing = chatLog.querySelector(".chat-working, .chat-reasoning");
+      if (existing) existing.replaceWith(workingIndicatorRow());
+      else renderChat(false);
+    }
+    void shouldPersist;
+  }
+
   function appendUserLine(prompt: string, createdAt = new Date().toISOString(), shouldPersist = true): void {
     state.chatMessages.push({ id: nextMessageId("user"), role: "user", createdAt, text: prompt });
     activeAssistantId = null;
     renderChat();
     if (shouldPersist) ctx.persist();
+  }
+
+  /**
+   * A visible in-transcript notice. Turn errors, stopped/empty turns, and send
+   * failures used to land only in the hidden Diagnostics feed — so a chat that
+   * did nothing looked stuck with no explanation. This surfaces them inline.
+   */
+  function appendSystemMessage(text: string, tone: "error" | "info" = "info", retry = false): void {
+    // Only offer Retry when we actually have a prompt to resend.
+    const canRetry = retry && lastSentPrompt !== null;
+    // A Docker Sandbox (host session) auth failure gets a one-click sbx sign-in.
+    const signIn = /sbx login|not authenticated|Docker Sandbox session|no valid user session|secret not found/i.test(text);
+    // A PROVIDER auth failure — the agent itself isn't signed in for the sandbox
+    // (Claude "Not logged in · Please run /login", Codex 401) — gets a one-click
+    // "Authenticate <provider>" button that runs the provider's sbx-secret login.
+    const providerAuth = !signIn && /not logged in|please run \/login|authentication_failed|apikeysource\W+none|invalid api key|401 unauthorized|needs[- ]login/i.test(text);
+    const authProviderId = providerAuth ? selectedProviderId() : undefined;
+    state.chatMessages.push({
+      id: nextMessageId("system"),
+      role: "system",
+      createdAt: new Date().toISOString(),
+      text,
+      tone,
+      ...(canRetry ? { retry: true } : {}),
+      ...(signIn ? { signIn: true } : {}),
+      ...(providerAuth ? { authenticate: true, ...(authProviderId === undefined ? {} : { authProviderId }) } : {})
+    });
+    activeAssistantId = null;
+    renderChat();
+    ctx.persist();
+  }
+
+  /** Provider of the selected session, falling back to the composer's choice. */
+  function selectedProviderId(): string {
+    const session = currentSession(state);
+    return normalizeProviderId(session ? session.providerId : providerSelect.value);
+  }
+
+  /** Human label for a provider id (we only support claude and codex). */
+  function providerLabel(providerId: string): string {
+    const normalized = normalizeProviderId(providerId);
+    if (normalized === "claude") return "Claude";
+    if (normalized === "codex") return "Codex";
+    return providerId.length > 0 ? providerId : "provider";
+  }
+
+  /** Re-sends the last submitted prompt (the Retry button on an error notice). */
+  function retryLastTurn(): void {
+    if (lastSentPrompt === null || turnActive || starting || backendBusy) return;
+    promptInput.value = lastSentPrompt;
+    void onSend();
+  }
+
+  /**
+   * Renders a shell command the agent ran, coalescing its started→terminal
+   * events into one row that gains an exit code + captured output. The summary
+   * is `<cmd> [<status>[ exit N]]`; we split the command text from the suffix so
+   * the row reads like a terminal line.
+   */
+  function appendCommand(line: SequencedTranscriptLine | DiagnosticEntry): void {
+    const summary = line.summary;
+    const status = "toolStatus" in line && (line.toolStatus === "started" || line.toolStatus === "completed" || line.toolStatus === "failed")
+      ? line.toolStatus
+      : "started";
+    const commandText = summary.replace(/\s*\[[^\]]*\]\s*$/, "").trim() || summary;
+    const exitMatch = /exit (-?\d+)/.exec(summary);
+    const commandExit = exitMatch ? Number(exitMatch[1]) : undefined;
+    const output = "detail" in line && typeof line.detail === "string" && line.detail.length > 0 ? line.detail : undefined;
+
+    const existingId = runningCommands.get(commandText);
+    const existingIndex = existingId === undefined ? -1 : state.chatMessages.findIndex((message) => message.id === existingId);
+    const id = existingIndex >= 0 ? state.chatMessages[existingIndex]!.id : nextMessageId("command");
+    const message: ChatMessage = {
+      id,
+      role: "command",
+      createdAt: line.createdAt,
+      text: commandText,
+      commandStatus: status,
+      ...(commandExit === undefined ? {} : { commandExit }),
+      ...(output === undefined ? {} : { commandOutput: output })
+    };
+    if (existingIndex >= 0) {
+      state.chatMessages[existingIndex] = message;
+    } else {
+      state.chatMessages.push(message);
+    }
+    if (status === "started") {
+      runningCommands.set(commandText, id);
+    } else {
+      runningCommands.delete(commandText);
+    }
+    renderChat();
+    ctx.persist();
   }
 
   function appendDiagnostic(entry: DiagnosticEntry, shouldPersist = true): void {
@@ -1254,9 +1719,17 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function setTurnActive(next: boolean): void {
+    const changed = turnActive !== next;
     turnActive = next;
+    turnStartedAt = next ? Date.now() : undefined;
+    // Seed last-activity to turn start; transcript pushes bump it as output arrives.
+    if (next) lastActivityAt = Date.now();
+    setWorkingIndicatorTicking(next);
     refreshControls();
     renderHeader();
+    // Only the transcript's working-indicator visibility changed here, and only
+    // when the flag actually flipped (avoids clobbering an in-progress render).
+    if (changed) renderChat(false);
   }
 
   // ---------------------------------------------------------------------------
@@ -1264,29 +1737,68 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // ---------------------------------------------------------------------------
   function renderHeader(): void {
     const session = currentSession(state);
-    titleLabel.textContent = session ? session.title : "New chat";
-    // Status dot: elsewhere (ring) / running (turn active) / live / ended.
+    // pendingSessionStart wins outright: a caller switched here ahead of a NEW
+    // session landing, so any still-selected PREVIOUS session must not show
+    // through (it would look like the new chat reused the old one).
+    if (pendingSessionStart) {
+      titleLabel.textContent = "Starting…";
+    } else {
+      titleLabel.textContent = session ? session.title : "New chat";
+    }
+    // Hierarchy: a small muted line above the title naming the parent task,
+    // shown only when the selected session belongs to a subtask (the main
+    // title already shows the subtask's own name via session.title). A
+    // session linked directly to a task (no subtask) shows no parent line —
+    // the title already names it.
+    const parentTitle = pendingSessionStart ? undefined : subtaskParentTitleForSelectedSession();
+    titleParentLabel.textContent = parentTitle ?? "";
+    titleParentLabel.classList.toggle("hidden", parentTitle === undefined);
+    // Status dot: starting / running (turn active) / live / offline / none.
     let stateClass = "state-ended";
-    let label = "no live session";
-    if (session?.runningElsewhere === true) {
-      stateClass = "state-elsewhere";
-      label = "running in another window (read-only)";
+    let label = "no chat selected";
+    if (pendingSessionStart) {
+      stateClass = "state-running";
+      label = "starting the chat backend";
     } else if (session && isSessionLiveish(state, session.sessionId)) {
       if (turnActive) { stateClass = "state-running"; label = "turn in progress"; }
       else { stateClass = "state-live"; label = "live"; }
+    } else if (session !== undefined) {
+      // Selected but its backend is not live here (ended, or lost on reload).
+      // Not a lock — sending a message reconnects it with its context.
+      stateClass = "state-offline";
+      label = "offline — send a message to reconnect";
     }
     statusDotEl.className = `status-dot ${stateClass}`;
     statusDotEl.title = label;
     statusDotEl.setAttribute("aria-label", label);
-    titleWrap.replaceChildren(statusDotEl, titleLabel);
+    titleWrap.replaceChildren(statusDotEl, titleTextWrap);
+  }
+
+  /**
+   * FIX 3: finds the subtask (if any) whose `linkedSessionIds` includes the
+   * selected session, by scanning `state.tasks[].subtasks[]`, and returns its
+   * parent task's title for display above the main title (which already shows
+   * the subtask's own name via session.title). Returns undefined when the
+   * selected session is not a subtask session (a plain task-linked session
+   * already shows its name as the main title; nothing extra to add above it).
+   */
+  function subtaskParentTitleForSelectedSession(): string | undefined {
+    const sessionId = state.selectedSessionId;
+    if (sessionId === null) return undefined;
+    for (const task of state.tasks) {
+      for (const subtask of task.subtasks) {
+        if (subtask.linkedSessionIds.includes(sessionId)) return task.title;
+      }
+    }
+    return undefined;
   }
 
   /**
    * Mounts <details>: a "1 mount · rw" style summary; expanding lists each mount
    * (mode chip + runtimePath ← hostDisplayPath). Before a session starts, the
    * summary shows the upcoming context ("Auto: <folders>" / set name / no mounts)
-   * and expanding lists the planned `/workspace/root-N` mapping when workspace
-   * state is available.
+   * and expanding lists the planned sandbox mount path when workspace state is
+   * available.
    */
   function renderContextStrip(): void {
     mountsBody.replaceChildren();
@@ -1350,7 +1862,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       const modeChip = el("span", `chip mode-${mount.mode === "read-write" ? "read-write" : "read-only"}`);
       modeChip.textContent = mount.mode === "read-write" ? "rw" : "ro";
       const path = el("span", "context-mount-path");
-      path.textContent = `${prefix ? `${prefix} · ` : ""}${mount.runtimePath}${mount.hostDisplayPath ? ` ← ${mount.hostDisplayPath}` : ""}`;
+      const { text, title } = mountPathText(mount, prefix);
+      path.textContent = text;
+      if (title) path.title = title;
       row.append(modeChip, path);
       mountsBody.append(row);
     }
@@ -1359,14 +1873,52 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   function plannedWorkspaceMounts(): DisplayMount[] {
     const names = plannedWorkspaceProjectNames();
     const mode = state.composerMode === "plan" ? "read-only" : "read-write";
-    return names.map((name, index) => {
+    return names.map((name) => {
       const project = state.workspacePolicy?.projects.find((candidate) => candidate.name === name);
+      const hostDisplayPath = project?.displayPath ?? name;
       return {
-        runtimePath: `/workspace/root-${String(index + 1)}`,
+        runtimePath: hostPathToSandboxPath(hostDisplayPath),
         mode,
-        hostDisplayPath: project?.displayPath ?? name
+        hostDisplayPath
       };
     });
+  }
+
+  /**
+   * Client mirror of core's sandboxRuntimePath: the real in-container mount
+   * point for a host folder (`H:\a\b` → `/h/a/b`). Used for the pre-start mount
+   * preview so the advertised path matches where sbx actually mounts it.
+   */
+  function hostPathToSandboxPath(hostPath: string): string {
+    const drive = /^([A-Za-z]):[\\/]?(.*)$/.exec(hostPath);
+    if (drive) {
+      return `/${drive[1]!.toLowerCase()}/${(drive[2] ?? "").replace(/\\/g, "/")}`;
+    }
+    return hostPath.replace(/\\/g, "/");
+  }
+
+  /**
+   * FIX 2: true when a mount's runtime path IS the sandbox mirror of its host
+   * path — i.e. "directly available" at the location a user would expect from
+   * the host path, so the `← hostDisplayPath` arrow would be pure noise. This
+   * is the common case (auto-mounted project roots); only an approved mount
+   * placed somewhere else in the sandbox genuinely needs the arrow.
+   */
+  function mountIsDirectlyAvailable(mount: DisplayMount): boolean {
+    return mount.hostDisplayPath === undefined || hostPathToSandboxPath(mount.hostDisplayPath) === mount.runtimePath;
+  }
+
+  /**
+   * FIX 2: the mount-line text (mode chip aside) — `<runtimePath>` alone when
+   * directly available (with a "direct" marker via title/suffix), else
+   * `<runtimePath> ← <hostDisplayPath>` when they genuinely differ.
+   */
+  function mountPathText(mount: DisplayMount, prefix?: string): { text: string; title?: string } {
+    const lead = prefix ? `${prefix} · ` : "";
+    if (mountIsDirectlyAvailable(mount)) {
+      return { text: `${lead}${mount.runtimePath} · direct`, title: "mounted at its host location" };
+    }
+    return { text: `${lead}${mount.runtimePath} ← ${mount.hostDisplayPath ?? ""}` };
   }
 
   function plannedWorkspaceProjectNames(): string[] {
@@ -1415,8 +1967,106 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
 
     thinkingSelect.value = state.thinkingEffort;
+    renderModelButton();
     renderAuthBanner();
     refreshControls();
+  }
+
+  /** Syncs the composer's model button label to the (hidden) select values. */
+  function renderModelButton(): void {
+    const catalogs = state.providerCatalogs.length === 0 ? [fallbackCatalog()] : state.providerCatalogs;
+    const providerId = normalizeProviderId(providerSelect.value);
+    const catalog = catalogs.find((candidate) => normalizeProviderId(candidate.providerId) === providerId);
+    const providerName = catalog?.displayName ?? providerLabel(providerId);
+    const model = catalog?.models.find((candidate) => candidate.id === modelSelect.value);
+    const modelName = model?.displayName ?? (modelSelect.value || "default");
+    modelButton.replaceChildren();
+    const label = el("span", "composer-model-label");
+    // Button shows just the model name (compact); provider lives in the tree.
+    label.textContent = catalog === undefined ? "Model" : modelName;
+    modelButton.title = catalog === undefined ? "Choose a model" : `Model: ${providerName} · ${modelName}`;
+    modelButton.append(label, modelButtonChevron);
+  }
+
+  /**
+   * Applies a (provider, model) pick from the model tree by driving the hidden
+   * selects and reusing their change handlers — a provider change fires the
+   * confirm-and-restart flow (onSelectionChange), a same-provider change just
+   * records the model for the next turn.
+   */
+  function selectModelFromTree(providerId: string, modelId: string): void {
+    const normalized = normalizeProviderId(providerId);
+    const providerChanged = normalizeProviderId(providerSelect.value) !== normalized;
+    if (providerChanged) {
+      providerSelect.value = catalogProviderValue(normalized);
+      manualModelSessionId = null;
+      renderProviderControls(false);
+    }
+    // Set the model after any provider rebuild so it isn't clobbered by the
+    // provider's default; mark it manual so the next turn carries it.
+    if ([...modelSelect.options].some((opt) => opt.value === modelId)) {
+      modelSelect.value = modelId;
+      state.selectedModel = modelId;
+      manualModelSessionId = state.selectedSessionId;
+    }
+    renderModelButton();
+    ctx.persist();
+    if (providerChanged) void onSelectionChange();
+  }
+
+  /** The catalog's own casing for a normalized provider id (for the select value). */
+  function catalogProviderValue(normalizedProviderId: string): string {
+    const catalogs = state.providerCatalogs.length === 0 ? [fallbackCatalog()] : state.providerCatalogs;
+    return catalogs.find((candidate) => normalizeProviderId(candidate.providerId) === normalizedProviderId)?.providerId
+      ?? normalizedProviderId;
+  }
+
+  /**
+   * Builds the model popup tree: every registered provider as a group, its
+   * models beneath, the current one checked. Auth state and refresh source are
+   * surfaced as small hints; picking a model routes through selectModelFromTree.
+   */
+  function buildModelTree(content: HTMLElement, close: () => void): void {
+    const catalogs = state.providerCatalogs.length === 0 ? [fallbackCatalog()] : state.providerCatalogs;
+    const activeProvider = normalizeProviderId(providerSelect.value);
+    const activeModel = modelSelect.value;
+    for (const catalog of catalogs) {
+      const providerId = normalizeProviderId(catalog.providerId);
+      const group = el("div", "model-tree-group");
+      const groupHead = el("div", "model-tree-provider");
+      const name = el("span", "model-tree-provider-name");
+      name.textContent = catalog.displayName;
+      groupHead.append(name);
+      if (catalog.authStatus === "needs-login") {
+        const hint = el("span", "model-tree-auth");
+        hint.textContent = "needs login";
+        groupHead.append(hint);
+      }
+      group.append(groupHead);
+      const models = catalog.models.filter((model) => !model.hidden);
+      if (models.length === 0) {
+        const empty = el("div", "model-tree-empty");
+        empty.textContent = catalog.source === "fallback" ? "start a chat to load models" : "no models";
+        group.append(empty);
+      }
+      for (const model of models) {
+        const row = el("button", "model-tree-model");
+        const isActive = providerId === activeProvider && model.id === activeModel;
+        if (isActive) row.classList.add("active");
+        const check = el("span", "model-tree-check");
+        check.textContent = isActive ? "✓" : "";
+        const modelName = el("span", "model-tree-model-name");
+        modelName.textContent = model.displayName;
+        row.append(check, modelName);
+        if (model.description) row.title = model.description;
+        row.addEventListener("click", () => {
+          selectModelFromTree(catalog.providerId, model.id);
+          close();
+        });
+        group.append(row);
+      }
+      content.append(group);
+    }
   }
 
   /**
@@ -1440,11 +2090,17 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     // control only for live-in-this-window sessions (a child needs a live
     // parent to inherit mounts from).
     const session = currentSession(state);
-    lensStrip.classList.toggle("hidden", session === undefined);
+    // pendingSessionStart wins outright — see renderHeader for why a stale
+    // previously-selected session must not show through here either.
+    lensStrip.classList.toggle("hidden", pendingSessionStart || session === undefined);
     spawnRoleSelect.classList.add("hidden");
     if (transcriptView === "agents") renderAgentsLens();
     chatLog.replaceChildren();
-    if (state.chatMessages.length === 0) {
+    if (pendingSessionStart) {
+      chatLog.append(startingPlaceholder());
+      return;
+    }
+    if (state.chatMessages.length === 0 && !turnActive && !reasoningActive) {
       // Empty transcript orients the first-run user: a call to action plus a dim
       // line naming the two composer modes. Clone remains a transfer/sync
       // detail for clone sessions, not a first-run chat mode.
@@ -1460,8 +2116,279 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     for (const message of state.chatMessages) {
       chatLog.append(chatMessageRow(message));
     }
+    // FIX 4: while a turn is running, a bottom-of-transcript activity
+    // indicator fills the gap between turnStarted and the first streamed
+    // output (previously blank — looked stuck). Removed as soon as the turn
+    // ends (setTurnActive(false) re-renders without it) UNLESS reasoning was
+    // captured this turn, in which case its disclosure persists (collapsed,
+    // relabeled "Thought for Ns") until the next turn starts.
+    if (turnActive) chatLog.append(workingIndicatorRow());
+    else if (reconnecting) chatLog.append(reconnectingIndicatorRow());
+    else if (reasoningActive) chatLog.append(reasoningDisclosure(false));
     // Keep the scrollable chat body pinned to the newest entry as it grows/streams.
     if (pinToBottom) chatScroll.scrollTop = chatScroll.scrollHeight;
+  }
+
+  /**
+   * FIX 1: centered placeholder shown in place of the transcript while a
+   * caller has switched to Chat before chat.startSession resolved (no session
+   * to render yet). A rotating-border spinner (CSS) plus a short caption;
+   * `.spinner` falls back to a static ring under prefers-reduced-motion.
+   */
+  function startingPlaceholder(): HTMLElement {
+    const wrap = el("div", "chat-starting");
+    const spinner = el("div", "spinner");
+    const caption = el("div", "chat-starting-caption");
+    caption.textContent = "Starting the chat backend…";
+    wrap.append(spinner, caption);
+    return wrap;
+  }
+
+  /**
+   * FIX 4 (+ reasoning follow-up): activity indicator appended at the bottom
+   * of the transcript for the duration of a running turn, filling the gap
+   * between turnStarted and the first streamed output. Reasoning (agent.text
+   * "thinking" — Claude thinking blocks, Codex reasoning items) is now
+   * captured as agent.reasoning events (see applyTranscriptLine/
+   * appendReasoning above); when any has arrived this turn, the indicator
+   * becomes the live "Thinking" disclosure instead of the generic dots row,
+   * so the minutes-long silent gap on a long turn shows real progress rather
+   * than just "working…".
+   */
+  function workingIndicatorRow(): HTMLElement {
+    if (reasoningActive) return reasoningDisclosure(true);
+    const row = el("div", "chat-working");
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+    const elapsed = turnStartedAt === undefined ? 0 : Math.max(0, Math.floor((Date.now() - turnStartedAt) / 1000));
+    // Primary signal is time since the last streamed output: a value that keeps
+    // climbing means the turn is running but silent (a likely hang). Total
+    // elapsed lives in the tooltip.
+    const sinceLast = lastActivityAt === undefined ? elapsed : Math.max(0, Math.floor((Date.now() - lastActivityAt) / 1000));
+    row.title = `${String(elapsed)}s since this turn started`;
+    const label = el("span", "chat-working-label");
+    if (reducedMotion) {
+      // No pulsing dots under reduced motion — a static label only.
+      label.textContent = `Working… (${String(sinceLast)}s since last output)`;
+      row.append(label);
+    } else {
+      const dots = el("span", "chat-working-dots");
+      dots.append(el("span", "dot"), el("span", "dot"), el("span", "dot"));
+      label.textContent = `Assistant is working… (${String(sinceLast)}s since last output)`;
+      row.append(dots, label);
+    }
+    // After a sustained silence, offer a gentle nudge instead of leaving the user
+    // to guess whether it's stuck. The poke is a graceful interrupt (not a kill).
+    if (sinceLast >= POKE_AFTER_SECONDS) {
+      row.append(pokeButton());
+    }
+    return row;
+  }
+
+  /** "Give it a poke?" — a soft turn/interrupt to try to break a quiet standoff. */
+  function pokeButton(): HTMLElement {
+    const btn = button("Give it a poke?", "small chat-poke");
+    btn.title = "Nudge the agent with a graceful interrupt to try to break a standoff — the session and container stay alive.";
+    btn.addEventListener("click", () => {
+      const sessionId = state.selectedSessionId;
+      if (!sessionId) return;
+      btn.disabled = true;
+      btn.textContent = "Poking…";
+      void request({ type: "chat.poke", sessionId }).then((response) => {
+        if (!response.ok) {
+          btn.disabled = false;
+          btn.textContent = "Give it a poke?";
+          logChat(`poke failed: ${response.error.message}`);
+          return;
+        }
+        if (response.payload.type === "chat.poke" && response.payload.poked) {
+          appendSystemMessage("Poked the agent — asked it to wrap up the current step. Give it a moment; if nothing changes, Stop the turn or End the session.");
+        } else {
+          appendSystemMessage("Nothing to poke here — the turn isn't live in this window. Try Stop, or send again to reconnect.");
+        }
+      });
+    });
+    return btn;
+  }
+
+  /**
+   * Live, collapsible "Thinking" block: streams accumulated agent.reasoning
+   * text as it arrives, collapsed by default so it never dominates the
+   * transcript (the user opts in to reading it). `live` selects the summary
+   * label ("Thinking… (Ns)" while the turn runs vs. "Thought for Ns" once it
+   * ends) and whether the pulsing dots render — CSS handles the
+   * prefers-reduced-motion fallback the same way workingIndicatorRow does.
+   * Content renders via textContent only (CSP): no markdown, just the raw
+   * reasoning stream.
+   */
+  function reasoningDisclosure(live: boolean): HTMLElement {
+    const details = document.createElement("details");
+    details.className = "chat-reasoning";
+    const summary = document.createElement("summary");
+    const elapsed = turnStartedAt === undefined ? 0 : Math.max(0, Math.floor((Date.now() - turnStartedAt) / 1000));
+    const label = el("span", "chat-reasoning-label");
+    label.textContent = live ? `Thinking… (${String(elapsed)}s)` : `Thought for ${String(elapsed)}s`;
+    summary.append(label);
+    if (live) {
+      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+      if (!reducedMotion) {
+        const dots = el("span", "chat-working-dots");
+        dots.append(el("span", "dot"), el("span", "dot"), el("span", "dot"));
+        summary.append(dots);
+      }
+    }
+    details.append(summary);
+    const body = el("pre", "chat-reasoning-body");
+    body.textContent = reasoningText;
+    details.append(body);
+    return details;
+  }
+
+  /** Whole seconds since an ISO timestamp, floored at zero. */
+  function secondsSince(iso: string): number {
+    const then = Date.parse(iso);
+    if (Number.isNaN(then)) return 0;
+    return Math.max(0, Math.floor((Date.now() - then) / 1000));
+  }
+
+  function stopRawStreamPolling(): void {
+    if (rawStreamTimer !== undefined) {
+      window.clearInterval(rawStreamTimer);
+      rawStreamTimer = undefined;
+    }
+  }
+
+  /**
+   * Fetches the selected session's current-turn raw buffer and renders it.
+   * Keeps the view pinned to the bottom unless the user has scrolled up to read
+   * earlier output (the live tail is where a hang shows).
+   */
+  async function pollRawStream(): Promise<void> {
+    const sessionId = state.selectedSessionId;
+    if (!sessionId) {
+      rawStreamBody.textContent = "No chat selected.";
+      rawStreamMeta.textContent = "";
+      return;
+    }
+    const response = await request({ type: "chat.rawStream", sessionId });
+    if (!response.ok || response.payload.type !== "chat.rawStream") return;
+    // The selection may have changed while the request was in flight.
+    if (state.selectedSessionId !== sessionId) return;
+    const { text, lastChunkAt } = response.payload;
+    const atBottom = rawStreamBody.scrollHeight - rawStreamBody.scrollTop - rawStreamBody.clientHeight < 40;
+    rawStreamBody.textContent = text.length === 0
+      ? "No raw output captured yet — send a message to start a turn."
+      : text;
+    if (atBottom) rawStreamBody.scrollTop = rawStreamBody.scrollHeight;
+    rawStreamMeta.textContent = lastChunkAt === null ? "" : `· ${String(secondsSince(lastChunkAt))}s since last output`;
+  }
+
+  /**
+   * Live indicator shown while a reconnect (resume/reclaim) boots a fresh runtime,
+   * before the turn can start streaming. Without it the "Reconnecting…" notice
+   * just sat there with no sign of progress. Elapsed climbs each second; past ~20s
+   * it adds a reassurance that starting a sandbox can take a moment.
+   */
+  function reconnectingIndicatorRow(): HTMLElement {
+    const row = el("div", "chat-working chat-reconnecting");
+    const elapsed = reconnectStartedAt === undefined ? 0 : Math.max(0, Math.floor((Date.now() - reconnectStartedAt) / 1000));
+    const suffix = elapsed >= 45
+      ? " — still trying; if it doesn't recover, End the session or reload the window"
+      : elapsed >= 20
+        ? " — starting the sandbox can take a bit"
+        : "";
+    const text = `${reconnectLabel} (${String(elapsed)}s)${suffix}`;
+    const label = el("span", "chat-working-label");
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+    if (reducedMotion) {
+      label.textContent = text;
+      row.append(label);
+      return row;
+    }
+    const dots = el("span", "chat-working-dots");
+    dots.append(el("span", "dot"), el("span", "dot"), el("span", "dot"));
+    label.textContent = text;
+    row.append(dots, label);
+    return row;
+  }
+
+  // --- sandbox usage bar (pinned below the transcript) -----------------------
+  let sandboxStatsInFlight = false;
+  function renderSandboxStats(stats: RuntimeStatsSummary | null): void {
+    // null = no running sandbox for this session → hide entirely.
+    if (stats === null) {
+      sandboxStatsBar.classList.add("hidden");
+      sandboxStatsBar.replaceChildren();
+      return;
+    }
+    const label = el("span", "sandbox-stats-label");
+    label.textContent = "sandbox";
+    const value = el("span", "sandbox-stats-value");
+    if (!stats.available) {
+      // Running, but the host couldn't measure it (non-Windows, or the probe
+      // failed) — show the bar so it's visible rather than silently absent.
+      value.textContent = "usage unavailable";
+    } else {
+      const parts = [
+        `CPU ${stats.cpuPercent === null ? "…" : `${String(Math.round(stats.cpuPercent))}%`}`,
+        `mem ${stats.memBytes === null ? "—" : formatStatBytes(stats.memBytes)}`,
+        `IO ↓${formatStatRate(stats.ioReadBytesPerSec)} ↑${formatStatRate(stats.ioWriteBytesPerSec)}`
+      ];
+      if (stats.threads !== null) parts.push(`${String(stats.threads)} thr`);
+      value.textContent = parts.join("  ·  ");
+    }
+    sandboxStatsBar.replaceChildren(label, value);
+    sandboxStatsBar.classList.remove("hidden");
+  }
+  async function pollSandboxStats(): Promise<void> {
+    if (sandboxStatsInFlight) return;
+    const sessionId = state.selectedSessionId;
+    // Only gate on being on the Chat tab with a session selected; the backend
+    // returns null when there's no running sandbox, which hides the bar. (Do NOT
+    // gate on isSessionLiveish — a running runtime can exist even when the
+    // window's `live` flag is momentarily stale, which was hiding the bar.)
+    if (state.activeTab !== "chat" || !sessionId) {
+      renderSandboxStats(null);
+      return;
+    }
+    sandboxStatsInFlight = true;
+    try {
+      const response = await request({ type: "chat.runtimeStats", sessionId });
+      if (response.ok && response.payload.type === "chat.runtimeStats" && state.selectedSessionId === sessionId) {
+        renderSandboxStats(response.payload.stats);
+      }
+    } finally {
+      sandboxStatsInFlight = false;
+    }
+  }
+  window.setInterval(() => void pollSandboxStats(), 2_500);
+
+  function formatStatBytes(bytes: number): string {
+    if (bytes < 1024) return `${String(Math.round(bytes))} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let value = bytes / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+    return `${value < 10 ? value.toFixed(1) : String(Math.round(value))} ${units[unit]}`;
+  }
+  function formatStatRate(bytesPerSec: number | null): string {
+    if (bytesPerSec === null) return "…";
+    if (bytesPerSec < 1) return "0";
+    return `${formatStatBytes(bytesPerSec)}/s`;
+  }
+
+  /** Starts/stops the 1s tick that keeps the working / reconnecting indicator fresh. */
+  function setWorkingIndicatorTicking(active: boolean): void {
+    if (workingIndicatorTimer !== undefined) {
+      window.clearInterval(workingIndicatorTimer);
+      workingIndicatorTimer = undefined;
+    }
+    if (active) {
+      workingIndicatorTimer = window.setInterval(() => {
+        if ((!turnActive && !reconnecting) || transcriptView !== "log") return;
+        const existing = chatLog.querySelector(".chat-working, .chat-reasoning");
+        if (existing) existing.replaceWith(turnActive ? workingIndicatorRow() : reconnectingIndicatorRow());
+      }, 1_000);
+    }
   }
 
   /**
@@ -1475,15 +2402,89 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         ? agentGroupBlock(message.nodeId)
         : el("div", "chat-message role-group empty");
     }
+    if (message.role === "system") {
+      // A visible in-transcript notice: turn errors, stopped/empty turns, and
+      // send failures that used to vanish into the Diagnostics feed.
+      const row = el("div", `chat-message role-system${message.tone === "error" ? " tone-error" : ""}`);
+      const body = el("div", "chat-system-body");
+      body.textContent = message.text;
+      row.append(body);
+      if (message.signIn === true) {
+        const signInButton = button("Sign in to Docker Sandbox", "small primary chat-system-signin");
+        signInButton.addEventListener("click", () => {
+          void request({ type: "runtime.sbxLogin" }).then((response) => {
+            if (!response.ok) logChat(`sbx login failed to launch: ${response.error.message}`);
+            else appendSystemMessage("Opened a terminal running `sbx login`. Complete the sign-in, then reload the window and send again.");
+          });
+        });
+        row.append(signInButton);
+      }
+      if (message.authenticate === true) {
+        const providerId = message.authProviderId ?? selectedProviderId();
+        const authButton = button(`Authenticate ${providerLabel(providerId)}`, "small primary chat-system-signin");
+        authButton.addEventListener("click", () => {
+          authButton.disabled = true;
+          void request({ type: "provider.login", providerId }).then((response) => {
+            authButton.disabled = false;
+            if (!response.ok) {
+              logChat(`login failed to launch: ${response.error.message}`);
+              return;
+            }
+            appendSystemMessage(
+              normalizeProviderId(providerId) === "claude"
+                ? "Opened a terminal running Claude in a sandbox. Type /login there to sign in (a browser opens), then close the terminal and click Retry."
+                : `Opened a terminal to sign ${providerLabel(providerId)} in for the sandbox. Complete the OAuth flow, then click Retry or send again.`
+            );
+          });
+        });
+        row.append(authButton);
+      }
+      if (message.retry === true) {
+        const retryButton = button("Retry", "small chat-system-retry");
+        retryButton.addEventListener("click", () => retryLastTurn());
+        row.append(retryButton);
+      }
+      return row;
+    }
+    if (message.role === "command") {
+      const row = el("div", `chat-message role-command status-${message.commandStatus ?? "started"}`);
+      const commandLine = el("div", "chat-command-line");
+      const promptGlyph = el("span", "chat-command-prompt");
+      promptGlyph.textContent = "$";
+      const commandText = el("span", "chat-command-text");
+      commandText.textContent = message.text;
+      const statusChip = el("span", "chat-command-status");
+      statusChip.textContent = message.commandStatus === "started"
+        ? "running…"
+        : message.commandStatus === "failed"
+          ? `failed${message.commandExit === undefined ? "" : ` · exit ${String(message.commandExit)}`}`
+          : `exit ${message.commandExit === undefined ? "0" : String(message.commandExit)}`;
+      commandLine.append(promptGlyph, commandText, statusChip);
+      row.append(commandLine);
+      if (message.commandOutput !== undefined && message.commandOutput.length > 0) {
+        const lineCount = message.commandOutput.replace(/\n+$/, "").split("\n").length;
+        const output = document.createElement("details");
+        output.className = "chat-command-output";
+        // Short output shows inline; anything over 3 lines collapses by default.
+        output.open = lineCount <= 3;
+        const summary = document.createElement("summary");
+        summary.textContent = lineCount <= 3 ? "output" : `output (${String(lineCount)} lines)`;
+        const pre = document.createElement("pre");
+        pre.textContent = message.commandOutput;
+        output.append(summary, pre);
+        row.append(output);
+      }
+      return row;
+    }
     const streaming = message.streaming === true;
     const row = el("div", `chat-message role-${message.role}${streaming ? " streaming" : ""}`);
     const meta = el("div", "chat-meta");
-    meta.textContent = `${message.role === "user" ? "You" : "Assistant"} · ${formatTime(message.createdAt)}`;
+    meta.textContent = `${message.role === "user" ? "You" : authorLabel()} · ${formatTime(message.createdAt)}`;
     row.append(meta);
 
     if (message.role === "user") {
       const body = el("div", "chat-user-body");
-      appendTextWithFileTokens(body, message.text);
+      appendUserMessageBody(body, message.text);
       row.append(body);
     } else {
       const body = el("div", "chat-assistant-body");
@@ -1495,6 +2496,62 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       row.append(body);
     }
     return row;
+  }
+
+  /**
+   * CH·10: assistant meta label. "Orchestrator" names the role (agent types
+   * land later); the model comes from the current session's provider catalog
+   * (falling back to the session's raw model id, then omitted entirely).
+   */
+  function authorLabel(): string {
+    const session = currentSession(state);
+    const model = session === undefined ? undefined : displayModelName(session.providerId, session.model);
+    return model === undefined ? "Orchestrator" : `Orchestrator · ${model}`;
+  }
+
+  /** Model id → catalog display name for the given provider; raw id if no catalog match. */
+  function displayModelName(providerId: string, model: string | undefined): string | undefined {
+    if (model === undefined || model === "") return undefined;
+    const catalog = state.providerCatalogs.find((c) => normalizeProviderId(c.providerId) === normalizeProviderId(providerId));
+    return catalog?.models.find((candidate) => candidate.id === model)?.displayName ?? model;
+  }
+
+  const HOST_BRIEFING_START = "[host briefing]";
+  const HOST_BRIEFING_END = "[end host briefing]";
+
+  /**
+   * CH·5: a user message's first turn is host-prefixed with a
+   * `[host briefing]` … `[end host briefing]` block (see
+   * packages/core/src/accessRequestProtocol.ts buildSessionBriefing). Splits it
+   * out into a collapsed `<details>` ("Host briefing") so the transcript leads
+   * with what the user actually typed; falls back to the plain render when the
+   * delimiters are not both present (robust to older/replayed messages).
+   */
+  function appendUserMessageBody(container: HTMLElement, text: string): void {
+    const startIdx = text.indexOf(HOST_BRIEFING_START);
+    const endIdx = startIdx === -1 ? -1 : text.indexOf(HOST_BRIEFING_END, startIdx + HOST_BRIEFING_START.length);
+    if (startIdx === -1 || endIdx === -1) {
+      appendTextWithFileTokens(container, text);
+      return;
+    }
+    const briefingText = text.slice(startIdx, endIdx + HOST_BRIEFING_END.length);
+    const remainder = `${text.slice(0, startIdx)}${text.slice(endIdx + HOST_BRIEFING_END.length)}`.trim();
+
+    const disclosure = document.createElement("details");
+    disclosure.className = "host-briefing-detail";
+    const summary = document.createElement("summary");
+    summary.textContent = "Host briefing";
+    const pre = document.createElement("pre");
+    pre.className = "host-briefing-pre";
+    pre.textContent = briefingText;
+    disclosure.append(summary, pre);
+    container.append(disclosure);
+
+    if (remainder.length > 0) {
+      const rest = el("div", "host-briefing-remainder");
+      appendTextWithFileTokens(rest, remainder);
+      container.append(rest);
+    }
   }
 
   function appendTextWithFileTokens(container: HTMLElement, text: string): void {
@@ -2020,20 +3077,64 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (!copied) throw new Error("copy failed");
   }
 
-  /** Builds one structural markdown block as DOM (textContent leaves only). */
+  /**
+   * Inline markdown → DOM: links (clickable — file refs open in the editor,
+   * http(s) in the browser), inline code, bold, italic. Everything else stays a
+   * plain text node (CSP-safe: no innerHTML). Code fences are handled separately.
+   */
+  function appendInline(parent: HTMLElement, text: string): void {
+    const pattern = /\[([^\]]+)\]\(([^)\s]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|(?:\*|_)([^*_\s][^*_]*?)(?:\*|_)/g;
+    let last = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      if (match.index > last) parent.append(document.createTextNode(text.slice(last, match.index)));
+      if (match[1] !== undefined && match[2] !== undefined) {
+        parent.append(inlineLink(match[1], match[2]));
+      } else if (match[3] !== undefined) {
+        const code = el("code", "md-inline-code");
+        code.textContent = match[3];
+        parent.append(code);
+      } else if (match[4] !== undefined) {
+        const strong = document.createElement("strong");
+        strong.textContent = match[4];
+        parent.append(strong);
+      } else if (match[5] !== undefined) {
+        const em = document.createElement("em");
+        em.textContent = match[5];
+        parent.append(em);
+      }
+      last = pattern.lastIndex;
+    }
+    if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
+  }
+
+  /** A clickable markdown link; the host decides file-open vs. external. */
+  function inlineLink(label: string, href: string): HTMLElement {
+    const anchor = el("a", "md-link") as HTMLAnchorElement;
+    anchor.textContent = label;
+    anchor.href = "#";
+    anchor.title = href;
+    anchor.addEventListener("click", (event) => {
+      event.preventDefault();
+      void request({ type: "chat.openFile", path: href });
+    });
+    return anchor;
+  }
+
+  /** Builds one structural markdown block as DOM (inline markdown + textContent leaves). */
   function assistantBlock(block: DocBlock): HTMLElement {
     switch (block.kind) {
       case "heading": {
         const level = Math.min(block.level ?? 1, 4);
         const heading = el(`h${String(level)}`, "md-heading");
-        heading.textContent = block.text;
+        appendInline(heading, block.text);
         return heading;
       }
       case "list": {
         const ul = el("ul", "md-list");
         for (const item of block.items ?? []) {
           const li = el("li");
-          li.textContent = item;
+          appendInline(li, item);
           ul.append(li);
         }
         return ul;
@@ -2045,7 +3146,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       case "paragraph":
       default: {
         const p = el("p", "md-paragraph");
-        p.textContent = block.text;
+        appendInline(p, block.text);
         return p;
       }
     }
@@ -2169,9 +3270,24 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     cloneActions.classList.add("hidden");
     cloneCaption.classList.add("hidden");
     const count = diffChanges.length > 0 ? diffChanges.length : state.changedFiles.size;
-    changes.summaryLabel.textContent = `Changes (${String(count)} file${count === 1 ? "" : "s"})`;
+    // Aggregate line stats for the tray summary (+A −R); only diff rows carry
+    // them, so the legacy in-memory fallback shows the count without stats.
+    const stats = diffChanges.length > 0
+      ? diffChanges.reduce(
+          (acc, change) => ({
+            added: acc.added + (change.addedLines ?? 0),
+            removed: acc.removed + (change.removedLines ?? 0)
+          }),
+          { added: 0, removed: 0 }
+        )
+      : null;
+    setChangesSummary(count, stats?.added ?? null, stats?.removed ?? null);
     workingSetTitle.textContent = `Working set (${String(count)} file${count === 1 ? "" : "s"})`;
     setChangesScrollCap(count);
+    autoExpandChangesOnGrowth(count);
+    // Empty-hide: a real chat session with no edits hides the tray entirely. The
+    // no-session (workspace) scope stays visible so Snapshot remains reachable.
+    changes.details.classList.toggle("hidden", count === 0 && state.selectedSessionId !== null);
     // Snapshot only makes sense in the no-session (workspace) scope.
     snapshotButton.classList.toggle("hidden", state.selectedSessionId !== null);
     const actionable = diffChanges.length > 0;
@@ -2231,10 +3347,14 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     cloneActions.classList.remove("hidden");
     cloneCaption.classList.remove("hidden");
     snapshotButton.classList.add("hidden");
+    // Clone sessions use the tray as the sync surface — always shown, never
+    // empty-hidden (the empty state explains where the agent's changes land).
+    changes.details.classList.remove("hidden");
     const total = cloneRepos.reduce((sum, repo) => sum + repo.files.length, 0);
-    changes.summaryLabel.textContent = `Changes (${String(total)} file${total === 1 ? "" : "s"})`;
+    setChangesSummary(total, null, null);
     workingSetTitle.textContent = `Clone sync (${String(total)} file${total === 1 ? "" : "s"})`;
     setChangesScrollCap(total);
+    autoExpandChangesOnGrowth(total);
     refreshCloneActions();
 
     changedFilesList.replaceChildren();
@@ -2322,6 +3442,40 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   function setChangesScrollCap(fileCount: number): void {
     changedFilesList.classList.toggle("scroll-capped", fileCount > 3);
+  }
+
+  /**
+   * Writes the docked tray's summary label — "<n> file(s) changed  +A  −R",
+   * colouring the added/removed counts. Line stats are omitted (null) for the
+   * legacy in-memory fallback and for clone sync, which have no per-file diff.
+   */
+  function setChangesSummary(count: number, added: number | null, removed: number | null): void {
+    changes.summaryLabel.replaceChildren();
+    const label = el("span", "changes-summary-count");
+    label.textContent = `${String(count)} file${count === 1 ? "" : "s"} changed`;
+    changes.summaryLabel.append(label);
+    if (added !== null && removed !== null && (added > 0 || removed > 0)) {
+      const add = el("span", "changes-summary-add");
+      add.textContent = `+${String(added)}`;
+      const del = el("span", "changes-summary-del");
+      del.textContent = `−${String(removed)}`;
+      changes.summaryLabel.append(add, del);
+    }
+  }
+
+  /**
+   * Opens the (collapsed) Changes section when the changed-file count grows
+   * within the SAME session — so a new edit surfaces without a click. A session
+   * switch only re-baselines the count (no auto-open on selecting an old chat).
+   */
+  function autoExpandChangesOnGrowth(count: number): void {
+    if (state.selectedSessionId !== lastChangeSessionId) {
+      lastChangeSessionId = state.selectedSessionId;
+      lastChangeCount = count;
+      return;
+    }
+    if (count > lastChangeCount) changes.details.open = true;
+    lastChangeCount = count;
   }
 
   /** Stable key for a diff file (matches diff.openFile's identity). */
@@ -2502,77 +3656,173 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderChangedFiles();
   }
 
+  /**
+   * CH·13: the owning task for the selected session. A direct
+   * `linkedSessionIds` match wins; otherwise walk the session's
+   * `parentSessionId` chain (a spawned/subtask child session may not be
+   * directly linked even though it belongs to the same task as its ancestor)
+   * and match a task linking any ancestor. Guards against cycles with a
+   * visited set since session records are host-provided.
+   */
   function selectedTaskForNotes(): WorkTaskSummary | undefined {
     const sessionId = state.selectedSessionId;
     if (sessionId === null) return undefined;
-    return state.tasks.find((task) => task.linkedSessionIds.includes(sessionId));
+    const direct = state.tasks.find((task) => task.linkedSessionIds.includes(sessionId));
+    if (direct !== undefined) return direct;
+    const visited = new Set<string>();
+    let current = state.sessions.find((session) => session.sessionId === sessionId)?.parentSessionId;
+    while (current !== undefined && !visited.has(current)) {
+      visited.add(current);
+      const viaAncestor = state.tasks.find((task) => task.linkedSessionIds.includes(current as string));
+      if (viaAncestor !== undefined) return viaAncestor;
+      current = state.sessions.find((session) => session.sessionId === current)?.parentSessionId;
+    }
+    return undefined;
   }
 
+  /**
+   * The subtask (if any) whose `linkedSessionIds` includes the selected session,
+   * so notes scope to that subtask. Mirrors
+   * `subtaskParentTitleForSelectedSession` (direct-link match), returning the
+   * subtask id instead of the parent title. Undefined for a plain task session.
+   */
+  function selectedSubtaskIdForNotes(): string | undefined {
+    const sessionId = state.selectedSessionId;
+    if (sessionId === null) return undefined;
+    for (const task of state.tasks) {
+      for (const subtask of task.subtasks) {
+        if (subtask.linkedSessionIds.includes(sessionId)) return subtask.subtaskId;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Notes for the current context. A subtask session shows only that subtask's
+   * notes (matching `subtaskId`); a plain task session shows the task-level
+   * notes (no `subtaskId`). This keeps the two scopes from bleeding together.
+   */
   function selectedTaskNotes(): readonly TaskNote[] {
     const task = selectedTaskForNotes();
     if (task === undefined) return [];
+    const subtaskId = selectedSubtaskIdForNotes();
     return state.taskNotes
-      .filter((note) => note.taskId === task.taskId)
+      .filter((note) => note.taskId === task.taskId
+        && (subtaskId === undefined ? note.subtaskId === undefined : note.subtaskId === subtaskId))
       .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
   }
 
-  function addTaskNote(): void {
+  function commitTaskNote(text: string): void {
     const task = selectedTaskForNotes();
     if (task === undefined) return;
-    const text = taskNoteInput.value.replace(/\s+$/, "");
-    if (text.trim().length === 0) return;
+    const trimmed = text.replace(/\s+$/, "");
+    if (trimmed.trim().length === 0) return;
+    const subtaskId = selectedSubtaskIdForNotes();
     const note: TaskNote = {
       noteId: nextMessageId("task-note"),
       taskId: task.taskId,
+      ...(subtaskId === undefined ? {} : { subtaskId }),
       createdAt: new Date().toISOString(),
-      text
+      text: trimmed
     };
     state.taskNotes = [...state.taskNotes, note];
-    taskNoteInput.value = "";
     ctx.persist();
-    renderTaskNotes();
+    renderNotesButton();
   }
 
   function deleteTaskNote(noteId: string): void {
     state.taskNotes = state.taskNotes.filter((note) => note.noteId !== noteId);
     ctx.persist();
-    renderTaskNotes();
+    renderNotesButton();
   }
 
-  function renderTaskNotes(): void {
+  /**
+   * The pinned top-bar notes icon: a count badge and enabled state. Disabled
+   * (nothing to attach notes to) when the selected session has no linked task.
+   */
+  function renderNotesButton(): void {
     const task = selectedTaskForNotes();
-    const notes = selectedTaskNotes();
-    taskNotes.summaryLabel.textContent = notes.length > 0 ? `Task Notes (${String(notes.length)})` : "Task Notes";
-    taskNoteInput.disabled = task === undefined;
-    addTaskNoteButton.disabled = task === undefined;
-    taskNoteInput.placeholder = task === undefined ? "No linked task" : "Add a task note...";
-    taskNotesList.replaceChildren();
+    const count = selectedTaskNotes().length;
+    notesButton.disabled = task === undefined;
+    notesButton.classList.toggle("has-notes", count > 0);
+    notesBadge.textContent = count > 0 ? String(count) : "";
+    notesBadge.classList.toggle("hidden", count === 0);
+    const scope = selectedSubtaskIdForNotes() !== undefined ? "subtask" : "task";
+    notesButton.title = task === undefined
+      ? "Notes — no linked task"
+      : count > 0 ? `Notes (${String(count)}) — this ${scope}` : `Notes — this ${scope}`;
+  }
 
+  /**
+   * Builds the notes popover (fresh on each open, via the shared `popover`
+   * component): a context caption, the notes list with per-row delete, and the
+   * add-note form. Add/delete re-render the list in place through the local
+   * `renderList` closure and refresh the header badge via renderNotesButton.
+   */
+  function buildNotesPopover(content: HTMLElement): void {
+    const task = selectedTaskForNotes();
+    const caption = el("div", "notes-popover-caption");
     if (task === undefined) {
+      caption.textContent = "No linked task";
       const empty = el("div", "empty");
-      empty.textContent = "No linked task.";
-      taskNotesList.append(empty);
+      empty.textContent = "This chat isn't linked to a task, so there's nowhere to keep notes.";
+      content.append(caption, empty);
       return;
     }
-    if (notes.length === 0) {
-      const empty = el("div", "empty");
-      empty.textContent = "No task notes.";
-      taskNotesList.append(empty);
-      return;
-    }
-    for (const note of notes) {
-      const row = el("div", "task-note-row");
-      const head = el("div", "task-note-head");
-      const meta = el("span", "task-note-meta");
-      meta.textContent = formatTime(note.createdAt);
-      const remove = iconButton("x", "Delete note", "task-note-delete danger");
-      wireInlineConfirmIcon(remove, "x", "Confirm", "Delete note", () => deleteTaskNote(note.noteId), "Confirm delete note");
-      head.append(meta, remove);
-      const body = el("div", "task-note-body");
-      body.textContent = note.text;
-      row.append(head, body);
-      taskNotesList.append(row);
-    }
+    const onSubtask = selectedSubtaskIdForNotes() !== undefined;
+    caption.textContent = onSubtask ? `${task.title} · this subtask` : task.title;
+
+    const list = el("div", "task-notes");
+    const form = el("div", "task-note-form");
+    const input = document.createElement("textarea");
+    input.className = "task-note-input";
+    input.rows = 3;
+    input.placeholder = onSubtask ? "Add a note for this subtask…" : "Add a note for this task…";
+    const addButton = button("Add note", "small primary");
+    const actions = el("div", "task-note-actions");
+    actions.append(addButton);
+    form.append(input, actions);
+
+    const renderList = (): void => {
+      const notes = selectedTaskNotes();
+      list.replaceChildren();
+      if (notes.length === 0) {
+        const empty = el("div", "empty");
+        empty.textContent = "No notes yet.";
+        list.append(empty);
+        return;
+      }
+      for (const note of notes) {
+        const row = el("div", "task-note-row");
+        const head = el("div", "task-note-head");
+        const meta = el("span", "task-note-meta");
+        meta.textContent = formatTime(note.createdAt);
+        const remove = iconButton("x", "Delete note", "task-note-delete danger");
+        wireInlineConfirmIcon(remove, "x", "Confirm", "Delete note", () => { deleteTaskNote(note.noteId); renderList(); }, "Confirm delete note");
+        head.append(meta, remove);
+        const body = el("div", "task-note-body");
+        body.textContent = note.text;
+        row.append(head, body);
+        list.append(row);
+      }
+    };
+    renderList();
+
+    const submit = (): void => {
+      commitTaskNote(input.value);
+      input.value = "";
+      renderList();
+      input.focus();
+    };
+    addButton.addEventListener("click", submit);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        submit();
+      }
+    });
+
+    content.append(caption, list, form);
   }
 
   /**
@@ -2630,14 +3880,17 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const elsewhere = selectedRunsElsewhere();
     if (elsewhere) {
       promptInput.disabled = true;
-      promptInput.placeholder = "This chat is running in another VS Code window (read-only here)";
+      promptInput.placeholder = "Read-only — this chat is owned by another VS Code window. Use “Take over here” to reclaim it.";
       sendButton.disabled = true;
       cancelButton.classList.add("hidden");
       providerSelect.disabled = true;
       modelSelect.disabled = true;
       thinkingSelect.disabled = true;
+      reclaimBannerText.textContent = "This chat is marked as running in another VS Code window. If this is the right window (e.g. you just reloaded), take it over here.";
+      reclaimBanner.classList.remove("hidden");
       return;
     }
+    reclaimBanner.classList.add("hidden");
     promptInput.disabled = false;
     promptInput.placeholder = "Ask the isolated agent…";
     const disabled = starting || backendBusy;
@@ -2656,6 +3909,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * Files dragged from the VS Code explorer (or the OS) onto the composer append
    * explicit file tokens to the textarea (one per line). Mounted host paths are
    * rewritten to the runtime path the container can see.
+   *
+   * CH·6: `dragover` already called `preventDefault()` (required for `drop` to
+   * fire at all) and set `dropEffect`, so that half was not the bug. The gap
+   * was in `droppedPaths` below, which only read `text/uri-list`/`text/plain`
+   * — VS Code explorer drops into a webview do not reliably populate
+   * `text/uri-list`; see `droppedPaths` for the format list now covered.
    */
   function wireComposerDropTarget(): void {
     const zones = [promptInput, composer];
@@ -2686,37 +3945,127 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (!data) return;
     const paths = droppedPaths(data);
     if (paths.length === 0) return;
-
-    const inserted: string[] = [];
-    for (const path of paths) {
-      const runtimePath = hostPathToRuntimePath(path);
-      if (runtimePath !== null) {
-        inserted.push(`[file:${encodeFilePathToken(runtimePath)}]`);
-      } else {
-        inserted.push(`[file-unmounted:${encodeFilePathToken(path)}]`);
-        logChat(`note: ${path} is not mounted — the agent can request access to it`);
-      }
-    }
-    insertIntoComposer(inserted);
+    for (const path of paths) addAttachment(path);
   }
 
+  /** Adds a host file path as a composer attachment chip (dedup by host path). */
+  function addAttachment(hostPath: string): void {
+    const normalized = normalizeComparablePath(hostPath).toLowerCase();
+    if (attachments.some((a) => normalizeComparablePath(a.hostPath).toLowerCase() === normalized)) return;
+    const runtimePath = hostPathToRuntimePath(hostPath);
+    const name = hostPath.split(/[\\/]/).filter((part) => part.length > 0).pop() ?? hostPath;
+    if (runtimePath === null) logChat(`note: ${hostPath} is not mounted — the agent can request access to it`);
+    attachments.push({ hostPath, runtimePath, name });
+    renderAttachments();
+  }
+
+  function removeAttachment(hostPath: string): void {
+    const normalized = normalizeComparablePath(hostPath).toLowerCase();
+    const index = attachments.findIndex((a) => normalizeComparablePath(a.hostPath).toLowerCase() === normalized);
+    if (index >= 0) {
+      attachments.splice(index, 1);
+      renderAttachments();
+    }
+  }
+
+  function clearAttachments(): void {
+    if (attachments.length === 0) return;
+    attachments.length = 0;
+    renderAttachments();
+  }
+
+  /** `[file:…]` / `[file-unmounted:…]` tokens for the current attachments. */
+  function attachmentTokenLines(): string[] {
+    return attachments.map((a) => a.runtimePath !== null
+      ? `[file:${encodeFilePathToken(a.runtimePath)}]`
+      : `[file-unmounted:${encodeFilePathToken(a.hostPath)}]`);
+  }
+
+  /**
+   * Renders the composer attachment chips: the active editor as a clickable
+   * "add" chip (when not already attached), then each attachment as a removable
+   * VS Code-style chip. Hidden when there's nothing to show.
+   */
+  function renderAttachments(): void {
+    attachmentsRow.replaceChildren();
+    const active = state.activeEditor;
+    const activeKey = active !== null ? normalizeComparablePath(active.path).toLowerCase() : null;
+    const alreadyAttached = activeKey !== null
+      && attachments.some((a) => normalizeComparablePath(a.hostPath).toLowerCase() === activeKey);
+    if (active !== null && !alreadyAttached) {
+      const add = el("button", "composer-attach-add");
+      const icon = el("span", "composer-attach-addicon");
+      icon.textContent = "+";
+      const name = el("span", "composer-attach-name");
+      name.textContent = active.name;
+      add.append(icon, name);
+      add.title = `Add open editor: ${active.path}`;
+      add.addEventListener("click", () => addAttachment(active.path));
+      attachmentsRow.append(add);
+    }
+    for (const attachment of attachments) {
+      const chip = el("span", `composer-attach-chip${attachment.runtimePath === null ? " unmounted" : ""}`);
+      const name = el("span", "composer-attach-name");
+      name.textContent = attachment.name;
+      chip.title = attachment.runtimePath === null
+        ? `${attachment.hostPath}\nnot mounted in the container`
+        : attachment.hostPath;
+      const remove = iconButton("×", "Remove attachment", "composer-attach-remove");
+      remove.addEventListener("click", () => removeAttachment(attachment.hostPath));
+      chip.append(name, remove);
+      attachmentsRow.append(chip);
+    }
+    attachmentsRow.classList.toggle("hidden", attachmentsRow.children.length === 0);
+  }
+
+  /**
+   * CH·6: VS Code explorer drags do not reliably populate the standard
+   * `text/uri-list` format the way an OS file drop does — a webview drop from
+   * the explorer typically carries `application/vnd.code.uri-list` (VS Code's
+   * own webview-drop format, newline-separated `file://` URIs) and/or
+   * `resourceurls` (a JSON-encoded array of URI strings; used by older/some
+   * tree views). Reading only `text/uri-list`/`text/plain` (the previous
+   * behavior) silently drops explorer-originated drags. Try every format VS
+   * Code is known to use, in order of specificity, before falling back to
+   * plain OS file drops.
+   */
   function droppedPaths(data: DataTransfer): string[] {
-    // Prefer a uri-list (VS Code explorer / OS file drops); fall back to plain
-    // text and finally Electron's File.path when available.
-    const uriList = data.getData("text/uri-list");
-    const text = uriList && uriList.trim().length > 0 ? uriList : data.getData("text/plain");
-    const paths = text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith("#"))
-      .map(fileUriToPath);
-    if (paths.length > 0) return paths;
+    const candidates = [
+      data.getData("application/vnd.code.uri-list"),
+      data.getData("text/uri-list"),
+      resourceUrlsToLines(data.getData("resourceurls")),
+      data.getData("text/plain")
+    ];
+    for (const candidate of candidates) {
+      if (candidate === undefined || candidate.trim().length === 0) continue;
+      const paths = candidate
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith("#"))
+        .map(fileUriToPath);
+      if (paths.length > 0) return paths;
+    }
+    // Last resort: plain OS file drops (Electron exposes File.path; the web
+    // platform does not, so name-only is the final fallback).
     return Array.from(data.files)
       .map((file) => {
         const maybePath = (file as File & { readonly path?: string }).path;
         return maybePath && maybePath.length > 0 ? maybePath : file.name;
       })
       .filter((path) => path.length > 0);
+  }
+
+  /** Parses the `resourceurls` payload (JSON array of URI strings) into newline-joined text, or undefined if absent/malformed. */
+  function resourceUrlsToLines(raw: string): string | undefined {
+    if (raw.trim().length === 0) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return undefined;
+      const uris = parsed.filter((entry): entry is string => typeof entry === "string");
+      return uris.length > 0 ? uris.join("\n") : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Decodes a file:// URI to an fs path; leaves non-URI text untouched. */
@@ -2793,31 +4142,35 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   }
 
-  /** Appends the given paths to the composer, one per line, and refocuses it. */
-  function insertIntoComposer(paths: readonly string[]): void {
-    const existing = promptInput.value;
-    const addition = paths.join("\n");
-    promptInput.value = existing.length === 0
-      ? addition
-      : `${existing}${existing.endsWith("\n") ? "" : "\n"}${addition}`;
-    state.promptDraft = promptInput.value;
-    ctx.persist();
-    promptInput.focus();
-    promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
-  }
-
   // ---------------------------------------------------------------------------
   // Public view API
   // ---------------------------------------------------------------------------
+  /**
+   * FIX 1: shows/clears the "Starting the chat backend…" placeholder for a
+   * caller (e.g. workTab's "Create and start chat") that switches to this tab
+   * before chat.startSession has resolved. `selectSession` (called once the
+   * real session lands) clears it as a side effect too, so callers only need
+   * this for the failure path or an explicit early clear.
+   */
+  function showStarting(active: boolean): void {
+    pendingSessionStart = active;
+    renderHeader();
+    renderChat();
+  }
+
   function selectSession(sessionId: string | null): void {
+    pendingSessionStart = false;
     state.selectedSessionId = sessionId;
     manualModelSessionId = null;
     state.chatMessages = [];
+    runningCommands.clear();
     state.diagnostics = [];
     state.agentGroups = {};
     expandedGroups.clear();
     state.lastSequence = 0;
     activeAssistantId = null;
+    reasoningText = "";
+    reasoningActive = false;
     state.changedFiles.clear();
     diffChanges = [];
     cloneRepos = [];
@@ -2831,10 +4184,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderChat();
     renderDiagnostics();
     renderChangedFiles();
-    renderTaskNotes();
+    renderNotesButton();
     renderFacts();
     renderAccessCards();
     renderPlanDocs();
+    renderAttachments();
     ctx.persist();
     if (sessionId) {
       void loadTimeline(sessionId);
@@ -2850,14 +4204,18 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function resetToNewChat(): void {
+    pendingSessionStart = false;
     state.selectedSessionId = null;
     manualModelSessionId = null;
     state.chatMessages = [];
+    runningCommands.clear();
     state.diagnostics = [];
     state.agentGroups = {};
     expandedGroups.clear();
     state.lastSequence = 0;
     activeAssistantId = null;
+    reasoningText = "";
+    reasoningActive = false;
     state.changedFiles.clear();
     diffChanges = [];
     cloneRepos = [];
@@ -2870,10 +4228,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderChat();
     renderDiagnostics();
     renderChangedFiles();
-    renderTaskNotes();
+    renderNotesButton();
     renderFacts();
     renderAccessCards();
     renderPlanDocs();
+    renderAttachments();
     ctx.persist();
   }
 
@@ -2886,13 +4245,17 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderChat();
     renderDiagnostics();
     renderChangedFiles();
-    renderTaskNotes();
+    renderNotesButton();
     renderFacts();
     renderAccessCards();
     renderPlanDocs();
+    renderAttachments();
+    // Refresh the sandbox usage bar promptly on tab activation / session switch
+    // (the interval keeps it live thereafter).
+    void pollSandboxStats();
   }
 
-  return { root, render, selectSession, resetToNewChat, logChat };
+  return { root, render, selectSession, resetToNewChat, logChat, showStarting };
 }
 
 /**

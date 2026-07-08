@@ -188,6 +188,21 @@ export class ClaudeEventNormalizer {
       if (text.length === 0) return [];
       return [{ ...this.base("agent.text", context, raw, path), type: "agent.text", text, final: true }];
     }
+    if (blockType === "thinking") {
+      const text = stringValue(block["thinking"]) ?? "";
+      if (text.length === 0) return [];
+      return [{ ...this.base("agent.reasoning", context, raw, path), type: "agent.reasoning", text, final: true }];
+    }
+    if (blockType === "redacted_thinking") {
+      // The provider withheld the actual thinking content (safety redaction);
+      // still surface a placeholder so the "Thinking" disclosure isn't silent.
+      return [{
+        ...this.base("agent.reasoning", context, raw, path),
+        type: "agent.reasoning",
+        text: "[redacted reasoning]",
+        final: true
+      }];
+    }
     if (blockType !== "tool_use") {
       return [];
     }

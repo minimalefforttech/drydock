@@ -11,6 +11,8 @@
  * human-facing approval prompt for a host mount.
  */
 
+import { sandboxRuntimePath } from "./mountPolicy.js";
+
 export interface ParsedAccessRequest {
   readonly path: string;
   readonly mode: "read-only" | "read-write";
@@ -172,8 +174,25 @@ export interface SessionBriefingInput {
  * prompt after a backend restart, when mounts may have changed). Kept compact:
  * it is paid on every conversation.
  */
+export const HOST_BRIEFING_START = "[host briefing]";
+export const HOST_BRIEFING_END = "[end host briefing]";
+
+/**
+ * Removes the host-briefing block from a stored user message so it never rides
+ * into restored conversation context. The briefing is a host-authored preamble
+ * prepended to briefed turns (see applySessionBriefing); replaying it as context
+ * would repeat mount/protocol boilerplate and crowd out the actual dialogue.
+ */
+export function stripHostBriefing(text: string): string {
+  const start = text.indexOf(HOST_BRIEFING_START);
+  if (start === -1) return text;
+  const end = text.indexOf(HOST_BRIEFING_END, start);
+  if (end === -1) return text;
+  return `${text.slice(0, start)}${text.slice(end + HOST_BRIEFING_END.length)}`.trim();
+}
+
 export function buildSessionBriefing(input: SessionBriefingInput): string {
-  const lines: string[] = ["[host briefing]"];
+  const lines: string[] = [HOST_BRIEFING_START];
   if (input.mode === "plan") {
     lines.push(
       "Mode: PLAN. Workspace mounts are read-only; produce analysis and plan documents rather than code edits. " +
@@ -200,7 +219,13 @@ export function buildSessionBriefing(input: SessionBriefingInput): string {
   } else {
     lines.push("Mounts:");
     for (const mount of input.mounts) {
-      lines.push(`- ${mount.runtimePath} (${mount.mode})${mount.hostDisplayPath ? ` = host ${mount.hostDisplayPath}` : ""}`);
+      // The `= host <path>` suffix only earns its place when the sandbox path is
+      // NOT just the direct drive-mirror of the host path — for a direct mount the
+      // runtime path already encodes the host location, so the remap is noise.
+      const isDirectMirror = mount.hostDisplayPath !== undefined
+        && sandboxRuntimePath(mount.hostDisplayPath) === mount.runtimePath;
+      const hostSuffix = mount.hostDisplayPath !== undefined && !isDirectMirror ? ` = host ${mount.hostDisplayPath}` : "";
+      lines.push(`- ${mount.runtimePath} (${mount.mode})${hostSuffix}`);
     }
   }
   lines.push(
@@ -230,6 +255,6 @@ export function buildSessionBriefing(input: SessionBriefingInput): string {
   if (input.grantedNote !== undefined) {
     lines.push(input.grantedNote);
   }
-  lines.push("[end host briefing]");
+  lines.push(HOST_BRIEFING_END);
   return lines.join("\n");
 }

@@ -8,7 +8,9 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { ClaudeAdapter, CodexAdapter, CodexAppServerTransport } from "@drydock/agent-adapters";
 import type { AgentAdapter } from "@drydock/contracts";
@@ -28,6 +30,7 @@ import {
   RuntimeLifecycleService,
   RuntimeReconcileService,
   SessionDiffService,
+  SessionRawStreamStore,
   SpawnCommandRunner,
   IsolatedRunWorkflow,
   SystemClock,
@@ -79,6 +82,8 @@ export interface BackendReady {
   readonly memory: MemoryService;
   readonly workInsights: WorkInsightsAppService;
   readonly bus: ProductEventBus;
+  /** Debug-only per-session capture of the current turn's raw agent stream. */
+  readonly rawStreamStore: SessionRawStreamStore;
   /** Session + inventory reconciliation, run once after activation. */
   readonly reconcileOnActivate: () => Promise<void>;
   readonly sbxDisplayPath: string;
@@ -100,6 +105,34 @@ export interface CreateBackendOptions {
   readonly logger: Logger;
   /** Paths excluded from mounts, snapshots, and diffs (drydock.deniedPaths). */
   readonly deniedPaths?: readonly string[];
+  /** Codex app-server stall watchdog window in ms (drydock.runtime.appServerInactivityTimeoutMs). */
+  readonly appServerInactivityTimeoutMs?: number;
+}
+
+/**
+ * Ensures the runtime tool directories are on the extension host's PATH before
+ * any `sbx` call. A GUI-launched VS Code inherits a login-time PATH that often
+ * omits Docker Desktop's `resources\bin` — where the Docker credential helper
+ * (`docker-credential-desktop`) lives that `sbx` shells out to for its session
+ * token. Without the helper on PATH, `sbx create` fails auth with
+ * "secret not found / not authenticated to Docker", even though the identical
+ * command works in a terminal (whose PATH does include that dir). Prepends the
+ * sbx binary's own dir plus the known Docker Desktop bin locations; each is
+ * added only if it exists and is not already present.
+ */
+function ensureRuntimeToolsOnPath(sbxPath: string, logger: Logger): void {
+  const programFiles = process.env["ProgramFiles"] ?? "C:\\Program Files";
+  const candidates = [
+    path.dirname(sbxPath),
+    path.join(os.homedir(), "AppData", "Local", "DockerSandboxes", "bin"),
+    path.join(programFiles, "Docker", "Docker", "resources", "bin")
+  ];
+  const existing = (process.env["PATH"] ?? "").split(path.delimiter);
+  const additions = candidates.filter((dir) => dir.length > 0 && existsSync(dir) && !existing.includes(dir));
+  if (additions.length > 0) {
+    process.env["PATH"] = [...additions, ...existing].join(path.delimiter);
+    logger.info("augmented PATH for runtime tools", { added: additions });
+  }
 }
 
 export async function createBackend(options: CreateBackendOptions): Promise<Backend> {
@@ -114,6 +147,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       dispose: () => { /* nothing composed */ }
     };
   }
+  ensureRuntimeToolsOnPath(sbxPath, logger);
 
   const stateDir = path.join(stateRootPath, "state");
   const tmpDir = path.join(stateRootPath, "tmp");
@@ -143,6 +177,9 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   const lifecycle = new RuntimeLifecycleService({ clock, inventory, runtimeAdapter, logger });
   const cleanup = new RuntimeCleanupService({ clock, inventory, runtimeAdapter, logger });
   const hostCodexPath = discoverStandaloneCodexCommand();
+  // Debug-only capture of the current turn's raw agent stream, read on demand by
+  // the chat tab's raw view. Bounded + last-turn-only, so it scales to many sessions.
+  const rawStreamStore = new SessionRawStreamStore(clock);
   const adapterOptions = {
     ids,
     clock,
@@ -152,11 +189,13 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     appServer: {
       command: sbxPath,
       argsForRuntime: (handle: { readonly externalName: string }) => ["exec", handle.externalName],
-      cwd: stateRootPath
+      cwd: stateRootPath,
+      rawSink: rawStreamStore,
+      ...(options.appServerInactivityTimeoutMs === undefined ? {} : { inactivityTimeoutMs: options.appServerInactivityTimeoutMs })
     }
   };
   const agent = new CodexAdapter(hostCodexPath === null ? adapterOptions : { ...adapterOptions, hostCodexPath });
-  const claudeAgent = new ClaudeAdapter({ ids, clock, logger, runtimeExecutor: runtimeAdapter });
+  const claudeAgent = new ClaudeAdapter({ ids, clock, logger, runtimeExecutor: runtimeAdapter, rawSink: rawStreamStore });
   const agentAdapters: ReadonlyMap<string, AgentAdapter> = new Map<string, AgentAdapter>([
     [agent.providerId, agent],
     [claudeAgent.providerId, claudeAgent]
@@ -441,6 +480,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     memory,
     workInsights,
     bus,
+    rawStreamStore,
     reconcileOnActivate,
     sbxDisplayPath: sbxPath,
     stateRootPath,

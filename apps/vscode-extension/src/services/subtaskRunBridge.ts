@@ -33,7 +33,7 @@ import type { ChatWorkspaceContext } from "./isolatedRunService.js";
 
 /** Chat-session facts the bridge needs; IsolatedRunService satisfies this structurally. */
 export interface SubtaskRunSessionPort {
-  startChat(prompt: string, model?: ChatModelSelection, workspace?: ChatWorkspaceContext): Promise<{ session: ChatSessionRecord }>;
+  startChat(prompt: string, model?: ChatModelSelection, workspace?: ChatWorkspaceContext, title?: string): Promise<{ session: ChatSessionRecord }>;
   sendChatTurn(sessionId: string, prompt: string): Promise<unknown>;
 }
 
@@ -66,9 +66,10 @@ export interface SubtaskRunBridgeOptions {
  * back through the bus.
  */
 export function createSubtaskRunBridge(options: SubtaskRunBridgeOptions): StartSubtaskRun {
-  return async ({ taskId, subtaskId, prompt }) => {
+  return async ({ taskId, subtaskId, prompt, title }) => {
     const workspace = await resolveTaskWorkspace(options, taskId);
-    const started = await options.sessions.startChat(prompt, undefined, workspace);
+    // The subtask's title names the chat (survives the first-turn auto-rename).
+    const started = await options.sessions.startChat(prompt, undefined, workspace, title);
     const sessionId = started.session.sessionId as string;
     if (workspace !== undefined && workspace.mode === "implementation") {
       // Mirrors baselineWorkspaceSession in the chat.start flow: baselines are

@@ -119,11 +119,16 @@ export class CodexExecJsonTransport {
       agentRole: connection.agentRole,
       runtimeId: connection.runtime.runtimeId
     });
+    let sawTerminal = false;
     for (const event of events) {
+      if (event.type === "agent.error" || event.type === "agent.done") sawTerminal = true;
       yield event;
     }
 
-    if (result.exitCode !== 0) {
+    // Suppress the generic failure when Codex already emitted a terminal event
+    // carrying the real cause (parity with the Claude adapter); keep it only for
+    // true launch failures where stdout produced nothing.
+    if (result.exitCode !== 0 && !sawTerminal) {
       yield {
         id: this.options.ids.eventId(),
         type: "agent.error",

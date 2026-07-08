@@ -12,6 +12,7 @@ import type {
   BoardColumnStore,
   ColumnCategory,
   ColumnId,
+  SessionId,
   SubtaskDependencyRecord,
   SubtaskId,
   SubtaskRecord,
@@ -266,6 +267,10 @@ class MemoryWorkTaskStore implements WorkTaskStore {
   }
 
   listLinks(): Promise<WorkTaskLinkRecord[]> {
+    return Promise.resolve([]);
+  }
+
+  listSessionIdsBySubtask(): Promise<SessionId[]> {
     return Promise.resolve([]);
   }
 

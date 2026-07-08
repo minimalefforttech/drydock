@@ -80,6 +80,8 @@ export interface SubtaskRecord {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly doneAt?: string;
+  /** 0-7 palette index overriding the parent task's stripe hue; undefined uses the task hue. */
+  readonly colorOverride?: number;
 }
 
 export interface SubtaskUpdate {
@@ -93,6 +95,8 @@ export interface SubtaskUpdate {
   readonly sortOrder?: number;
   /** null clears doneAt. */
   readonly doneAt?: string | null;
+  /** null reverts to the parent task's stripe hue; a number (0-7) sets an override. */
+  readonly colorOverride?: number | null;
   readonly updatedAt: string;
 }
 
@@ -141,6 +145,8 @@ export interface WorkTaskStore {
   insertLink(record: WorkTaskLinkRecord): Promise<void>;
   deleteLink(taskId: TaskId, target: { workspaceSetId?: WorkspaceSetId; sessionId?: SessionId }): Promise<void>;
   listLinks(taskId?: TaskId): Promise<WorkTaskLinkRecord[]>;
+  /** Session ids linked to a specific subtask (session-target links only), in link order. */
+  listSessionIdsBySubtask(subtaskId: SubtaskId): Promise<SessionId[]>;
   /** Bulk-reassigns every task currently on fromColumnId to toColumnId (column deletion). */
   reassignTasksColumn(fromColumnId: ColumnId, toColumnId: ColumnId): Promise<void>;
 }

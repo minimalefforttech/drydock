@@ -13,8 +13,17 @@ function wrap(payload: unknown): unknown {
 test("workspace and policy payloads validate their fields", () => {
   assert.ok(parsePanelRequest(wrap({ type: "workspace.state" })));
   assert.ok(parsePanelRequest(wrap({ type: "workspace.registerOpenFolders" })));
-  assert.ok(parsePanelRequest(wrap({ type: "workspace.createSet", name: "Studio" })));
-  assert.equal(parsePanelRequest(wrap({ type: "workspace.createSet", name: "" })), null);
+  const members = [{ projectId: "project-a", readOnly: false }, { projectId: "project-b", readOnly: true }];
+  assert.ok(parsePanelRequest(wrap({ type: "workspace.createSet", name: "Studio", members })));
+  assert.equal(parsePanelRequest(wrap({ type: "workspace.createSet", name: "", members })), null);
+  // Members are required and must be non-empty and well-formed.
+  assert.equal(parsePanelRequest(wrap({ type: "workspace.createSet", name: "Studio" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "workspace.createSet", name: "Studio", members: [] })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "workspace.createSet", name: "Studio", members: [{ projectId: "a" }] })), null);
+  assert.ok(parsePanelRequest(wrap({ type: "workspace.updateSet", workspaceSetId: "set-1", name: "Solo", members })));
+  assert.ok(parsePanelRequest(wrap({ type: "workspace.deleteSet", workspaceSetId: "set-1" })));
+  assert.ok(parsePanelRequest(wrap({ type: "workspace.removeProject", projectId: "project-a" })));
+  assert.ok(parsePanelRequest(wrap({ type: "workspace.updateProjectPath", projectId: "project-a", path: "C:\\repos\\a" })));
 
   assert.ok(parsePanelRequest(wrap({
     type: "policy.requestAccess",
@@ -209,6 +218,31 @@ test("chat.resumeSession validates the session id, optional model, and workspace
     sessionId: "session-1",
     workspace: { auto: true, mode: "detached" }
   })), null);
+});
+
+test("chat.reclaim accepts an optional model for a forced provider switch", () => {
+  // Bare reclaim (no model) is valid — same-provider takeover.
+  const bare = parsePanelRequest(wrap({ type: "chat.reclaim", sessionId: "session-1" }));
+  assert.ok(bare);
+  assert.equal(bare.payload.type === "chat.reclaim" ? bare.payload.model : "sentinel", undefined);
+  // With a well-formed model (the forced-switch case).
+  const withModel = parsePanelRequest(wrap({ type: "chat.reclaim", sessionId: "session-1", model: { providerId: "codex" } }));
+  assert.ok(withModel);
+  assert.deepEqual(withModel.payload.type === "chat.reclaim" ? withModel.payload.model : undefined, { providerId: "codex" });
+  // A malformed (non-object) model rejects.
+  assert.equal(parsePanelRequest(wrap({ type: "chat.reclaim", sessionId: "session-1", model: "codex" })), null);
+  // A missing session id rejects.
+  assert.equal(parsePanelRequest(wrap({ type: "chat.reclaim", sessionId: "" })), null);
+});
+
+test("ui.confirm requires message and confirmLabel, allows optional detail", () => {
+  const ok = parsePanelRequest(wrap({ type: "ui.confirm", message: "Switch?", confirmLabel: "Switch" }));
+  assert.ok(ok);
+  const withDetail = parsePanelRequest(wrap({ type: "ui.confirm", message: "Switch?", confirmLabel: "Switch", detail: "New container" }));
+  assert.ok(withDetail);
+  assert.equal(withDetail.payload.type === "ui.confirm" ? withDetail.payload.detail : undefined, "New container");
+  assert.equal(parsePanelRequest(wrap({ type: "ui.confirm", confirmLabel: "Switch" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "ui.confirm", message: "Switch?" })), null);
 });
 
 test("session rename/setDescription/delete validate ids and bounds", () => {

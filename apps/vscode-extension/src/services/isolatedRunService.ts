@@ -8,7 +8,7 @@
  * "run an isolated prompt". No `vscode` imports belong here.
  */
 
-import { stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { claudeModelCatalog, fetchCodexHostModelCatalog } from "@drydock/agent-adapters";
 import { TempWorkspaceStore, type TempWorkspace } from "@drydock/artifacts";
@@ -25,6 +25,7 @@ import {
   type ChatModelSelection,
   type CloneRepoState,
   type CloneSyncResult,
+  type CommandResult,
   type CommandRunner,
   type ProviderAuthStatus,
   type ChatSessionRecord,
@@ -34,6 +35,7 @@ import {
   type RuntimeHandle,
   type RuntimeInventoryRecord,
   type RuntimeInventoryStore,
+  type RuntimeStatsSummary,
   type RuntimeSummary,
   type RuntimeTemplate,
   type SequencedTranscriptLine,
@@ -52,6 +54,7 @@ import {
   RuntimeCleanupService,
   RuntimeLifecycleService,
   IsolatedRunWorkflow,
+  normalizePathKey,
   type Clock,
   type IdGenerator,
   type Logger
@@ -100,6 +103,8 @@ export interface ChatWorkspaceContext {
   readonly mode: SessionMode;
   /** Ordered absolute project roots (from a set, or the open folders). */
   readonly roots: readonly string[];
+  /** Subset of roots the set marks read-only; they mount RO even in implementation. */
+  readonly readOnlyRoots?: readonly string[];
 }
 
 /**
@@ -248,6 +253,98 @@ export class IsolatedRunService {
     return runtimes.filter((runtime) => runtime.status !== "removed");
   }
 
+  /** Previous CPU/IO counters per runtime, so a sample can diff into rates. */
+  private readonly statsSamples = new Map<string, { readonly cpu100ns: number; readonly ioReadBytes: number; readonly ioWriteBytes: number; readonly atMs: number }>();
+
+  /**
+   * Live per-sandbox resource sample (CPU%, memory, I/O rate) measured entirely
+   * HOST-SIDE — no container exec. Each sbx sandbox is a nerdbox microVM whose
+   * `containerd-shim-nerdbox` process (plus any children) carries the sandbox's
+   * real CPU and memory. We map externalName -> shim PID from containerd's
+   * on-disk task state, then sum each shim's whole process tree from ONE
+   * `Win32_Process` snapshot (a single call covers every sandbox). CPU/IO are
+   * rates diffed against the previous sample, so the first poll returns nulls
+   * for those. Windows-only (the nerdbox shim model); other platforms return
+   * empty and the UI omits the usage line.
+   */
+  async sampleRuntimeStats(runtimeIds?: readonly string[]): Promise<RuntimeStatsSummary[]> {
+    const sbxPath = this.options.sbxPath;
+    const runner = this.options.commandRunner;
+    if (sbxPath === undefined || runner === undefined || process.platform !== "win32") {
+      return [];
+    }
+    const wanted = runtimeIds === undefined ? undefined : new Set(runtimeIds);
+    const running = (await this.listRuntimes()).filter(
+      (runtime) => runtime.status === "running" && (wanted === undefined || wanted.has(String(runtime.runtimeId)))
+    );
+    if (running.length === 0) {
+      return [];
+    }
+    const unavailable = (runtime: RuntimeInventoryRecord): RuntimeStatsSummary => ({
+      runtimeId: String(runtime.runtimeId),
+      available: false,
+      cpuPercent: null,
+      memBytes: null,
+      ioReadBytesPerSec: null,
+      ioWriteBytesPerSec: null,
+      loadAvg1: null,
+      threads: null
+    });
+    const [shimPids, snapshot] = await Promise.all([readSandboxShimPids(sbxPath), snapshotProcessTree(runner)]);
+    if (snapshot === null) {
+      return running.map(unavailable);
+    }
+    const nowMs = this.options.clock.now().getTime();
+    const stats = running.map((runtime): RuntimeStatsSummary => {
+      const shimPid = shimPids.get(runtime.externalName);
+      if (shimPid === undefined || !snapshot.byId.has(shimPid)) {
+        return unavailable(runtime);
+      }
+      const tree = sumProcessTree(snapshot, shimPid);
+      const key = String(runtime.runtimeId);
+      const prev = this.statsSamples.get(key);
+      let cpuPercent: number | null = null;
+      let ioReadBytesPerSec: number | null = null;
+      let ioWriteBytesPerSec: number | null = null;
+      if (prev !== undefined && nowMs > prev.atMs) {
+        const dtSec = (nowMs - prev.atMs) / 1000;
+        // A counter that regressed means the shim restarted (new sandbox gen);
+        // skip that interval rather than report a negative rate.
+        if (tree.cpu100ns >= prev.cpu100ns) cpuPercent = (tree.cpu100ns - prev.cpu100ns) / 1e7 / dtSec * 100;
+        if (tree.ioReadBytes >= prev.ioReadBytes) ioReadBytesPerSec = (tree.ioReadBytes - prev.ioReadBytes) / dtSec;
+        if (tree.ioWriteBytes >= prev.ioWriteBytes) ioWriteBytesPerSec = (tree.ioWriteBytes - prev.ioWriteBytes) / dtSec;
+      }
+      this.statsSamples.set(key, { cpu100ns: tree.cpu100ns, ioReadBytes: tree.ioReadBytes, ioWriteBytes: tree.ioWriteBytes, atMs: nowMs });
+      return {
+        runtimeId: key,
+        available: true,
+        cpuPercent,
+        memBytes: tree.memBytes,
+        ioReadBytesPerSec,
+        ioWriteBytesPerSec,
+        loadAvg1: null,
+        threads: tree.threads
+      };
+    });
+    const alive = new Set(running.map((runtime) => String(runtime.runtimeId)));
+    for (const key of [...this.statsSamples.keys()]) {
+      if (!alive.has(key)) this.statsSamples.delete(key);
+    }
+    return stats;
+  }
+
+  /** Live usage for a session's running sandbox (the chat panel's usage bar). */
+  async sampleSessionStats(sessionId: string): Promise<RuntimeStatsSummary | null> {
+    const runtime = (await this.listRuntimes()).find(
+      (record) => String(record.sessionId) === sessionId && record.status === "running"
+    );
+    if (runtime === undefined) {
+      return null;
+    }
+    const stats = await this.sampleRuntimeStats([String(runtime.runtimeId)]);
+    return stats[0] ?? null;
+  }
+
   /**
    * Panel-facing inventory. The redesign hides `removed` runtimes by default so
    * torn-down generations stop accumulating in the System tab; a post-mortem
@@ -288,9 +385,14 @@ export class IsolatedRunService {
   // Chat sessions (app-server transport)
   // -------------------------------------------------------------------------
 
-  /** Starts a persistent chat session on a fresh disposable workspace. */
-  async startChat(prompt: string, model?: ChatModelSelection, workspace?: ChatWorkspaceContext): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
-    return this.startChatSession(model, titleFromPrompt(prompt), workspace);
+  /**
+   * Starts a persistent chat session on a fresh disposable workspace. An
+   * explicit title (e.g. a subtask name) wins; otherwise it derives from the
+   * prompt. A title other than "New chat" also survives the first-turn
+   * auto-rename in ChatSessionService.
+   */
+  async startChat(prompt: string, model?: ChatModelSelection, workspace?: ChatWorkspaceContext, title?: string): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
+    return this.startChatSession(model, title ?? titleFromPrompt(prompt), workspace);
   }
 
   /** Starts the isolated chat backend before the first prompt is sent. */
@@ -306,6 +408,8 @@ export class IsolatedRunService {
       model: normalizedModel,
       transport: transportForProvider(normalizedModel.providerId),
       ...(workspace?.mode === undefined ? {} : { mode: workspace.mode }),
+      ...(workspace?.roots === undefined || workspace.roots.length === 0 ? {} : { workspaceRoots: workspace.roots }),
+      ...(workspace?.readOnlyRoots === undefined || workspace.readOnlyRoots.length === 0 ? {} : { readOnlyRoots: workspace.readOnlyRoots }),
       disposeWorkspace: () => this.options.workspaceStore.cleanupWorkspace(prepared.workspace)
     });
     await this.refreshModelsForSession(session.sessionId);
@@ -427,6 +531,25 @@ export class IsolatedRunService {
   }
 
   /**
+   * "Take over here": reclaims a session another window still owns — most often
+   * this same window's own pre-reload instance, whose heartbeat has not yet gone
+   * stale — and revives it live in THIS window with its transcript replayed.
+   * Claims ownership first so the running-elsewhere guard yields, then resumes on
+   * a fresh runtime using the session's persisted project roots plus any approved
+   * access mounts.
+   */
+  async reclaimChatSession(
+    sessionId: string,
+    model?: ChatModelSelection,
+    additionalRoots?: { readonly roots: readonly string[]; readonly readOnlyRoots: readonly string[] }
+  ): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
+    await this.options.chatService.claimOwnership(asId<"SessionId">(sessionId));
+    // force: a reclaimed session is usually still `active` (running in the other
+    // window / a dead prior instance), which a plain resume refuses.
+    return this.resumeChatSession(sessionId, model, undefined, true, additionalRoots);
+  }
+
+  /**
    * Revives an ended/failed session on a fresh runtime under current mount
    * rules, replaying its durable transcript. The model defaults to the stored
    * session's provider/model when the caller omits one; a fresh disposable
@@ -434,7 +557,13 @@ export class IsolatedRunService {
    * resume honors the current denied-path defaults. Rejects a still-live
    * session — resume is revival, not a takeover of a running backend.
    */
-  async resumeChatSession(sessionId: string, model?: ChatModelSelection, workspace?: ChatWorkspaceContext): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
+  async resumeChatSession(
+    sessionId: string,
+    model?: ChatModelSelection,
+    workspace?: ChatWorkspaceContext,
+    force = false,
+    additionalRoots?: { readonly roots: readonly string[]; readonly readOnlyRoots: readonly string[] }
+  ): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
     if (this.isChatSessionLive(sessionId)) {
       throw new Error("This session is already live; it cannot be resumed.");
     }
@@ -450,7 +579,25 @@ export class IsolatedRunService {
     };
     const normalizedModel = this.normalizeModelSelection(requestedModel);
     this.assertSupportedModelSelection(normalizedModel);
-    const prepared = await this.prepareWorkspace("chat", workspace, normalizedModel.providerId);
+    // Re-mount the SAME project roots the session started with (persisted on the
+    // record) so a revived session can still edit the project — not just its
+    // disposable workspace. An explicit workspace arg wins; otherwise rebuild the
+    // context from the stored roots + mode. Falls back to no roots only when the
+    // session never had any (a plain no-folder chat).
+    const baseWorkspace: ChatWorkspaceContext | undefined = workspace ?? (
+      stored.workspaceRoots !== undefined && stored.workspaceRoots.length > 0
+        ? {
+            mode: stored.mode ?? "implementation",
+            roots: stored.workspaceRoots,
+            ...(stored.readOnlyRoots === undefined ? {} : { readOnlyRoots: stored.readOnlyRoots })
+          }
+        : undefined
+    );
+    // Merge back the folders granted via approved access requests, so a resume
+    // re-mounts what the agent was already allowed (e.g. a project it asked for)
+    // instead of losing it and re-requesting every time.
+    const effectiveWorkspace = mergeWorkspaceRoots(baseWorkspace, additionalRoots, stored.mode);
+    const prepared = await this.prepareWorkspace("chat", effectiveWorkspace, normalizedModel.providerId);
     const session = await this.options.chatService.resumeSession({
       sessionId: asId<"SessionId">(sessionId),
       template: prepared.template,
@@ -458,12 +605,13 @@ export class IsolatedRunService {
       workspaceOwnerToken: prepared.workspace.ownerToken,
       model: normalizedModel,
       transport: transportForProvider(normalizedModel.providerId),
-      ...(workspace?.mode === undefined ? {} : { mode: workspace.mode }),
+      ...(effectiveWorkspace?.mode === undefined ? {} : { mode: effectiveWorkspace.mode }),
+      ...(force ? { force: true } : {}),
       disposeWorkspace: () => this.options.workspaceStore.cleanupWorkspace(prepared.workspace)
     });
     // Resume re-clones on a fresh workspace, so the mode comes from the stored
     // record when the caller omitted a workspace (mode is immutable per session).
-    this.sessionModes.set(session.sessionId, workspace?.mode ?? session.mode ?? "implementation");
+    this.sessionModes.set(session.sessionId, effectiveWorkspace?.mode ?? session.mode ?? "implementation");
     this.stashSessionClones(session.sessionId, prepared.clones);
     // Mounts changed with the fresh runtime; the next turn must re-brief.
     this.briefedSessions.delete(session.sessionId);
@@ -473,6 +621,11 @@ export class IsolatedRunService {
 
   cancelChatTurn(sessionId: string): Promise<void> {
     return this.options.chatService.cancelTurn(asId<"SessionId">(sessionId));
+  }
+
+  /** Soft nudge for a quiet turn; resolves false when there's nothing to poke. */
+  pokeChatTurn(sessionId: string): Promise<boolean> {
+    return this.options.chatService.pokeTurn(asId<"SessionId">(sessionId));
   }
 
   // -------------------------------------------------------------------------
@@ -617,8 +770,21 @@ export class IsolatedRunService {
 
   /** Display command plus spawnable pieces for signing a provider in. */
   loginCommand(providerId: string): { readonly command: string; readonly args: readonly string[]; readonly display: string } {
-    const service = PROVIDER_SBX_SERVICES[this.normalizeModelSelection({ providerId }).providerId];
-    if (service === undefined || this.options.sbxPath === undefined) {
+    if (this.options.sbxPath === undefined) {
+      throw new Error(`No login flow is available for provider ${providerId}.`);
+    }
+    const normalized = this.normalizeModelSelection({ providerId }).providerId;
+    // Anthropic can't be configured via `sbx secret set` (Docker Sandbox rejects
+    // `sbx secret set -g anthropic --oauth`). Claude must be signed in from INSIDE
+    // a Claude sandbox: `sbx run claude`, then `/login`; Docker Sandbox then
+    // persists the credential for future Claude sandboxes. OpenAI/Codex uses the
+    // standard sbx secret OAuth flow.
+    if (normalized === CLAUDE_PROVIDER_ID) {
+      const args = ["run", "claude"];
+      return { command: this.options.sbxPath, args, display: "sbx run claude (then /login inside Claude)" };
+    }
+    const service = PROVIDER_SBX_SERVICES[normalized];
+    if (service === undefined) {
       throw new Error(`No login flow is available for provider ${providerId}.`);
     }
     const args = ["secret", "set", "-g", service, "--oauth"];
@@ -657,6 +823,8 @@ export class IsolatedRunService {
   }
 
   private loginHint(providerId: string): string {
+    // Claude signs in from inside a sandbox; Codex/OpenAI via the secret OAuth flow.
+    if (providerId === CLAUDE_PROVIDER_ID) return "sbx run claude (then /login)";
     const service = PROVIDER_SBX_SERVICES[providerId];
     return service === undefined ? "" : `sbx secret set -g ${service} --oauth`;
   }
@@ -821,7 +989,8 @@ export class IsolatedRunService {
       provider: providerId === CLAUDE_PROVIDER_ID ? "claude" : "codex",
       ...(workspaceContext === undefined ? {} : {
         projectRoots: workspaceContext.roots,
-        sessionMode: workspaceContext.mode
+        sessionMode: workspaceContext.mode,
+        ...(workspaceContext.readOnlyRoots === undefined ? {} : { readOnlyRoots: workspaceContext.readOnlyRoots })
       }),
       ...(this.options.deniedPaths === undefined ? {} : { deniedPaths: this.options.deniedPaths })
     });
@@ -917,8 +1086,156 @@ export function toRuntimeSummary(record: RuntimeInventoryRecord): RuntimeSummary
   };
 }
 
+/** One process's host counters from a Win32_Process snapshot. */
+interface ProcInfo {
+  readonly ppid: number;
+  readonly memBytes: number;
+  readonly cpu100ns: number;
+  readonly ioReadBytes: number;
+  readonly ioWriteBytes: number;
+  readonly threads: number;
+}
+
+interface ProcessSnapshot {
+  readonly byId: Map<number, ProcInfo>;
+  readonly childrenByPpid: Map<number, number[]>;
+}
+
+/**
+ * Maps each running sandbox's externalName to its nerdbox shim host PID by
+ * reading containerd's on-disk task state (`config.json`.hostname + `shim.pid`),
+ * whose location is derived from the sbx binary path. Best-effort: returns what
+ * it can parse, empty on any failure — callers then report the sandbox as
+ * unavailable rather than throwing.
+ */
+async function readSandboxShimPids(sbxPath: string): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  try {
+    // <DockerSandboxes>\bin\sbx.exe -> <DockerSandboxes>\sandboxes\state\sandboxd\...
+    const root = path.dirname(path.dirname(sbxPath));
+    const taskDir = path.join(root, "sandboxes", "state", "sandboxd", "containerd", "state", "io.containerd.runtime.v2.task", "docker");
+    const entries = await readdir(taskDir, { withFileTypes: true });
+    await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
+      try {
+        const dir = path.join(taskDir, entry.name);
+        const [configRaw, pidRaw] = await Promise.all([
+          readFile(path.join(dir, "config.json"), "utf8"),
+          readFile(path.join(dir, "shim.pid"), "utf8")
+        ]);
+        const hostname = (JSON.parse(configRaw) as { hostname?: unknown }).hostname;
+        const pid = Number.parseInt(pidRaw.trim(), 10);
+        if (typeof hostname === "string" && hostname.length > 0 && Number.isFinite(pid)) {
+          map.set(hostname, pid);
+        }
+      } catch {
+        // Skip a task dir we can't read/parse.
+      }
+    }));
+  } catch {
+    // No task dir (no running sandboxes, or layout changed): empty map.
+  }
+  return map;
+}
+
+/** Snapshots all host processes (PID/PPID/CPU/mem/IO/threads) via one PowerShell call. */
+async function snapshotProcessTree(runner: CommandRunner): Promise<ProcessSnapshot | null> {
+  const script = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,KernelModeTime,UserModeTime,ReadTransferCount,WriteTransferCount,ThreadCount | ConvertTo-Json -Compress";
+  let result: CommandResult;
+  try {
+    result = await runner.run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      cwd: process.cwd(),
+      timeoutMs: 10_000
+    });
+  } catch {
+    return null;
+  }
+  if (result.exitCode !== 0 || result.stdout.trim().length === 0) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(result.stdout); } catch { return null; }
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  const byId = new Map<number, ProcInfo>();
+  const childrenByPpid = new Map<number, number[]>();
+  for (const row of rows) {
+    if (row === null || typeof row !== "object") continue;
+    const record = row as Record<string, unknown>;
+    const pid = statNumber(record["ProcessId"]);
+    if (pid === null) continue;
+    const ppid = statNumber(record["ParentProcessId"]) ?? -1;
+    byId.set(pid, {
+      ppid,
+      memBytes: statNumber(record["WorkingSetSize"]) ?? 0,
+      cpu100ns: (statNumber(record["KernelModeTime"]) ?? 0) + (statNumber(record["UserModeTime"]) ?? 0),
+      ioReadBytes: statNumber(record["ReadTransferCount"]) ?? 0,
+      ioWriteBytes: statNumber(record["WriteTransferCount"]) ?? 0,
+      threads: statNumber(record["ThreadCount"]) ?? 0
+    });
+    if (ppid >= 0) {
+      const list = childrenByPpid.get(ppid);
+      if (list) list.push(pid); else childrenByPpid.set(ppid, [pid]);
+    }
+  }
+  return { byId, childrenByPpid };
+}
+
+/** Sums CPU/mem/IO/threads over a process and all its descendants (cycle-guarded). */
+function sumProcessTree(snapshot: ProcessSnapshot, rootPid: number): { cpu100ns: number; memBytes: number; ioReadBytes: number; ioWriteBytes: number; threads: number } {
+  let cpu100ns = 0, memBytes = 0, ioReadBytes = 0, ioWriteBytes = 0, threads = 0;
+  const seen = new Set<number>();
+  const stack = [rootPid];
+  while (stack.length > 0) {
+    const pid = stack.pop() as number;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    const info = snapshot.byId.get(pid);
+    if (info === undefined) continue;
+    cpu100ns += info.cpu100ns;
+    memBytes += info.memBytes;
+    ioReadBytes += info.ioReadBytes;
+    ioWriteBytes += info.ioWriteBytes;
+    threads += info.threads;
+    for (const child of snapshot.childrenByPpid.get(pid) ?? []) stack.push(child);
+  }
+  return { cpu100ns, memBytes, ioReadBytes, ioWriteBytes, threads };
+}
+
+/** WMI numbers arrive as number or string (large uint64); coerce, else null. */
+function statNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; }
+  return null;
+}
+
 function titleFromPrompt(prompt: string): string {
   return prompt.length > CHAT_TITLE_MAX ? `${prompt.slice(0, CHAT_TITLE_MAX)}…` : prompt;
+}
+
+/** Merges approved-access roots into a base workspace context, deduping by normalized path key. */
+function mergeWorkspaceRoots(
+  base: ChatWorkspaceContext | undefined,
+  additional: { readonly roots: readonly string[]; readonly readOnlyRoots: readonly string[] } | undefined,
+  storedMode: SessionMode | undefined
+): ChatWorkspaceContext | undefined {
+  if (additional === undefined || additional.roots.length === 0) {
+    return base;
+  }
+  const dedupe = (values: readonly string[]): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const value of values) {
+      const key = normalizePathKey(value);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(value);
+    }
+    return out;
+  };
+  const roots = dedupe([...(base?.roots ?? []), ...additional.roots]);
+  const readOnlyRoots = dedupe([...(base?.readOnlyRoots ?? []), ...additional.readOnlyRoots]);
+  return {
+    mode: base?.mode ?? storedMode ?? "implementation",
+    roots,
+    ...(readOnlyRoots.length === 0 ? {} : { readOnlyRoots })
+  };
 }
 
 /** True when `<root>/.git` exists (clone mode's git-repo requirement). */

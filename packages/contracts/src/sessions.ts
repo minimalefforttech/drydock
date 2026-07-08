@@ -29,6 +29,14 @@ export interface ChatSessionRecord {
   readonly transport: string;
   /** Session mode recorded at start: drives briefing + clone sync UI. */
   readonly mode?: SessionMode;
+  /**
+   * Absolute project roots mounted at start. Persisted so a resume/reclaim/reload
+   * re-mounts the SAME folders instead of coming up with only the disposable
+   * workspace — otherwise a revived session can't touch the project it edited.
+   */
+  readonly workspaceRoots?: readonly string[];
+  /** Subset of workspaceRoots mounted read-only (per-set read-only flags). */
+  readonly readOnlyRoots?: readonly string[];
   readonly runtimeId?: RuntimeId;
   /**
    * Multi-window ownership: which extension-host instance currently

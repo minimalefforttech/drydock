@@ -61,6 +61,8 @@ interface PersistedState {
   readonly ageDays: number;
   readonly taskFilter: string | null;
   readonly connectionsMode?: ConnectionsMode;
+  /** "Lanes" toolbar toggle: stack columns into per-category lanes instead of one rail. */
+  readonly lanesEnabled?: boolean;
 }
 
 const vscodeApi = acquireVsCodeApi();
@@ -158,6 +160,10 @@ let newTaskOpen = false;
 let addSubtaskKey: string | null = null;
 /** Column-settings modal draft, or null when the modal is closed. */
 let settingsDraft: SettingsDraft | null = null;
+/** "Lanes" toolbar toggle: ON groups columns into stacked per-category lanes. */
+let lanesEnabled = false;
+/** Subtask id whose colour-override swatch picker is open (at most one at a time). */
+let colorPickerSubtaskId: string | null = null;
 
 // --- Dependency editor + start-action state ---------------------------------
 
@@ -236,6 +242,14 @@ document.addEventListener("click", (event) => {
   openMenuKey = null;
   render();
 });
+// A click anywhere outside an open colour picker closes it (Esc too).
+document.addEventListener("click", (event) => {
+  if (colorPickerSubtaskId === null) return;
+  const target = event.target;
+  if (target instanceof Element && target.closest(".tb-color-picker")) return;
+  colorPickerSubtaskId = null;
+  render();
+});
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (dragLink !== null) {
@@ -245,6 +259,10 @@ document.addEventListener("keydown", (event) => {
   let dirty = false;
   if (openMenuKey !== null) {
     openMenuKey = null;
+    dirty = true;
+  }
+  if (colorPickerSubtaskId !== null) {
+    colorPickerSubtaskId = null;
     dirty = true;
   }
   if (selectedEdge !== null) {
@@ -302,6 +320,24 @@ function stripeIndex(taskId: string): number {
     hash = ((hash * 33) ^ taskId.charCodeAt(i)) >>> 0;
   }
   return hash % STRIPE_CLASS_COUNT;
+}
+
+/**
+ * The lowest stripe index (0..7) not already claimed by a sibling subtask's
+ * colorOverride — the colour picker's default highlighted choice, so picking
+ * distinct colours across a task's subtasks is the path of least resistance.
+ * Falls back to 0 once every hue is already in use.
+ */
+function nextAvailableHue(task: WorkTaskSummary, excludingSubtaskId: string): number {
+  const used = new Set(
+    task.subtasks
+      .filter((subtask) => subtask.subtaskId !== excludingSubtaskId && subtask.colorOverride !== undefined)
+      .map((subtask) => subtask.colorOverride)
+  );
+  for (let i = 0; i < STRIPE_CLASS_COUNT; i += 1) {
+    if (!used.has(i)) return i;
+  }
+  return 0;
 }
 
 /** Chip text for a task's linked workspace sets: names when resolvable, else a count. */
@@ -373,7 +409,7 @@ function clearStatus(): void {
 }
 
 function persist(): void {
-  vscodeApi.setState({ ageDays, taskFilter, connectionsMode });
+  vscodeApi.setState({ ageDays, taskFilter, connectionsMode, lanesEnabled });
 }
 
 /** Subtasks a "Start ready" on the task card would start right now. */
@@ -483,6 +519,18 @@ function renderToolbar(): void {
   });
   toolbar.append(connSelect);
 
+  // Lanes toggle: groups columns into stacked per-category lanes instead of
+  // one horizontal rail. Webview-local persisted state, same as the filters above.
+  const lanesToggle = button("Lanes", `small tb-lanes-toggle${lanesEnabled ? " active" : ""}`);
+  lanesToggle.title = "Group columns into stacked lanes by category (backlog / pending / in progress / done)";
+  lanesToggle.setAttribute("aria-pressed", String(lanesEnabled));
+  lanesToggle.addEventListener("click", () => {
+    lanesEnabled = !lanesEnabled;
+    persist();
+    render();
+  });
+  toolbar.append(lanesToggle);
+
   const spacer = el("span", "tb-toolbar-spacer");
   toolbar.append(spacer);
 
@@ -555,13 +603,39 @@ function renderEmptyState(): void {
   }
 }
 
+/**
+ * OFF (default): every column in one horizontal flex row (`.tb-rail`'s own
+ * flex layout). ON: columns group by `category` (fixed CATEGORY_ORDER) into
+ * stacked `.tb-lane` rows — a labelled lane per category containing that
+ * category's columns, lanes stacked vertically. Toggling swaps `rail`'s
+ * layout class; the column-building logic (buildColumn) is unchanged either way.
+ */
 function renderRail(): void {
   rail.replaceChildren();
+  rail.classList.toggle("tb-lanes", lanesEnabled);
   const done = doneColumns();
   const firstDone = done[0];
   const nextDone = done[1];
-  for (const column of sortedColumns()) {
-    rail.append(buildColumn(column, firstDone, nextDone));
+  if (!lanesEnabled) {
+    for (const column of sortedColumns()) {
+      rail.append(buildColumn(column, firstDone, nextDone));
+    }
+    return;
+  }
+  const columnsByCategory = sortedColumns();
+  for (const category of CATEGORY_ORDER) {
+    const categoryColumns = columnsByCategory.filter((column) => column.category === category);
+    if (categoryColumns.length === 0) continue;
+    const lane = el("section", `tb-lane cat-${category}`);
+    const caption = el("div", "tb-lane-caption");
+    caption.textContent = CATEGORY_LABEL[category];
+    lane.append(caption);
+    const laneCols = el("div", "tb-lane-cols");
+    for (const column of categoryColumns) {
+      laneCols.append(buildColumn(column, firstDone, nextDone));
+    }
+    lane.append(laneCols);
+    rail.append(lane);
   }
 }
 
@@ -785,7 +859,7 @@ function buildSubtaskCard(
   column: BoardColumnSummary,
   ghostTarget: BoardColumnSummary | undefined
 ): HTMLElement {
-  const card = el("article", `tb-card tb-subtask-card stripe-h${String(stripeIndex(parent.taskId))}${subtask.isBlocked ? " blocked" : ""}`);
+  const card = el("article", `tb-card tb-subtask-card stripe-h${String(subtask.colorOverride ?? stripeIndex(parent.taskId))}${subtask.isBlocked ? " blocked" : ""}`);
   card.dataset["subtaskId"] = subtask.subtaskId;
   card.dataset["taskId"] = subtask.taskId;
 
@@ -832,6 +906,8 @@ function buildSubtaskCard(
   const actions = buildSubtaskActions(subtask, column);
   if (actions.childNodes.length > 0) card.append(actions);
 
+  card.append(buildColorPicker(subtask, parent));
+
   // Dependency dots. The input dot is the drop cue; a drop is accepted
   // anywhere on a valid sibling card (friendlier target than a 9px dot).
   const inDot = el("span", "tb-dot tb-dot-in");
@@ -854,6 +930,15 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
   const actions = el("div", "tb-card-actions");
   const startable = subtask.prompt !== undefined && subtask.prompt.length > 0;
   const isDone = column.category === "done";
+  // Subtasks aren't just pre-prompts — chats run against them and stay grouped
+  // under the task. This chip surfaces that grouping (running or finished
+  // chats alike) alongside the ▶ Start affordance for starting another.
+  if (subtask.linkedSessionIds.length > 0) {
+    const linked = el("span", "tb-linked-chip");
+    linked.textContent = `💬 ${String(subtask.linkedSessionIds.length)}`;
+    linked.title = `${String(subtask.linkedSessionIds.length)} chat${subtask.linkedSessionIds.length === 1 ? "" : "s"} linked to this subtask`;
+    actions.append(linked);
+  }
   if (subtask.isRunning) {
     const running = el("span", "tb-running-chip");
     running.textContent = "running";
@@ -894,6 +979,64 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
     }
   }
   return actions;
+}
+
+/**
+ * Dependency-edge colour override control: a small swatch toggle (showing the
+ * subtask's current effective hue) that expands into a row of the 8 palette
+ * swatches plus a "clear" to revert to the parent task's stripe hue. The
+ * highlighted default choice is the next hue not already claimed by a sibling
+ * subtask's own override, so distinct colours are the path of least resistance.
+ */
+function buildColorPicker(subtask: SubtaskSummary, parent: WorkTaskSummary): HTMLElement {
+  const wrap = el("div", "tb-color-picker");
+  const effective = subtask.colorOverride ?? stripeIndex(parent.taskId);
+  const toggle = iconButton("●", "Set this subtask's dependency-edge colour", `tb-color-toggle stripe-h${String(effective)}`);
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    colorPickerSubtaskId = colorPickerSubtaskId === subtask.subtaskId ? null : subtask.subtaskId;
+    render();
+  });
+  wrap.append(toggle);
+  if (colorPickerSubtaskId !== subtask.subtaskId) return wrap;
+
+  const popover = el("div", "tb-color-swatches");
+  popover.setAttribute("role", "menu");
+  const suggested = nextAvailableHue(parent, subtask.subtaskId);
+  for (let i = 0; i < STRIPE_CLASS_COUNT; i += 1) {
+    const swatch = iconButton(
+      "",
+      `Stripe ${String(i)}${i === suggested ? " (next available)" : ""}`,
+      `tb-color-swatch stripe-h${String(i)}${subtask.colorOverride === i ? " selected" : ""}${i === suggested && subtask.colorOverride === undefined ? " suggested" : ""}`
+    );
+    swatch.addEventListener("click", (event) => {
+      event.stopPropagation();
+      colorPickerSubtaskId = null;
+      void updateSubtaskColor(subtask.subtaskId, i);
+    });
+    popover.append(swatch);
+  }
+  const clear = button("Clear", "ghost small tb-color-clear");
+  clear.title = "Revert to the parent task's stripe hue";
+  clear.addEventListener("click", (event) => {
+    event.stopPropagation();
+    colorPickerSubtaskId = null;
+    void updateSubtaskColor(subtask.subtaskId, null);
+  });
+  popover.append(clear);
+  wrap.append(popover);
+  return wrap;
+}
+
+async function updateSubtaskColor(subtaskId: string, colorOverride: number | null): Promise<void> {
+  const response = await request({ type: "subtask.update", subtaskId, colorOverride });
+  if (!response.ok) {
+    showError(`set colour failed: ${response.error.message}`);
+    render();
+    return;
+  }
+  clearStatus();
+  await refetchBoard();
 }
 
 function buildAddSubtaskRow(column: BoardColumnSummary, task: WorkTaskSummary): HTMLElement {
@@ -1107,7 +1250,16 @@ function visibleEdges(): VisibleEdge[] {
             && selectedEdge.fromSubtaskId === fromSubtaskId && selectedEdge.toSubtaskId === subtask.subtaskId;
           if (!touchesHover && !isSelected) continue;
         }
-        edges.push({ fromSubtaskId, toSubtaskId: subtask.subtaskId, taskId: task.taskId, stripe: stripeIndex(task.taskId) });
+        // An edge tints by its downstream (dependent) subtask's own colour
+        // override when set, else the parent task's stripe hue — two
+        // overlapping tasks' webs no longer blend together once subtasks pick
+        // distinct colours.
+        edges.push({
+          fromSubtaskId,
+          toSubtaskId: subtask.subtaskId,
+          taskId: task.taskId,
+          stripe: subtask.colorOverride ?? stripeIndex(task.taskId)
+        });
       }
     }
   }
@@ -1541,6 +1693,9 @@ if (saved) {
   }
   if (saved.connectionsMode === "hover" || saved.connectionsMode === "all" || saved.connectionsMode === "off") {
     connectionsMode = saved.connectionsMode;
+  }
+  if (typeof saved.lanesEnabled === "boolean") {
+    lanesEnabled = saved.lanesEnabled;
   }
 }
 void Promise.all([loadWorkspaceSetNames(), loadBoard()]).then(() => render());

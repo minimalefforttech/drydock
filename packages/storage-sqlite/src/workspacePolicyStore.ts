@@ -16,6 +16,7 @@ import type {
   ProjectRecord,
   SessionId,
   WorkspaceSetId,
+  WorkspaceSetMember,
   WorkspaceSetRecord,
   WorkspaceSetStore
 } from "@drydock/contracts";
@@ -39,6 +40,24 @@ export class SqliteProjectCatalogStore implements ProjectCatalogStore {
       record.createdAt,
       record.updatedAt
     );
+  }
+
+  async updateProject(record: ProjectRecord, pathKey: string): Promise<void> {
+    this.connection.database.prepare(`
+      UPDATE project_records
+      SET name = ?, path = ?, path_key = ?, kind = ?, updated_at = ?
+      WHERE project_id = ?
+    `).run(record.name, record.path, pathKey, record.kind, record.updatedAt, record.projectId);
+  }
+
+  async deleteProject(projectId: ProjectId): Promise<void> {
+    // Drop memberships first so the FK on workspace_set_projects stays satisfied.
+    this.connection.database.prepare(
+      "DELETE FROM workspace_set_projects WHERE project_id = ?"
+    ).run(projectId);
+    this.connection.database.prepare(
+      "DELETE FROM project_records WHERE project_id = ?"
+    ).run(projectId);
   }
 
   async getProject(projectId: ProjectId): Promise<ProjectRecord | null> {
@@ -93,12 +112,36 @@ export class SqliteWorkspaceSetStore implements WorkspaceSetStore {
       INSERT INTO workspace_sets (workspace_set_id, name, created_at, updated_at)
       VALUES (?, ?, ?, ?)
     `).run(record.workspaceSetId, record.name, record.createdAt, record.updatedAt);
+    this.replaceMembers(record);
+  }
+
+  async updateWorkspaceSet(record: WorkspaceSetRecord): Promise<void> {
+    this.connection.database.prepare(`
+      UPDATE workspace_sets SET name = ?, updated_at = ? WHERE workspace_set_id = ?
+    `).run(record.name, record.updatedAt, record.workspaceSetId);
+    this.connection.database.prepare(
+      "DELETE FROM workspace_set_projects WHERE workspace_set_id = ?"
+    ).run(record.workspaceSetId);
+    this.replaceMembers(record);
+  }
+
+  async deleteWorkspaceSet(workspaceSetId: WorkspaceSetId): Promise<void> {
+    this.connection.database.prepare(
+      "DELETE FROM workspace_set_projects WHERE workspace_set_id = ?"
+    ).run(workspaceSetId);
+    this.connection.database.prepare(
+      "DELETE FROM workspace_sets WHERE workspace_set_id = ?"
+    ).run(workspaceSetId);
+  }
+
+  /** Writes the ordered membership rows, read-only flag included. */
+  private replaceMembers(record: WorkspaceSetRecord): void {
     const insertMember = this.connection.database.prepare(`
-      INSERT INTO workspace_set_projects (workspace_set_id, project_id, position)
-      VALUES (?, ?, ?)
+      INSERT INTO workspace_set_projects (workspace_set_id, project_id, position, read_only)
+      VALUES (?, ?, ?, ?)
     `);
-    for (const [position, projectId] of record.projectIds.entries()) {
-      insertMember.run(record.workspaceSetId, projectId, position);
+    for (const [position, member] of record.members.entries()) {
+      insertMember.run(record.workspaceSetId, member.projectId, position, member.readOnly ? 1 : 0);
     }
   }
 
@@ -117,15 +160,20 @@ export class SqliteWorkspaceSetStore implements WorkspaceSetStore {
   }
 
   private mapWorkspaceSet(row: WorkspaceSetRow): WorkspaceSetRecord {
-    const members = this.connection.database.prepare(`
-      SELECT project_id FROM workspace_set_projects
+    const rows = this.connection.database.prepare(`
+      SELECT project_id, read_only FROM workspace_set_projects
       WHERE workspace_set_id = ?
       ORDER BY position
-    `).all(row.workspace_set_id) as unknown as { readonly project_id: string }[];
+    `).all(row.workspace_set_id) as unknown as MemberRow[];
+    const members: WorkspaceSetMember[] = rows.map((member) => ({
+      projectId: member.project_id as ProjectId,
+      readOnly: member.read_only === 1
+    }));
     return {
       workspaceSetId: row.workspace_set_id as WorkspaceSetId,
       name: row.name,
-      projectIds: members.map((member) => member.project_id as ProjectId),
+      projectIds: members.map((member) => member.projectId),
+      members,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -137,6 +185,11 @@ interface WorkspaceSetRow {
   readonly name: string;
   readonly created_at: string;
   readonly updated_at: string;
+}
+
+interface MemberRow {
+  readonly project_id: string;
+  readonly read_only: number;
 }
 
 // MARK: Access requests

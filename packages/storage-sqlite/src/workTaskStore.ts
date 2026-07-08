@@ -169,6 +169,16 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
     return rows.map(mapLink);
   }
 
+  async listSessionIdsBySubtask(subtaskId: SubtaskId): Promise<SessionId[]> {
+    const rows = this.connection.database.prepare(`
+      SELECT session_id
+      FROM work_task_links
+      WHERE subtask_id = ? AND session_id IS NOT NULL
+      ORDER BY rowid ASC
+    `).all(subtaskId) as unknown as { readonly session_id: string }[];
+    return rows.map((row) => row.session_id as SessionId);
+  }
+
   async reassignTasksColumn(fromColumnId: ColumnId, toColumnId: ColumnId): Promise<void> {
     this.connection.database.prepare(`
       UPDATE work_tasks

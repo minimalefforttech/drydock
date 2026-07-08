@@ -18,7 +18,7 @@ import type {
 } from "@drydock/contracts";
 import type { Clock } from "./clock.js";
 import type { IdGenerator } from "./ids.js";
-import { assertMountAllowed } from "./mountPolicy.js";
+import { assertMountAllowed, sandboxRuntimePath } from "./mountPolicy.js";
 
 export interface AccessRequestServiceOptions {
   readonly ids: IdGenerator;
@@ -80,7 +80,7 @@ export class AccessRequestService {
     const mount: MountPolicy = {
       mountId: this.options.ids.mountId(),
       hostPath: request.hostPath,
-      runtimePath: `/approved/${accessRequestId}`,
+      runtimePath: sandboxRuntimePath(request.hostPath),
       mode: request.mode,
       source: request.mode === "read-only" ? "shared-read" : "shared-write",
       approvedBy: "user",

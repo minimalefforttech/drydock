@@ -40,6 +40,22 @@ test("normalizes text, commands, file edits, tool calls, and completion", () => 
   assert.equal(done?.type === "agent.done" ? done.status : "", "completed");
 });
 
+test("captures thinking and redacted_thinking blocks as agent.reasoning events", () => {
+  const normalizer = new ClaudeEventNormalizer(new FixedIds(), new FixedClock());
+  const stdout = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "thinking", thinking: "Let me consider the approach." }] } }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "redacted_thinking", data: "opaque" }] } }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Done." }] } })
+  ].join("\n");
+
+  const parsed = normalizer.parseJsonLines(stdout, context());
+
+  assert.deepEqual(parsed.events.map((event) => event.type), ["agent.reasoning", "agent.reasoning", "agent.text"]);
+  const [thinking, redacted] = parsed.events;
+  assert.equal(thinking?.type === "agent.reasoning" ? thinking.text : "", "Let me consider the approach.");
+  assert.equal(redacted?.type === "agent.reasoning" ? redacted.text : "", "[redacted reasoning]");
+});
+
 test("error results produce agent.error plus a failed terminal event", () => {
   const normalizer = new ClaudeEventNormalizer(new FixedIds(), new FixedClock());
   const stdout = JSON.stringify({

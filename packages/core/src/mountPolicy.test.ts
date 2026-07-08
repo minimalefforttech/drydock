@@ -19,6 +19,7 @@ import {
   isPathWithin,
   isSensitivePath,
   normalizePathKey,
+  sandboxRuntimePath,
   sensitivePathMatch
 } from "./mountPolicy.js";
 
@@ -60,6 +61,42 @@ test("clone mode does not mount live workspace roots", () => {
   }, new RandomIdGenerator());
 
   assert.equal(mounts.length, 0);
+});
+
+test("workspace roots advertise the real sandbox mount path, not a synthetic label", () => {
+  const [mount] = buildMountPolicy({
+    mode: "implementation",
+    workspaceRoots: ["H:\\pipeline\\work\\fr_sceptre"],
+    sharedRead: [],
+    sharedWrite: [],
+    approvedAt: "2026-07-01T00:00:00.000Z",
+    approvedBy: "test"
+  }, new RandomIdGenerator());
+  // The agent is told where sbx actually mounts the folder; the old
+  // `/workspace/root-N` fiction sent writes into an unmounted overlay.
+  assert.notEqual(mount?.runtimePath, "/workspace/root-1");
+  if (process.platform === "win32") {
+    assert.equal(mount?.runtimePath, "/h/pipeline/work/fr_sceptre");
+  }
+});
+
+test("sandboxRuntimePath mirrors a Windows drive path into the container", () => {
+  if (process.platform === "win32") {
+    assert.equal(sandboxRuntimePath("H:\\pipeline\\work"), "/h/pipeline/work");
+    assert.equal(sandboxRuntimePath("C:/proj/app"), "/c/proj/app");
+  }
+});
+
+test("readOnlyRoots force read-only even in implementation mode", () => {
+  const mounts = buildMountPolicy({
+    mode: "implementation",
+    workspaceRoots: ["C:\\rw", "C:\\ro"],
+    readOnlyRoots: ["C:\\ro"], // matched by normalized path key
+    sharedRead: [],
+    sharedWrite: []
+  }, new RandomIdGenerator());
+  assert.equal(mounts[0]?.mode, "read-write");
+  assert.equal(mounts[1]?.mode, "read-only");
 });
 
 test("workspace ownership guard rejects paths outside owner root", async () => {

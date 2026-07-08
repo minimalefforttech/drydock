@@ -1,8 +1,8 @@
 /**
  * Docker Sandbox runtime templates.
  *
- * The isolated-run template mounts only the disposable workspace. Workspace
- * sets add project roots whose mode follows the session mode: plan mode
+ * The isolated-run template always mounts the disposable workspace. Workspace
+ * sets can add project roots whose mode follows the session mode: plan mode
  * mounts read-only, implementation mode read-write. Scoped provider service
  * egress is granted through adapter-owned policy commands; the sandbox agent
  * kind follows the selected provider.
@@ -22,6 +22,28 @@ const PROVIDER_NETWORK_RESOURCES: Readonly<Record<SandboxProvider, string>> = {
   claude: CLAUDE_SERVICE_NETWORK_RESOURCES
 };
 
+/**
+ * Returns a copy of a template rebound to a different sandbox provider — swaps
+ * the sandbox agent image, the scoped egress allowlist, and the provider tags,
+ * keeping every provider-agnostic field (mounts, workspace, mode) intact. Used
+ * when a live session switches provider: the new agent must run in ITS OWN
+ * sandbox (e.g. Codex can't run inside the Claude image), so reusing the old
+ * template is what left `codex app-server` hanging on initialize.
+ */
+export function withSandboxProvider(template: RuntimeTemplate, provider: SandboxProvider): RuntimeTemplate {
+  return {
+    ...template,
+    id: `isolated-run-docker-sandbox-${provider}`,
+    name: `Isolated Run Docker Sandbox ${provider === "codex" ? "Codex" : "Claude"}`,
+    adapterProviderIds: [provider],
+    advancedOptions: {
+      ...template.advancedOptions,
+      sandboxAgent: provider,
+      networkResources: PROVIDER_NETWORK_RESOURCES[provider]
+    }
+  };
+}
+
 export function buildIsolatedRunTemplate(input: {
   readonly workspacePath: string;
   readonly ids: IdGenerator;
@@ -30,6 +52,8 @@ export function buildIsolatedRunTemplate(input: {
   readonly provider?: SandboxProvider;
   /** Real project roots mounted alongside the disposable workspace. */
   readonly projectRoots?: readonly string[];
+  /** Subset of projectRoots that must mount read-only even in implementation mode. */
+  readonly readOnlyRoots?: readonly string[];
   /** Session mode governing project-root write access. Defaults to implementation. */
   readonly sessionMode?: SessionMode;
   readonly deniedPaths?: readonly string[];
@@ -56,6 +80,7 @@ export function buildIsolatedRunTemplate(input: {
       ...buildMountPolicy({
         mode: sessionMode,
         workspaceRoots: projectRoots,
+        ...(input.readOnlyRoots === undefined ? {} : { readOnlyRoots: input.readOnlyRoots }),
         sharedRead: [],
         sharedWrite: [],
         ...(input.deniedPaths === undefined ? {} : { deniedPaths: input.deniedPaths }),

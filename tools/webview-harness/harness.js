@@ -85,7 +85,7 @@
       ]
     },
     {
-      providerId: "claude", displayName: "Claude / Anthropic", refreshedAt: iso(1), source: "provider", diagnostics: [], authStatus: "needs-login", loginHint: "sbx secret set -g anthropic --oauth",
+      providerId: "claude", displayName: "Claude / Anthropic", refreshedAt: iso(1), source: "provider", diagnostics: [], authStatus: "needs-login", loginHint: "sbx run claude (then /login)",
       models: [
         { id: "claude-opus-4-8", displayName: "Claude Opus 4.8", isDefault: true, hidden: false },
         { id: "claude-fable-5", displayName: "Claude Fable 5", isDefault: false, hidden: false }

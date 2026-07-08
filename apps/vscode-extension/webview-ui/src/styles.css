@@ -239,6 +239,26 @@ select {
   padding: 3px 4px;
 }
 
+/* CH·12: on some dark themes the native OPEN option list ignores the dropdown
+   theme vars and renders light-on-light. color-scheme tells the OS picker to
+   use its dark palette for the popup; VS Code stamps body.vscode-dark /
+   body.vscode-high-contrast so this only kicks in for dark/high-contrast
+   themes (light themes keep the default light popup). The explicit option
+   rule is belt-and-suspenders for engines that still theme options off
+   color-scheme alone. This is a pragmatic CSS-only fix — native <option>
+   popup styling is OS-rendered and not fully controllable from CSS. */
+body.vscode-dark select,
+body.vscode-high-contrast select {
+  color-scheme: dark;
+}
+
+.provider-select option,
+.model-select option,
+.thinking-select option {
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+}
+
 .set-select {
   flex: 1;
 }
@@ -275,6 +295,37 @@ h3 {
   max-width: 46ch;
 }
 
+/* FIX 1: shown in place of the transcript when a caller has switched to Chat
+   before chat.startSession resolved (e.g. "Create and start chat"). */
+.chat-starting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 32px 12px;
+  text-align: center;
+}
+
+.chat-starting-caption {
+  font-size: 0.9em;
+  opacity: 0.8;
+}
+
+/* Generic rotating-border spinner, reused wherever a bare loading affordance
+   is needed. Falls back to a static ring under prefers-reduced-motion. */
+.spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--vscode-descriptionForeground, rgba(128, 128, 128, 0.35));
+  border-top-color: var(--vscode-progressBar-background, var(--vscode-foreground));
+  animation: spinner-rotate 0.8s linear infinite;
+}
+
+@keyframes spinner-rotate {
+  to { transform: rotate(360deg); }
+}
+
 /* --------------------------------------------------------------------------
    Status dots + badges
    -------------------------------------------------------------------------- */
@@ -309,6 +360,13 @@ h3 {
 .status-dot.state-elsewhere {
   background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--vscode-descriptionForeground, #888);
+}
+
+/* Offline: selected but its backend isn't live here — an amber hollow ring.
+   Sending reconnects it (not a lock). */
+.status-dot.state-offline {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--vscode-charts-yellow, #cca700);
 }
 
 @keyframes pulse {
@@ -444,6 +502,36 @@ h3 {
   word-break: break-all;
 }
 
+/* CH·3: collapsed-by-default disclosure inside the isolation popover that
+   reveals the reconstructed `sbx create` invocation as selectable text. */
+.launch-command-detail {
+  margin: 6px 0 0;
+  font-size: 0.9em;
+}
+.launch-command-detail > summary {
+  cursor: pointer;
+  opacity: 0.75;
+}
+.launch-command-detail > summary:hover {
+  opacity: 1;
+}
+.launch-command-pre {
+  margin: 4px 0 2px;
+  padding: 4px 6px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
+  border-radius: 3px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+.launch-command-caption {
+  opacity: 0.65;
+  font-size: 0.85em;
+  font-style: italic;
+}
+
 /* Overflow ⋯ menu items render inside a popover. */
 .menu-item {
   display: block;
@@ -493,12 +581,51 @@ h3 {
   padding-right: 2px;
 }
 
+/* Pinned top bar: sits OUTSIDE chat-scroll (a direct child of chat-tab) so it
+   stays fixed while the transcript scrolls under it. The bottom border is the
+   scroll separator. */
 .chat-header {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 4px 0 8px;
+  margin: 0 0 4px;
+  padding: 5px 2px 6px;
   flex: 0 0 auto;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+
+/* Notes icon in the top bar: a small count badge sits over the top-right. */
+.chat-notes-button {
+  position: relative;
+}
+
+.chat-notes-button.has-notes {
+  opacity: 1;
+  color: var(--vscode-charts-yellow, #dcb67a);
+}
+
+.chat-notes-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+  background: transparent;
+}
+
+.notes-badge {
+  position: absolute;
+  top: -2px;
+  right: -1px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 7px;
+  background: var(--vscode-charts-yellow, #dcb67a);
+  color: var(--vscode-editor-background, #1e1e1e);
+  font-size: 0.62em;
+  font-weight: 700;
+  line-height: 13px;
+  text-align: center;
 }
 
 .chat-back {
@@ -513,6 +640,26 @@ h3 {
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+/* Column wrapping the optional parent-task line + the main title line. */
+.chat-title-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* FIX 3: small muted line above the title naming the parent task, shown only
+   when the selected session belongs to a subtask (the title itself already
+   shows the subtask's own name). */
+.chat-title-parent {
+  font-size: 0.78em;
+  line-height: 1.2;
+  opacity: 0.65;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-title {
@@ -579,6 +726,45 @@ h3 {
   align-items: center;
   gap: 6px;
   font-size: 0.82em;
+}
+
+/* Raw-stream debug disclosure — mirrors the mounts disclosure styling. */
+.context-raw {
+  margin: 0;
+}
+
+.context-raw-summary {
+  cursor: pointer;
+  font-size: 0.85em;
+  opacity: 0.8;
+  padding: 2px 0;
+  list-style: revert;
+}
+
+.context-raw-summary:hover {
+  opacity: 1;
+}
+
+.context-raw-meta {
+  margin-left: 6px;
+  opacity: 0.65;
+  font-size: 0.92em;
+}
+
+.context-raw-body {
+  margin: 4px 0 2px;
+  padding: 6px 8px;
+  max-height: 28vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.8em;
+  line-height: 1.4;
+  background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.1));
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.25));
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground);
 }
 
 .context-mount-path {
@@ -668,6 +854,23 @@ h3 {
   word-break: break-word;
 }
 
+.reclaim-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--vscode-charts-blue, #4a90d9);
+  background: var(--vscode-inputValidation-infoBackground, rgba(74, 144, 217, 0.1));
+}
+
+.reclaim-banner-text {
+  flex: 1 1 100%;
+  word-break: break-word;
+  font-size: 0.9em;
+}
+
 /* Transcript block: the outer chat-scroll owns overflow. Keep a useful minimum
    so open questions and expanded Changes cannot squeeze the log to a sliver. */
 .transcript-region {
@@ -731,6 +934,36 @@ h3 {
 .chat-file-token.unmounted {
   border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 48%, transparent);
   color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+/* CH·5: the host briefing prepended to a session's first prompt collapses
+   into its own disclosure so the transcript leads with what the user typed. */
+.host-briefing-detail {
+  margin: 0 0 6px;
+  font-size: 0.9em;
+}
+.host-briefing-detail > summary {
+  cursor: pointer;
+  opacity: 0.7;
+}
+.host-briefing-detail > summary:hover {
+  opacity: 1;
+}
+.host-briefing-pre {
+  margin: 4px 0 0;
+  padding: 5px 7px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
+  border-radius: 3px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+.host-briefing-remainder {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* Attention stack: pending questions + access requests share ONE card slot
@@ -907,6 +1140,108 @@ h3 {
   margin-bottom: 0;
 }
 
+/* System notice: an inline, centered status/error line in the transcript. */
+.chat-message.role-system {
+  align-self: center;
+  max-width: 90%;
+  margin: 4px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-system-retry {
+  align-self: center;
+}
+
+.chat-system-body {
+  font-size: 0.85em;
+  line-height: 1.45;
+  /* Preserve authored line breaks (multi-step hints) but wrap long lines. When
+     a notice has newlines it reads as steps, so left-align for legibility. */
+  white-space: pre-line;
+  text-align: left;
+  color: var(--vscode-descriptionForeground, #9aabb3);
+  background: var(--vscode-editorWidget-background, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--vscode-editorWidget-border, transparent);
+  border-radius: 6px;
+  padding: 6px 12px;
+  word-break: break-word;
+}
+
+.chat-message.role-system.tone-error .chat-system-body {
+  color: var(--vscode-errorForeground, #e28579);
+  border-color: var(--vscode-inputValidation-errorBorder, rgba(226, 133, 121, 0.5));
+  background: var(--vscode-inputValidation-errorBackground, rgba(226, 133, 121, 0.08));
+}
+
+/* Command the agent ran in the container: a terminal-style inline row. */
+.chat-message.role-command {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+  border-left: 2px solid var(--vscode-panel-border, #263740);
+  padding: 3px 0 3px 8px;
+  margin: 2px 0;
+}
+
+.chat-command-line {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.chat-command-prompt {
+  color: var(--vscode-charts-green, #74b57e);
+  font-weight: 700;
+}
+
+.chat-command-text {
+  color: var(--vscode-foreground);
+  word-break: break-all;
+  flex: 1 1 auto;
+}
+
+.chat-command-status {
+  flex: 0 0 auto;
+  opacity: 0.75;
+  font-size: 0.9em;
+}
+
+.chat-message.role-command.status-started .chat-command-status {
+  color: var(--vscode-charts-blue, #4fa3b6);
+}
+
+.chat-message.role-command.status-failed {
+  border-left-color: var(--vscode-errorForeground, #d66a5f);
+}
+
+.chat-message.role-command.status-failed .chat-command-status {
+  color: var(--vscode-errorForeground, #d66a5f);
+}
+
+.chat-command-output {
+  margin: 3px 0 0 12px;
+}
+
+.chat-command-output > summary {
+  cursor: pointer;
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+
+.chat-command-output pre {
+  margin: 3px 0 0;
+  padding: 5px 7px;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
+  border-radius: 3px;
+}
+
 .md-heading {
   font-weight: 600;
   line-height: 1.3;
@@ -920,6 +1255,25 @@ h4.md-heading { font-size: 1em; }
 .md-paragraph {
   white-space: pre-wrap;
   line-height: 1.45;
+}
+
+.md-link {
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.md-link:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+}
+
+.md-inline-code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.92em;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.16));
 }
 
 .md-list {
@@ -1061,11 +1415,150 @@ h4.md-heading { font-size: 1em; }
   50% { opacity: 0.1; }
 }
 
+/* FIX 4: "Assistant is working…" activity indicator at the bottom of the
+   transcript for the duration of a running turn — fills the gap between
+   turnStarted and the first streamed output. Shown only when the turn has
+   produced no agent.reasoning yet; once reasoning arrives, .chat-reasoning
+   (below) takes over as the live indicator instead. */
+.chat-working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 2px;
+  opacity: 0.75;
+  font-size: 0.9em;
+}
+
+/* The poke offer sits at full opacity so it reads as an actionable prompt even
+   though the surrounding working indicator is dimmed. */
+.chat-working .chat-poke {
+  opacity: 1;
+  border-color: var(--vscode-inputValidation-warningBorder, #cca700);
+}
+
+.chat-working-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.chat-working-dots .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.4;
+  animation: chat-working-pulse 1.2s ease-in-out infinite;
+}
+
+.chat-working-dots .dot:nth-child(2) { animation-delay: 0.2s; }
+.chat-working-dots .dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes chat-working-pulse {
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
+}
+
+/* Reasoning follow-up to FIX 4: live "Thinking" disclosure that replaces
+   .chat-working once the turn has produced agent.reasoning text — fills the
+   same working-indicator slot but lets the user expand into the actual
+   reasoning stream instead of a generic "working…" label. Collapsed by
+   default (muted, monospace-ish body) so it never dominates the transcript;
+   stays mounted (relabeled "Thought for Ns") after the turn ends. */
+.chat-reasoning {
+  margin: 4px 0;
+  padding: 6px 2px;
+  font-size: 0.9em;
+  opacity: 0.85;
+}
+
+.chat-reasoning > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  opacity: 0.85;
+}
+
+.chat-reasoning > summary::-webkit-details-marker { display: none; }
+
+.chat-reasoning > summary::before {
+  content: "▸";
+  display: inline-block;
+  font-size: 0.85em;
+  opacity: 0.6;
+}
+
+.chat-reasoning[open] > summary::before { content: "▾"; }
+
+.chat-reasoning > summary:hover {
+  opacity: 1;
+}
+
+.chat-reasoning-label {
+  font-style: italic;
+}
+
+.chat-reasoning-body {
+  margin: 6px 0 0 16px;
+  padding: 6px 8px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
+  border-radius: 3px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.88em;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.8;
+  max-height: 240px;
+  overflow-y: auto;
+  user-select: text;
+}
+
 /* Composer */
+
+/* Live sandbox usage, pinned between the transcript and the composer. */
+.sandbox-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin: 0 2px 6px;
+  padding: 3px 4px 5px;
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.sandbox-stats.hidden {
+  display: none;
+}
+
+.sandbox-stats-label {
+  text-transform: uppercase;
+  font-size: 0.82em;
+  letter-spacing: 0.05em;
+  opacity: 0.6;
+}
+
+.sandbox-stats-value {
+  font-family: var(--vscode-editor-font-family);
+}
+
+/* Docked composer: the collapsed Changes tray (when present) stacks directly on
+   top of the composer as one attached panel, pinned below the chat scroll. */
+.composer-dock {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  margin: 0 0 8px;
+}
 
 .composer {
   container-type: inline-size;
-  margin: 0 0 8px;
+  margin: 0;
   flex: 0 0 auto;
   padding: 8px 10px 9px;
   border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.3)));
@@ -1075,6 +1568,68 @@ h4.md-heading { font-size: 1em; }
 
 .composer:focus-within {
   border-color: var(--vscode-focusBorder, var(--vscode-inputOption-activeBorder, #007fd4));
+}
+
+/* Collapsed edited-files tray, attached to the composer top. Hidden entirely
+   when a chat session has no edits (see renderChangedFiles). */
+.changes-tray {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 10px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.3)));
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  background: color-mix(in srgb, var(--vscode-input-background, var(--vscode-editor-background)) 86%, var(--vscode-editor-background));
+}
+
+.changes-tray > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  list-style: none;
+  cursor: pointer;
+}
+
+.changes-tray > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Disclosure drop-arrow: points right when collapsed, down when open. */
+.changes-tray > summary::before {
+  content: "▸";
+  flex: 0 0 auto;
+  font-size: 0.85em;
+  opacity: 0.65;
+  transition: transform 0.12s ease;
+}
+
+.changes-tray[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+/* When the tray is showing, the composer squares its top corners so the two
+   read as one panel, joined by a faint hairline seam (not the full border). */
+.changes-tray:not(.hidden) + .composer {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  border-top-color: color-mix(in srgb, var(--vscode-panel-border, rgba(128, 128, 128, 0.3)) 45%, transparent);
+}
+
+.changes-summary-count {
+  font-weight: 600;
+}
+
+.changes-summary-add {
+  margin-left: 8px;
+  font-family: var(--vscode-editor-font-family);
+  color: var(--vscode-testing-iconPassed, #2ea043);
+}
+
+.changes-summary-del {
+  margin-left: 6px;
+  font-family: var(--vscode-editor-font-family);
+  color: var(--vscode-editorError-foreground, #f14c4c);
 }
 
 .prompt-input {
@@ -1100,55 +1655,81 @@ h4.md-heading { font-size: 1em; }
   opacity: 0.82;
 }
 
+/* Copilot-style toolbar: [mode · model · thinking · spacer · send]. */
 .composer-actions {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  grid-template-areas:
-    "mode spacer send cancel"
-    "controls controls controls controls";
+  display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 5px;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 6px;
+  padding-top: 7px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
 }
 
-.composer-actions > .segmented {
-  grid-area: mode;
-  justify-self: start;
-}
-
-.composer-model-controls {
-  grid-area: controls;
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(66px, 0.72fr);
-  align-items: center;
-  width: 100%;
-  box-sizing: border-box;
-  min-width: 0;
-  gap: 4px;
-  padding: 6px 0 0;
-  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+/* Compact mode segments so the whole toolbar stays on one line at sidebar width. */
+.composer-actions .segment {
+  padding: 3px 8px;
 }
 
 .composer-spacer {
-  grid-area: spacer;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
 .composer-send {
-  grid-area: send;
-  justify-self: end;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 3px 8px;
+  font-size: 1.15em;
+  line-height: 1.1;
 }
 
 .composer-cancel {
-  grid-area: cancel;
-  justify-self: end;
+  flex: 0 0 auto;
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  border-color: var(--vscode-editorWarning-foreground, #cca700);
 }
 
-.composer .provider-select.compact,
-.composer .model-select.compact,
+.composer-cancel:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 15%, transparent);
+}
+
+.composer-hidden-controls {
+  display: none;
+}
+
+/* Model button: a quiet text affordance with a chevron; opens the model tree. */
+.composer-model-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 200px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  padding: 3px 6px;
+}
+
+.composer-model-button:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+  color: var(--vscode-foreground);
+}
+
+.composer-model-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-model-chevron {
+  flex: 0 0 auto;
+  font-size: 0.7em;
+  opacity: 0.7;
+}
+
 .composer .thinking-select.compact {
-  width: 100%;
-  max-width: none;
+  flex: 0 0 auto;
+  max-width: 96px;
   min-width: 0;
   border-color: transparent;
   background: transparent;
@@ -1156,45 +1737,140 @@ h4.md-heading { font-size: 1em; }
   padding: 3px 5px;
 }
 
-.composer .provider-select.compact:hover,
-.composer .model-select.compact:hover,
 .composer .thinking-select.compact:hover,
-.composer .provider-select.compact:focus,
-.composer .model-select.compact:focus,
 .composer .thinking-select.compact:focus {
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
   color: var(--vscode-foreground);
 }
 
-@container (min-width: 430px) {
-  .composer-actions {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-    grid-template-areas: "mode controls send cancel";
-  }
+/* Model popup tree (inside the shared .popover). */
+.model-tree-group + .model-tree-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
 
-  .composer-model-controls {
-    display: flex;
-    width: auto;
-    padding: 0 0 0 6px;
-    border-top: none;
-    border-left: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  }
+.model-tree-provider {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-weight: 600;
+  opacity: 0.85;
+  padding: 2px 4px;
+}
 
-  .composer-spacer {
-    display: none;
-  }
+.model-tree-auth {
+  font-size: 0.8em;
+  font-weight: 400;
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
 
-  .composer .provider-select.compact {
-    flex: 0 1 116px;
-  }
+.model-tree-empty {
+  padding: 2px 4px 2px 22px;
+  opacity: 0.6;
+  font-size: 0.9em;
+}
 
-  .composer .model-select.compact {
-    flex: 0 1 150px;
-  }
+.model-tree-model {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  text-align: left;
+  padding: 3px 6px 3px 4px;
+  cursor: pointer;
+}
 
-  .composer .thinking-select.compact {
-    flex: 0 1 86px;
-  }
+.model-tree-model:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.model-tree-model.active {
+  background: var(--vscode-list-activeSelectionBackground, rgba(14, 99, 156, 0.35));
+}
+
+.model-tree-check {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  color: var(--vscode-testing-iconPassed, #4ec9b0);
+}
+
+.model-tree-model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Composer attachments: dropped files + the clickable active editor. */
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0 0 7px;
+}
+
+.composer-attach-add,
+.composer-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.86em;
+  line-height: 1.5;
+}
+
+.composer-attach-add {
+  border: 1px dashed var(--vscode-input-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.5)));
+  background: transparent;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  cursor: pointer;
+}
+
+.composer-attach-add:hover {
+  border-color: var(--vscode-focusBorder, #007fd4);
+  color: var(--vscode-foreground);
+}
+
+.composer-attach-addicon {
+  flex: 0 0 auto;
+  font-weight: 700;
+  opacity: 0.8;
+}
+
+.composer-attach-chip {
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.18));
+  color: var(--vscode-foreground);
+}
+
+.composer-attach-chip.unmounted {
+  border-style: dashed;
+  border-color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.composer-attach-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attach-remove {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  font-size: 1em;
+  line-height: 1;
+  opacity: 0.6;
+}
+
+.composer-attach-remove:hover {
+  opacity: 1;
 }
 
 .segmented {
@@ -1284,8 +1960,8 @@ h4.md-heading { font-size: 1em; }
 }
 
 .working-set-files.scroll-capped {
-  max-height: none;
-  overflow-y: visible;
+  max-height: 30vh;
+  overflow-y: auto;
   padding-right: 2px;
 }
 
@@ -1372,13 +2048,20 @@ h4.md-heading { font-size: 1em; }
   font-weight: 700;
 }
 
-/* Plain task notes are task-scoped context, separate from the file-change list. */
-.task-notes-section {
-  margin: 6px 0;
+/* Notes now live in a top-bar popover. The caption names the scope (linked task,
+   or "this subtask" for a subtask session); the list scrolls within the popover. */
+.notes-popover-caption {
+  font-weight: 600;
+  font-size: 0.92em;
+  opacity: 0.85;
+  margin: 0 0 6px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
 }
 
-.task-notes-section > summary {
-  font-weight: 600;
+.popover .task-notes {
+  max-height: 42vh;
+  overflow-y: auto;
 }
 
 .task-note-form {
@@ -2063,6 +2746,21 @@ h4.md-heading { font-size: 1em; }
   );
 }
 
+/* Drag an orphaned chat onto a task to link it. */
+.session-card[draggable="true"] {
+  cursor: grab;
+}
+
+.session-card.dragging {
+  opacity: 0.5;
+}
+
+.task-card.drop-target {
+  outline: 2px dashed var(--vscode-focusBorder, #007fd4);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 10%, transparent);
+}
+
 .task-card-top {
   display: flex;
   align-items: center;
@@ -2619,6 +3317,29 @@ h4.md-heading { font-size: 1em; }
   cursor: pointer;
 }
 
+/* A runtime row is now a header line (status/name/stop) plus a live stats line. */
+.runtime-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.runtime-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.runtime-stats {
+  font-size: 0.85em;
+  opacity: 0.72;
+  padding-left: 2px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+
 .projects-list,
 .plan-blocks {
   display: flex;
@@ -2878,6 +3599,108 @@ h4.md-heading { font-size: 1em; }
   opacity: 0.7;
 }
 
+/* Actions sit at the row's right edge; center-align so icon buttons line up. */
+.set-row {
+  align-items: center;
+}
+
+.set-row-edit,
+.set-row-delete {
+  flex: 0 0 auto;
+}
+
+.set-row-edit {
+  margin-left: auto;
+}
+
+/* --------------------------------------------------------------------------
+   Workspace set editor (draft membership)
+   -------------------------------------------------------------------------- */
+
+.ws-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.ws-editor-members {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ws-member-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 5px;
+  border-radius: 3px;
+  background: var(--vscode-editorWidget-background, transparent);
+}
+
+.ws-member-name {
+  flex: 0 0 auto;
+  font-weight: 600;
+  font-size: 0.9em;
+}
+
+.ws-member-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+.ws-member-remove {
+  flex: 0 0 auto;
+}
+
+.ws-mode-toggle {
+  flex: 0 0 auto;
+  min-width: 36px;
+  padding: 1px 8px;
+  font-size: 0.72em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border-radius: 9px;
+  background: transparent;
+}
+
+.ws-mode-toggle.rw {
+  color: var(--vscode-charts-green, #3fb950);
+  border: 1px solid var(--vscode-charts-green, #3fb950);
+}
+
+.ws-mode-toggle.ro {
+  color: var(--vscode-charts-orange, #d18616);
+  border: 1px solid var(--vscode-charts-orange, #d18616);
+}
+
+.ws-editor-hint {
+  font-size: 0.82em;
+  opacity: 0.7;
+  min-height: 1em;
+}
+
+.ws-project-edit,
+.ws-project-remove {
+  flex: 0 0 auto;
+}
+
+.ws-project-edit {
+  margin-left: auto;
+}
+
+.ws-path-edit {
+  flex: 1;
+  min-width: 0;
+}
+
 /* --------------------------------------------------------------------------
    Memory section
    -------------------------------------------------------------------------- */
@@ -2932,4 +3755,12 @@ h4.md-heading { font-size: 1em; }
   flex: 1;
   min-width: 0;
   word-break: break-word;
+}
+
+/* FIXES 1 & 4: reduced motion — the starting spinner falls back to a static
+   ring; the working-indicator dots stop pulsing (still visible, just static),
+   matching the existing tb-shake/tb-running-chip fallback in taskBoard.css. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; }
+  .chat-working-dots .dot { animation: none; opacity: 0.8; }
 }

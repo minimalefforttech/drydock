@@ -376,6 +376,20 @@ test("end and delete are refused for a session running in another window", async
   assert.equal((await harness.sessionStore.getSession(sessionId))?.status, "active");
 });
 
+test("claimOwnership stamps this window as the owner (the reclaim/takeover half)", async () => {
+  const harness = createHarness(new FakeAgentAdapter("no-terminal"));
+  await harness.service.startSession(sessionRequest());
+  const sessionId = asId<"SessionId">("session-test");
+
+  // A sibling window claims the session (the backend half of interacting =
+  // taking over): the stored row now carries host-b + a fresh heartbeat.
+  const sibling = harness.spawnSibling({ hostInstanceId: "host-b" });
+  const claimed = await sibling.claimOwnership(sessionId);
+  assert.equal(claimed.hostInstanceId, "host-b");
+  assert.ok(claimed.heartbeatAt !== undefined);
+  assert.equal((await harness.sessionStore.getSession(sessionId))?.hostInstanceId, "host-b");
+});
+
 test("beatOnce stamps a fresh heartbeat for every live session", async () => {
   const harness = createHarness(new FakeAgentAdapter("no-terminal"));
   const session = await harness.service.startSession(sessionRequest());

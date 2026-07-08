@@ -167,8 +167,8 @@ interface Harness {
   links: FakeLinks;
   bus: ProductEventBus;
   logger: MemoryLogger;
-  startRun: (input: { taskId: string; subtaskId: string; prompt: string }) => Promise<{ sessionId: string }>;
-  startCalls: { taskId: string; subtaskId: string; prompt: string }[];
+  startRun: (input: { taskId: string; subtaskId: string; prompt: string; title: string }) => Promise<{ sessionId: string }>;
+  startCalls: { taskId: string; subtaskId: string; prompt: string; title: string }[];
   sessionCounter: { n: number };
 }
 
@@ -179,7 +179,7 @@ function harness(startRunImpl?: StartSubtaskRun): Harness {
   const bus = new ProductEventBus();
   subtasks.bus = bus;
   const logger = new MemoryLogger();
-  const startCalls: { taskId: string; subtaskId: string; prompt: string }[] = [];
+  const startCalls: { taskId: string; subtaskId: string; prompt: string; title: string }[] = [];
   const sessionCounter = { n: 0 };
   const startRun: StartSubtaskRun = async (input) => {
     startCalls.push(input);

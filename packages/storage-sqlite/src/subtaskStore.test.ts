@@ -220,6 +220,52 @@ test("reassignSubtasksColumn moves every subtask on a column to another", async 
   }
 });
 
+test("colorOverride round-trips through insert, update, clear, and a reopen", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  const dbPath = path.join(dir, "subtask-color-override.sqlite");
+  try {
+    const connection = new SqliteConnection(dbPath);
+    applyMigrations(connection);
+    const taskStore = new SqliteWorkTaskStore(connection);
+    const store = new SqliteSubtaskStore(connection);
+
+    await taskStore.insertTask(task("task-1"));
+    // Absent by default (undefined, not 0) — falls back to the parent task's stripe hue.
+    await store.insertSubtask(subtask("sub-default", "task-1", 0));
+    // Set at creation time.
+    await store.insertSubtask(subtask("sub-colored", "task-1", 1, { colorOverride: 3 }));
+
+    assert.equal((await store.getSubtask(asId<"SubtaskId">("sub-default")))?.colorOverride, undefined);
+    assert.equal((await store.getSubtask(asId<"SubtaskId">("sub-colored")))?.colorOverride, 3);
+
+    // Update sets an override on the previously-unset subtask.
+    await store.updateSubtask(asId<"SubtaskId">("sub-default"), {
+      updatedAt: "2026-07-03T00:00:02.000Z",
+      colorOverride: 5
+    });
+    assert.equal((await store.getSubtask(asId<"SubtaskId">("sub-default")))?.colorOverride, 5);
+
+    // null clears it back to "use the parent task's stripe hue" (undefined, not 0).
+    await store.updateSubtask(asId<"SubtaskId">("sub-colored"), {
+      updatedAt: "2026-07-03T00:00:03.000Z",
+      colorOverride: null
+    });
+    connection.close();
+
+    const reopened = new SqliteConnection(dbPath);
+    applyMigrations(reopened);
+    const reopenedStore = new SqliteSubtaskStore(reopened);
+    const stillColored = await reopenedStore.getSubtask(asId<"SubtaskId">("sub-default"));
+    const cleared = await reopenedStore.getSubtask(asId<"SubtaskId">("sub-colored"));
+    reopened.close();
+
+    assert.equal(stillColored?.colorOverride, 5);
+    assert.equal(cleared?.colorOverride, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("migration backfills work_tasks.column_id from legacy state for pre-existing rows", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
   const dbPath = path.join(dir, "backfill.sqlite");
@@ -276,7 +322,13 @@ function subtask(
   subtaskId: string,
   taskId: string,
   sortOrder: number,
-  options?: { readonly description?: string; readonly prompt?: string; readonly columnId?: string; readonly autoStart?: boolean }
+  options?: {
+    readonly description?: string;
+    readonly prompt?: string;
+    readonly columnId?: string;
+    readonly autoStart?: boolean;
+    readonly colorOverride?: number;
+  }
 ): SubtaskRecord {
   return {
     subtaskId: asId<"SubtaskId">(subtaskId),
@@ -289,6 +341,7 @@ function subtask(
     columnId: asId<"ColumnId">(options?.columnId ?? "col-todo"),
     sortOrder,
     createdAt: "2026-07-03T00:00:00.000Z",
-    updatedAt: "2026-07-03T00:00:00.000Z"
+    updatedAt: "2026-07-03T00:00:00.000Z",
+    ...(options?.colorOverride === undefined ? {} : { colorOverride: options.colorOverride })
   };
 }

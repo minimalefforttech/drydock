@@ -118,7 +118,7 @@ export function badge(text: string, extraClass = ""): HTMLElement {
  */
 export function popover(
   trigger: HTMLElement,
-  build: (content: HTMLElement) => void
+  build: (content: HTMLElement, close: () => void) => void
 ): HTMLElement {
   const wrap = el("span", "popover-wrap");
   const content = el("div", "popover hidden");
@@ -140,7 +140,7 @@ export function popover(
     event.stopPropagation();
     if (content.classList.contains("hidden")) {
       content.replaceChildren();
-      build(content);
+      build(content, close);
       content.classList.remove("hidden");
       document.addEventListener("click", onOutside, true);
       document.addEventListener("keydown", onKey, true);

@@ -63,6 +63,8 @@ export interface SubtaskUpdateInput {
   /** "" clears the prompt to null; a string overwrites it. */
   readonly prompt?: string;
   readonly autoStart?: boolean;
+  /** A 0-7 palette index sets an override; null reverts to the parent task's stripe hue. */
+  readonly colorOverride?: number | null;
 }
 
 /** One card reference: exactly one of taskId/subtaskId is set. */
@@ -103,11 +105,17 @@ export class SubtaskService {
   }
 
   async updateSubtask(subtaskId: string, input: SubtaskUpdateInput): Promise<SubtaskRecord> {
-    if (input.title === undefined && input.description === undefined && input.prompt === undefined && input.autoStart === undefined) {
+    if (
+      input.title === undefined && input.description === undefined && input.prompt === undefined
+      && input.autoStart === undefined && input.colorOverride === undefined
+    ) {
       throw new Error("Subtask update must change at least one field.");
     }
     if (input.title !== undefined && input.title.trim() === "") {
       throw new Error("Subtask title must not be empty.");
+    }
+    if (input.colorOverride !== undefined && input.colorOverride !== null && (!Number.isInteger(input.colorOverride) || input.colorOverride < 0 || input.colorOverride > 7)) {
+      throw new Error("Subtask colorOverride must be an integer between 0 and 7, or null.");
     }
     const id = asId<"SubtaskId">(subtaskId);
     const existing = await this.options.store.getSubtask(id);
@@ -120,7 +128,8 @@ export class SubtaskService {
       // "" clears the description/prompt; the store maps null to a NULL column.
       ...(input.description === undefined ? {} : { description: input.description === "" ? null : input.description }),
       ...(input.prompt === undefined ? {} : { prompt: input.prompt === "" ? null : input.prompt }),
-      ...(input.autoStart === undefined ? {} : { autoStart: input.autoStart })
+      ...(input.autoStart === undefined ? {} : { autoStart: input.autoStart }),
+      ...(input.colorOverride === undefined ? {} : { colorOverride: input.colorOverride })
     });
     const updated = await this.options.store.getSubtask(id);
     if (updated === null) {

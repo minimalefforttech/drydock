@@ -55,6 +55,12 @@ export class RuntimeReconcileService {
           externalName: runtime.externalName,
           previousStatus: runtime.status
         });
+      } else if (runtime.status !== "removed") {
+        // The sandbox is confirmed gone from the host and the row is not active,
+        // so any pending/failed cleanup is moot — reap it to "removed" instead of
+        // leaving quarantined/lost rows piling up forever (they survive `sbx reset`
+        // because they are product inventory, not sandboxes).
+        await this.options.inventory.updateRuntimeStatus(runtime.runtimeId, "removed", reconciledAt);
       }
     }
 

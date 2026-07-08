@@ -33,6 +33,18 @@ export interface AgentTextEvent extends AgentEventBase {
   readonly final: boolean;
 }
 
+/**
+ * The agent's reasoning/thinking, distinct from its final-answer text
+ * (AgentTextEvent). DISPLAY-ONLY: never replayed as conversation context
+ * (see chatSessionService.contextMessages) — it is the agent's own scratch
+ * thoughts, not user/assistant dialogue.
+ */
+export interface AgentReasoningEvent extends AgentEventBase {
+  readonly type: "agent.reasoning";
+  readonly text: string;
+  readonly final?: boolean;
+}
+
 export interface AgentToolCallEvent extends AgentEventBase {
   readonly type: "agent.tool_call";
   readonly toolName: string;
@@ -109,6 +121,7 @@ export interface AgentNodeDoneEvent extends AgentEventBase {
 
 export type AgentEvent =
   | AgentTextEvent
+  | AgentReasoningEvent
   | AgentToolCallEvent
   | AgentCommandEvent
   | AgentFileEditEvent
@@ -172,6 +185,11 @@ export function summarizeAgentEvent(event: AgentEvent): TranscriptLine {
   switch (event.type) {
     case "agent.text":
       return transcriptLine(event, event.text);
+    case "agent.reasoning":
+      // Reasoning CAN be clipped (unlike the user's own message in
+      // summarizeStoredEvent) — it's the agent's scratch thinking, not
+      // content the user needs verbatim.
+      return transcriptLine(event, event.text);
     case "agent.tool_call":
       return {
         ...transcriptLine(event, `${event.toolName} ${event.status}${event.output === undefined ? "" : `: ${event.output}`}`),
@@ -232,10 +250,15 @@ export function summarizeAgentEvent(event: AgentEvent): TranscriptLine {
 export function summarizeStoredEvent(event: StoredEvent): TranscriptLine {
   if (event.eventType === "user.message") {
     const text = event.payload["text"];
+    // The user's own message is rendered in full, NOT clipped — matching the
+    // live transcript-line path (chatSessionService.appendUserMessage). Clipping
+    // it on replay truncated long prompts and, worse, cut the closing
+    // `[end host briefing]` delimiter off the first message so the host-briefing
+    // block stopped collapsing after a reload.
     return {
       eventType: "user.message",
       createdAt: event.createdAt,
-      summary: clipSummary(typeof text === "string" ? text : "")
+      summary: typeof text === "string" ? text : ""
     };
   }
   return summarizeAgentEvent(event.payload as unknown as AgentEvent);

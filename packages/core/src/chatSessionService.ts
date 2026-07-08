@@ -38,12 +38,19 @@ import type { IdGenerator } from "./ids.js";
 import type { Logger } from "./logger.js";
 import type { ProductEventBus } from "./eventBus.js";
 import { assertChildMountsWithinParent } from "./mountPolicy.js";
+import { withSandboxProvider, type SandboxProvider } from "./isolatedRunTemplate.js";
+import { stripHostBriefing } from "./accessRequestProtocol.js";
 import { RuntimeCleanupService } from "./runtimeCleanupService.js";
 import { RuntimeLifecycleService } from "./runtimeLifecycleService.js";
 
 /** Role sessions run under their spawned role; everything else stays "worker". */
 function sessionRole(record: ChatSessionRecord): AgentRole {
   return record.spawnedRole ?? "worker";
+}
+
+/** Maps a provider id to a sandbox agent kind (only Claude and Codex ship today). */
+function toSandboxProvider(providerId: string): SandboxProvider {
+  return providerId === "claude" ? "claude" : "codex";
 }
 
 export interface StartChatSessionRequest {
@@ -55,6 +62,9 @@ export interface StartChatSessionRequest {
   readonly transport: AgentTransport;
   /** Session mode recorded on the row: drives briefing + clone sync UI. */
   readonly mode?: SessionMode;
+  /** Original project mount roots, persisted so a later resume re-mounts them. */
+  readonly workspaceRoots?: readonly string[];
+  readonly readOnlyRoots?: readonly string[];
   /**
    * Role-session spawn lineage. When set, the caller has already derived the
    * child template from the parent's mounts and this service enforces the
@@ -84,6 +94,13 @@ export interface ResumeChatSessionRequest {
    * the column so the resumed session is still recognizable as clone/plan.
    */
   readonly mode?: SessionMode;
+  /**
+   * Force-revive a session that is still `active` (a takeover / reclaim), not
+   * just ended/failed. The caller must have already claimed ownership so it is
+   * not running elsewhere; this only relaxes the status guard. The prior
+   * generation's container (if any) is left for reconciliation to reap.
+   */
+  readonly force?: boolean;
   readonly disposeWorkspace?: () => Promise<void>;
 }
 
@@ -188,6 +205,8 @@ export class ChatSessionService {
       ...(request.model.model === undefined ? {} : { model: request.model.model }),
       transport: request.transport,
       ...(request.mode === undefined ? {} : { mode: request.mode }),
+      ...(request.workspaceRoots === undefined ? {} : { workspaceRoots: request.workspaceRoots }),
+      ...(request.readOnlyRoots === undefined ? {} : { readOnlyRoots: request.readOnlyRoots }),
       ...(request.parentSessionId === undefined ? {} : { parentSessionId: request.parentSessionId }),
       ...(request.spawnedRole === undefined ? {} : { spawnedRole: request.spawnedRole }),
       runtimeId,
@@ -225,10 +244,27 @@ export class ChatSessionService {
     }
     const stored = await this.requiredStoredSession(request.sessionId);
     // A session running in another window is off-limits to resume here even if
-    // this window's row still reads ended/failed (races on shared state).
+    // this window's row still reads ended/failed (races on shared state). A
+    // reclaim clears this by claiming ownership first, so this still passes.
     this.assertNotRunningElsewhere(stored);
-    if (stored.status !== "ended" && stored.status !== "failed") {
+    // A plain resume is revival, not a takeover of a running backend. A reclaim
+    // (force) deliberately revives an `active` session in THIS window instead.
+    if (!request.force && stored.status !== "ended" && stored.status !== "failed") {
       throw new Error(`Session ${request.sessionId} is ${stored.status}; only ended or failed sessions can be resumed.`);
+    }
+    // A resume boots a FRESH runtime generation, so the session's PREVIOUS
+    // container (from a dead prior instance or an earlier generation) would leak
+    // as a stray "running" sandbox. Reap it best-effort before booting the new
+    // one — otherwise repeated resume/reclaim/reload piles up dead containers.
+    if (stored.runtimeId !== undefined) {
+      try {
+        await this.options.cleanup.cleanupRuntime(stored.runtimeId, "graceful");
+      } catch (error) {
+        this.options.logger.warn("resume: previous runtime cleanup failed", {
+          sessionId: request.sessionId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
     const adapter = this.requiredAdapter(request.model.providerId);
     const runtimeId = this.options.ids.runtimeId();
@@ -433,6 +469,21 @@ export class ChatSessionService {
     }
   }
 
+  /**
+   * Soft nudge for a turn that has gone quiet ("Give it a poke?"): asks the
+   * adapter to interrupt the current turn WITHOUT cancelling it, so a standoff
+   * can resolve gracefully while the session stays live. Returns false when
+   * there is nothing to poke (no live turn, or the adapter has no poke path).
+   */
+  async pokeTurn(sessionId: SessionId): Promise<boolean> {
+    const live = this.liveSessions.get(sessionId);
+    if (live?.activeTurn?.runId === undefined || live.adapter.poke === undefined) {
+      return false;
+    }
+    await live.adapter.poke(live.connection, live.activeTurn.runId);
+    return true;
+  }
+
   listModels(sessionId: SessionId): Promise<AgentModelCatalog> {
     const live = this.requiredLiveSession(sessionId);
     return live.adapter.listModels(live.connection);
@@ -455,6 +506,12 @@ export class ChatSessionService {
     }
     const adapter = this.requiredAdapter(model.providerId);
     const nextTransport = transport ?? live.transport;
+    // A provider switch must run in the NEW provider's sandbox (its own agent
+    // image + egress); reusing the old template booted e.g. Codex inside the
+    // Claude image, where `codex app-server` never answers initialize.
+    const nextTemplate = model.providerId === live.model.providerId
+      ? live.template
+      : withSandboxProvider(live.template, toSandboxProvider(model.providerId));
 
     try {
       await live.adapter.stop(live.connection, reason);
@@ -475,7 +532,7 @@ export class ChatSessionService {
         chatId: live.session.chatId,
         agentId,
         agentRole: sessionRole(live.session),
-        template: live.template,
+        template: nextTemplate,
         workspacePath: live.workspacePath,
         generationId,
         runtimeId,
@@ -503,6 +560,7 @@ export class ChatSessionService {
       live.connection = connection;
       live.adapter = adapter;
       live.transport = nextTransport;
+      live.template = nextTemplate;
       live.model = model;
       // A restart re-boots the backend under this host, so it re-stamps
       // ownership + heartbeat exactly like a fresh activation.
@@ -632,6 +690,26 @@ export class ChatSessionService {
     const updated = await this.updateSession(record, { title });
     this.syncLiveRecord(updated);
     return updated;
+  }
+
+  /**
+   * Force-claims a not-live session's ownership for THIS host instance with a
+   * fresh heartbeat — the backend half of "Take over here". It clears the
+   * running-elsewhere lock (isFreshForeignHeartbeat now sees our own id) so this
+   * window can revive/drive the session. A session already live here is returned
+   * unchanged. The caller (reclaim) then resumes it on a fresh runtime; the
+   * previous owner's container, if any, is left for reconciliation to reap.
+   */
+  async claimOwnership(sessionId: SessionId): Promise<ChatSessionRecord> {
+    const live = this.liveSessions.get(sessionId);
+    if (live !== undefined) {
+      return live.session;
+    }
+    const record = await this.requiredStoredSession(sessionId);
+    return this.updateSession(record, {
+      hostInstanceId: this.options.hostInstanceId,
+      heartbeatAt: this.options.clock.isoNow()
+    });
   }
 
   /** An empty string clears the stored description (persisted as NULL). */
@@ -976,7 +1054,8 @@ export class ChatSessionService {
 
   /**
    * Refuses a destructive/mutating operation on a session another live window
-   * owns. Callers pass a record already known not to be live in this process.
+   * owns. Explicit takeover goes through claimOwnership/reclaim first, which
+   * stamps this host as owner before resuming on a fresh runtime.
    */
   private assertNotRunningElsewhere(record: ChatSessionRecord): void {
     if (this.isFreshForeignHeartbeat(record)) {
@@ -1058,12 +1137,24 @@ export class ChatSessionService {
     const messages: AgentContextMessage[] = [];
     for (const event of events) {
       if (event.eventType === "user.message") {
-        const text = event.payload["text"];
-        if (typeof text === "string" && text.length > 0) {
-          messages.push({ role: "user", text, createdAt: event.createdAt });
+        const raw = event.payload["text"];
+        if (typeof raw === "string" && raw.length > 0) {
+          // Strip the host briefing so restored context is just the dialogue —
+          // replaying mount/protocol boilerplate crowds out real history.
+          const text = stripHostBriefing(raw);
+          if (text.length > 0) {
+            messages.push({ role: "user", text, createdAt: event.createdAt });
+          }
         }
         continue;
       }
+      // Only final agent.text becomes assistant context. agent.reasoning is
+      // DISPLAY-ONLY (see AgentReasoningEvent in contracts/events.ts) — it is
+      // the agent's own scratch thinking, not user/assistant dialogue, and is
+      // naturally excluded here since it never matches "agent.text". It still
+      // flows through appendAndPublish like any other agent event (stored +
+      // pushed to the webview) — that part is correct; only replay-as-context
+      // must skip it.
       if (event.eventType !== "agent.text") {
         continue;
       }

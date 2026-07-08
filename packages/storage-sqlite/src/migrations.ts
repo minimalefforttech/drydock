@@ -88,6 +88,10 @@ export function applyMigrations(connection: SqliteConnection): void {
   // Role sessions: spawned-by lineage. NULL = a normal top-level chat.
   ensureColumn(connection, "chat_sessions", "parent_session_id", "TEXT NULL");
   ensureColumn(connection, "chat_sessions", "spawned_role", "TEXT NULL");
+  // Original project mount roots (JSON arrays), so resume/reclaim re-mounts the
+  // same folders instead of only the disposable workspace.
+  ensureColumn(connection, "chat_sessions", "workspace_roots", "TEXT NULL");
+  ensureColumn(connection, "chat_sessions", "read_only_roots", "TEXT NULL");
   connection.database.exec(
     "CREATE INDEX IF NOT EXISTS idx_chat_sessions_parent ON chat_sessions(parent_session_id)"
   );
@@ -151,6 +155,9 @@ export function applyMigrations(connection: SqliteConnection): void {
     CREATE INDEX IF NOT EXISTS idx_agent_questions_status
       ON agent_questions(status, session_id);
   `);
+  // Per-path read/write intent on a set membership. Legacy rows and any member
+  // added before this column existed default to read-write (0).
+  ensureColumn(connection, "workspace_set_projects", "read_only", "INTEGER NOT NULL DEFAULT 0");
 
   // Stage 4: diff baselines and review threads.
   connection.database.exec(`
@@ -393,6 +400,10 @@ export function applyMigrations(connection: SqliteConnection): void {
   // done, it has a prompt, and it is not in a backlog-category column;
   // manual start never cascades (explicit Force start override, manual only).
   ensureColumn(connection, "subtasks", "auto_start", "INTEGER NOT NULL DEFAULT 0");
+  // Per-subtask dependency-edge colour override (0-7, matching the 8-hue
+  // stripe palette); NULL means "use the parent task's stripe hue" (the
+  // pre-existing default behaviour), so this column is purely additive.
+  ensureColumn(connection, "subtasks", "color_override", "INTEGER NULL");
   // work_tasks.state is replaced by column_id (+ optional done_at); state is
   // kept transitionally (see WorkTaskRecord doc comment) until the board UI
   // lands and the webview stops reading it.

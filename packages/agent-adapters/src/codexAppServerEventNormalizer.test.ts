@@ -36,6 +36,39 @@ test("normalizes app-server text, command, file, plan, and done notifications", 
   assert.equal(events[4]?.type === "agent.done" ? events[4].status : "", "completed");
 });
 
+test("a completed command execution carries its captured output and exit code", () => {
+  const normalizer = new CodexAppServerEventNormalizer(new FixedIds(), new FixedClock());
+  const context = {
+    sessionId: asId<"SessionId">("session-test"),
+    runId: asId<"RunId">("run-test"),
+    agentRole: "worker" as const,
+    runtimeId: asId<"RuntimeId">("runtime-test")
+  };
+  const events = normalizer.normalize({
+    method: "item/completed",
+    params: { item: { type: "command_execution", command: "ls", exit_code: 0, aggregated_output: "file-a\nfile-b\n" } }
+  }, context);
+
+  assert.deepEqual(events.map((event) => event.type), ["agent.command"]);
+  const command = events[0];
+  assert.equal(command?.type === "agent.command" ? command.exitCode : -1, 0);
+  assert.ok(command?.type === "agent.command" && (command.output ?? "").includes("file-a"));
+});
+
+test("normalizes app-server reasoning deltas into agent.reasoning events", () => {
+  const normalizer = new CodexAppServerEventNormalizer(new FixedIds(), new FixedClock());
+  const context = {
+    sessionId: asId<"SessionId">("session-test"),
+    runId: asId<"RunId">("run-test"),
+    agentRole: "worker" as const,
+    runtimeId: asId<"RuntimeId">("runtime-test")
+  };
+  const events = normalizer.normalize({ method: "item/reasoning/delta", params: { delta: "considering the approach" } }, context);
+
+  assert.deepEqual(events.map((event) => event.type), ["agent.reasoning"]);
+  assert.equal(events[0]?.type === "agent.reasoning" ? events[0].text : "", "considering the approach");
+});
+
 test("normalizes app-server turn failures into error plus terminal failed", () => {
   const normalizer = new CodexAppServerEventNormalizer(new FixedIds(), new FixedClock());
   const events = normalizer.normalize({

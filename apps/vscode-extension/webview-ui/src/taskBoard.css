@@ -143,6 +143,35 @@ body {
   min-height: 200px;
 }
 
+/* Lanes toggle ON: the rail stacks one .tb-lane per column category instead
+   of laying every column out in a single row. .tb-lane is shared with the
+   column-settings modal's category grouping (same box: category-accented
+   left border, small caption) — .tb-lane-cols is the rail-specific
+   horizontal row of columns nested inside it. */
+.tb-rail.tb-lanes {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.tb-rail.tb-lanes .tb-lane {
+  min-height: 0;
+}
+
+.tb-lane-caption {
+  font-size: 0.7em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.7;
+}
+
+.tb-lane-cols {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  overflow-x: auto;
+}
+
 .tb-col {
   flex: 0 0 250px;
   display: flex;
@@ -580,6 +609,14 @@ body {
   cursor: default;
 }
 
+/* Lanes toolbar toggle: pressed state uses the same accent as active
+   selections elsewhere (focusBorder), matching the toolbar's other controls. */
+.tb-lanes-toggle.active {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border-color: var(--vscode-button-background);
+}
+
 .icon-button {
   border: none;
   background: transparent;
@@ -667,6 +704,77 @@ body {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
 }
 
+/* Per-subtask dependency-edge colour override: a small swatch toggle that
+   expands into the 8-hue palette (matching --dd-stripe-0..7) plus a clear
+   option reverting to the parent task's stripe hue. */
+.tb-color-picker {
+  position: relative;
+  align-self: flex-start;
+}
+
+.tb-color-toggle {
+  font-size: 0.7em;
+  line-height: 1;
+  padding: 1px 4px;
+}
+
+.tb-color-toggle.stripe-h0 { color: var(--dd-stripe-0); }
+.tb-color-toggle.stripe-h1 { color: var(--dd-stripe-1); }
+.tb-color-toggle.stripe-h2 { color: var(--dd-stripe-2); }
+.tb-color-toggle.stripe-h3 { color: var(--dd-stripe-3); }
+.tb-color-toggle.stripe-h4 { color: var(--dd-stripe-4); }
+.tb-color-toggle.stripe-h5 { color: var(--dd-stripe-5); }
+.tb-color-toggle.stripe-h6 { color: var(--dd-stripe-6); }
+.tb-color-toggle.stripe-h7 { color: var(--dd-stripe-7); }
+
+.tb-color-swatches {
+  position: absolute;
+  top: 20px;
+  left: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px;
+  width: 148px;
+  padding: 5px;
+  border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.4));
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.tb-color-swatch {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1.5px solid transparent;
+}
+
+.tb-color-swatch.stripe-h0 { background: var(--dd-stripe-0); }
+.tb-color-swatch.stripe-h1 { background: var(--dd-stripe-1); }
+.tb-color-swatch.stripe-h2 { background: var(--dd-stripe-2); }
+.tb-color-swatch.stripe-h3 { background: var(--dd-stripe-3); }
+.tb-color-swatch.stripe-h4 { background: var(--dd-stripe-4); }
+.tb-color-swatch.stripe-h5 { background: var(--dd-stripe-5); }
+.tb-color-swatch.stripe-h6 { background: var(--dd-stripe-6); }
+.tb-color-swatch.stripe-h7 { background: var(--dd-stripe-7); }
+
+.tb-color-swatch.selected {
+  border-color: var(--vscode-foreground, #cccccc);
+}
+
+.tb-color-swatch.suggested {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 55%, transparent);
+}
+
+.tb-color-clear {
+  flex-basis: 100%;
+  font-size: 0.75em;
+  padding: 1px 6px;
+}
+
 /* Connection dots on subtask cards. They extend into the column body's 8px
    padding, so the inner scroller never clips them. */
 .tb-dot {
@@ -743,6 +851,18 @@ body {
 .tb-task-start.armed {
   color: var(--vscode-errorForeground, #f48771);
   border-color: var(--vscode-errorForeground, #f48771);
+}
+
+/* Linked-chat count chip: subtasks aren't just pre-prompts — chats run
+   against them, and this surfaces how many are linked (running or finished)
+   alongside the ▶ Start affordance for starting another one. */
+.tb-linked-chip {
+  font-size: 0.68em;
+  letter-spacing: 0.02em;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-descriptionForeground, #9d9d9d);
+  color: var(--vscode-descriptionForeground, #9d9d9d);
 }
 
 .tb-running-chip {

@@ -13,6 +13,7 @@ import type {
   RuntimeInventoryRecord,
   StartRuntimeRequest
 } from "@drydock/contracts";
+import { sandboxRuntimePath } from "@drydock/core";
 import type { RuntimeAdapter } from "@drydock/core";
 import type { Logger } from "@drydock/core";
 
@@ -52,7 +53,8 @@ export class DockerSandboxRuntimeAdapter implements RuntimeAdapter {
       { cwd: this.options.cwd, timeoutMs: this.createTimeoutMs }
     );
     if (result.exitCode !== 0) {
-      throw new Error(`sbx create failed: ${result.stderr || result.error || result.stdout}`);
+      const detail = result.stderr || result.error || result.stdout;
+      throw new Error(`sbx create failed: ${detail}${authHint(detail)}`);
     }
     const handle: RuntimeHandle = {
       runtimeId: request.runtimeId,
@@ -158,6 +160,27 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Appends actionable guidance when sbx fails on authentication. The common cause
+ * is NOT that the user is signed out, but that the extension host (a GUI-launched
+ * VS Code) can't reach the same Docker/sbx session the user's terminal can —
+ * usually the Docker credential helper isn't on the extension's PATH.
+ */
+function authHint(detail: string): string {
+  if (!/not authenticated|no valid user session|secret not found|401|sbx login/i.test(detail)) {
+    return "";
+  }
+  return [
+    "",
+    "The extension host isn't seeing your Docker Sandbox session. Try, in order:",
+    "1. Use the “Sign in to Docker Sandbox” button below (runs sbx login).",
+    "2. If that succeeds, reload the window and send again.",
+    "3. Otherwise launch VS Code from a terminal where sbx works (code .).",
+    "4. Confirm Docker Desktop is running.",
+    "Drydock adds Docker Desktop's bin to PATH; a non-standard install may need drydock.runtime.pathAdditions."
+  ].join("\n");
+}
+
 /** Provider-scoped egress allowlist; the legacy codex-specific key still reads. */
 function networkResources(advancedOptions: Record<string, unknown>): string | undefined {
   const generic = advancedOptions["networkResources"];
@@ -166,11 +189,11 @@ function networkResources(advancedOptions: Record<string, unknown>): string | un
   return typeof legacy === "string" ? legacy : undefined;
 }
 
+/**
+ * The sandbox mount point for a host path. Delegates to core's
+ * `sandboxRuntimePath` so the container path advertised in mount policies (and
+ * thus the briefing/UI) is the exact location sbx mounts the folder at.
+ */
 export function toDockerSandboxPath(hostPath: string): string {
-  const normalized = hostPath.replace(/\\/g, "/");
-  const drive = /^([A-Za-z]):\/(.*)$/.exec(normalized);
-  if (drive) {
-    return `/${drive[1]?.toLowerCase()}/${drive[2] ?? ""}`;
-  }
-  return normalized;
+  return sandboxRuntimePath(hostPath);
 }

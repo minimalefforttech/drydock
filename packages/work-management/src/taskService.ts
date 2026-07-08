@@ -221,6 +221,11 @@ export class TaskService {
     await this.options.store.deleteLink(asId<"TaskId">(taskId), resolveTarget(target));
   }
 
+  /** Session ids linked to one subtask (session-target links carrying that subtaskId), in link order. */
+  listSessionIdsBySubtask(subtaskId: string): Promise<SessionId[]> {
+    return this.options.store.listSessionIdsBySubtask(asId<"SubtaskId">(subtaskId));
+  }
+
   getTask(taskId: string): Promise<WorkTaskRecord | null> {
     return this.options.store.getTask(asId<"TaskId">(taskId));
   }

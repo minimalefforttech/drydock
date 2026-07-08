@@ -16,3 +16,5 @@ land.
 | [0005](0005-product-identity-and-namespace.md) | Product identity and namespace | Accepted | The product is Drydock. Public ids use `drydock.*`, `@drydock/*`, and `drydock-baseline`. |
 | [0006](0006-task-scoped-chat-and-agent-visibility.md) | Task-scoped chat and agent visibility | Accepted | Chats belong to tasks. The Chat surface exposes context, safe rich transcript blocks, and delegated-agent visibility. |
 | [0007](0007-task-board-subtasks-and-auto-start.md) | Task board, subtasks, and auto-start | Accepted | Subtasks with same-task acyclic dependencies on a category-driven board. Auto-start is per-subtask opt-in; automation never forces and never passes Review. |
+| [0008](0008-session-ownership-and-reclaim.md) | Session ownership and reclaim | Accepted | Fresh foreign heartbeats make sessions read-only here. Takeover is explicit and restores durable context plus approved mounts. |
+| [0009](0009-apply-access-before-approval.md) | Apply access before approval | Accepted | Runtime mounts are applied before an access request is marked approved. Failed applies leave the request pending. |

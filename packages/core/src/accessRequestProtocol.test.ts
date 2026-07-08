@@ -5,8 +5,10 @@ import {
   extractAccessRequests,
   extractAgentQuestions,
   extractMemoryCandidates,
-  MAX_ACCESS_REQUESTS_PER_TEXT
+  MAX_ACCESS_REQUESTS_PER_TEXT,
+  stripHostBriefing
 } from "./accessRequestProtocol.js";
+import { sandboxRuntimePath } from "./mountPolicy.js";
 
 test("extractAccessRequests parses a well-formed fenced block", () => {
   const text = [
@@ -65,6 +67,26 @@ test("buildSessionBriefing states mode, mounts, and the request protocol", () =>
   assert.match(briefing, /\/workspace\/app \(read-only\) = host D:\/proj\/app/);
   assert.match(briefing, /access-request/);
   assert.match(briefing, /\[end host briefing\]/);
+});
+
+test("buildSessionBriefing omits the host remap for a direct-mirror mount", () => {
+  const host = "C:\\Users\\me\\proj";
+  const runtimePath = sandboxRuntimePath(host);
+  const briefing = buildSessionBriefing({
+    mode: "implementation",
+    mounts: [{ runtimePath, mode: "read-write", hostDisplayPath: host }]
+  });
+  assert.match(briefing, new RegExp(`${runtimePath.replace(/[/]/g, "\\/")} \\(read-write\\)`));
+  // The runtime path already encodes the host location, so no "= host ..." noise.
+  assert.doesNotMatch(briefing, /= host/);
+});
+
+test("stripHostBriefing removes the briefing block but keeps the prompt and plain text", () => {
+  const briefing = buildSessionBriefing({ mode: "implementation", mounts: [] });
+  const stored = `${briefing}\n\nPlease refactor the login flow.`;
+  assert.equal(stripHostBriefing(stored), "Please refactor the login flow.");
+  // Text without a briefing is returned unchanged.
+  assert.equal(stripHostBriefing("just a follow-up message"), "just a follow-up message");
 });
 
 test("extractMemoryCandidates takes bounded plain text and drops empties", () => {

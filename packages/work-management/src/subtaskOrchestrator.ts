@@ -64,7 +64,7 @@ export interface OrchestratorLinkPort {
 }
 
 /** App-layer callback that actually starts a chat session and sends the subtask's prompt as the first turn. */
-export type StartSubtaskRun = (input: { readonly taskId: string; readonly subtaskId: string; readonly prompt: string }) => Promise<{ readonly sessionId: string }>;
+export type StartSubtaskRun = (input: { readonly taskId: string; readonly subtaskId: string; readonly prompt: string; readonly title: string }) => Promise<{ readonly sessionId: string }>;
 
 export interface SubtaskOrchestratorOptions {
   readonly subtasks: OrchestratorSubtaskPort;
@@ -158,7 +158,7 @@ export class SubtaskOrchestrator {
 
     this.running.add(id);
     try {
-      const { sessionId } = await this.options.startRun({ taskId: subtask.taskId, subtaskId: id, prompt: subtask.prompt });
+      const { sessionId } = await this.options.startRun({ taskId: subtask.taskId, subtaskId: id, prompt: subtask.prompt, title: subtask.title });
       this.sessionToSubtask.set(sessionId, id);
       await this.options.links.link(subtask.taskId, { sessionId, subtaskId: id });
       const inProgress = await this.options.board.firstColumnOf("in-progress");

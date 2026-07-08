@@ -17,6 +17,7 @@ export * from "./lineDiff.js";
 export * from "./mountPolicy.js";
 export * from "./reviewCommentComposer.js";
 export * from "./sessionDiffService.js";
+export * from "./sessionRawStreamStore.js";
 export * from "./runtimeAdapter.js";
 export * from "./runtimeCleanupService.js";
 export * from "./runtimeReconcileService.js";

@@ -43,6 +43,11 @@ test("workspace policy records persist across reopen", async () => {
     assert.equal(byKey?.projectId, "project-a");
     // Membership order is positional, not insertion-alphabetical.
     assert.deepEqual(set?.projectIds, ["project-b", "project-a"]);
+    // Members round-trip in the same order with their read-only flag (default false).
+    assert.deepEqual(set?.members, [
+      { projectId: "project-b", readOnly: false },
+      { projectId: "project-a", readOnly: false }
+    ]);
     assert.equal(approved.length, 1);
     assert.equal(approved[0]?.resolvedBy, "user");
     assert.equal(pending.length, 0);
@@ -116,10 +121,12 @@ function project(projectId: string, projectPath: string): ProjectRecord {
 }
 
 function workspaceSet(workspaceSetId: string, projectIds: readonly string[]): WorkspaceSetRecord {
+  const ids = projectIds.map((projectId) => asId<"ProjectId">(projectId));
   return {
     workspaceSetId: asId<"WorkspaceSetId">(workspaceSetId),
     name: "Test set",
-    projectIds: projectIds.map((projectId) => asId<"ProjectId">(projectId)),
+    projectIds: ids,
+    members: ids.map((projectId) => ({ projectId, readOnly: false })),
     createdAt: "2026-07-02T00:00:00.000Z",
     updatedAt: "2026-07-02T00:00:00.000Z"
   };

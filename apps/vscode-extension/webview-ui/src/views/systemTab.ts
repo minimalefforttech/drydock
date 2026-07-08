@@ -12,7 +12,7 @@
  * re-render with replaceChildren so stop-button handlers cannot leak.
  */
 
-import { type RuntimeSummary } from "@drydock/contracts";
+import { type RuntimeStatsSummary, type RuntimeSummary } from "@drydock/contracts";
 import { badge, button, el, formatTime } from "../components.js";
 import { onPush, request } from "../messaging.js";
 import { currentSession, type DiagnosticEntry } from "../state.js";
@@ -39,6 +39,10 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
   const showRemovedText = el("span");
   showRemovedText.textContent = "show removed (24h)";
   showRemovedLabel.append(showRemovedCheckbox, showRemovedText);
+  const cleanupButton = button("Clean up stale", "small ghost");
+  cleanupButton.title = "Reap quarantined/lost runtimes whose sandbox is already gone, and purge old removed rows";
+  const runtimesControls = el("div", "button-row");
+  runtimesControls.append(showRemovedLabel, cleanupButton);
   const runtimesList = el("div", "runtimes");
 
   const logHeading = el("h3");
@@ -57,7 +61,7 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
     toolsHeading,
     toolsRow,
     runtimesHeading,
-    showRemovedLabel,
+    runtimesControls,
     runtimesList,
     chatDiagnosticsHeading,
     chatFactsGrid,
@@ -87,6 +91,18 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
     });
   });
   showRemovedCheckbox.addEventListener("change", () => void refreshRuntimes());
+  cleanupButton.addEventListener("click", () => {
+    cleanupButton.disabled = true;
+    void request({ type: "runtime.reconcile" }).then((response) => {
+      cleanupButton.disabled = false;
+      if (!response.ok) {
+        logSystemLine(`clean up failed: ${response.error.message}`);
+        return;
+      }
+      logSystemLine("cleaned up stale runtimes (reaped gone sandboxes, purged old removed rows)");
+      void refreshRuntimes();
+    });
+  });
 
   async function refreshRuntimes(): Promise<void> {
     const response = await request({ type: "isolatedRun.listRuntimes", includeRemoved: showRemovedCheckbox.checked });
@@ -96,6 +112,29 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
       ctx.persist();
     }
   }
+
+  // Live per-sandbox CPU/mem/IO, measured host-side (each sandbox's nerdbox shim
+  // process tree) — one cheap snapshot covers every sandbox, so we show them all
+  // while the System tab is visible. Ephemeral — not persisted.
+  const statsByRuntime = new Map<string, RuntimeStatsSummary>();
+  let statsInFlight = false;
+  async function pollStats(): Promise<void> {
+    if (statsInFlight || state.activeTab !== "system") return;
+    statsInFlight = true;
+    try {
+      const response = await request({ type: "runtime.stats" });
+      if (response.ok && response.payload.type === "runtime.stats") {
+        statsByRuntime.clear();
+        for (const entry of response.payload.stats) statsByRuntime.set(entry.runtimeId, entry);
+        renderRuntimes();
+      }
+    } finally {
+      statsInFlight = false;
+    }
+  }
+  // Ticks only while the System tab is visible (a cheap flag check otherwise);
+  // the first sample also fires immediately on activation from render().
+  window.setInterval(() => void pollStats(), 2_500);
 
   // ---------------------------------------------------------------------------
   // Push subscriptions (global, non-session events)
@@ -144,10 +183,11 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
 
   function runtimeRow(runtime: RuntimeSummary): HTMLElement {
     const row = el("div", "runtime-row");
+    const head = el("div", "runtime-head");
     const status = badge(runtime.status, `status-${runtime.status}`);
     const name = el("span", "runtime-name");
     name.textContent = runtime.externalName;
-    row.append(status, name);
+    head.append(status, name);
     if (runtime.status !== "removed") {
       const stop = button("Stop", "ghost small");
       stop.addEventListener("click", () => {
@@ -161,9 +201,54 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
           }
         });
       });
-      row.append(stop);
+      head.append(stop);
+    }
+    row.append(head);
+    // Live host-side resource line for running sandboxes — the "is it actually
+    // doing anything?" signal (CPU / memory / I/O), refreshed by the stats poll.
+    if (runtime.status === "running") {
+      row.append(statsLine(statsByRuntime.get(runtime.runtimeId)));
     }
     return row;
+  }
+
+  function statsLine(stats: RuntimeStatsSummary | undefined): HTMLElement {
+    const line = el("div", "runtime-stats");
+    if (stats === undefined) {
+      line.textContent = "measuring…";
+      return line;
+    }
+    if (!stats.available) {
+      line.textContent = "stats unavailable";
+      return line;
+    }
+    const parts = [
+      `CPU ${stats.cpuPercent === null ? "…" : `${String(Math.round(stats.cpuPercent))}%`}`,
+      `mem ${stats.memBytes === null ? "—" : formatBytes(stats.memBytes)}`,
+      `IO ↓${formatRate(stats.ioReadBytesPerSec)} ↑${formatRate(stats.ioWriteBytesPerSec)}`
+    ];
+    if (stats.loadAvg1 !== null) parts.push(`load ${stats.loadAvg1.toFixed(2)}`);
+    if (stats.threads !== null) parts.push(`${String(stats.threads)} thr`);
+    line.textContent = parts.join("  ·  ");
+    return line;
+  }
+
+  function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${String(Math.round(bytes))} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let value = bytes / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit += 1;
+    }
+    return `${value < 10 ? value.toFixed(1) : String(Math.round(value))} ${units[unit]}`;
+  }
+
+  function formatRate(bytesPerSec: number | null): string {
+    if (bytesPerSec === null) return "…";
+    if (bytesPerSec < 1) return "0";
+    return `${formatBytes(bytesPerSec)}/s`;
   }
 
   function renderLog(): void {
@@ -252,6 +337,8 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
 
   function render(): void {
     renderRuntimes();
+    // Fetch a fresh sample the moment the tab is shown (the interval covers the rest).
+    void pollStats();
     renderChatDiagnostics();
     renderLog();
   }

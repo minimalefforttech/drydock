@@ -23,6 +23,7 @@ import {
   type ReviewThreadStatus,
   type SessionId,
   type WorkspacePolicyState,
+  type WorkspaceSetMember,
   type WorkspaceSetRecord,
   type WorkspaceSetSummary
 } from "@drydock/contracts";
@@ -62,10 +63,10 @@ export class WorkspaceReviewAppService {
       this.options.workspaceSets.listWorkspaceSets(),
       this.options.accessRequests.listRequests()
     ]);
-    const projectNames = new Map(projects.map((project) => [project.projectId, project.name]));
+    const byId = new Map(projects.map((project) => [project.projectId, project]));
     return {
       projects: projects.map(toProjectSummary),
-      workspaceSets: sets.map((set) => toWorkspaceSetSummary(set, projectNames)),
+      workspaceSets: sets.map((set) => toWorkspaceSetSummary(set, byId)),
       accessRequests: requests.map(toAccessRequestSummary)
     };
   }
@@ -78,11 +79,58 @@ export class WorkspaceReviewAppService {
     return projects;
   }
 
-  /** Creates a set over every registered project, in catalog order. */
-  async createWorkspaceSetFromCatalog(name: string): Promise<WorkspaceSetSummary> {
-    const projects = await this.options.projectCatalog.listProjects();
-    const record = await this.options.workspaceSets.createWorkspaceSet(name, projects.map((project) => project.projectId));
-    return toWorkspaceSetSummary(record, new Map(projects.map((project) => [project.projectId, project.name])));
+  /** Removes a registered project (and its set memberships); returns fresh state. */
+  async removeProject(projectId: string): Promise<WorkspacePolicyState> {
+    await this.options.projectCatalog.removeProject(asId<"ProjectId">(projectId));
+    return this.getPolicyState();
+  }
+
+  /**
+   * The host paths this session was granted via approved access requests, split
+   * by mount mode. A resume re-mounts these alongside the session's original
+   * project roots so a granted folder (e.g. one the agent asked for) survives a
+   * revive instead of forcing the agent to re-request it every time.
+   */
+  async approvedAccessRoots(sessionId: string): Promise<{ readonly roots: readonly string[]; readonly readOnlyRoots: readonly string[] }> {
+    const approved = (await this.options.accessRequests.listRequests("approved"))
+      .filter((request) => request.sessionId === sessionId);
+    const roots: string[] = [];
+    const readOnlyRoots: string[] = [];
+    for (const request of approved) {
+      roots.push(request.hostPath);
+      if (request.mode === "read-only") {
+        readOnlyRoots.push(request.hostPath);
+      }
+    }
+    return { roots, readOnlyRoots };
+  }
+
+  /** Repoints a project at a new host folder; returns fresh state. */
+  async updateProjectPath(projectId: string, newPath: string): Promise<WorkspacePolicyState> {
+    await this.options.projectCatalog.updateProjectPath(asId<"ProjectId">(projectId), newPath);
+    return this.getPolicyState();
+  }
+
+  /** Creates a set from an explicit, ordered member list; returns fresh state. */
+  async createWorkspaceSet(name: string, members: readonly WorkspaceSetMemberInput[]): Promise<WorkspacePolicyState> {
+    await this.options.workspaceSets.createWorkspaceSet(name, toMembers(members));
+    return this.getPolicyState();
+  }
+
+  /** Replaces a set's name and membership; returns fresh state. */
+  async updateWorkspaceSet(
+    workspaceSetId: string,
+    name: string,
+    members: readonly WorkspaceSetMemberInput[]
+  ): Promise<WorkspacePolicyState> {
+    await this.options.workspaceSets.updateWorkspaceSet(asId<"WorkspaceSetId">(workspaceSetId), name, toMembers(members));
+    return this.getPolicyState();
+  }
+
+  /** Deletes a set (never its member projects); returns fresh state. */
+  async deleteWorkspaceSet(workspaceSetId: string): Promise<WorkspacePolicyState> {
+    await this.options.workspaceSets.deleteWorkspaceSet(asId<"WorkspaceSetId">(workspaceSetId));
+    return this.getPolicyState();
   }
 
   /**
@@ -101,8 +149,17 @@ export class WorkspaceReviewAppService {
       }
       return { mode: selection.mode, roots: [...openFolderRoots] };
     }
-    const roots = await this.options.workspaceSets.resolveMountRoots(asId<"WorkspaceSetId">(selection.workspaceSetId));
-    return { workspaceSetId: selection.workspaceSetId, mode: selection.mode, roots };
+    const setId = asId<"WorkspaceSetId">(selection.workspaceSetId);
+    const [roots, readOnlyRoots] = await Promise.all([
+      this.options.workspaceSets.resolveMountRoots(setId),
+      this.options.workspaceSets.resolveReadOnlyRoots(setId)
+    ]);
+    return {
+      workspaceSetId: selection.workspaceSetId,
+      mode: selection.mode,
+      roots,
+      ...(readOnlyRoots.length === 0 ? {} : { readOnlyRoots })
+    };
   }
 
   /** Ordered absolute mount roots for a workspace set (used by "open in new window"). */
@@ -340,11 +397,31 @@ function toProjectSummary(record: ProjectRecord): ProjectSummary {
   };
 }
 
-function toWorkspaceSetSummary(record: WorkspaceSetRecord, projectNames: ReadonlyMap<string, string>): WorkspaceSetSummary {
+/** Panel-side shape for a set member before it is validated into an id. */
+interface WorkspaceSetMemberInput {
+  readonly projectId: string;
+  readonly readOnly: boolean;
+}
+
+function toMembers(members: readonly WorkspaceSetMemberInput[]): WorkspaceSetMember[] {
+  return members.map((member) => ({ projectId: asId<"ProjectId">(member.projectId), readOnly: member.readOnly }));
+}
+
+function toWorkspaceSetSummary(record: WorkspaceSetRecord, byId: ReadonlyMap<string, ProjectRecord>): WorkspaceSetSummary {
+  const members = record.members.map((member) => {
+    const project = byId.get(member.projectId);
+    return {
+      projectId: member.projectId,
+      name: project?.name ?? member.projectId,
+      displayPath: project?.path ?? "",
+      readOnly: member.readOnly
+    };
+  });
   return {
     workspaceSetId: record.workspaceSetId,
     name: record.name,
-    projectNames: record.projectIds.map((projectId) => projectNames.get(projectId) ?? projectId)
+    projectNames: members.map((member) => member.name),
+    members
   };
 }
 

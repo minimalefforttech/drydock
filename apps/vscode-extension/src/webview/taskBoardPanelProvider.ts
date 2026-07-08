@@ -168,13 +168,14 @@ export class TaskBoardPanelProvider {
           throw new Error(`Subtask ${payload.subtaskId} was not found.`);
         }
         const hasFieldUpdate = payload.title !== undefined || payload.description !== undefined
-          || payload.prompt !== undefined || payload.autoStart !== undefined;
+          || payload.prompt !== undefined || payload.autoStart !== undefined || payload.colorOverride !== undefined;
         if (hasFieldUpdate) {
           await backend.subtasks.updateSubtask(payload.subtaskId, {
             ...(payload.title === undefined ? {} : { title: payload.title }),
             ...(payload.description === undefined ? {} : { description: payload.description }),
             ...(payload.prompt === undefined ? {} : { prompt: payload.prompt }),
-            ...(payload.autoStart === undefined ? {} : { autoStart: payload.autoStart })
+            ...(payload.autoStart === undefined ? {} : { autoStart: payload.autoStart }),
+            ...(payload.colorOverride === undefined ? {} : { colorOverride: payload.colorOverride })
           });
         }
         if (payload.columnId !== undefined) {

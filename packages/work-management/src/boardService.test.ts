@@ -12,6 +12,7 @@ import type {
   BoardColumnStore,
   ColumnCategory,
   ColumnId,
+  SessionId,
   SubtaskId,
   SubtaskRecord,
   SubtaskStore,
@@ -224,6 +225,12 @@ class MemoryWorkTaskStore implements WorkTaskStore {
 
   listLinks(taskId?: TaskId): Promise<WorkTaskLinkRecord[]> {
     return Promise.resolve(taskId === undefined ? [...this.links] : this.links.filter((link) => link.taskId === taskId));
+  }
+
+  listSessionIdsBySubtask(subtaskId: SubtaskId): Promise<SessionId[]> {
+    return Promise.resolve(
+      this.links.filter((link) => link.subtaskId === subtaskId && link.sessionId !== undefined).map((link) => link.sessionId as SessionId)
+    );
   }
 
   reassignTasksColumn(fromColumnId: ColumnId, toColumnId: ColumnId): Promise<void> {

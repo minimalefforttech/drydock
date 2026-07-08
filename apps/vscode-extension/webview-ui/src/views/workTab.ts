@@ -26,6 +26,7 @@ import {
   type SubtaskSummary,
   type WorkHistoryEntry,
   type WorkspaceActivateResult,
+  type WorkspaceSetSummary,
   type WorkTaskSummary
 } from "@drydock/contracts";
 import {
@@ -204,6 +205,9 @@ function activateOutcomeLine(result: WorkspaceActivateResult): string {
   }
 }
 
+/** DataTransfer MIME for dragging an orphaned chat onto a task to link it. */
+const SESSION_DRAG_MIME = "application/x-drydock-session";
+
 export function createWorkTab(ctx: ViewContext): WorkTabView {
   const state = ctx.state;
   const root = el("div", "work-tab");
@@ -364,10 +368,17 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   /**
    * Create & start chat: task.create → (set picked → task.link {workspaceSetId})
-   * → chat.startSession {model, workspace} → task.link {sessionId} → upsert the
-   * session, select it, jump to Chat. Buttons disabled while in flight; on any
+   * → chat.startSession {model, workspace, title} → task.link {sessionId} →
+   * upsert the session, select it. Buttons disabled while in flight; on any
    * step failing we log to chat diagnostics and stop — earlier steps stay (a
    * created task without a chat is a fine partial outcome).
+   *
+   * UX: the Chat tab switch happens RIGHT AFTER the task is created (and its
+   * workspace-set link, if any) — not after chat.startSession resolves — so the
+   * user sees the Chat tab immediately with a "Starting the chat backend…"
+   * placeholder (ctx.bridge.chat.showStarting) instead of a perceived hang
+   * while the backend boots. The real session is selected (clearing the
+   * placeholder) once chat.startSession resolves.
    */
   const createTaskAndStartChat = (): void => {
     if (!taskTitleInput.value.trim()) return;
@@ -380,17 +391,27 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         const linked = await linkTaskAwait(task.taskId, { workspaceSetId: setId });
         if (linked === null) { renderTasks(); ctx.persist(); setCreateButtonsDisabled(false); return; }
       }
-      // Start the chat with the panel's current provider/model selection.
+      // Jump to Chat now with a loading placeholder — the backend boot below
+      // takes a few seconds and should not look like a hang on this tab.
+      resetTaskCreateForm();
+      renderTasks();
+      ctx.persist();
+      ctx.bridge.chat.showStarting(true);
+      ctx.bridge.switchTab("chat");
+      // Start the chat with the panel's current provider/model selection, named
+      // after the task so the chat list reads naturally.
       const model = { providerId: state.providerId, ...(state.selectedModel ? { model: state.selectedModel } : {}) };
       const workspace = pickedChatWorkspace();
       const startResponse = await request({
         type: "chat.startSession",
         model,
+        title: task.title,
         ...(workspace ? { workspace } : {})
       });
       if (!startResponse.ok || startResponse.payload.type !== "chat.startSession") {
         ctx.bridge.chat.logChat(`start chat failed: ${startResponse.ok ? "unexpected response" : startResponse.error.message}`);
-        renderTasks(); ctx.persist(); setCreateButtonsDisabled(false);
+        ctx.bridge.chat.showStarting(false);
+        setCreateButtonsDisabled(false);
         return;
       }
       const session = startResponse.payload.session;
@@ -400,19 +421,15 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       const linkedSession = await linkTaskAwait(task.taskId, { sessionId: session.sessionId });
       if (linkedSession === null) {
         // The chat exists and is upserted; only the link failed (already logged).
-        resetTaskCreateForm();
         renderTasks(); renderSessions(); ctx.persist();
         ctx.bridge.chat.selectSession(session.sessionId);
-        ctx.bridge.switchTab("chat");
         setCreateButtonsDisabled(false);
         return;
       }
-      resetTaskCreateForm();
       renderTasks();
       renderSessions();
       ctx.persist();
       ctx.bridge.chat.selectSession(session.sessionId);
-      ctx.bridge.switchTab("chat");
       setCreateButtonsDisabled(false);
     })();
   };
@@ -438,12 +455,31 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   unassignedSessionsSection.body.append(sessionsList);
 
   // --- Workspace sets (advanced) ---------------------------------------------
+  // A workspace set is an editable, ordered list of registered folders, each
+  // mounted read-write or read-only. The editor stages members in webview-local
+  // draft state; nothing persists until Save. Editing a saved set loads it back
+  // in here; saving over it calls workspace.updateSet.
   const workspaceSets = collapsible("Workspace sets (advanced)");
+
+  interface DraftMember { readonly projectId: string; readOnly: boolean; }
+  let editingSetId: string | null = null;
+  let draftMembers: DraftMember[] = [];
+  let editingProjectId: string | null = null;
+
+  const setNameInput = textInput("Workspace set name");
+  const editorMembers = el("div", "ws-editor-members");
+  const addProjectSelect = select("ws-add-select", "Add a registered folder to this set");
   const registerFoldersButton = button("Register open folders", "small");
-  const setNameInput = textInput("New set name");
-  const createSetButton = button("Create set", "small");
-  const setCreateRow = el("div", "button-row");
-  setCreateRow.append(registerFoldersButton, setNameInput, createSetButton);
+  const addRow = el("div", "button-row");
+  addRow.append(addProjectSelect, registerFoldersButton);
+  const saveSetButton = button("Save workspace", "small");
+  const cancelEditButton = button("Cancel", "ghost small");
+  const editorActions = el("div", "button-row");
+  editorActions.append(saveSetButton, cancelEditButton);
+  const editorHint = el("div", "ws-editor-hint");
+  const workspaceEditor = el("div", "ws-editor");
+  workspaceEditor.append(setNameInput, editorMembers, addRow, editorActions, editorHint);
+
   const workspaceSetSelect = select("set-select", "Workspace set mounted into new chats");
   const modeSelect = select("mode-select", "Session mode for new chats");
   modeSelect.append(option("plan", "plan (read-only)"), option("implementation", "implementation (read-write)"));
@@ -452,7 +488,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // Explicit set rows (each a touch-history hover anchor); populated in render.
   const setsList = el("div", "sets-list");
   const projectsList = el("div", "projects-list");
-  workspaceSets.body.append(setCreateRow, setPickRow, setsList, projectsList);
+  workspaceSets.body.append(workspaceEditor, setPickRow, setsList, projectsList);
 
   workspaceSetSelect.addEventListener("change", () => {
     state.selectedWorkspaceSetId = workspaceSetSelect.value;
@@ -463,27 +499,145 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     state.selectedSessionMode = modeSelect.value;
     ctx.persist();
   });
+
+  function projectSummaryById(projectId: string) {
+    return (state.workspacePolicy?.projects ?? []).find((project) => project.projectId === projectId);
+  }
+
+  function resetDraft(): void {
+    editingSetId = null;
+    draftMembers = [];
+    setNameInput.value = "";
+    renderWorkspaceEditor();
+  }
+
+  function loadSetIntoDraft(set: WorkspaceSetSummary): void {
+    editingSetId = set.workspaceSetId;
+    setNameInput.value = set.name;
+    draftMembers = set.members.map((member) => ({ projectId: member.projectId, readOnly: member.readOnly }));
+    renderWorkspaceEditor();
+    workspaceSets.details.open = true;
+    setNameInput.focus();
+  }
+
+  function addDraftMember(projectId: string): void {
+    if (draftMembers.some((member) => member.projectId === projectId)) return;
+    draftMembers.push({ projectId, readOnly: false });
+    renderWorkspaceEditor();
+  }
+
+  // Renders the draft editor: one row per staged member (name, path, RW/RO
+  // toggle, remove), the "add registered folder" picker, and Save/Cancel.
+  function renderWorkspaceEditor(): void {
+    editorMembers.replaceChildren();
+    if (draftMembers.length === 0) {
+      const empty = el("div", "empty");
+      empty.textContent = "No folders yet — register open folders or add a registered one below.";
+      editorMembers.append(empty);
+    }
+    draftMembers.forEach((member, index) => {
+      const project = projectSummaryById(member.projectId);
+      const row = el("div", "ws-member-row");
+      const name = el("span", "ws-member-name");
+      name.textContent = project ? project.name : member.projectId;
+      const path = el("span", "ws-member-path");
+      path.textContent = project?.displayPath ?? "";
+      const mode = button(member.readOnly ? "RO" : "RW", `ws-mode-toggle ${member.readOnly ? "ro" : "rw"}`);
+      mode.title = member.readOnly ? "Read-only — click to allow writes" : "Read-write — click to fence read-only";
+      mode.addEventListener("click", () => {
+        draftMembers[index] = { projectId: member.projectId, readOnly: !member.readOnly };
+        renderWorkspaceEditor();
+      });
+      const remove = iconButton("✕", "Remove from set", "ws-member-remove");
+      remove.addEventListener("click", () => {
+        draftMembers.splice(index, 1);
+        renderWorkspaceEditor();
+      });
+      row.append(name, path, mode, remove);
+      editorMembers.append(row);
+    });
+
+    addProjectSelect.replaceChildren();
+    addProjectSelect.append(option("", "＋ add registered folder…"));
+    for (const project of state.workspacePolicy?.projects ?? []) {
+      if (draftMembers.some((member) => member.projectId === project.projectId)) continue;
+      addProjectSelect.append(option(project.projectId, project.name));
+    }
+
+    saveSetButton.textContent = editingSetId ? "Update workspace" : "Save workspace";
+    cancelEditButton.style.display = editingSetId ? "" : "none";
+    editorHint.textContent = editingSetId ? "Editing a saved set — Save overwrites it." : "";
+  }
+
+  addProjectSelect.addEventListener("change", () => {
+    if (addProjectSelect.value) {
+      addDraftMember(addProjectSelect.value);
+      addProjectSelect.value = "";
+    }
+  });
+  cancelEditButton.addEventListener("click", () => resetDraft());
   registerFoldersButton.addEventListener("click", () => {
     void request({ type: "workspace.registerOpenFolders" }).then((response) => {
-      if (!response.ok) {
-        ctx.bridge.chat.logChat(`register folders failed: ${response.error.message}`);
+      if (!response.ok || response.payload.type !== "workspace.registerOpenFolders") {
+        if (!response.ok) ctx.bridge.chat.logChat(`register folders failed: ${response.error.message}`);
         return;
       }
-      void loadWorkspaceState();
+      const registered = response.payload.projects;
+      // Refresh the catalog, then stage the newly-registered folders into the draft.
+      void loadWorkspaceState().then(() => {
+        for (const project of registered) addDraftMember(project.projectId);
+      });
     });
   });
-  createSetButton.addEventListener("click", () => {
+  saveSetButton.addEventListener("click", () => {
     const name = setNameInput.value.trim();
-    if (!name) return;
-    void request({ type: "workspace.createSet", name }).then((response) => {
-      if (!response.ok) {
-        ctx.bridge.chat.logChat(`create set failed: ${response.error.message}`);
-        return;
+    if (!name) { editorHint.textContent = "Give the set a name."; return; }
+    if (draftMembers.length === 0) { editorHint.textContent = "Add at least one folder."; return; }
+    const members = draftMembers.map((member) => ({ projectId: member.projectId, readOnly: member.readOnly }));
+    const outbound = editingSetId === null
+      ? { type: "workspace.createSet" as const, name, members }
+      : { type: "workspace.updateSet" as const, workspaceSetId: editingSetId, name, members };
+    void request(outbound).then((response) => {
+      if (!response.ok) { ctx.bridge.chat.logChat(`save set failed: ${response.error.message}`); return; }
+      if (response.payload.type === "workspace.createSet" || response.payload.type === "workspace.updateSet") {
+        state.workspacePolicy = response.payload.state;
       }
-      setNameInput.value = "";
-      void loadWorkspaceState();
+      resetDraft();
+      renderWorkspaceSets();
+      ctx.persist();
     });
   });
+
+  function deleteSet(workspaceSetId: string): void {
+    void request({ type: "workspace.deleteSet", workspaceSetId }).then((response) => {
+      if (!response.ok) { ctx.bridge.chat.logChat(`delete set failed: ${response.error.message}`); return; }
+      if (response.payload.type === "workspace.deleteSet") state.workspacePolicy = response.payload.state;
+      if (editingSetId === workspaceSetId) resetDraft();
+      renderWorkspaceSets();
+      ctx.persist();
+    });
+  }
+
+  function saveProjectPath(projectId: string, newPath: string): void {
+    if (!newPath) { editingProjectId = null; renderWorkspaceSets(); return; }
+    void request({ type: "workspace.updateProjectPath", projectId, path: newPath }).then((response) => {
+      if (!response.ok) { ctx.bridge.chat.logChat(`edit path failed: ${response.error.message}`); return; }
+      if (response.payload.type === "workspace.updateProjectPath") state.workspacePolicy = response.payload.state;
+      editingProjectId = null;
+      renderWorkspaceSets();
+      ctx.persist();
+    });
+  }
+
+  function removeProject(projectId: string): void {
+    void request({ type: "workspace.removeProject", projectId }).then((response) => {
+      if (!response.ok) { ctx.bridge.chat.logChat(`remove project failed: ${response.error.message}`); return; }
+      if (response.payload.type === "workspace.removeProject") state.workspacePolicy = response.payload.state;
+      draftMembers = draftMembers.filter((member) => member.projectId !== projectId);
+      renderWorkspaceSets();
+      ctx.persist();
+    });
+  }
 
   // Subtasks: the currently-expanded (inline-editing) subtaskId per task,
   // webview-session-local (not persisted). One at a time per task — expanding a
@@ -993,6 +1147,23 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   function taskCard(task: WorkTaskSummary): HTMLElement {
     const c = card("task-card");
+    // Drop target for an orphaned chat dragged from the Orphaned Chats list.
+    c.addEventListener("dragover", (event) => {
+      if (event.dataTransfer?.types.includes(SESSION_DRAG_MIME) === true) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "link";
+        c.classList.add("drop-target");
+      }
+    });
+    c.addEventListener("dragleave", () => c.classList.remove("drop-target"));
+    c.addEventListener("drop", (event) => {
+      c.classList.remove("drop-target");
+      const sessionId = event.dataTransfer?.getData(SESSION_DRAG_MIME);
+      if (sessionId === undefined || sessionId === "") return;
+      event.preventDefault();
+      if (task.linkedSessionIds.includes(sessionId)) return;
+      linkTask(task.taskId, { sessionId });
+    });
     const activeSession = activeTaskSession(task);
     if (activeSession !== undefined) {
       c.classList.add("active");
@@ -1773,6 +1944,16 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   function sessionCard(session: ChatSessionSummary): HTMLElement {
     const c = card("session-card");
     if (session.sessionId === state.selectedSessionId) c.classList.add("selected");
+    // Drag an orphaned chat onto a task card to link it there.
+    c.draggable = true;
+    c.title = "Drag onto a task to link this chat";
+    c.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData(SESSION_DRAG_MIME, session.sessionId);
+      event.dataTransfer?.setData("text/plain", session.title);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "link";
+      c.classList.add("dragging");
+    });
+    c.addEventListener("dragend", () => c.classList.remove("dragging"));
 
     const top = el("div", "session-card-top");
     // A session running in another window is read-only here: no Resume, no delete.
@@ -2068,21 +2249,31 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     state.selectedWorkspaceSetId = workspaceSetSelect.value;
     modeSelect.value = state.selectedSessionMode || "implementation";
 
-    // One row per set, each a touch-history hover anchor (work item 3).
+    // One row per set, each a touch-history hover anchor (work item 3), with
+    // Edit (load into the draft editor) and a two-click Delete.
     setsList.replaceChildren();
     for (const set of state.workspacePolicy?.workspaceSets ?? []) {
       const row = el("div", "set-row");
       const name = el("span", "set-row-name");
       name.textContent = set.name;
+      const readOnlyCount = set.members.filter((member) => member.readOnly).length;
       const paths = el("span", "set-row-paths");
-      paths.textContent = set.projectNames.join(", ");
+      paths.textContent = readOnlyCount > 0
+        ? `${set.projectNames.join(", ")} · ${String(readOnlyCount)} read-only`
+        : set.projectNames.join(", ");
+      const edit = iconButton("✎", "Edit this set", "set-row-edit");
+      edit.addEventListener("click", (event) => {
+        event.stopPropagation();
+        loadSetIntoDraft(set);
+      });
+      const del = inlineConfirmButton("✕", "Delete?", () => deleteSet(set.workspaceSetId), "icon-button danger set-row-delete");
       const activate = button("Activate", "ghost small set-row-activate");
       activate.title = "Switch this window's folders to this set (Replace / Append / new window)";
       activate.addEventListener("click", (event) => {
         event.stopPropagation();
         void activateWorkspace({ workspaceSetId: set.workspaceSetId }, activate);
       });
-      row.append(name, paths, activate);
+      row.append(name, paths, edit, del, activate);
       attachHistoryHover(row, set.workspaceSetId);
       setsList.append(row);
     }
@@ -2096,12 +2287,31 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     }
     for (const project of projects) {
       const row = el("div", "project-row");
-      const kind = badge(project.kind);
-      const name = el("span", "changed-file-path");
-      name.textContent = `${project.name} · ${project.displayPath}`;
-      row.append(kind, name);
+      if (editingProjectId === project.projectId) {
+        const input = textInput("New folder path");
+        input.value = project.displayPath;
+        input.classList.add("ws-path-edit");
+        const save = iconButton("✓", "Save path", "ws-path-save");
+        const cancel = iconButton("✕", "Cancel", "ws-path-cancel");
+        save.addEventListener("click", () => saveProjectPath(project.projectId, input.value.trim()));
+        cancel.addEventListener("click", () => { editingProjectId = null; renderWorkspaceSets(); });
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") saveProjectPath(project.projectId, input.value.trim());
+          if (event.key === "Escape") { editingProjectId = null; renderWorkspaceSets(); }
+        });
+        row.append(input, save, cancel);
+      } else {
+        const kind = badge(project.kind);
+        const name = el("span", "changed-file-path");
+        name.textContent = `${project.name} · ${project.displayPath}`;
+        const edit = iconButton("✎", "Edit folder path", "ws-project-edit");
+        edit.addEventListener("click", () => { editingProjectId = project.projectId; renderWorkspaceSets(); });
+        const remove = inlineConfirmButton("✕", "Remove?", () => removeProject(project.projectId), "icon-button danger ws-project-remove");
+        row.append(kind, name, edit, remove);
+      }
       projectsList.append(row);
     }
+    renderWorkspaceEditor();
   }
 
   function render(): void {

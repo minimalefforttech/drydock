@@ -14,6 +14,7 @@ import type {
   AgentFileEditEvent,
   AgentNodeDoneEvent,
   AgentPlanEvent,
+  AgentReasoningEvent,
   AgentRole,
   AgentSpawnEvent,
   AgentToolCallEvent,
@@ -33,6 +34,7 @@ import {
   spawnLabel,
   terminalStatusFrom
 } from "./codexThreadLineage.js";
+import { TOOL_OUTPUT_PREVIEW_MAX } from "./previewCaps.js";
 
 export interface AppServerNormalizerContext {
   readonly sessionId: SessionId;
@@ -61,6 +63,16 @@ export class CodexAppServerEventNormalizer {
       case "item/agentMessage/delta": {
         const text = textFrom(params, ["delta", "text", "content"]);
         return text === null ? [] : [this.textEvent(context, text, false, raw, path)];
+      }
+      // NOTE: the method string "item/reasoning/delta" is inferred from the
+      // "item/agentMessage/delta" pattern plus the schema's `reasoning` item
+      // type — not yet confirmed against a live app-server stream. If the
+      // real method name differs, this case simply never matches and
+      // reasoning falls through to `default: return []` as it does today
+      // (no regression, just no reasoning captured until confirmed).
+      case "item/reasoning/delta": {
+        const text = textFrom(params, ["delta", "text", "content"]);
+        return text === null ? [] : [this.reasoningEvent(context, text, raw, path)];
       }
       case "item/plan/delta": {
         const text = textFrom(params, ["delta", "text", "content"]);
@@ -190,8 +202,20 @@ export class CodexAppServerEventNormalizer {
       const text = textFrom(item, ["text", "content", "message"]) ?? textFrom(params, ["text", "content", "message"]);
       return text === null ? [] : [this.textEvent(context, text, true, raw, path)];
     }
+    // Mirrors isAgentMessageItem above: a reasoning item arriving whole via
+    // item/completed (rather than streamed via item/reasoning/delta), so a
+    // provider that only reports reasoning at completion still surfaces it.
+    if (isReasoningItem(item)) {
+      const text = textFrom(item, ["text", "content", "message"]) ?? textFrom(params, ["text", "content", "message"]);
+      return text === null ? [] : [this.reasoningEvent(context, text, raw, path, true)];
+    }
     if (isCommandItem(item)) {
-      return [this.commandEvent(context, item, "completed", raw, path)];
+      // The completed command_execution item carries the full captured output —
+      // grab it (capped) so the chat shows what the command actually printed,
+      // not just the command + exit code.
+      const rawOutput = textFrom(item, ["aggregated_output", "output", "stdout", "formatted_output", "aggregatedOutput"]);
+      const output = rawOutput === null ? undefined : capPreview(rawOutput, TOOL_OUTPUT_PREVIEW_MAX);
+      return [this.commandEvent(context, item, "completed", raw, path, output)];
     }
     const fileEvents = this.fileEvents(item ?? params, context, raw, path);
     if (fileEvents.length > 0) {
@@ -396,6 +420,21 @@ export class CodexAppServerEventNormalizer {
     };
   }
 
+  private reasoningEvent(
+    context: AppServerNormalizerContext,
+    text: string,
+    raw: JsonObject,
+    path: readonly string[] | undefined,
+    final?: boolean
+  ): AgentReasoningEvent {
+    return {
+      ...this.base("agent.reasoning", context, raw, path),
+      type: "agent.reasoning",
+      text,
+      ...(final === undefined ? {} : { final })
+    };
+  }
+
   private planEvent(
     context: AppServerNormalizerContext,
     text: string,
@@ -463,6 +502,11 @@ function itemObject(params: JsonObject | undefined): JsonObject | undefined {
 function isAgentMessageItem(item: JsonObject | undefined): boolean {
   const type = textFrom(item, ["type", "kind"]);
   return type === "agent_message" || type === "agentMessage" || type === "message";
+}
+
+function isReasoningItem(item: JsonObject | undefined): boolean {
+  const type = textFrom(item, ["type", "kind"]);
+  return type === "reasoning";
 }
 
 function isCollabItem(item: JsonObject | undefined): boolean {

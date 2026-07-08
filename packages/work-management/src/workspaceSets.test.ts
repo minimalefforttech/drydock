@@ -64,23 +64,78 @@ test("workspace sets resolve ordered mount roots and projections", async () => {
       catalog: catalogStore,
       store: new MemoryWorkspaceSetStore()
     });
-    const set = await sets.createWorkspaceSet("Studio", [projectB.projectId, projectA.projectId]);
+    const set = await sets.createWorkspaceSet("Studio", [rw(projectB.projectId), rw(projectA.projectId)]);
 
     assert.deepEqual(await sets.resolveMountRoots(set.workspaceSetId), [pathB, pathA]);
     const projection = await sets.projection(set.workspaceSetId);
     assert.equal(projection.name, "Studio");
     assert.deepEqual(projection.folderPaths, [pathB, pathA]);
 
-    await assert.rejects(sets.createWorkspaceSet("", [projectA.projectId]), /name/);
+    await assert.rejects(sets.createWorkspaceSet("", [rw(projectA.projectId)]), /name/);
     await assert.rejects(sets.createWorkspaceSet("Empty", []), /at least one project/);
     await assert.rejects(
-      sets.createWorkspaceSet("Ghost", ["project-missing" as ProjectId]),
+      sets.createWorkspaceSet("Ghost", [rw("project-missing" as ProjectId)]),
       /not in the catalog/
+    );
+    await assert.rejects(
+      sets.createWorkspaceSet("Dupe", [rw(projectA.projectId), rw(projectA.projectId)]),
+      /listed twice/
     );
   } finally {
     await rm(base, { recursive: true, force: true });
   }
 });
+
+test("workspace sets carry per-member read-only, update, and delete", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "drydock-sets-edit-"));
+  try {
+    const catalogStore = new MemoryProjectCatalogStore();
+    const catalog = new ProjectCatalogService({ ids: new RandomIdGenerator(), clock: fixedClock(), store: catalogStore });
+    const pathA = path.join(base, "a");
+    const pathB = path.join(base, "b");
+    await mkdir(pathA);
+    await mkdir(pathB);
+    const projectA = await catalog.registerProject({ path: pathA });
+    const projectB = await catalog.registerProject({ path: pathB });
+
+    const store = new MemoryWorkspaceSetStore();
+    const sets = new WorkspaceSetService({ ids: new RandomIdGenerator(), clock: fixedClock(), catalog: catalogStore, store });
+
+    const set = await sets.createWorkspaceSet("Studio", [
+      { projectId: projectA.projectId, readOnly: false },
+      { projectId: projectB.projectId, readOnly: true }
+    ]);
+    assert.deepEqual(set.members, [
+      { projectId: projectA.projectId, readOnly: false },
+      { projectId: projectB.projectId, readOnly: true }
+    ]);
+    assert.deepEqual(set.projectIds, [projectA.projectId, projectB.projectId]);
+
+    // Update: rename, drop B, flip A to read-only.
+    const updated = await sets.updateWorkspaceSet(set.workspaceSetId, "Solo", [{ projectId: projectA.projectId, readOnly: true }]);
+    assert.equal(updated.name, "Solo");
+    assert.deepEqual(updated.members, [{ projectId: projectA.projectId, readOnly: true }]);
+    assert.deepEqual((await store.getWorkspaceSet(set.workspaceSetId))?.members, [{ projectId: projectA.projectId, readOnly: true }]);
+
+    // Repathing a project rewrites its record; removing it prunes the catalog.
+    const pathC = path.join(base, "c");
+    await mkdir(pathC);
+    const repathed = await catalog.updateProjectPath(projectA.projectId, pathC);
+    assert.equal(repathed.path, pathC);
+    await catalog.removeProject(projectB.projectId);
+    assert.equal((await catalog.listProjects()).length, 1);
+
+    await sets.deleteWorkspaceSet(set.workspaceSetId);
+    assert.equal(await store.getWorkspaceSet(set.workspaceSetId), null);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+/** A read-write member, the common case in these tests. */
+function rw(projectId: ProjectId) {
+  return { projectId, readOnly: false };
+}
 
 function fixedClock(): Clock {
   return {
@@ -96,6 +151,23 @@ class MemoryProjectCatalogStore implements ProjectCatalogStore {
   insertProject(record: ProjectRecord, pathKey: string): Promise<void> {
     this.projects.set(record.projectId, record);
     this.byPathKey.set(pathKey, record.projectId);
+    return Promise.resolve();
+  }
+
+  updateProject(record: ProjectRecord, pathKey: string): Promise<void> {
+    for (const [key, id] of this.byPathKey) {
+      if (id === record.projectId) this.byPathKey.delete(key);
+    }
+    this.projects.set(record.projectId, record);
+    this.byPathKey.set(pathKey, record.projectId);
+    return Promise.resolve();
+  }
+
+  deleteProject(projectId: ProjectId): Promise<void> {
+    this.projects.delete(projectId);
+    for (const [key, id] of this.byPathKey) {
+      if (id === projectId) this.byPathKey.delete(key);
+    }
     return Promise.resolve();
   }
 
@@ -118,6 +190,16 @@ class MemoryWorkspaceSetStore implements WorkspaceSetStore {
 
   insertWorkspaceSet(record: WorkspaceSetRecord): Promise<void> {
     this.sets.set(record.workspaceSetId, record);
+    return Promise.resolve();
+  }
+
+  updateWorkspaceSet(record: WorkspaceSetRecord): Promise<void> {
+    this.sets.set(record.workspaceSetId, record);
+    return Promise.resolve();
+  }
+
+  deleteWorkspaceSet(workspaceSetId: WorkspaceSetId): Promise<void> {
+    this.sets.delete(workspaceSetId);
     return Promise.resolve();
   }
 

@@ -174,6 +174,15 @@ export class CodexAdapter implements AgentAdapter {
     this.options.logger.warn("Codex exec cancellation is not supported by the buffered transport", {});
   }
 
+  async poke(connection: AgentConnection, runId: RunId): Promise<void> {
+    // Soft nudge for a quiet turn; only the streaming app-server transport can
+    // interrupt a live turn. The buffered exec transport has no live turn to poke.
+    if (connection.transport === "codex-app-server") {
+      const appServer = this.requiredAppServerSession(connection);
+      appServer.transport.poke(appServer.session, runId);
+    }
+  }
+
   async stop(connection: AgentConnection, reason: string): Promise<void> {
     if (connection.transport === "codex-app-server") {
       const appServer = this.requiredAppServerSession(connection);

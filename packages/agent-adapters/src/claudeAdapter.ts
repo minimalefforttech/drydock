@@ -26,7 +26,7 @@ import type {
   StartAgentProtocolRequest
 } from "@drydock/contracts";
 import { asId } from "@drydock/contracts";
-import type { Clock, IdGenerator, Logger } from "@drydock/core";
+import type { Clock, IdGenerator, Logger, RawStreamSink } from "@drydock/core";
 import { ClaudeEventNormalizer } from "./claudeEventNormalizer.js";
 
 /** Runtime exec port with cancellation; DockerSandboxRuntimeAdapter satisfies it. */
@@ -40,6 +40,8 @@ export interface ClaudeAdapterOptions {
   readonly logger: Logger;
   readonly runtimeExecutor: CancellableRuntimeExecutor;
   readonly timeoutMs?: number;
+  /** Optional debug tee of the raw exec stream for the chat tab's raw view. */
+  readonly rawSink?: RawStreamSink;
 }
 
 export const CLAUDE_MODEL_CATALOG_MODELS = [
@@ -160,6 +162,15 @@ export class ClaudeAdapter implements AgentAdapter {
       return;
     }
 
+    // Debug tee: Claude's exec is buffered, so the whole raw stream-json of this
+    // turn arrives at once. Reset the session's buffer and publish it verbatim,
+    // then append stderr so a failure that only writes there is still readable.
+    this.options.rawSink?.beginTurn(connection.sessionId);
+    this.options.rawSink?.write(connection.sessionId, result.stdout);
+    if (result.stderr.length > 0) {
+      this.options.rawSink?.write(connection.sessionId, `\n[stderr]\n${result.stderr}\n`);
+    }
+
     const state = this.connections.get(connection.connectionId);
     const parsed = this.normalizer.parseJsonLines(result.stdout, {
       sessionId: connection.sessionId,
@@ -170,16 +181,26 @@ export class ClaudeAdapter implements AgentAdapter {
     if (state !== undefined && parsed.claudeSessionId !== undefined) {
       state.claudeSessionId = parsed.claudeSessionId;
     }
+    let sawTerminal = false;
     for (const event of parsed.events) {
+      if (event.type === "agent.error" || event.type === "agent.done") sawTerminal = true;
       yield event;
     }
 
-    if (result.exitCode !== 0) {
+    // Only synthesize a generic failure when Claude produced NO terminal event of
+    // its own. When it did — a stream-json `result` with is_error (auth failures
+    // like "Not logged in · Please run /login", rate limits, etc.) — that event
+    // already carries the real, actionable message; stacking "claude exec failed"
+    // on top only buries it. The generic path remains for true launch failures
+    // (sbx couldn't start claude, empty stdout) where stderr/error hold the cause.
+    if (result.exitCode !== 0 && !sawTerminal) {
+      const detail = result.stderr || result.error
+        || (result.stdout.trim().length > 0 ? `claude exited ${String(result.exitCode)} without a result line` : "claude exec failed");
       yield this.errorEvent(
         connection,
         runId,
         run.controller.signal.aborted ? "TURN_CANCELLED" : "CLAUDE_EXEC_FAILED",
-        result.stderr || result.error || "claude exec failed",
+        detail,
         !run.controller.signal.aborted,
         { exitCode: result.exitCode, timedOut: result.timedOut }
       );

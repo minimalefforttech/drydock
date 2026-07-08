@@ -9,6 +9,14 @@ import { spawn } from "node:child_process";
 import type { JsonValue } from "@drydock/contracts";
 import { errorMessage, makeSpawnInvocation, sanitizeOutput } from "@drydock/core";
 
+/** Thrown by nextNotification when no notification arrives within the timeout. */
+export class NotificationTimeoutError extends Error {
+  constructor(public readonly timeoutMs: number) {
+    super(`No app-server notification within ${String(timeoutMs)}ms.`);
+    this.name = "NotificationTimeoutError";
+  }
+}
+
 export interface JsonRpcMessage {
   readonly id?: string | number | null;
   readonly method?: string;
@@ -45,7 +53,9 @@ export class LineJsonRpcClient {
   constructor(
     private readonly command: string,
     private readonly args: readonly string[],
-    private readonly cwd: string
+    private readonly cwd: string,
+    /** Live tee of stderr chunks (e.g. to the raw-stream debug view). */
+    private readonly onStderr?: (chunk: string) => void
   ) {}
 
   async start(): Promise<void> {
@@ -60,7 +70,9 @@ export class LineJsonRpcClient {
     this.child.stderr?.setEncoding("utf8");
     this.child.stdout?.on("data", (chunk: string) => this.onStdout(chunk));
     this.child.stderr?.on("data", (chunk: string) => {
-      this.stderrBuffer += sanitizeOutput(chunk);
+      const clean = sanitizeOutput(chunk);
+      this.stderrBuffer += clean;
+      this.onStderr?.(clean);
     });
     this.child.on("error", (error) => this.rejectAll(new Error(`app-server process error: ${error.message}`)));
     this.child.on("exit", (code, signal) => {
@@ -93,7 +105,12 @@ export class LineJsonRpcClient {
     this.child?.stdin?.write(`${JSON.stringify({ method, params })}\n`);
   }
 
-  nextNotification(signal?: AbortSignal): Promise<JsonRpcMessage> {
+  /**
+   * Resolves with the next server notification. `timeoutMs`, when set, rejects
+   * with a NotificationTimeoutError after that much silence — the stall watchdog
+   * the streaming loop uses so a wedged app-server can't hang a turn forever.
+   */
+  nextNotification(signal?: AbortSignal, timeoutMs?: number): Promise<JsonRpcMessage> {
     const queued = this.notificationQueue.shift();
     if (queued !== undefined) {
       return Promise.resolve(queued);
@@ -102,18 +119,38 @@ export class LineJsonRpcClient {
       return Promise.reject(new Error("Notification wait aborted."));
     }
     return new Promise<JsonRpcMessage>((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined;
+      // Wrapped settlers so every resolution path — a notification, an abort, a
+      // rejectAll, or the timeout — clears the watchdog timer exactly once.
+      const settleResolve = (message: JsonRpcMessage): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(message);
+      };
+      const settleReject = (error: Error): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        reject(error);
+      };
       const waiter: NotificationWaiter = {
-        resolve,
-        reject,
+        resolve: settleResolve,
+        reject: settleReject,
         ...(signal === undefined ? {} : { signal })
       };
       if (signal !== undefined) {
         const abortHandler = (): void => {
           this.removeNotificationWaiter(waiter);
-          reject(new Error("Notification wait aborted."));
+          settleReject(new Error("Notification wait aborted."));
         };
         waiter.abortHandler = abortHandler;
         signal.addEventListener("abort", abortHandler, { once: true });
+      }
+      if (timeoutMs !== undefined && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.removeNotificationWaiter(waiter);
+          if (waiter.signal !== undefined && waiter.abortHandler !== undefined) {
+            waiter.signal.removeEventListener("abort", waiter.abortHandler);
+          }
+          settleReject(new NotificationTimeoutError(timeoutMs));
+        }, timeoutMs);
       }
       this.notificationWaiters.push(waiter);
     });

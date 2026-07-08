@@ -35,8 +35,9 @@ export class SqliteSubtaskStore implements SubtaskStore {
         sort_order,
         created_at,
         updated_at,
-        done_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        done_at,
+        color_override
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.subtaskId,
       record.taskId,
@@ -49,7 +50,8 @@ export class SqliteSubtaskStore implements SubtaskStore {
       record.sortOrder,
       record.createdAt,
       record.updatedAt,
-      record.doneAt ?? null
+      record.doneAt ?? null,
+      record.colorOverride ?? null
     );
   }
 
@@ -88,6 +90,11 @@ export class SqliteSubtaskStore implements SubtaskStore {
       // null clears doneAt; a string stamps it.
       assignments.push("done_at = ?");
       values.push(update.doneAt);
+    }
+    if (update.colorOverride !== undefined) {
+      // null reverts to the parent task's stripe hue; a number sets an override.
+      assignments.push("color_override = ?");
+      values.push(update.colorOverride);
     }
     this.connection.database.prepare(`
       UPDATE subtasks
@@ -191,6 +198,7 @@ interface SubtaskRow {
   readonly created_at: string;
   readonly updated_at: string;
   readonly done_at: string | null;
+  readonly color_override: number | null;
 }
 
 interface SubtaskDependencyRow {
@@ -213,7 +221,8 @@ function mapSubtask(row: SubtaskRow): SubtaskRecord {
     sortOrder: row.sort_order,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    ...(row.done_at === null ? {} : { doneAt: row.done_at })
+    ...(row.done_at === null ? {} : { doneAt: row.done_at }),
+    ...(row.color_override === null ? {} : { colorOverride: row.color_override })
   };
 }
 

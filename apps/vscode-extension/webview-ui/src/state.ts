@@ -14,6 +14,7 @@
 
 import type {
   AccessRequestSummary,
+  ActiveEditorRef,
   AgentActivitySummary,
   AgentModelCatalog,
   AgentQuestionSummary,
@@ -45,12 +46,32 @@ export type ThinkingEffort = "low" | "medium" | "high";
 
 export interface ChatMessage {
   readonly id: string;
-  readonly role: "user" | "assistant" | "group";
+  /**
+   * "system" is a client-side notice; "command" is a shell command the agent
+   * ran inside the container (surfaced inline, not just in the debug feed).
+   */
+  readonly role: "user" | "assistant" | "group" | "system" | "command";
   readonly createdAt: string;
   readonly text: string;
   readonly streaming?: boolean;
   /** role "group": the subagent group block this row renders. */
   readonly nodeId?: string;
+  /** role "system": severity styling — "error" reds it, otherwise neutral. */
+  readonly tone?: "error" | "info";
+  /** role "system": show a Retry button that re-sends the last prompt. */
+  readonly retry?: boolean;
+  /** role "system": show a "Sign in to Docker Sandbox" button (auth failures). */
+  readonly signIn?: boolean;
+  /** role "system": show an "Authenticate <provider>" button (provider not signed in). */
+  readonly authenticate?: boolean;
+  /** role "system": provider id the Authenticate button should sign in. */
+  readonly authProviderId?: string;
+  /** role "command": lifecycle of the shell command. */
+  readonly commandStatus?: "started" | "completed" | "failed";
+  /** role "command": process exit code once it terminates. */
+  readonly commandExit?: number;
+  /** role "command": captured stdout/stderr (behind a disclosure). */
+  readonly commandOutput?: string;
 }
 
 export interface DiagnosticEntry {
@@ -73,10 +94,14 @@ export interface DiagnosticEntry {
   readonly usage?: JsonObject;
 }
 
-/** Freeform, task-scoped notes the user adds from the chat panel. */
+/** Freeform notes the user adds from the chat panel, scoped to a task and
+ * (when the chat is a subtask session) to that subtask. */
 export interface TaskNote {
   readonly noteId: string;
   readonly taskId: string;
+  /** Present when the note was added from a subtask session; scopes it to that
+   * subtask so parent-task and subtask notes stay separate. */
+  readonly subtaskId?: string;
   readonly createdAt: string;
   readonly text: string;
 }
@@ -180,6 +205,9 @@ export interface AppState {
   selectedWorkspaceSetId: string;
   selectedSessionMode: string;
   openFolderNames: readonly string[];
+  /** The window's active editor (host-reported), offered as a composer
+   * attachment; null when none. Transient — not persisted. */
+  activeEditor: ActiveEditorRef | null;
   /** Internal work tasks, newest-first by updatedAt. */
   tasks: WorkTaskSummary[];
   /** Board columns (task board and subtasks); ordered by sortOrder at render time. */
@@ -238,6 +266,7 @@ function freshState(): AppState {
     selectedWorkspaceSetId: "",
     selectedSessionMode: "implementation",
     openFolderNames: [],
+    activeEditor: null,
     tasks: [],
     boardColumns: [],
     planDocs: null,
@@ -256,6 +285,7 @@ function isTaskNote(value: unknown): value is TaskNote {
   const note = value as Record<string, unknown>;
   return typeof note["noteId"] === "string"
     && typeof note["taskId"] === "string"
+    && (note["subtaskId"] === undefined || typeof note["subtaskId"] === "string")
     && typeof note["createdAt"] === "string"
     && typeof note["text"] === "string";
 }
@@ -429,6 +459,7 @@ export function applyInitState(state: AppState, init: PanelInitState): void {
   state.runtimes = init.runtimes;
   state.providerCatalogs = [...init.providerCatalogs];
   state.openFolderNames = [...init.openFolderNames];
+  state.activeEditor = init.activeEditor ?? null;
   state.agentIdleThresholdMs = init.agentIdleThresholdMs;
   state.codeBlockWordWrap = init.codeBlockWordWrap;
 }
@@ -523,7 +554,13 @@ export function currentSession(state: AppState): ChatSessionSummary | undefined 
 
 export function isSessionLiveish(state: AppState, sessionId: string): boolean {
   const session = state.sessions.find((candidate) => candidate.sessionId === sessionId);
-  return session !== undefined && (session.status === "active" || session.status === "starting");
+  if (session === undefined) return false;
+  // Authoritative: the host tells us whether the backend is live HERE. Fall back
+  // to the stored status only for summaries that predate the `live` field (which
+  // the host now always sets) — a reloaded "active" row is NOT live until revived.
+  return session.live !== undefined
+    ? session.live
+    : (session.status === "active" || session.status === "starting");
 }
 
 /**

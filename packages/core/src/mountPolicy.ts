@@ -16,6 +16,12 @@ export type { SessionMode };
 export interface BuildMountPolicyRequest {
   readonly mode: SessionMode;
   readonly workspaceRoots: readonly string[];
+  /**
+   * Workspace roots that must mount read-only even in implementation mode — the
+   * per-member read-only flag from a workspace set. Matched by normalized path
+   * key. Plan mode is read-only regardless.
+   */
+  readonly readOnlyRoots?: readonly string[];
   readonly sharedRead: readonly string[];
   readonly sharedWrite: readonly string[];
   readonly deniedPaths?: readonly string[];
@@ -25,39 +31,41 @@ export interface BuildMountPolicyRequest {
 
 export function buildMountPolicy(request: BuildMountPolicyRequest, ids: IdGenerator): MountPolicy[] {
   const deniedPaths = request.deniedPaths ?? [];
+  const readOnlyKeys = new Set((request.readOnlyRoots ?? []).map((root) => normalizePathKey(root)));
   const mounts: MountPolicy[] = [];
   if (request.mode !== "clone") {
-    for (const [index, root] of request.workspaceRoots.entries()) {
+    for (const root of request.workspaceRoots) {
       assertMountAllowed(root, deniedPaths);
+      const writable = request.mode === "implementation" && !readOnlyKeys.has(normalizePathKey(root));
       mounts.push(policy({
         ids,
         hostPath: root,
-        runtimePath: `/workspace/root-${String(index + 1)}`,
-        mode: request.mode === "implementation" ? "read-write" : "read-only",
+        runtimePath: sandboxRuntimePath(root),
+        mode: writable ? "read-write" : "read-only",
         source: "workspace-root",
         ...approvalFields(request)
       }));
     }
   }
 
-  for (const [index, root] of request.sharedRead.entries()) {
+  for (const root of request.sharedRead) {
     assertMountAllowed(root, deniedPaths);
     mounts.push(policy({
       ids,
       hostPath: root,
-      runtimePath: `/shared/read-${String(index + 1)}`,
+      runtimePath: sandboxRuntimePath(root),
       mode: "read-only",
       source: "shared-read",
       ...approvalFields(request)
     }));
   }
 
-  for (const [index, root] of request.sharedWrite.entries()) {
+  for (const root of request.sharedWrite) {
     assertMountAllowed(root, deniedPaths);
     mounts.push(policy({
       ids,
       hostPath: root,
-      runtimePath: `/shared/write-${String(index + 1)}`,
+      runtimePath: sandboxRuntimePath(root),
       mode: "read-write",
       source: "shared-write",
       ...approvalFields(request)
@@ -65,6 +73,24 @@ export function buildMountPolicy(request: BuildMountPolicyRequest, ids: IdGenera
   }
 
   return mounts;
+}
+
+/**
+ * The in-container path where the Docker Sandbox runtime mounts a host folder:
+ * a drive-letter mirror on Windows (`H:\pipeline\work` → `/h/pipeline/work`),
+ * otherwise the resolved POSIX path. sbx derives the mount point from the host
+ * path — it is NOT caller-assignable — so this is the ONE true location, and
+ * every mount briefing, UI label, and grant note must advertise it. An agent
+ * told a different path (e.g. a synthetic `/workspace/root-1`) writes into an
+ * unmounted container overlay and its edits never reach the host.
+ */
+export function sandboxRuntimePath(hostPath: string): string {
+  const resolved = path.resolve(hostPath);
+  const drive = /^([A-Za-z]):[\\/]?(.*)$/.exec(resolved);
+  if (drive && path.sep === "\\") {
+    return `/${drive[1]!.toLowerCase()}/${(drive[2] ?? "").replace(/\\/g, "/")}`;
+  }
+  return resolved.replace(/\\/g, "/");
 }
 
 /**

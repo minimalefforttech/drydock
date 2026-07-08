@@ -28,9 +28,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(output);
   const logger = new OutputChannelLogger(output);
 
+  // Apply the user's runtime-environment settings BEFORE the backend spawns any
+  // `sbx`/agent process: children inherit process.env, so mutating it here is the
+  // single place that reaches every runtime command.
+  applyRuntimeEnvironment(logger);
+
   const stateRootPath = resolveStateRootPath();
   const deniedPaths = resolveDeniedPaths();
-  const backend = await createBackend({ stateRootPath, logger, deniedPaths });
+  const appServerInactivityTimeoutMs = vscode.workspace
+    .getConfiguration("drydock")
+    .get<number>("runtime.appServerInactivityTimeoutMs", 300_000);
+  const backend = await createBackend({ stateRootPath, logger, deniedPaths, appServerInactivityTimeoutMs });
   context.subscriptions.push(new vscode.Disposable(() => backend.dispose()));
   await writeStorePointer(context, stateRootPath);
 
@@ -185,6 +193,42 @@ function resolveDeniedPaths(): string[] {
     deduped.push(entry);
   }
   return deduped;
+}
+
+/**
+ * Applies the user's `drydock.runtime.*` environment settings to process.env so
+ * every runtime tool (`sbx`, agent CLIs) the backend spawns inherits them:
+ * `runtime.env` sets/overrides variables, `runtime.pathAdditions` prepends PATH
+ * directories, and `runtime.copyEnv` names variables that MUST be present (a
+ * warning fires if one is missing, since a GUI-launched host may not carry a
+ * terminal's session vars). Additive and reload-scoped.
+ */
+function applyRuntimeEnvironment(logger: OutputChannelLogger): void {
+  const config = vscode.workspace.getConfiguration("drydock");
+
+  const extraEnv = config.get<Record<string, string>>("runtime.env", {});
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (typeof value === "string" && key.length > 0) {
+      process.env[key] = value;
+    }
+  }
+
+  const copyEnv = config.get<string[]>("runtime.copyEnv", []);
+  const missing = copyEnv.filter((name) => typeof name === "string" && name.length > 0 && process.env[name] === undefined);
+  if (missing.length > 0) {
+    logger.warn("drydock.runtime.copyEnv lists variables not present in the extension host environment", { missing });
+  }
+
+  const pathAdditions = config.get<string[]>("runtime.pathAdditions", [])
+    .filter((dir) => typeof dir === "string" && dir.length > 0);
+  if (pathAdditions.length > 0) {
+    const existing = (process.env["PATH"] ?? "").split(path.delimiter);
+    const additions = pathAdditions.filter((dir) => !existing.includes(dir));
+    if (additions.length > 0) {
+      process.env["PATH"] = [...additions, ...existing].join(path.delimiter);
+      logger.info("applied drydock.runtime.pathAdditions", { added: additions });
+    }
+  }
 }
 
 function resolveStateRootPath(): string {
