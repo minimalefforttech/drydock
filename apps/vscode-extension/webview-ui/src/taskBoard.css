@@ -319,6 +319,10 @@ body {
   white-space: nowrap;
 }
 
+.tb-clone-chip {
+  background: color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 22%, transparent);
+}
+
 .tb-progress {
   font-size: 0.72em;
   opacity: 0.75;

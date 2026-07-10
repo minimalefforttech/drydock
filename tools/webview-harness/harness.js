@@ -99,7 +99,13 @@
       { projectId: "p-asset", name: "asset_api", displayPath: "C:\\hitl\\asset_api", kind: "git" }
     ],
     workspaceSets: [
-      { workspaceSetId: "set-1", name: "pipeline", projectNames: ["demo-project", "asset_api"] }
+      {
+        workspaceSetId: "set-1", name: "pipeline", projectNames: ["demo-project", "asset_api"],
+        members: [
+          { projectId: "p-demo", name: "demo-project", displayPath: "C:\\hitl\\demo-project", readOnly: false },
+          { projectId: "p-asset", name: "asset_api", displayPath: "C:\\hitl\\asset_api", readOnly: false }
+        ]
+      }
     ],
     accessRequests: [
       { accessRequestId: "ar-rw", sessionId: "s-live", displayPath: "D:\\builds\\maya2026", mode: "read-write", reason: "verify compiled plugin load", status: "pending", requestedAt: iso(4) },
@@ -108,11 +114,22 @@
     ]
   };
 
+  // Session-view rows (the working frame; accept removes rows here and in turn).
   const diffChanges = [
     { baselineId: "b-1", rootName: "asset_api", path: "publish_hooks.py", changeKind: "modify", addedLines: 12, removedLines: 3, revertSupported: true },
     { baselineId: "b-1", rootName: "asset_api", path: "exporters/alembic.py", changeKind: "add", addedLines: 40, removedLines: 0, revertSupported: true },
     { baselineId: "b-1", rootName: "asset_api", path: "legacy/exporter_v1.py", changeKind: "delete", addedLines: 0, removedLines: 55, revertSupported: false, reason: "file exceeded the blob cap" }
   ];
+  // This Turn: only the most recent edit happened since the last send.
+  const diffChangesTurn = [
+    { baselineId: "b-turn", rootName: "asset_api", path: "exporters/alembic.py", changeKind: "add", addedLines: 40, removedLines: 0, revertSupported: true }
+  ];
+  // Full Session: everything since session start, including an already-accepted row.
+  const diffChangesFull = [
+    ...diffChanges.map((change) => ({ ...change, baselineId: "b-start" })),
+    { baselineId: "b-start", rootName: "asset_api", path: "config/defaults.toml", changeKind: "modify", addedLines: 2, removedLines: 2, revertSupported: true, accepted: true }
+  ];
+  const diffListFor = (view) => view === "turn" ? diffChangesTurn : view === "full-session" ? diffChangesFull : diffChanges;
 
   // Clone-mode sync state: one repo, two changed files, one conflicted.
   // Mutated in place by the clone.pull/push/discard mock handlers below.
@@ -139,6 +156,7 @@
   const tasks = [
     {
       taskId: "t-1", title: "Alembic publish support", description: "4 repos: db, api, maya, houdini", state: "in-progress", columnId: "col-in-progress", linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: ["s-live", "s-clone"], createdAt: iso(200), updatedAt: iso(5), lastWorkedAt: iso(2), openReviewCommentCount: 1,
+      clonePolicy: { workspaceSetId: "set-1", projectIds: ["p-asset"], dirtyHandling: "carry", workspaceSetProjectCount: 2 },
       subtasks: [
         { subtaskId: "st-1", taskId: "t-1", title: "Patch alembic exporter", description: "exporters/alembic.py", prompt: "Patch exporters/alembic.py to support alembic caches.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(190), updatedAt: iso(5), isBlocked: false, dependsOn: [], isRunning: true, linkedSessionIds: ["s-live"] },
         { subtaskId: "st-2", taskId: "t-1", title: "Update allowlist config", description: "", prompt: "", autoStart: true, origin: "manual", columnId: "col-todo", sortOrder: 1, createdAt: iso(188), updatedAt: iso(188), isBlocked: true, dependsOn: ["st-1"], isRunning: false, linkedSessionIds: [] },
@@ -157,6 +175,7 @@
     // hides behind the per-column "1 hidden · Show" counter by default).
     {
       taskId: "t-3", title: "Task board rollout", state: "review", columnId: "col-review", doneAt: iso(45), linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: [], createdAt: iso(3200), updatedAt: iso(45),
+      clonePolicy: { workspaceSetId: "set-1", projectIds: ["p-demo", "p-asset"], dirtyHandling: "fresh", workspaceSetProjectCount: 2 },
       subtasks: [
         // st-5 depends on the already-finished st-6 (an edge to a done sibling
         // is allowed — instantly satisfied) and wears a failed chip from a
@@ -184,12 +203,6 @@
     { taskId: "t-1", taskTitle: "Alembic publish support", sessionId: "s-live", sessionTitle: "Add alembic support to asset_api", lastActivityAt: iso(2), turnCount: 7 },
     { sessionId: "s-ended", sessionTitle: "Investigate USD 24 upgrade", lastActivityAt: iso(1900), turnCount: 3 }
   ];
-
-  const planDocs = {
-    "s-ended": [
-      { name: "usd-upgrade.md", format: "markdown", revision: 2, collectedAt: iso(1900), content: "# USD 24 upgrade\n\nScope and risks.\n\n```mermaid\nflowchart TD; usd_core-->houdini\n```" }
-    ]
-  };
 
   const runtimes = [
     { runtimeId: "r-1", externalName: "drydock-slive-gen1-worker", status: "running", startedAt: iso(60) }
@@ -324,6 +337,30 @@
         window.__harnessClipboard = payload.text;
         return respond(requestId, { type, accepted: true });
       case "session.list": return respond(requestId, { type, sessions });
+      case "session.summarize": {
+        const session = sessions.find((candidate) => candidate.sessionId === payload.sessionId);
+        if (!session) return respondError(requestId, "unknown session");
+        if (payload.mode === "log") {
+          // The real host builds the log from durable events and writes the
+          // clipboard itself; the harness records a stand-in the same way.
+          window.__harnessClipboard = `# ${session.title}\n\n(harness chat log)\n`;
+          harnessLog(`session.summarize log ${String(payload.sessionId)}`);
+          return respond(requestId, { type, sessionId: payload.sessionId, mode: "log", accepted: true });
+        }
+        respond(requestId, { type, sessionId: payload.sessionId, mode: "ai", accepted: true });
+        // Simulate the out-of-band model turn finishing a beat later. Seed
+        // window.__harnessSummarizeFail = true to exercise the failure push.
+        setTimeout(() => {
+          if (window.__harnessSummarizeFail) {
+            push({ type: "session.summaryReady", sessionId: payload.sessionId, ok: false, error: "harness: simulated summary failure" });
+          } else {
+            window.__harnessClipboard = `## Overview\n(harness AI summary for ${session.title})\n`;
+            push({ type: "session.summaryReady", sessionId: payload.sessionId, ok: true });
+          }
+          harnessLog(`session.summaryReady ${String(payload.sessionId)}`);
+        }, 1200);
+        return;
+      }
       case "session.timeline": {
         const lines = (timelines[payload.sessionId] ?? []).filter((line) => line.sequence >= (payload.fromSequence ?? 0));
         return respond(requestId, { type, sessionId: payload.sessionId, lines });
@@ -433,16 +470,24 @@
         if (payload.editedHostPath) access.displayPath = payload.editedHostPath;
         return respond(requestId, { type, accessRequest: access });
       }
-      case "diff.status": return respond(requestId, { type, changes: payload.sessionId === "s-live" || payload.sessionId === undefined ? diffChanges : [] });
+      case "diff.status": return respond(requestId, { type, changes: payload.sessionId === "s-live" || payload.sessionId === undefined ? diffListFor(payload.view) : [] });
       case "diff.acceptFile": {
-        const index = diffChanges.findIndex((candidate) => candidate.path === payload.path);
-        if (index >= 0) diffChanges.splice(index, 1);
-        return respond(requestId, { type, changes: diffChanges });
+        // Mirror the host: accept clears the row from the session AND turn
+        // frames and flips the full-session row to accepted history.
+        for (const list of [diffChanges, diffChangesTurn]) {
+          const index = list.findIndex((candidate) => candidate.path === payload.path);
+          if (index >= 0) list.splice(index, 1);
+        }
+        const fullRow = diffChangesFull.find((candidate) => candidate.path === payload.path);
+        if (fullRow) fullRow.accepted = true;
+        return respond(requestId, { type, changes: diffListFor(payload.view) });
       }
       case "diff.revertFile": {
-        const index = diffChanges.findIndex((candidate) => candidate.path === payload.path);
-        if (index >= 0) diffChanges.splice(index, 1);
-        return respond(requestId, { type, changes: diffChanges });
+        for (const list of [diffChanges, diffChangesTurn, diffChangesFull]) {
+          const index = list.findIndex((candidate) => candidate.path === payload.path);
+          if (index >= 0) list.splice(index, 1);
+        }
+        return respond(requestId, { type, changes: diffListFor(payload.view) });
       }
       case "diff.openFile":
         // Log the send so the task-review visual check (V27) can assert it.
@@ -694,9 +739,6 @@
         // Log the send so a visual check can assert the Memories "Open" row wiring.
         harnessLog(`memory.open ${String(payload.memoryCandidateId)}`);
         return respond(requestId, { type, accepted: true });
-      case "planDocs.state": return respond(requestId, { type, sessionId: payload.sessionId, docs: planDocs[payload.sessionId] ?? [] });
-      case "planDocs.open": return respond(requestId, { type, accepted: true });
-      case "planDocs.sendComments": return respond(requestId, { type, accepted: true, sentCount: 0 });
       case "clone.state":
         return respond(requestId, { type, sessionId: payload.sessionId, repos: cloneRepos });
       case "clone.pull": {
@@ -751,9 +793,277 @@
       case "taskReview.open":
         harnessLog(`taskReview.open ${String(payload.taskId)}`);
         return respond(requestId, { type, accepted: true });
+      case "planner.plans":
+        return respond(requestId, { type, plans: plannerPlans.map(plannerPlanSummary) });
+      case "planner.aspects.list":
+        return respond(requestId, { type, aspects: plannerAspects });
+      case "planner.state": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        if (!plan) return respondError(requestId, "harness: unknown plan");
+        const live = plan.sessionId === "s-live";
+        const session = plan.sessionId === null ? null : { ...sessions.find((s) => s.sessionId === plan.sessionId), live };
+        return respond(requestId, { type, state: plannerState(plan), session });
+      }
+      case "planner.create": {
+        const plan = {
+          planId: `pl-${String(plannerPlans.length + 1)}`,
+          title: payload.title ?? payload.brief.split("\n")[0].slice(0, 48),
+          brief: payload.brief,
+          aspectIds: payload.aspectIds,
+          contextRoots: payload.contextRoots,
+          notes: payload.notes ?? "",
+          status: "draft",
+          sessionId: null,
+          updatedAt: new Date().toISOString()
+        };
+        plannerPlans.unshift(plan);
+        plannerArtifacts[plan.planId] = [];
+        plannerAnnotations[plan.planId] = [];
+        harnessLog(`planner.create ${plan.planId} aspects=${String(payload.aspectIds.length)} roots=${String(payload.contextRoots.length)}`);
+        respond(requestId, { type, plan: plannerPlanSummary(plan) });
+        setTimeout(() => {
+          plan.sessionId = "s-live";
+          plan.status = "active";
+          push({ type: "planner.sessionReady", planId: plan.planId, sessionId: "s-live", ok: true });
+        }, 600);
+        return;
+      }
+      case "planner.updateIntake": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        if (!plan) return respondError(requestId, "harness: unknown plan");
+        if (payload.title !== undefined) plan.title = payload.title;
+        if (payload.brief !== undefined) plan.brief = payload.brief;
+        if (payload.aspectIds !== undefined) plan.aspectIds = payload.aspectIds;
+        if (payload.contextRoots !== undefined) plan.contextRoots = payload.contextRoots;
+        if (payload.notes !== undefined) plan.notes = payload.notes;
+        plan.updatedAt = new Date().toISOString();
+        return respond(requestId, { type, plan: plannerPlanSummary(plan) });
+      }
+      case "planner.archive": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        if (!plan) return respondError(requestId, "harness: unknown plan");
+        plan.status = payload.archived ? "archived" : (plan.sessionId === null ? "draft" : "active");
+        return respond(requestId, { type, plan: plannerPlanSummary(plan) });
+      }
+      case "planner.startSession": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        if (!plan) return respondError(requestId, "harness: unknown plan");
+        respond(requestId, { type, accepted: true });
+        setTimeout(() => {
+          plan.sessionId = "s-live";
+          plan.status = "active";
+          push({ type: "planner.sessionReady", planId: plan.planId, sessionId: "s-live", ok: true });
+        }, 600);
+        return;
+      }
+      case "planner.sendTurn": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        if (!plan) return respondError(requestId, "harness: unknown plan");
+        harnessLog(`planner.sendTurn ${plan.planId}: ${String(payload.prompt).slice(0, 60)}`);
+        respond(requestId, { type, accepted: true });
+        const sessionId = plan.sessionId ?? "s-live";
+        push({ type: "chat.turnStarted", sessionId, runId: "run-planner" });
+        window.__harness.eventSequence = (window.__harness.eventSequence ?? 10_000) + 10;
+        push({ type: "chat.event", sessionId, line: { sequence: window.__harness.eventSequence, eventType: "user.message", summary: payload.prompt, createdAt: new Date().toISOString() } });
+        setTimeout(() => {
+          const doc = (plannerArtifacts[plan.planId] ?? []).find((artifact) => artifact.kind === "document");
+          if (doc) doc.revision += 1;
+          push({ type: "chat.turnCompleted", sessionId, runId: "run-planner", status: "completed" });
+          push({ type: "planner.changed", planId: plan.planId });
+        }, 700);
+        return;
+      }
+      case "planner.annotation.add": {
+        const list = plannerAnnotations[payload.planId];
+        if (!list) return respondError(requestId, "harness: unknown plan");
+        const annotation = {
+          annotationId: `plnote-${String(now)}-${String(list.length + 1)}`,
+          artifactId: payload.artifactId,
+          anchor: payload.anchor,
+          body: payload.body,
+          status: "open",
+          delegatedRev: null,
+          createdAt: new Date().toISOString()
+        };
+        list.push(annotation);
+        harnessLog(`planner.annotation.add ${payload.anchor}`);
+        return respond(requestId, { type, annotation });
+      }
+      case "planner.annotation.setStatus": {
+        const annotation = findPlannerAnnotation(payload.annotationId);
+        if (!annotation) return respondError(requestId, "harness: unknown annotation");
+        annotation.status = payload.status;
+        if (payload.status === "open") annotation.delegatedRev = null;
+        return respond(requestId, { type, annotation });
+      }
+      case "planner.annotation.remove": {
+        for (const planId of Object.keys(plannerAnnotations)) {
+          plannerAnnotations[planId] = plannerAnnotations[planId].filter((entry) => entry.annotationId !== payload.annotationId);
+        }
+        return respond(requestId, { type, removed: true });
+      }
+      case "planner.artifact.rename": {
+        const artifact = findPlannerArtifact(payload.artifactId);
+        if (!artifact) return respondError(requestId, "harness: unknown artifact");
+        artifact.title = payload.title.trim().length === 0 ? artifact.baseTitle : payload.title.trim();
+        return respond(requestId, { type, artifact });
+      }
+      case "planner.sendInstructions": {
+        const list = plannerAnnotations[payload.planId] ?? [];
+        let sentCount = 0;
+        for (const annotation of list) {
+          if (annotation.status !== "open") continue;
+          annotation.status = "delegated";
+          annotation.delegatedRev = findPlannerArtifact(annotation.artifactId)?.revision ?? null;
+          sentCount += 1;
+        }
+        harnessLog(`planner.sendInstructions sent=${String(sentCount)}`);
+        push({ type: "planner.changed", planId: payload.planId });
+        return respond(requestId, { type, accepted: true, sentCount });
+      }
+      case "planner.regenerate":
+        harnessLog(`planner.regenerate ${String(payload.planId)} aspect=${String(payload.aspectId ?? "all")}`);
+        return respond(requestId, { type, accepted: true });
+      case "planner.openArtifact":
+        harnessLog(`planner.openArtifact ${String(payload.artifactId)}`);
+        return respond(requestId, { type, accepted: true });
+      case "planner.setPrototypeScripts": {
+        const artifact = findPlannerArtifact(payload.artifactId);
+        if (!artifact) return respondError(requestId, "harness: unknown artifact");
+        artifact.scriptsEnabled = payload.enabled;
+        harnessLog(`planner.setPrototypeScripts ${String(payload.enabled)}`);
+        return respond(requestId, { type, artifact });
+      }
+      case "planner.aspects.save": {
+        if (payload.aspect.aspectId !== undefined) {
+          const existing = plannerAspects.find((aspect) => aspect.aspectId === payload.aspect.aspectId);
+          if (!existing) return respondError(requestId, "harness: unknown aspect");
+          existing.label = payload.aspect.label;
+          existing.instructions = payload.aspect.instructions;
+          existing.expectedArtifacts = payload.aspect.expectedArtifacts;
+        } else {
+          const slug = payload.aspect.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "aspect";
+          plannerAspects.push({
+            aspectId: plannerAspects.some((aspect) => aspect.aspectId === slug) ? `${slug}-2` : slug,
+            label: payload.aspect.label,
+            instructions: payload.aspect.instructions,
+            expectedArtifacts: payload.aspect.expectedArtifacts,
+            sortOrder: plannerAspects.length,
+            archived: false,
+            seeded: false
+          });
+        }
+        return respond(requestId, { type, aspects: plannerAspects });
+      }
+      case "planner.aspects.archive": {
+        const aspect = plannerAspects.find((entry) => entry.aspectId === payload.aspectId);
+        if (!aspect) return respondError(requestId, "harness: unknown aspect");
+        aspect.archived = payload.archived;
+        return respond(requestId, { type, aspects: plannerAspects });
+      }
       default:
         return respondError(requestId, `harness: unhandled request ${String(type)}`);
     }
+  }
+
+  // --- planner fixtures (ADR 0012) --------------------------------------------
+  const plannerAspects = [
+    { aspectId: "requirements", label: "Requirements & scope", instructions: "State the problem, users, and success criteria.", expectedArtifacts: ["Requirements brief (document)"], sortOrder: 0, archived: false, seeded: true },
+    { aspectId: "architecture", label: "System architecture", instructions: "Describe components, boundaries, and decisions.", expectedArtifacts: ["Architecture overview (document)", "Component diagram (mermaid)"], sortOrder: 1, archived: false, seeded: true },
+    { aspectId: "ui-ux", label: "UI / UX", instructions: "Screens, flows, states; prefer showing over telling.", expectedArtifacts: ["Screen inventory (document)", "Mockups (images)", "Clickable components (HTML prototype)"], sortOrder: 4, archived: false, seeded: true },
+    { aspectId: "testing", label: "Testing & verification", instructions: "Test strategy and what observation proves it works.", expectedArtifacts: ["Test plan (document)"], sortOrder: 5, archived: false, seeded: true },
+    { aspectId: "rollout", label: "Migration & rollout", instructions: "Sequencing, flags, rollback.", expectedArtifacts: ["Rollout plan (document)"], sortOrder: 8, archived: true, seeded: true },
+    { aspectId: "brand-review", label: "Brand review", instructions: "Check the visuals against the brand book.", expectedArtifacts: ["Brand notes (document)"], sortOrder: 100, archived: false, seeded: false }
+  ];
+  const PLANNER_DOC = [
+    "# Auth Service Revamp",
+    "",
+    "Replace the legacy cookie stack with an OIDC code flow. Sessions stay server-side;",
+    "service-to-service calls move to short-lived tokens.",
+    "",
+    "## Phases",
+    "",
+    "- Phase 1 — provider spike and library choice",
+    "- Phase 2 — migrate sessions and cut over cookies",
+    "- Phase 3 — rollout with kill switch",
+    "",
+    "## Rollback",
+    "",
+    "Keep the legacy issuer warm for one release; flags gate every entry point.",
+    "",
+    "```mermaid",
+    "flowchart LR; Browser-->Gateway-->AuthAPI; AuthAPI-->SessionStore",
+    "```",
+    "",
+    "## Open questions",
+    "",
+    "Token TTLs and the service-account rotation cadence."
+  ].join("\n");
+  // A wireframe-ish SVG served through <img> (inert: no scripts execute in an
+  // image context), so the annotation surface has real geometry to hit.
+  const PLANNER_IMAGE = `data:image/svg+xml;utf8,${encodeURIComponent(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='640' height='400'>" +
+    "<rect width='640' height='400' fill='#10131a'/>" +
+    "<rect x='16' y='14' width='608' height='30' rx='4' fill='#1c212b'/>" +
+    "<rect x='16' y='56' width='140' height='328' rx='4' fill='#181d26'/>" +
+    "<rect x='172' y='56' width='220' height='150' rx='4' fill='#181d26'/>" +
+    "<rect x='404' y='56' width='220' height='150' rx='4' fill='#181d26'/>" +
+    "<rect x='172' y='222' width='452' height='162' rx='4' fill='#181d26'/>" +
+    "<path d='M188 180 l40 -40 l36 16 l48 -52 l60 30' stroke='#7d9fbe' fill='none' stroke-width='2'/>" +
+    "</svg>"
+  )}`;
+  const plannerArtifacts = {
+    "pl-1": [
+      { artifactId: "plart-doc", relPath: "architecture/overview.md", kind: "document", aspectId: "architecture", title: "Auth Service Revamp", baseTitle: "Auth Service Revamp", revision: 3, scriptsEnabled: false, collectedAt: iso(5), content: PLANNER_DOC },
+      { artifactId: "plart-diagram", relPath: "architecture/components.mmd", kind: "diagram", aspectId: "architecture", title: "Component Diagram", baseTitle: "Component Diagram", revision: 2, scriptsEnabled: false, collectedAt: iso(5), content: "flowchart LR\n  Browser-->Gateway\n  Gateway-->AuthAPI\n  AuthAPI-->SessionStore" },
+      { artifactId: "plart-image", relPath: "ui-ux/dashboard.png", kind: "image", aspectId: "ui-ux", title: "Dashboard Mockup", baseTitle: "Dashboard Mockup", revision: 1, scriptsEnabled: false, collectedAt: iso(20), imageDataUri: PLANNER_IMAGE },
+      { artifactId: "plart-proto", relPath: "ui-ux/login-prototype.html", kind: "prototype", aspectId: "ui-ux", title: "Login Prototype", baseTitle: "Login Prototype", revision: 1, scriptsEnabled: false, collectedAt: iso(20), content: "<main style=\"font-family: sans-serif; padding: 24px; max-width: 320px\">\n  <h1>Sign in</h1>\n  <p><input placeholder=\"email\" style=\"width: 100%\"></p>\n  <p><input placeholder=\"password\" type=\"password\" style=\"width: 100%\"></p>\n  <p><button onclick=\"this.textContent='Clicked!'\">Sign in</button></p>\n  <p><a href=\"#\">Forgot password?</a></p>\n</main>" },
+      { artifactId: "plart-test", relPath: "testing/test-plan.md", kind: "document", aspectId: "testing", title: "Test Plan", baseTitle: "Test Plan", revision: 1, scriptsEnabled: false, collectedAt: iso(9), content: "# Test Plan\n\n## Unit\n\n- allowlist coverage\n\n## Live\n\n- login flow against the spike provider" }
+    ],
+    "pl-2": []
+  };
+  const plannerAnnotations = {
+    "pl-1": [
+      { annotationId: "plnote-1", artifactId: "plart-doc", anchor: "block:4", body: "Split phase 2: session migration and cookie cutover are separate risks.", status: "open", delegatedRev: null, createdAt: iso(30) },
+      { annotationId: "plnote-2", artifactId: "plart-diagram", anchor: "node:Gateway", body: "Gateway should own rate-limiting; add a limiter box.", status: "open", delegatedRev: null, createdAt: iso(25) },
+      { annotationId: "plnote-3", artifactId: "plart-doc", anchor: "block:8", body: "Name the kill-switch flag.", status: "delegated", delegatedRev: 2, createdAt: iso(120) },
+      { annotationId: "plnote-4", artifactId: "plart-image", anchor: "region:0.05,0.14,0.25,0.8", body: "Move filters into a left rail.", status: "resolved", delegatedRev: 1, createdAt: iso(200) }
+    ],
+    "pl-2": []
+  };
+  const plannerPlans = [
+    { planId: "pl-1", title: "Auth service revamp", brief: "Replace the legacy cookie stack with OIDC; sessions stay server-side.", aspectIds: ["architecture", "ui-ux", "testing"], contextRoots: ["C:\\hitl\\asset_api\\src"], notes: "Server-side sessions only.", status: "active", sessionId: "s-live", updatedAt: iso(5) },
+    { planId: "pl-2", title: "Docs portal spike", brief: "A static docs portal for the pipeline team.", aspectIds: ["requirements"], contextRoots: [], notes: "", status: "archived", sessionId: null, updatedAt: iso(4000) }
+  ];
+  function plannerPlanSummary(plan) {
+    const annotations = plannerAnnotations[plan.planId] ?? [];
+    return {
+      ...plan,
+      artifactCount: (plannerArtifacts[plan.planId] ?? []).length,
+      openAnnotationCount: annotations.filter((annotation) => annotation.status === "open").length
+    };
+  }
+  function plannerState(plan) {
+    return {
+      plan: plannerPlanSummary(plan),
+      artifacts: plannerArtifacts[plan.planId] ?? [],
+      annotations: plannerAnnotations[plan.planId] ?? [],
+      aspects: plannerAspects
+    };
+  }
+  function findPlannerArtifact(artifactId) {
+    for (const planId of Object.keys(plannerArtifacts)) {
+      const artifact = plannerArtifacts[planId].find((entry) => entry.artifactId === artifactId);
+      if (artifact) return artifact;
+    }
+    return undefined;
+  }
+  function findPlannerAnnotation(annotationId) {
+    for (const planId of Object.keys(plannerAnnotations)) {
+      const annotation = plannerAnnotations[planId].find((entry) => entry.annotationId === annotationId);
+      if (annotation) return annotation;
+    }
+    return undefined;
   }
 
   window.acquireVsCodeApi = function acquireVsCodeApi() {
@@ -767,7 +1077,7 @@
   };
 
   window.__harness = {
-    fixtures: { sessions, catalogs, workspacePolicy, diffChanges, cloneRepos, tasks, boardColumns, memoryCandidates, workHistory, taskReviewProjects, taskReviewSessions, taskReviewComments, comments: [
+    fixtures: { sessions, catalogs, workspacePolicy, diffChanges, cloneRepos, tasks, boardColumns, memoryCandidates, workHistory, taskReviewProjects, taskReviewSessions, taskReviewComments, planner: { plans: plannerPlans, artifacts: plannerArtifacts, annotations: plannerAnnotations, aspects: plannerAspects }, comments: [
       { commentId: "c-1", filePath: "publish_hooks.py", startLine: 12, endLine: 14, body: "Guard the allowlist behind config.", author: "user", status: "open", createdAt: iso(30) }
     ] },
     log: [],
@@ -790,6 +1100,12 @@
       /** Fires the attention push for the waiting session (badge/marker test). */
       attention(sessionId, reasons) {
         push({ type: "session.attention", sessionId, reasons });
+      },
+      /** Planner: bump the main doc's revision and fire the coarse changed push. */
+      plannerChanged(planId = "pl-1") {
+        const doc = (window.__harness.fixtures.planner.artifacts[planId] ?? []).find((artifact) => artifact.kind === "document");
+        if (doc) doc.revision += 1;
+        push({ type: "planner.changed", planId });
       },
       /**
        * Subagent fan-out (V31/V32): streams a turn where the agent spawns two

@@ -72,7 +72,9 @@ Dependency rules:
 
 ## Orchestration
 
-- Starting a subtask with a prompt spawns a chat session linked to the parent task and the subtask, sends the prompt as the first turn, and moves the card to the first `in-progress` column.
+- Starting a subtask with a prompt spawns a chat session linked to the parent task and the subtask, sends the prompt as the first turn, and moves the card to the first `in-progress` column. Subtask automation always uses clone mode: one independent disposable clone workspace per subtask, never live implementation mounts.
+- A durable `TaskClonePolicy` selects exactly one linked workspace set, a non-empty ordered subset of its project IDs, and dirty handling (`carry` or `fresh`). Manual starts in either task surface use native VS Code UI to choose projects (saved selection, otherwise all by default), preflight the repos, prompt when any is dirty, then save the policy. Auto-cascades do not prompt; they re-read and revalidate the saved policy.
+- `carry` includes current tracked and untracked local changes. `fresh` means the current **local committed HEAD** only; task start does not fetch or pull a remote. Zero/multiple linked sets and missing, empty, or stale policies fail actionably rather than falling back to an empty workspace.
 - Completion is event-driven: on the product bus `turn-completed` with status `completed` for a session linked to a subtask, the card moves to the first `done` column (Review), `doneAt` is stamped, and dependents are evaluated. No polling.
 - Dependent evaluation: a downstream subtask auto-starts iff its `autoStart` flag is set (per-subtask opt-in, default false), all of its upstreams are done, it has a prompt, it is not already running or done, and it is not in a `backlog`-category column. All eligible dependents are dispatched together; actual concurrency follows the run-slot policy (see Open Questions).
 - A dependent without a prompt cannot auto-start; when its upstreams finish it just unblocks (badge clears, toast).
@@ -84,7 +86,7 @@ Dependency rules:
 ## Task Board Panel
 
 - New editor-area webview panel `drydock.taskBoard`, single instance, opened via `drydock.taskBoard.open` and from the Work tab. Clones the plan-docs panel host pattern with the task-review panel's strict CSP (no `unsafe-inline`); new esbuild bundle pair `taskBoard.ts` / `taskBoard.css` in `tools/bundle-extension.mjs`. Vanilla TS, `textContent`-only rendering.
-- Tasks and subtasks are independent cards; both drag freely between columns. Task cards show workspace-set chips and subtask progress; subtask cards show a parent-task colour stripe, input/output dots, prompt/chat glyphs, an auto-start indicator, and the computed blocked badge.
+- Tasks and subtasks are independent cards; both drag freely between columns. Task cards show workspace-set chips, a concise clone/isolation chip (`clone · all 3` or `clone · 2/3 · carry`), and subtask progress; subtask cards show a parent-task colour stripe, input/output dots, prompt/chat glyphs, an auto-start indicator, and the computed blocked badge.
 - Dependency edges render on an SVG overlay tinted by parent task, shown for the hovered/selected card by default with a show-all toolbar mode. Click an edge to select; a midpoint handle deletes. Esc cancels an in-flight connection drag; a drop that would create a cycle is rejected with feedback and nothing is written.
 - Toolbar: workspace-set filter, task focus filter, age dropdown ("hide finished older than N days", default 1), connections mode, column settings, new task.
 - The age filter hides `done`-category cards whose `doneAt` is older than the selected age behind a per-column "N hidden" affordance, so old finished work stays reachable.
@@ -93,7 +95,7 @@ Dependency rules:
 
 - Rename the drawer "Chats needing a task" to "Orphaned Chats" (label and live-count string in `workTab.ts`).
 - Memory keeps pending-candidate cards (approve/reject) and gains a Memories list of approved entries. Clicking one opens a read-only virtual document (`drydock-memory:` scheme via a `TextDocumentContentProvider`, same pattern as the baseline content provider) showing content, status, dates, and a source-session link. New `memory.open` request; a later iteration adds revoke (approved → rejected).
-- Task cards gain a subtask checklist with computed status pills, an add-subtask input, a column pill replacing the state `<select>`, and "Open on board" entry points.
+- Task cards gain a subtask checklist with computed status pills, an add-subtask input, a column pill replacing the state `<select>`, the same clone/isolation chip as the Task Board, and "Open on board" entry points.
 
 ## Protocol Additions
 
@@ -103,11 +105,18 @@ Dependency rules:
 
 ## Storage And Migration
 
-- New tables in the primary store: `board_columns`, `subtasks`, `subtask_dependencies`; `work_task_links` gains a nullable `subtask_id`; `work_tasks.state` becomes `column_id` with the seeded defaults. Forward-only migration in `packages/storage-sqlite/src/migrations.ts`.
+- New tables in the primary store: `board_columns`, `subtasks`, `subtask_dependencies`; `work_task_links` gains a nullable `subtask_id`; `work_tasks.state` becomes `column_id` with the seeded defaults. Nullable clone-policy columns are additive for existing task rows. Forward-only migration in `packages/storage-sqlite/src/migrations.ts`.
 - Column config is product state in the store — identical wherever the board opens. The board's toolbar settings (age filter, task focus, connections mode) currently persist per panel via webview state; promoting them to product state is a noted later item.
 
 ## Open Questions
 
+- **Integration gap for code-dependent chains:** isolation prevents sibling
+  agents from stepping on one another, but a completed clone run does not yet
+  merge its change set into a task-level integration workspace. A dependent
+  clone therefore starts from the task's local source, not automatically from
+  its upstream agent's output. Until durable change sets + an integration
+  workspace land, keep `autoStart` off for chains whose prompts require upstream
+  code; review/pull the upstream result, then start the dependent manually.
 - Age filter vs Review: "hide if complete" includes Review (a `done` column). Specified as hide-with-counter in every `done` column so unreviewed work cannot silently vanish; the alternative is exempting Review entirely.
 - Review counts as done for dependencies, so dependents fire before a human has reviewed the upstream. Pulling a card back out of `done` does not cancel runs already started.
 - Parallel starts vs the single-flight run slot — resolved during implementation: the `runInFlight` guard covers only the legacy prompt-run/probe surface (`isolatedRunService.startPromptRun`). Chat-backed subtask runs go through `ChatSessionService`, which supports many concurrent sessions (serialization is one active turn per session), so auto-started dependents genuinely run in parallel and no slot widening is needed.

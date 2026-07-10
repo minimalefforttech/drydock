@@ -149,4 +149,7 @@ class FixedIds implements IdGenerator {
   memoryCandidateId() { return asId<"MemoryCandidateId">("memory-fixed"); }
   columnId() { return asId<"ColumnId">("col-fixed"); }
   subtaskId() { return asId<"SubtaskId">("subtask-fixed"); }
+  planId() { return asId<"PlanId">("plan-test"); }
+  planArtifactId() { return asId<"PlanArtifactId">("plart-test"); }
+  planAnnotationId() { return asId<"PlanAnnotationId">("plnote-test"); }
 }

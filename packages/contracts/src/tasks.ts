@@ -8,10 +8,23 @@
  * TaskService in @drydock/work-management owns lifecycle and policy.
  */
 
-import type { ColumnId, SessionId, SubtaskId, TaskId, WorkspaceSetId } from "./ids.js";
+import type { ColumnId, ProjectId, SessionId, SubtaskId, TaskId, WorkspaceSetId } from "./ids.js";
 
 export const WORK_TASK_STATES = ["todo", "in-progress", "blocked", "review", "done"] as const;
 export type WorkTaskState = (typeof WORK_TASK_STATES)[number];
+
+/** What snapshot a task's isolated clone starts from when its source repo is dirty. */
+export type CloneDirtyHandling = "carry" | "fresh";
+
+/**
+ * Durable isolation policy for automated work on a task. One workspace set is
+ * selected explicitly; projectIds is a non-empty, ordered subset of that set.
+ */
+export interface TaskClonePolicy {
+  readonly workspaceSetId: WorkspaceSetId;
+  readonly projectIds: readonly ProjectId[];
+  readonly dirtyHandling: CloneDirtyHandling;
+}
 
 export interface WorkTaskRecord {
   readonly taskId: TaskId;
@@ -29,6 +42,8 @@ export interface WorkTaskRecord {
   readonly updatedAt: string;
   /** Stamped when the card enters a `done`-category column; cleared on exit. */
   readonly doneAt?: string;
+  /** Saved clone selection reused by manual starts and dependency cascades. */
+  readonly clonePolicy?: TaskClonePolicy;
 }
 
 /** A task points at the places its work happens. Exactly one target per link. */
@@ -140,6 +155,8 @@ export interface WorkTaskStore {
   getTask(taskId: TaskId): Promise<WorkTaskRecord | null>;
   /** Newest-first by updatedAt. */
   listTasks(): Promise<WorkTaskRecord[]>;
+  /** Replaces or clears the task's durable clone policy. */
+  setClonePolicy(taskId: TaskId, policy: TaskClonePolicy | undefined): Promise<void>;
   /** Removes the task and all of its links. */
   deleteTask(taskId: TaskId): Promise<void>;
   insertLink(record: WorkTaskLinkRecord): Promise<void>;

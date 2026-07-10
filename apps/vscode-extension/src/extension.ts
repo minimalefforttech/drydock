@@ -18,7 +18,8 @@ import { OutputChannelLogger } from "./outputChannelLogger.js";
 import { BASELINE_SCHEME, BaselineContentProvider } from "./webview/baselineContentProvider.js";
 import { ControlPanelProvider } from "./webview/controlPanelProvider.js";
 import { MEMORY_SCHEME, MemoryContentProvider } from "./webview/memoryContentProvider.js";
-import { PlanDocsPanelProvider } from "./webview/planDocsPanelProvider.js";
+import { PlannerPanelProvider } from "./webview/plannerPanelProvider.js";
+import { createAspectOverlayReader } from "./services/plannerAspectOverlay.js";
 import { TaskBoardPanelProvider } from "./webview/taskBoardPanelProvider.js";
 import { TaskReviewCommentsController } from "./webview/taskReviewCommentsController.js";
 import { TaskReviewPanelProvider } from "./webview/taskReviewPanelProvider.js";
@@ -38,7 +39,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const appServerInactivityTimeoutMs = vscode.workspace
     .getConfiguration("drydock")
     .get<number>("runtime.appServerInactivityTimeoutMs", 300_000);
-  const backend = await createBackend({ stateRootPath, logger, deniedPaths, appServerInactivityTimeoutMs });
+  // Department aspect packs: `.drydock/planner-aspects.json` in any open
+  // workspace folder merges read-only into the planner's aspect registry.
+  const plannerAspectOverlays = createAspectOverlayReader(
+    () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath)
+  );
+  const backend = await createBackend({ stateRootPath, logger, deniedPaths, appServerInactivityTimeoutMs, plannerAspectOverlays });
   context.subscriptions.push(new vscode.Disposable(() => backend.dispose()));
   await writeStorePointer(context, stateRootPath);
 
@@ -60,28 +66,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       )
     );
   }
-  const planDocsPanels = new PlanDocsPanelProvider(context.extensionUri, backend, logger);
-  context.subscriptions.push(vscode.commands.registerCommand("drydock.planDocs.open", async (sessionId?: unknown) => {
-    if (!backend.available) {
-      void vscode.window.showErrorMessage(backend.reason);
-      return;
-    }
-    let resolvedId = typeof sessionId === "string" ? sessionId : undefined;
-    const sessions = await backend.appService.listChatSessions();
-    let title = "Session";
-    if (resolvedId === undefined) {
-      const pick = await vscode.window.showQuickPick(
-        sessions.map((session) => ({ label: session.title, description: session.status, sessionId: session.sessionId })),
-        { placeHolder: "Select a session to review plan documents" }
-      );
-      if (pick === undefined) return;
-      resolvedId = pick.sessionId;
-      title = pick.label;
-    } else {
-      title = sessions.find((session) => session.sessionId === resolvedId)?.title ?? title;
-    }
-    await planDocsPanels.open(resolvedId, title);
-  }));
   // Construction order: the controller's onCommentsChanged callback needs the
   // panel provider, and the provider needs the controller. Resolve the cycle
   // with a `let`-captured provider reference: the callback closes over
@@ -146,6 +130,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return;
     }
     await taskBoardPanel.open();
+  }));
+  // Planner (ADR 0012): single global panel; landing, intake, and the
+  // three-column plan view all live inside it. The control panel's
+  // planner.open relay routes here.
+  const plannerPanel = new PlannerPanelProvider(context.extensionUri, backend, logger);
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.planner.open", async () => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    await plannerPanel.open();
   }));
   registerIsolatedRunCommands(context, output, backend);
 

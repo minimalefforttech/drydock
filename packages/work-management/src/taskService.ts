@@ -19,6 +19,7 @@ import type {
   SessionId,
   SubtaskId,
   SubtaskStore,
+  TaskClonePolicy,
   TaskId,
   WorkSessionRecord,
   WorkSessionStore,
@@ -27,6 +28,8 @@ import type {
   WorkTaskState,
   WorkTaskStore,
   WorkTaskSummary,
+  WorkspaceSetRecord,
+  WorkspaceSetStore,
   WorkspaceSetId
 } from "@drydock/contracts";
 import type { Clock, IdGenerator } from "@drydock/core";
@@ -40,6 +43,8 @@ export interface TaskServiceOptions {
   readonly workSessions?: WorkSessionStore;
   /** Presence enables cascading subtask deletion when a task is deleted. */
   readonly subtasks?: SubtaskStore;
+  /** Presence enables validation and display of durable clone policies. */
+  readonly workspaceSets?: WorkspaceSetStore;
 }
 
 /** One link target; exactly one field is set per call. subtaskId only applies alongside sessionId. */
@@ -58,6 +63,12 @@ export interface TaskUpdateInput {
    */
   readonly state?: WorkTaskState;
   readonly columnId?: string;
+}
+
+export interface TaskClonePolicyInput {
+  readonly workspaceSetId: string;
+  readonly projectIds: readonly string[];
+  readonly dirtyHandling: "carry" | "fresh";
 }
 
 /** Legacy WorkTaskState -> seeded default BoardColumnRecord.columnId (mirrors the migration backfill). */
@@ -209,16 +220,55 @@ export class TaskService {
 
   /** Idempotent: a duplicate link is a no-op via the store's INSERT OR IGNORE. */
   async link(taskId: string, target: TaskLinkTarget): Promise<void> {
+    const id = asId<"TaskId">(taskId);
     const record: WorkTaskLinkRecord = {
-      taskId: asId<"TaskId">(taskId),
+      taskId: id,
       ...resolveTarget(target),
       createdAt: this.options.clock.isoNow()
     };
     await this.options.store.insertLink(record);
+    if ("workspaceSetId" in target) {
+      await this.clearPolicyIfWorkspaceSelectionChanged(id);
+    }
   }
 
   async unlink(taskId: string, target: TaskLinkTarget): Promise<void> {
-    await this.options.store.deleteLink(asId<"TaskId">(taskId), resolveTarget(target));
+    const id = asId<"TaskId">(taskId);
+    await this.options.store.deleteLink(id, resolveTarget(target));
+    if ("workspaceSetId" in target) {
+      await this.clearPolicyIfWorkspaceSelectionChanged(id);
+    }
+  }
+
+  /** Saves a validated, non-empty ordered project subset for the task's sole linked set. */
+  async saveClonePolicy(taskId: string, input: TaskClonePolicyInput): Promise<TaskClonePolicy> {
+    const id = asId<"TaskId">(taskId);
+    const task = await this.options.store.getTask(id);
+    if (task === null) {
+      throw new Error(`Task ${taskId} was not found.`);
+    }
+    const policy: TaskClonePolicy = {
+      workspaceSetId: asId<"WorkspaceSetId">(input.workspaceSetId),
+      projectIds: input.projectIds.map((projectId) => asId<"ProjectId">(projectId)),
+      dirtyHandling: input.dirtyHandling
+    };
+    await this.validateClonePolicy(id, policy);
+    await this.options.store.setClonePolicy(id, policy);
+    return policy;
+  }
+
+  /** Reads and revalidates the durable policy immediately before a run uses it. */
+  async requireClonePolicy(taskId: string): Promise<TaskClonePolicy> {
+    const id = asId<"TaskId">(taskId);
+    const task = await this.options.store.getTask(id);
+    if (task === null) {
+      throw new Error(`Task ${taskId} was not found.`);
+    }
+    if (task.clonePolicy === undefined) {
+      throw new Error(`Task ${taskId} has no clone policy. Start it manually once to select the repositories and dirty-change handling.`);
+    }
+    await this.validateClonePolicy(id, task.clonePolicy);
+    return task.clonePolicy;
   }
 
   /** Session ids linked to one subtask (session-target links carrying that subtaskId), in link order. */
@@ -257,12 +307,22 @@ export class TaskService {
     const categoryByColumnId = new Map(columns.map((column) => [column.columnId as string, column.category]));
     const workspaceSetsByTask = new Map<string, string[]>();
     const sessionsByTask = new Map<string, string[]>();
+    const linkedSetIdsByTask = new Map<string, Set<string>>();
     for (const link of links) {
       if (link.workspaceSetId !== undefined) {
         pushInto(workspaceSetsByTask, link.taskId, link.workspaceSetId);
+        const setIds = linkedSetIdsByTask.get(link.taskId) ?? new Set<string>();
+        setIds.add(link.workspaceSetId);
+        linkedSetIdsByTask.set(link.taskId, setIds);
       }
       if (link.sessionId !== undefined) {
         pushInto(sessionsByTask, link.taskId, link.sessionId);
+      }
+    }
+    const workspaceSetById = new Map<string, WorkspaceSetRecord>();
+    if (this.options.workspaceSets !== undefined) {
+      for (const set of await this.options.workspaceSets.listWorkspaceSets()) {
+        workspaceSetById.set(set.workspaceSetId, set);
       }
     }
     const lastWorkedByTask = new Map<string, string>();
@@ -278,6 +338,7 @@ export class TaskService {
       const lastWorkedAt = lastWorkedByTask.get(task.taskId);
       const category = categoryByColumnId.get(task.columnId);
       const state = category === undefined ? "todo" : CATEGORY_TO_STATE[category];
+      const clonePolicy = validSummaryClonePolicy(task.clonePolicy, linkedSetIdsByTask.get(task.taskId), workspaceSetById);
       return {
         taskId: task.taskId,
         title: task.title,
@@ -290,10 +351,79 @@ export class TaskService {
         updatedAt: task.updatedAt,
         ...(task.doneAt === undefined ? {} : { doneAt: task.doneAt }),
         ...(lastWorkedAt === undefined ? {} : { lastWorkedAt }),
+        ...(clonePolicy === undefined ? {} : { clonePolicy }),
         subtasks: []
       };
     });
   }
+
+  private async validateClonePolicy(taskId: TaskId, policy: TaskClonePolicy): Promise<WorkspaceSetRecord> {
+    const workspaceSets = this.options.workspaceSets;
+    if (workspaceSets === undefined) {
+      throw new Error("Task clone policies are unavailable because no workspace-set store is configured.");
+    }
+    if (policy.dirtyHandling !== "carry" && policy.dirtyHandling !== "fresh") {
+      throw new Error(`Unknown clone dirty handling ${String(policy.dirtyHandling)}.`);
+    }
+    if (policy.projectIds.length === 0) {
+      throw new Error("A task clone policy must select at least one project.");
+    }
+    const selected = new Set<string>();
+    for (const projectId of policy.projectIds) {
+      if (selected.has(projectId)) {
+        throw new Error(`Project ${projectId} is selected more than once in the task clone policy.`);
+      }
+      selected.add(projectId);
+    }
+    const links = await this.options.store.listLinks(taskId);
+    const linkedSetIds = [...new Set(links.flatMap((link) => link.workspaceSetId === undefined ? [] : [link.workspaceSetId as string]))];
+    if (linkedSetIds.length !== 1) {
+      throw new Error(`Task ${taskId} must link exactly one workspace set before it can start an isolated clone run; found ${String(linkedSetIds.length)}.`);
+    }
+    if (linkedSetIds[0] !== policy.workspaceSetId) {
+      throw new Error(`Task ${taskId}'s clone policy selects workspace set ${policy.workspaceSetId}, but its linked set is ${linkedSetIds[0]}.`);
+    }
+    const set = await workspaceSets.getWorkspaceSet(policy.workspaceSetId);
+    if (set === null) {
+      throw new Error(`Task ${taskId}'s clone policy references missing workspace set ${policy.workspaceSetId}.`);
+    }
+    const memberIds = new Set(set.projectIds as readonly string[]);
+    for (const projectId of policy.projectIds) {
+      if (!memberIds.has(projectId)) {
+        throw new Error(`Task ${taskId}'s clone policy selects project ${projectId}, which is not in workspace set ${policy.workspaceSetId}.`);
+      }
+    }
+    return set;
+  }
+
+  private async clearPolicyIfWorkspaceSelectionChanged(taskId: TaskId): Promise<void> {
+    const task = await this.options.store.getTask(taskId);
+    if (task?.clonePolicy === undefined) return;
+    const links = await this.options.store.listLinks(taskId);
+    const setIds = [...new Set(links.flatMap((link) => link.workspaceSetId === undefined ? [] : [link.workspaceSetId as string]))];
+    if (setIds.length !== 1 || setIds[0] !== task.clonePolicy.workspaceSetId) {
+      await this.options.store.setClonePolicy(taskId, undefined);
+    }
+  }
+}
+
+function validSummaryClonePolicy(
+  policy: TaskClonePolicy | undefined,
+  linkedSetIds: ReadonlySet<string> | undefined,
+  workspaceSetById: ReadonlyMap<string, WorkspaceSetRecord>
+): (TaskClonePolicy & { readonly workspaceSetProjectCount: number }) | undefined {
+  if (policy === undefined || linkedSetIds?.size !== 1 || !linkedSetIds.has(policy.workspaceSetId) || policy.projectIds.length === 0) {
+    return undefined;
+  }
+  const set = workspaceSetById.get(policy.workspaceSetId);
+  if (set === undefined) return undefined;
+  const memberIds = new Set(set.projectIds as readonly string[]);
+  const selected = new Set<string>();
+  for (const projectId of policy.projectIds) {
+    if (!memberIds.has(projectId) || selected.has(projectId)) return undefined;
+    selected.add(projectId);
+  }
+  return { ...policy, workspaceSetProjectCount: set.projectIds.length };
 }
 
 function resolveTarget(target: TaskLinkTarget): { workspaceSetId?: WorkspaceSetId; sessionId?: SessionId; subtaskId?: SubtaskId } {

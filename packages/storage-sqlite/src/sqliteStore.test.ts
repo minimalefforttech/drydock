@@ -121,7 +121,7 @@ test("event appends return durable idempotent sequences and support resume", asy
   }
 });
 
-test("chat session workspace roots round-trip so a resume re-mounts the project", async () => {
+test("chat session workspace roots and clone snapshot choice round-trip for resume", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
   const dbPath = path.join(dir, "stage2-roots.sqlite");
   try {
@@ -131,7 +131,8 @@ test("chat session workspace roots round-trip so a resume re-mounts the project"
     await sessions.insertSession({
       ...sessionRecord("session-roots", "2026-07-01T00:00:00.000Z"),
       workspaceRoots: ["C:\\proj\\app", "C:\\proj\\shared"],
-      readOnlyRoots: ["C:\\proj\\shared"]
+      readOnlyRoots: ["C:\\proj\\shared"],
+      cloneDirtyHandling: "fresh"
     });
 
     // Reopen to prove the JSON columns persist across a restart.
@@ -141,6 +142,7 @@ test("chat session workspace roots round-trip so a resume re-mounts the project"
     const stored = await new SqliteChatSessionStore(reopened).getSession(asId<"SessionId">("session-roots"));
     assert.deepEqual(stored?.workspaceRoots, ["C:\\proj\\app", "C:\\proj\\shared"]);
     assert.deepEqual(stored?.readOnlyRoots, ["C:\\proj\\shared"]);
+    assert.equal(stored?.cloneDirtyHandling, "fresh");
     reopened.close();
   } finally {
     await rm(dir, { recursive: true, force: true });

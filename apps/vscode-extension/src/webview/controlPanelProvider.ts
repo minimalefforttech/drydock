@@ -48,17 +48,16 @@ import { normalizePathKey, sandboxRuntimePath, type AgentQuestionService, type L
 import type { BoardService, MemoryService, SubtaskService, TaskService } from "@drydock/work-management";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import { buildBoardState, decorateTaskSummary, joinOpenCommentCounts, reconcileColumns } from "./boardShared.js";
+import { promptAndSaveTaskClonePolicy } from "./taskClonePolicyPrompt.js";
 import {
   toRuntimeSummary,
   type ChatWorkspaceContext,
   type IsolatedRunService
 } from "../services/isolatedRunService.js";
-import type { PlanDocsAppService } from "../services/planDocsAppService.js";
 import type { WorkHistoryFilter, WorkInsightsAppService } from "../services/workInsightsAppService.js";
 import { toAccessRequestSummary, type WorkspaceReviewAppService } from "../services/workspaceReviewAppService.js";
 import { openBaselineDiff } from "./baselineDiff.js";
 import { memoryUri } from "./memoryContentProvider.js";
-import { composePlanDocsSend, toPlanDocDetail, toPlanDocSummary } from "./planDocsShared.js";
 
 export function toChatSessionSummary(record: ChatSessionRecord, runningElsewhere = false): ChatSessionSummary {
   return {
@@ -129,7 +128,7 @@ function toMemoryCandidateSummary(record: MemoryCandidateRecord): MemoryCandidat
  * drive-mirror path form (`/c/Users/...` → `C:\Users\...`) so links to mounted
  * host folders open in the editor at the right line.
  */
-async function openAgentFileRef(ref: string): Promise<boolean> {
+export async function openAgentFileRef(ref: string): Promise<boolean> {
   const trimmed = ref.trim();
   if (/^https?:\/\//i.test(trimmed)) {
     await vscode.env.openExternal(vscode.Uri.parse(trimmed));
@@ -279,11 +278,6 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.push({ type: "session.deleted", sessionId: event.sessionId });
         // A deleted session can no longer wait on the user; drop its attention.
         this.dropAttention(event.sessionId);
-        return;
-      case "plan-docs-updated":
-        // Forward as the summaries-only push (no content over the boundary
-        // beyond an explicit planDocs.state request).
-        this.push({ type: "planDocs.updated", sessionId: event.sessionId, docs: event.docs.map(toPlanDocSummary) });
         return;
       case "access-requested":
         // Detected agent access requests arrive here; forward the display-safe
@@ -695,6 +689,32 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.clearAttention(payload.sessionId, ["turn-completed", "turn-failed"]);
         return;
       }
+      case "session.summarize": {
+        const appService = this.requireBackend();
+        if (payload.mode === "log") {
+          // Host-side clipboard write: the log can exceed the webview→host
+          // clipboard request bound, and the host API takes any string.
+          await vscode.env.clipboard.writeText(await appService.buildChatLogExport(payload.sessionId));
+          this.respond(request.requestId, { type: "session.summarize", sessionId: payload.sessionId, mode: "log", accepted: true });
+          return;
+        }
+        // AI mode: a model turn can outlive the webview request timeout, so
+        // ack now and deliver the outcome as a push. The clipboard is written
+        // here regardless of whether the panel is still listening.
+        this.respond(request.requestId, { type: "session.summarize", sessionId: payload.sessionId, mode: "ai", accepted: true });
+        void appService
+          .generateChatSummary(payload.sessionId)
+          .then(async (summary) => {
+            await vscode.env.clipboard.writeText(summary);
+            this.push({ type: "session.summaryReady", sessionId: payload.sessionId, ok: true });
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.warn("chat AI summary failed", { sessionId: payload.sessionId, error: message });
+            this.push({ type: "session.summaryReady", sessionId: payload.sessionId, ok: false, error: message });
+          });
+        return;
+      }
       case "task.list": {
         const backend = this.requireBackendReady();
         const tasks = await joinOpenCommentCounts(backend, this.logger, await this.requireTasks().listTaskSummaries());
@@ -894,17 +914,17 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "diff.status": {
-        const changes = await this.requireWorkspaceReview().diffStatus(payload.sessionId);
+        const changes = await this.requireWorkspaceReview().diffStatus(payload.sessionId, payload.view);
         this.respond(request.requestId, { type: "diff.status", changes });
         return;
       }
       case "diff.acceptFile": {
-        const changes = await this.requireWorkspaceReview().acceptFile(payload.baselineId, payload.path);
+        const changes = await this.requireWorkspaceReview().acceptFile(payload.baselineId, payload.path, payload.view);
         this.respond(request.requestId, { type: "diff.acceptFile", changes });
         return;
       }
       case "diff.revertFile": {
-        const changes = await this.requireWorkspaceReview().revertFile(payload.baselineId, payload.path);
+        const changes = await this.requireWorkspaceReview().revertFile(payload.baselineId, payload.path, payload.view);
         this.respond(request.requestId, { type: "diff.revertFile", changes });
         return;
       }
@@ -928,38 +948,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.respond(request.requestId, { type: "review.setCommentStatus", comment });
         return;
       }
-      case "planDocs.state": {
-        this.requireBackend();
-        const docs = await this.requirePlanDocs().listDocs(payload.sessionId);
-        this.respond(request.requestId, { type: "planDocs.state", sessionId: payload.sessionId, docs: docs.map(toPlanDocDetail) });
-        return;
-      }
-      case "planDocs.open": {
-        // Editor-panel open is a host action; route through the command.
-        this.requireBackend();
-        await vscode.commands.executeCommand("drydock.planDocs.open", payload.sessionId);
-        this.respond(request.requestId, { type: "planDocs.open", accepted: true });
-        return;
-      }
       case "taskReview.open": {
         // Editor-panel open is a host action; route through the command.
         this.requireBackend();
         await vscode.commands.executeCommand("drydock.taskReview.open", payload.taskId);
         this.respond(request.requestId, { type: "taskReview.open", accepted: true });
-        return;
-      }
-      case "planDocs.sendComments": {
-        const appService = this.requireBackend();
-        if (!this.backend.available) {
-          throw new Error(this.backend.reason);
-        }
-        // Nothing open → accepted no-op; otherwise the guarded send returns a
-        // prompt to run detached.
-        const send = await composePlanDocsSend(this.backend, appService, payload.sessionId);
-        this.respond(request.requestId, { type: "planDocs.sendComments", accepted: true, sentCount: send.sentCount });
-        if (send.prompt !== undefined) {
-          this.runTurnDetached(appService, payload.sessionId, send.prompt);
-        }
         return;
       }
       case "clone.state": {
@@ -1083,14 +1076,36 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // force is the manual-only override for a BLOCKED subtask; typed
         // StartSubtaskError messages surface verbatim via the error-response path.
         const backend = this.requireBackendReady();
+        const subtask = await backend.subtasks.getSubtask(payload.subtaskId);
+        if (subtask === null) {
+          throw new Error(`Subtask ${payload.subtaskId} was not found.`);
+        }
+        if (!(await promptAndSaveTaskClonePolicy(backend, subtask.taskId))) {
+          this.respond(request.requestId, { type: "subtask.start", accepted: false });
+          return;
+        }
         await backend.orchestrator.startSubtask(payload.subtaskId, { force: payload.force === true });
         this.respond(request.requestId, { type: "subtask.start", accepted: true });
         return;
       }
       case "task.start": {
         const backend = this.requireBackendReady();
+        if (!(await promptAndSaveTaskClonePolicy(backend, payload.taskId))) {
+          this.respond(request.requestId, { type: "task.start", accepted: false });
+          return;
+        }
         await backend.orchestrator.startTask(payload.taskId);
         this.respond(request.requestId, { type: "task.start", accepted: true });
+        return;
+      }
+      case "planner.open": {
+        this.requireBackend();
+        try {
+          await vscode.commands.executeCommand("drydock.planner.open");
+          this.respond(request.requestId, { type: "planner.open", accepted: true });
+        } catch {
+          this.respondError(request.requestId, "Planner panel not available yet.");
+        }
         return;
       }
       case "taskBoard.open": {
@@ -1463,7 +1478,21 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
 
   /** Turn results surface via bus pushes; failures here are protocol-level. */
   private runTurnDetached(appService: IsolatedRunService, sessionId: string, prompt: string, model?: ChatModelSelection): void {
-    void appService.sendChatTurn(sessionId, prompt, model).catch((error: unknown) => {
+    void (async () => {
+      // "This Turn" frame: snapshot the send moment BEFORE the agent can edit.
+      // Best-effort like session baselining — a capture failure must not block
+      // the turn (the view then falls back to its previous frame). No-op for
+      // sessions without diff baselines (clone/plan).
+      try {
+        await this.requireWorkspaceReview().beginTurnBaselines(sessionId);
+      } catch (error) {
+        this.logger.warn("turn diff baseline capture failed", {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+      await appService.sendChatTurn(sessionId, prompt, model);
+    })().catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error("chat turn failed to run", { sessionId, error: message });
       this.push({ type: "run.failed", message });
@@ -1738,13 +1767,6 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       throw new Error(this.backend.reason);
     }
     return this.backend.workInsights;
-  }
-
-  private requirePlanDocs(): PlanDocsAppService {
-    if (!this.backend.available) {
-      throw new Error(this.backend.reason);
-    }
-    return this.backend.planDocs;
   }
 
   /** Refreshed summary (with current links, columnId/doneAt, and subtasks) for one task after a mutation. */

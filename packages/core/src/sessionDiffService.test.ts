@@ -8,7 +8,7 @@ import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/p
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { DiffFileChange } from "@drydock/contracts";
+import type { DiffFileChange, SessionId } from "@drydock/contracts";
 import type { Clock } from "./clock.js";
 import { RandomIdGenerator } from "./ids.js";
 import type { Logger } from "./logger.js";
@@ -135,6 +135,36 @@ test("accepting one file resets only that file's baseline", async () => {
 
     const changes = await harness.service.computeDiff(baseline.baselineId);
     assert.deepEqual(changes.map((change) => change.path), ["b.txt"]);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("cloneBaseline copies snapshots into a new scope without re-walking; delete removes it", async () => {
+  const harness = await makeHarness();
+  try {
+    await writeFile(file(harness.root, "a.txt"), "a1");
+    const working = await harness.service.createBaseline({
+      scope: "current-session",
+      sessionId: "session-1" as SessionId,
+      rootPath: harness.root
+    });
+    const copy = await harness.service.cloneBaseline(working.baselineId, "session-start");
+
+    assert.equal(copy.scope, "session-start");
+    assert.equal(copy.sessionId, "session-1");
+    assert.equal(copy.rootPath, working.rootPath);
+    assert.notEqual(copy.baselineId, working.baselineId);
+    // The copy diffs independently: an edit shows against BOTH, and accepting
+    // into the working baseline leaves the copy's snapshot untouched.
+    await writeFile(file(harness.root, "a.txt"), "a2");
+    await harness.service.acceptFile(working.baselineId, "a.txt");
+    assert.deepEqual(await harness.service.computeDiff(working.baselineId), []);
+    assert.equal((await harness.service.computeDiff(copy.baselineId)).length, 1);
+
+    await harness.service.deleteBaseline(copy.baselineId);
+    assert.equal(await harness.service.getBaseline(copy.baselineId), null);
+    await assert.rejects(harness.service.computeDiff(copy.baselineId), /not found/);
   } finally {
     await harness.cleanup();
   }

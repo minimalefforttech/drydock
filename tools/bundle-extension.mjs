@@ -45,23 +45,8 @@ await esbuild([
   `--outfile=${path.join(distRoot, "webview", "main.css")}`
 ]);
 
-// Plan-docs panel: browser IIFE + styles.
-await esbuild([
-  path.join(extensionRoot, "webview-ui", "src", "planDocs.ts"),
-  "--bundle",
-  "--platform=browser",
-  "--format=iife",
-  "--target=es2022",
-  `--outfile=${path.join(distRoot, "webview", "planDocs.js")}`
-]);
-await esbuild([
-  path.join(extensionRoot, "webview-ui", "src", "planDocs.css"),
-  "--bundle",
-  `--outfile=${path.join(distRoot, "webview", "planDocs.css")}`
-]);
-
-// Task-review panel: browser IIFE + styles. Same shape as the plan-docs
-// pair — a standalone editor-panel entry, contracts bundled in.
+// Task-review panel: browser IIFE + styles — a standalone editor-panel
+// entry, contracts bundled in.
 await esbuild([
   path.join(extensionRoot, "webview-ui", "src", "taskReview.ts"),
   "--bundle",
@@ -90,6 +75,22 @@ await esbuild([
   path.join(extensionRoot, "webview-ui", "src", "taskBoard.css"),
   "--bundle",
   `--outfile=${path.join(distRoot, "webview", "taskBoard.css")}`
+]);
+
+// Planner panel: browser IIFE + styles. Same shape as the plan-docs pair —
+// a standalone editor-panel entry, contracts bundled in.
+await esbuild([
+  path.join(extensionRoot, "webview-ui", "src", "planner.ts"),
+  "--bundle",
+  "--platform=browser",
+  "--format=iife",
+  "--target=es2022",
+  `--outfile=${path.join(distRoot, "webview", "planner.js")}`
+]);
+await esbuild([
+  path.join(extensionRoot, "webview-ui", "src", "planner.css"),
+  "--bundle",
+  `--outfile=${path.join(distRoot, "webview", "planner.css")}`
 ]);
 
 // Mermaid renderer: a separate, minified bundle the plan-docs webview injects

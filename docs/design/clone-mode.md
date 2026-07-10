@@ -26,16 +26,35 @@ local repo gains no commits.
 ### Why full clones, not worktrees
 A `git worktree`'s gitdir points back into the primary repo's `.git`
 directory — mounting a worktree rw into a VM hands the container a path into
-the live repository. Disqualified. `git clone --local` from a local path is
-cheap (hardlinked objects where the filesystem allows) and fully detached.
+the live repository. Disqualified. Drydock uses `git clone --local
+--no-hardlinks`: local clone transport stays fast, while object files are
+physically copied so a VM write cannot reach the developer's real object store.
 
-### Snapshot fidelity
-"Clone the current branch" must mean *what the developer sees*, not just
-HEAD: after cloning `-b <branch>`, the local dirty state is overlaid —
-`git -C <local> diff --binary HEAD` applied to the clone, plus untracked
-files (`ls-files -o --exclude-standard`, honoring .gitignore) copied in.
-Then `git -C <clone> add -A && commit` creates the **sync base**, tracked as
-ref `refs/sync/base`. The VM starts from a faithful snapshot.
+### Snapshot choice and fidelity
+Before a manual task/subtask start, Drydock selects a non-empty ordered subset
+of the task's sole linked workspace set and preflights each selected repository
+without changing it. Preflight reports branch/detached HEAD and tracked versus
+untracked dirtiness. The selection and dirty handling are saved as the task's
+durable clone policy, so automatic dependency cascades reuse exactly the same
+scope without prompting. The chosen dirty handling is also stamped onto each
+session row, so resume/reclaim recreates the same snapshot policy instead of
+falling back to a dirty overlay.
+
+If a selected repository is dirty, the user chooses one of two snapshots:
+
+- **Carry local changes** clones current local HEAD, then overlays
+  `git -C <local> diff --binary HEAD` plus untracked, non-ignored files.
+- **Fresh committed checkout** clones the repository's **current local
+  committed HEAD** and excludes tracked working changes and untracked files.
+
+"Fresh" never means refresh from a remote: this start path performs no
+`fetch`, `pull`, or remote checkout. In both cases `git -C <clone> add -A &&
+commit` creates the **sync base**, tracked as `refs/sync/base`.
+
+Every automated subtask gets its own disposable clone workspace and never a
+live implementation mount. A task with zero or multiple linked workspace sets,
+a missing policy, an empty/stale project selection, or a non-git selected root
+fails with an actionable error rather than running against an empty workspace.
 
 ### The sync protocol (symmetric 3-way patches through the clone)
 All bookkeeping lives in the clone; `refs/sync/base` always names the last

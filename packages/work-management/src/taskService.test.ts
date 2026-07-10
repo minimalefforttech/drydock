@@ -24,6 +24,8 @@ import type {
   WorkTaskRecord,
   WorkTaskStore,
   WorkTaskUpdate,
+  WorkspaceSetRecord,
+  WorkspaceSetStore,
   WorkspaceSetId
 } from "@drydock/contracts";
 import { RandomIdGenerator, type Clock } from "@drydock/core";
@@ -131,6 +133,40 @@ test("listTaskSummaries derives state from columnId category, not the stored sta
   assert.equal(summary?.state, "done");
 });
 
+test("clone policy validates the sole linked set, persists an ordered subset, and decorates summaries", async () => {
+  const store = new MemoryWorkTaskStore();
+  const workspaceSets = new MemoryWorkspaceSetStore([
+    workspaceSet("set-1", ["project-a", "project-b", "project-c"])
+  ]);
+  const service = new TaskService(options(store, undefined, undefined, undefined, workspaceSets));
+  const task = await service.createTask("Parallel work");
+  await service.link(task.taskId, { workspaceSetId: "set-1" });
+
+  await assert.rejects(
+    () => service.saveClonePolicy(task.taskId, { workspaceSetId: "set-1", projectIds: [], dirtyHandling: "fresh" }),
+    /at least one project/
+  );
+  await assert.rejects(
+    () => service.saveClonePolicy(task.taskId, { workspaceSetId: "set-1", projectIds: ["outside"], dirtyHandling: "fresh" }),
+    /not in workspace set/
+  );
+
+  const saved = await service.saveClonePolicy(task.taskId, {
+    workspaceSetId: "set-1",
+    projectIds: ["project-c", "project-a"],
+    dirtyHandling: "carry"
+  });
+  assert.deepEqual(saved.projectIds, ["project-c", "project-a"]);
+  assert.deepEqual(await service.requireClonePolicy(task.taskId), saved);
+  const summary = (await service.listTaskSummaries()).find((candidate) => candidate.taskId === task.taskId);
+  assert.equal(summary?.clonePolicy?.workspaceSetProjectCount, 3);
+  assert.deepEqual(summary?.clonePolicy?.projectIds, ["project-c", "project-a"]);
+
+  // Linking a second set invalidates and clears the now-ambiguous policy.
+  await service.link(task.taskId, { workspaceSetId: "set-2" });
+  await assert.rejects(() => service.requireClonePolicy(task.taskId), /no clone policy/);
+});
+
 test("recordSessionActivity creates then bumps a work session per linked task", async () => {
   const workSessions = new MemoryWorkSessionStore();
   const store = new MemoryWorkTaskStore();
@@ -195,7 +231,8 @@ function options(
   store: WorkTaskStore = new MemoryWorkTaskStore(),
   workSessions?: WorkSessionStore,
   columns: BoardColumnStore = new MemoryBoardColumnStore(),
-  subtasks?: SubtaskStore
+  subtasks?: SubtaskStore,
+  workspaceSets?: WorkspaceSetStore
 ): {
   ids: RandomIdGenerator;
   clock: Clock;
@@ -203,6 +240,7 @@ function options(
   columns: BoardColumnStore;
   workSessions?: WorkSessionStore;
   subtasks?: SubtaskStore;
+  workspaceSets?: WorkspaceSetStore;
 } {
   return {
     ids: new RandomIdGenerator(),
@@ -210,7 +248,8 @@ function options(
     store,
     columns,
     ...(workSessions === undefined ? {} : { workSessions }),
-    ...(subtasks === undefined ? {} : { subtasks })
+    ...(subtasks === undefined ? {} : { subtasks }),
+    ...(workspaceSets === undefined ? {} : { workspaceSets })
   };
 }
 
@@ -363,6 +402,15 @@ class MemoryWorkTaskStore implements WorkTaskStore {
     );
   }
 
+  setClonePolicy(taskId: TaskId, policy: WorkTaskRecord["clonePolicy"]): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (task !== undefined) {
+      const { clonePolicy: _old, ...withoutPolicy } = task;
+      this.tasks.set(taskId, policy === undefined ? withoutPolicy : { ...withoutPolicy, clonePolicy: policy });
+    }
+    return Promise.resolve();
+  }
+
   deleteTask(taskId: TaskId): Promise<void> {
     for (let i = this.links.length - 1; i >= 0; i -= 1) {
       if (this.links[i]?.taskId === taskId) this.links.splice(i, 1);
@@ -412,6 +460,48 @@ class MemoryWorkTaskStore implements WorkTaskStore {
     }
     return Promise.resolve();
   }
+}
+
+class MemoryWorkspaceSetStore implements WorkspaceSetStore {
+  private readonly sets = new Map<string, WorkspaceSetRecord>();
+
+  constructor(records: readonly WorkspaceSetRecord[] = []) {
+    for (const record of records) this.sets.set(record.workspaceSetId, record);
+  }
+
+  insertWorkspaceSet(record: WorkspaceSetRecord): Promise<void> {
+    this.sets.set(record.workspaceSetId, record);
+    return Promise.resolve();
+  }
+
+  updateWorkspaceSet(record: WorkspaceSetRecord): Promise<void> {
+    this.sets.set(record.workspaceSetId, record);
+    return Promise.resolve();
+  }
+
+  deleteWorkspaceSet(workspaceSetId: WorkspaceSetId): Promise<void> {
+    this.sets.delete(workspaceSetId);
+    return Promise.resolve();
+  }
+
+  getWorkspaceSet(workspaceSetId: WorkspaceSetId): Promise<WorkspaceSetRecord | null> {
+    return Promise.resolve(this.sets.get(workspaceSetId) ?? null);
+  }
+
+  listWorkspaceSets(): Promise<WorkspaceSetRecord[]> {
+    return Promise.resolve([...this.sets.values()]);
+  }
+}
+
+function workspaceSet(workspaceSetId: string, projectIds: readonly string[]): WorkspaceSetRecord {
+  return {
+    workspaceSetId: asId<"WorkspaceSetId">(workspaceSetId),
+    name: workspaceSetId,
+    projectIds: projectIds.map((projectId) => asId<"ProjectId">(projectId)),
+    members: projectIds.map((projectId) => ({ projectId: asId<"ProjectId">(projectId), readOnly: false })),
+    createdAt: "2026-07-03T00:00:00.000Z",
+    updatedAt: "2026-07-03T00:00:00.000Z"
+  };
 }
 
 class MemorySubtaskStore implements SubtaskStore {

@@ -127,6 +127,71 @@ test("initClone snapshots dirty tracked change + untracked file into sync base",
   }
 });
 
+test("preflightRepo reports branch and tracked/untracked dirtiness without changing the repo", async () => {
+  const { localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    await writeFile(join(localRepoPath, "a.txt"), "changed\n", "utf8");
+    await writeFile(join(localRepoPath, "loose.txt"), "loose\n", "utf8");
+    const before = await git(localRepoPath, "rev-parse", "HEAD");
+
+    const preflight = await service().preflightRepo(localRepoPath);
+
+    assert.equal(preflight.isGitRepo, true);
+    assert.equal(preflight.branch, "main");
+    assert.equal(preflight.detached, false);
+    assert.equal(preflight.trackedChanges, 1);
+    assert.equal(preflight.untrackedFiles, 1);
+    assert.equal(preflight.dirty, true);
+    assert.equal(await git(localRepoPath, "rev-parse", "HEAD"), before);
+    assert.equal(await read(join(localRepoPath, "a.txt")), "changed\n");
+
+    await git(localRepoPath, "checkout", "--detach");
+    const detached = await service().preflightRepo(localRepoPath);
+    assert.equal(detached.detached, true);
+    assert.equal(detached.branch, before.trim());
+  } finally {
+    await cleanup();
+  }
+});
+
+test("preflightRepo reports a non-git directory without throwing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "clone-sync-non-git-"));
+  try {
+    assert.deepEqual(await service().preflightRepo(root), {
+      localRepoPath: root,
+      isGitRepo: false,
+      detached: false,
+      trackedChanges: 0,
+      untrackedFiles: 0,
+      dirty: false
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("initClone fresh uses current committed HEAD and excludes dirty and untracked files", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "committed\n" });
+  try {
+    await writeFile(join(localRepoPath, "a.txt"), "dirty\n", "utf8");
+    await writeFile(join(localRepoPath, "loose.txt"), "loose\n", "utf8");
+
+    const { clonePath } = await service().initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "fresh-proj",
+      dirtyHandling: "fresh"
+    });
+
+    assert.equal(await read(join(clonePath, "a.txt")), "committed\n");
+    assert.equal(await fileExists(join(clonePath, "loose.txt")), false);
+    assert.equal((await git(clonePath, "status", "--porcelain")).trim(), "");
+    assert.equal((await git(clonePath, "diff", "--name-only", "refs/sync/base", "HEAD")).trim(), "");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("initClone notes a detached HEAD by commit id", async () => {
   const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
   try {

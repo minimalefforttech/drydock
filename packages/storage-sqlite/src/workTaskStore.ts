@@ -11,6 +11,7 @@ import type {
   ColumnId,
   SessionId,
   SubtaskId,
+  TaskClonePolicy,
   TaskId,
   WorkTaskLinkRecord,
   WorkTaskRecord,
@@ -34,8 +35,11 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
         column_id,
         created_at,
         updated_at,
-        done_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        done_at,
+        clone_workspace_set_id,
+        clone_project_ids_json,
+        clone_dirty_handling
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.taskId,
       record.title,
@@ -44,7 +48,10 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
       record.columnId,
       record.createdAt,
       record.updatedAt,
-      record.doneAt ?? null
+      record.doneAt ?? null,
+      record.clonePolicy?.workspaceSetId ?? null,
+      record.clonePolicy === undefined ? null : JSON.stringify(record.clonePolicy.projectIds),
+      record.clonePolicy?.dirtyHandling ?? null
     );
   }
 
@@ -100,6 +107,19 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
       ORDER BY updated_at DESC, rowid DESC
     `).all() as unknown as WorkTaskRow[];
     return rows.map(mapTask);
+  }
+
+  async setClonePolicy(taskId: TaskId, policy: TaskClonePolicy | undefined): Promise<void> {
+    this.connection.database.prepare(`
+      UPDATE work_tasks
+      SET clone_workspace_set_id = ?, clone_project_ids_json = ?, clone_dirty_handling = ?
+      WHERE task_id = ?
+    `).run(
+      policy?.workspaceSetId ?? null,
+      policy === undefined ? null : JSON.stringify(policy.projectIds),
+      policy?.dirtyHandling ?? null,
+      taskId
+    );
   }
 
   async deleteTask(taskId: TaskId): Promise<void> {
@@ -197,6 +217,9 @@ interface WorkTaskRow {
   readonly created_at: string;
   readonly updated_at: string;
   readonly done_at: string | null;
+  readonly clone_workspace_set_id: string | null;
+  readonly clone_project_ids_json: string | null;
+  readonly clone_dirty_handling: string | null;
 }
 
 interface WorkTaskLinkRow {
@@ -208,6 +231,7 @@ interface WorkTaskLinkRow {
 }
 
 function mapTask(row: WorkTaskRow): WorkTaskRecord {
+  const clonePolicy = mapClonePolicy(row);
   return {
     taskId: row.task_id as TaskId,
     title: row.title,
@@ -216,8 +240,33 @@ function mapTask(row: WorkTaskRow): WorkTaskRecord {
     columnId: row.column_id as ColumnId,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    ...(row.done_at === null ? {} : { doneAt: row.done_at })
+    ...(row.done_at === null ? {} : { doneAt: row.done_at }),
+    ...(clonePolicy === undefined ? {} : { clonePolicy })
   };
+}
+
+function mapClonePolicy(row: WorkTaskRow): TaskClonePolicy | undefined {
+  if (row.clone_workspace_set_id === null || row.clone_project_ids_json === null) {
+    return undefined;
+  }
+  if (row.clone_dirty_handling !== "carry" && row.clone_dirty_handling !== "fresh") {
+    return undefined;
+  }
+  try {
+    const projectIds: unknown = JSON.parse(row.clone_project_ids_json);
+    if (!Array.isArray(projectIds) || projectIds.length === 0 || projectIds.some((id) => typeof id !== "string")) {
+      return undefined;
+    }
+    return {
+      workspaceSetId: row.clone_workspace_set_id as WorkspaceSetId,
+      projectIds: projectIds as TaskClonePolicy["projectIds"],
+      dirtyHandling: row.clone_dirty_handling
+    };
+  } catch {
+    // Corrupt/partial legacy data degrades to "no policy" and is replaced by
+    // the next manual start rather than crashing every task listing.
+    return undefined;
+  }
 }
 
 function mapLink(row: WorkTaskLinkRow): WorkTaskLinkRecord {

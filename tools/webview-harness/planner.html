@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Webview harness — Planner panel</title>
+  <style>
+    /* Dark-theme values for the --vscode-* variables the real panel CSS uses. */
+    :root {
+      --vscode-font-family: "Segoe UI", system-ui, sans-serif;
+      --vscode-font-size: 13px;
+      --vscode-foreground: #cccccc;
+      --vscode-descriptionForeground: #9d9d9d;
+      --vscode-errorForeground: #f48771;
+      --vscode-focusBorder: #007fd4;
+      --vscode-sideBar-background: #252526;
+      --vscode-editor-background: #1e1e1e;
+      --vscode-editor-foreground: #d4d4d4;
+      --vscode-editor-font-family: Consolas, "Courier New", monospace;
+      --vscode-editorWidget-background: #252526;
+      --vscode-input-background: #3c3c3c;
+      --vscode-input-foreground: #cccccc;
+      --vscode-input-border: #3c3c3c;
+      --vscode-button-background: #0e639c;
+      --vscode-button-foreground: #ffffff;
+      --vscode-panel-border: #3c3c3c;
+      --vscode-charts-orange: #d18616;
+      --vscode-charts-yellow: #cca700;
+      --vscode-charts-green: #89d185;
+      --vscode-scrollbarSlider-background: rgba(121, 121, 121, 0.4);
+    }
+    html, body { margin: 0; height: 100%; background: #1b1b1b; }
+    body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
+    /* Resizable stage so the narrow auto-collapse breakpoint (~900px) is testable
+       by dragging the stage's bottom-right corner. */
+    #stage {
+      width: 1240px; height: calc(100vh - 32px); background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border); overflow: hidden; box-sizing: border-box;
+      resize: horizontal;
+    }
+    #stage-note { color: #7f7f7f; font-size: 12px; max-width: 260px; }
+    #stage-note code { color: #d7ba7d; }
+  </style>
+  <link rel="stylesheet" href="/assets/planner.css" />
+</head>
+<body class="vscode-dark">
+  <div id="stage">
+    <div id="app" data-nonce="harness" data-mermaid-src="/assets/planDocsMermaid.js"></div>
+  </div>
+  <div id="stage-note">
+    <p><strong>Planner harness.</strong> Real bundled panel, mock host. Fixtures: plan <code>pl-1</code> (5 artifacts across architecture / ui-ux / testing, 2 open instructions, live session) and an archived <code>pl-2</code>. The landing shows first — open <code>pl-1</code> from the plans list; ← Plans returns (a reload also resets the mock webview state).</p>
+    <p>Scenarios: <code>__harness.scenario.plannerChanged()</code> (revision bump + coarse push), <code>__harness.scenario.streamTurn("s-live")</code> (chat rail, P3+).</p>
+    <p>Drag the stage's right edge under 900px to exercise the narrow auto-collapse; sends land in <code>__harness.log</code>.</p>
+  </div>
+  <script src="/harness.js"></script>
+  <script src="/assets/planner.js"></script>
+</body>
+</html>

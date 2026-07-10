@@ -51,7 +51,10 @@ import {
   SqliteDiffBaselineStore,
   SqliteEventStore,
   SqliteMemoryCandidateStore,
-  SqlitePlanDocStore,
+  SqlitePlanAnnotationStore,
+  SqlitePlanArtifactStore,
+  SqlitePlanAspectStore,
+  SqlitePlanStore,
   SqliteProjectCatalogStore,
   SqliteReviewStore,
   SqliteRuntimeInventoryStore,
@@ -61,7 +64,7 @@ import {
   SqliteWorkTaskStore
 } from "@drydock/storage-sqlite";
 import { BoardService, MemoryService, ProjectCatalogService, SubtaskOrchestrator, SubtaskService, TaskService, WorkspaceSetService } from "@drydock/work-management";
-import { PlanDocsAppService } from "./services/planDocsAppService.js";
+import { PlannerAppService } from "./services/plannerAppService.js";
 import { IsolatedRunService } from "./services/isolatedRunService.js";
 import { createSubtaskRunBridge } from "./services/subtaskRunBridge.js";
 import { TaskReviewAppService } from "./services/taskReviewAppService.js";
@@ -72,7 +75,7 @@ export interface BackendReady {
   readonly available: true;
   readonly appService: IsolatedRunService;
   readonly workspaceReview: WorkspaceReviewAppService;
-  readonly planDocs: PlanDocsAppService;
+  readonly planner: PlannerAppService;
   readonly taskReview: TaskReviewAppService;
   readonly tasks: TaskService;
   readonly board: BoardService;
@@ -107,6 +110,8 @@ export interface CreateBackendOptions {
   readonly deniedPaths?: readonly string[];
   /** Codex app-server stall watchdog window in ms (drydock.runtime.appServerInactivityTimeoutMs). */
   readonly appServerInactivityTimeoutMs?: number;
+  /** Repo aspect packs merged read-only into the planner registry (ADR 0012). */
+  readonly plannerAspectOverlays?: () => Promise<readonly import("@drydock/contracts").PlanAspectRecord[]>;
 }
 
 /**
@@ -250,11 +255,12 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   // Workspace policy and diff review.
   const projectCatalogStore = new SqliteProjectCatalogStore(connection);
   const projectCatalog = new ProjectCatalogService({ ids, clock, store: projectCatalogStore });
+  const workspaceSetStore = new SqliteWorkspaceSetStore(connection);
   const workspaceSets = new WorkspaceSetService({
     ids,
     clock,
     catalog: projectCatalogStore,
-    store: new SqliteWorkspaceSetStore(connection)
+    store: workspaceSetStore
   });
   const accessRequests = new AccessRequestService({ ids, clock, store: new SqliteAccessRequestStore(connection), deniedPaths });
   // Agent questions (attention stack): same protocol family as access requests.
@@ -280,7 +286,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     store: workTaskStore,
     columns: boardColumnStore,
     workSessions: workSessionStore,
-    subtasks: subtaskStore
+    subtasks: subtaskStore,
+    workspaceSets: workspaceSetStore
   });
   const workInsights = new WorkInsightsAppService({ workSessions: workSessionStore, tasks, chatService, workspaceSets });
   const diff = new SessionDiffService({
@@ -322,7 +329,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       listLinks: () => workTaskStore.listLinks()
     },
     bus,
-    startRun: createSubtaskRunBridge({ logger, sessions: appService, workspaces: workspaceReview, taskLinks: workTaskStore }),
+    startRun: createSubtaskRunBridge({ logger, sessions: appService, workspaces: workspaceReview, tasks }),
     logger
   });
 
@@ -405,21 +412,32 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     });
   });
 
-  // Plan mode v2 (chat-panel redesign, Phase 2): after each plan-mode turn the
-  // host collects the agent's `plan/` output into a per-session doc store and
-  // announces it on the bus; deleting a session drops its collected docs.
-  const planDocs = new PlanDocsAppService({
+  // Planner (ADR 0012): first-class plans over the same connection. The
+  // turn-completed hook collects the session's plan/ directory for the plan
+  // that owns that session; session deletion just unlinks (the plan and its
+  // collected artifacts persist — sessions are disposable, plans are not).
+  const planner = new PlannerAppService({
     logger,
     clock,
-    store: new SqlitePlanDocStore(connection),
-    chatService,
+    ids,
+    plans: new SqlitePlanStore(connection),
+    artifacts: new SqlitePlanArtifactStore(connection),
+    annotations: new SqlitePlanAnnotationStore(connection),
+    aspects: new SqlitePlanAspectStore(connection),
+    blobs: new ContentAddressedBlobStore(path.join(stateRootPath, "artifacts", "blobs")),
+    sessions: appService,
+    chat: chatService,
     bus,
-    review
+    ...(options.plannerAspectOverlays === undefined ? {} : { aspectOverlays: options.plannerAspectOverlays })
   });
   bus.subscribe((event) => {
-    if (event.kind === "turn-completed" && appService.getSessionMode(event.sessionId) === "plan") {
-      void planDocs.collectPlanDocs(event.sessionId).catch((error: unknown) => {
-        logger.warn("plan-doc collection failed", {
+    if (event.kind === "turn-completed") {
+      void planner.getPlanBySessionId(event.sessionId).then(async (plan) => {
+        if (plan !== null) {
+          await planner.collectPlanArtifacts(plan.planId);
+        }
+      }).catch((error: unknown) => {
+        logger.warn("planner artifact collection failed", {
           sessionId: event.sessionId,
           error: error instanceof Error ? error.message : String(error)
         });
@@ -427,14 +445,15 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       return;
     }
     if (event.kind === "session-deleted") {
-      void planDocs.deleteSessionDocs(event.sessionId).catch((error: unknown) => {
-        logger.warn("plan-doc cleanup failed", {
+      void planner.onSessionDeleted(event.sessionId).catch((error: unknown) => {
+        logger.warn("planner session unlink failed", {
           sessionId: event.sessionId,
           error: error instanceof Error ? error.message : String(error)
         });
       });
     }
   });
+
   const PURGE_REMOVED_OLDER_THAN_MS = 24 * 60 * 60 * 1000;
   const PURGE_LOST_OLDER_THAN_MS = 7 * 24 * 60 * 60 * 1000;
   const RUNTIME_NAME_PREFIX = "drydock";
@@ -471,7 +490,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     appService,
     workspaceReview,
     questions,
-    planDocs,
+    planner,
     taskReview,
     tasks,
     board,

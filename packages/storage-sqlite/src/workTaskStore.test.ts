@@ -48,6 +48,45 @@ test("work tasks insert, update, clear description, and list newest-first", asyn
   }
 });
 
+test("task clone policy round-trips and clears across migration reopens", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  const dbPath = path.join(dir, "work-task-clone-policy.sqlite");
+  try {
+    const connection = new SqliteConnection(dbPath);
+    applyMigrations(connection);
+    const store = new SqliteWorkTaskStore(connection);
+    await store.insertTask({
+      ...task("task-1", "Clone", "2026-07-03T00:00:00.000Z"),
+      clonePolicy: {
+        workspaceSetId: asId<"WorkspaceSetId">("set-1"),
+        projectIds: [asId<"ProjectId">("project-a")],
+        dirtyHandling: "fresh"
+      }
+    });
+    assert.equal((await store.getTask(asId<"TaskId">("task-1")))?.clonePolicy?.dirtyHandling, "fresh");
+    await store.setClonePolicy(asId<"TaskId">("task-1"), {
+      workspaceSetId: asId<"WorkspaceSetId">("set-1"),
+      projectIds: [asId<"ProjectId">("project-b"), asId<"ProjectId">("project-a")],
+      dirtyHandling: "carry"
+    });
+    connection.close();
+
+    const reopened = new SqliteConnection(dbPath);
+    applyMigrations(reopened);
+    const reopenedStore = new SqliteWorkTaskStore(reopened);
+    assert.deepEqual((await reopenedStore.getTask(asId<"TaskId">("task-1")))?.clonePolicy, {
+      workspaceSetId: "set-1",
+      projectIds: ["project-b", "project-a"],
+      dirtyHandling: "carry"
+    });
+    await reopenedStore.setClonePolicy(asId<"TaskId">("task-1"), undefined);
+    assert.equal((await reopenedStore.getTask(asId<"TaskId">("task-1")))?.clonePolicy, undefined);
+    reopened.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("deleting a task cascades its links and links dedupe on insert", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
   const dbPath = path.join(dir, "work-task-links.sqlite");

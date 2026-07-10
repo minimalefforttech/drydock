@@ -80,6 +80,61 @@ test("chat cancellation records a cancelled terminal status", async () => {
   assert.equal((timeline[2]?.payload as { readonly status?: string }).status, "cancelled");
 });
 
+test("runSidecarPrompt answers out-of-band and leaves the transcript untouched", async () => {
+  const agent = new FakeAgentAdapter("no-terminal");
+  const harness = createHarness(agent);
+  const busEvents: ProductBusEvent[] = [];
+  harness.bus.subscribe((event) => busEvents.push(event));
+  const session = await harness.service.startSession(sessionRequest());
+  assert.equal(agent.startProtocolCount, 1);
+
+  const text = await harness.service.runSidecarPrompt(session.sessionId, "Summarize this chat.");
+
+  assert.equal(text, "hello");
+  // The sidecar opened its OWN connection against the same runtime...
+  assert.equal(agent.startProtocolCount, 2);
+  // ...and nothing reached the durable transcript or the product bus.
+  assert.deepEqual(await harness.service.getTimeline(session.sessionId), []);
+  assert.equal(
+    busEvents.filter((event) =>
+      event.kind === "agent-event" || event.kind === "transcript-line" || event.kind === "turn-started"
+    ).length,
+    0
+  );
+
+  // The session still takes a normal turn afterwards.
+  const result = await harness.service.sendTurn(session.sessionId, "hello");
+  assert.equal(result.status, "completed");
+});
+
+test("runSidecarPrompt rejects sessions that are not live in this host", async () => {
+  const harness = createHarness(new FakeAgentAdapter("no-terminal"));
+  const session = await harness.service.startSession(sessionRequest());
+  await harness.service.endSession(session.sessionId, "test");
+
+  await assert.rejects(
+    harness.service.runSidecarPrompt(session.sessionId, "x"),
+    /not active in this extension host/
+  );
+});
+
+test("a second sidecar prompt is rejected while one is in flight", async () => {
+  const agent = new FakeAgentAdapter("cancel");
+  const harness = createHarness(agent);
+  const session = await harness.service.startSession(sessionRequest());
+
+  const first = harness.service.runSidecarPrompt(session.sessionId, "one");
+  await agent.waitForStream();
+  await assert.rejects(
+    harness.service.runSidecarPrompt(session.sessionId, "two"),
+    /sidecar prompt in flight/
+  );
+
+  // Release the hung stream; the first sidecar surfaces the stream failure.
+  await agent.cancel({} as AgentConnection, asId<"RunId">("run-sidecar"));
+  await assert.rejects(first, /Notification wait aborted/);
+});
+
 test("expandSessionMounts restarts only the session runtime with the added mount", async () => {
   const harness = createHarness(new FakeAgentAdapter("no-terminal"));
   const session = await harness.service.startSession(sessionRequest());
@@ -246,6 +301,20 @@ test("resumeSession revives an ended session on a fresh runtime and replays cont
   // A turn runs against the resumed backend.
   const afterResume = await harness.service.sendTurn(session.sessionId, "second question");
   assert.equal(afterResume.status, "completed");
+});
+
+test("startSession persists a clone session's dirty snapshot handling", async () => {
+  const harness = createHarness(new FakeAgentAdapter("no-terminal"));
+  const session = await harness.service.startSession({
+    ...sessionRequest(),
+    mode: "clone",
+    workspaceRoots: ["C:\\repo"],
+    cloneDirtyHandling: "fresh"
+  });
+
+  assert.equal(session.mode, "clone");
+  assert.equal(session.cloneDirtyHandling, "fresh");
+  assert.equal((await harness.service.listSessions())[0]?.cloneDirtyHandling, "fresh");
 });
 
 test("resumeSession rejects a live session and an unknown session", async () => {
@@ -857,6 +926,9 @@ class FixedIds implements IdGenerator {
   memoryCandidateId() { return asId<"MemoryCandidateId">("memory-test"); }
   columnId() { return asId<"ColumnId">("col-test"); }
   subtaskId() { return asId<"SubtaskId">("subtask-test"); }
+  planId() { return asId<"PlanId">("plan-test"); }
+  planArtifactId() { return asId<"PlanArtifactId">("plart-test"); }
+  planAnnotationId() { return asId<"PlanAnnotationId">("plnote-test"); }
 }
 
 class NullLogger implements Logger {

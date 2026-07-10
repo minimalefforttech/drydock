@@ -54,6 +54,12 @@ export class MemoryDiffBaselineStore implements DiffBaselineStore {
     this.snapshots.get(baselineId)?.delete(path);
     return Promise.resolve();
   }
+
+  deleteBaseline(baselineId: BaselineId): Promise<void> {
+    this.baselines.delete(baselineId);
+    this.snapshots.delete(baselineId);
+    return Promise.resolve();
+  }
 }
 
 /** File-content-in-memory blob store; digests match the production store. */

@@ -349,6 +349,15 @@ function workspaceChipText(task: WorkTaskSummary): string | null {
   return `${String(ids.length)} set${ids.length === 1 ? "" : "s"}`;
 }
 
+function clonePolicyChipText(task: WorkTaskSummary): string | null {
+  const policy = task.clonePolicy;
+  if (policy === undefined) return null;
+  const selected = policy.projectIds.length;
+  const total = policy.workspaceSetProjectCount;
+  const scope = selected === total ? `all ${String(total)}` : `${String(selected)}/${String(total)}`;
+  return `clone · ${scope}${policy.dirtyHandling === "carry" ? " · carry" : ""}`;
+}
+
 /** True when a done-category card's doneAt is older than the age filter. */
 function isAgedOut(columnId: string, doneAt: string | undefined): boolean {
   if (!isDoneColumn(columnId)) return false;
@@ -817,6 +826,15 @@ function buildTaskCard(
     chip.textContent = chipText;
     chip.title = "Linked workspace sets";
     meta.append(chip);
+  }
+  const cloneText = clonePolicyChipText(task);
+  if (cloneText !== null) {
+    const cloneChip = el("span", "tb-ws-chip tb-clone-chip");
+    cloneChip.textContent = cloneText;
+    cloneChip.title = task.clonePolicy?.dirtyHandling === "carry"
+      ? "Independent clones include current local tracked and untracked changes"
+      : "Independent clones use current local committed HEAD (no fetch or pull)";
+    meta.append(cloneChip);
   }
   const total = task.subtasks.length;
   if (total > 0) {

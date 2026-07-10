@@ -253,6 +253,15 @@ class MemoryWorkTaskStore implements WorkTaskStore {
     return Promise.resolve([...this.tasks.values()]);
   }
 
+  setClonePolicy(taskId: TaskId, policy: WorkTaskRecord["clonePolicy"]): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (task !== undefined) {
+      const { clonePolicy: _old, ...withoutPolicy } = task;
+      this.tasks.set(taskId, policy === undefined ? withoutPolicy : { ...withoutPolicy, clonePolicy: policy });
+    }
+    return Promise.resolve();
+  }
+
   deleteTask(taskId: TaskId): Promise<void> {
     this.tasks.delete(taskId);
     return Promise.resolve();

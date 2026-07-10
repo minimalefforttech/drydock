@@ -44,55 +44,17 @@ export const vscode: VsCodeApi = acquireVsCodeApi();
 export type TabId = "chat" | "work" | "system";
 export type ThinkingEffort = "low" | "medium" | "high";
 
-export interface ChatMessage {
-  readonly id: string;
-  /**
-   * "system" is a client-side notice; "command" is a shell command the agent
-   * ran inside the container (surfaced inline, not just in the debug feed).
-   */
-  readonly role: "user" | "assistant" | "group" | "system" | "command";
-  readonly createdAt: string;
-  readonly text: string;
-  readonly streaming?: boolean;
-  /** role "group": the subagent group block this row renders. */
-  readonly nodeId?: string;
-  /** role "system": severity styling — "error" reds it, otherwise neutral. */
-  readonly tone?: "error" | "info";
-  /** role "system": show a Retry button that re-sends the last prompt. */
-  readonly retry?: boolean;
-  /** role "system": show a "Sign in to Docker Sandbox" button (auth failures). */
-  readonly signIn?: boolean;
-  /** role "system": show an "Authenticate <provider>" button (provider not signed in). */
-  readonly authenticate?: boolean;
-  /** role "system": provider id the Authenticate button should sign in. */
-  readonly authProviderId?: string;
-  /** role "command": lifecycle of the shell command. */
-  readonly commandStatus?: "started" | "completed" | "failed";
-  /** role "command": process exit code once it terminates. */
-  readonly commandExit?: number;
-  /** role "command": captured stdout/stderr (behind a disclosure). */
-  readonly commandOutput?: string;
-}
-
-export interface DiagnosticEntry {
-  readonly createdAt: string;
-  readonly eventType: string;
-  readonly summary: string;
-  /**
-   * Structured lineage fields, mirroring TranscriptLine so the Agents
-   * lens can feed entries straight into the contracts tree reducer.
-   */
-  readonly agentPath?: readonly string[];
-  readonly nodeId?: string;
-  readonly label?: string;
-  readonly subagentType?: string;
-  readonly model?: string;
-  readonly nodeStatus?: "running" | "completed" | "failed" | "cancelled";
-  readonly toolStatus?: "started" | "completed" | "failed";
-  readonly commandName?: string;
-  readonly detail?: string;
-  readonly usage?: JsonObject;
-}
+// The transcript message/group model moved to the shared chat module (ADR
+// 0012, P3) so the Planner rail folds lines through the same reducer as the
+// Chat tab. Re-exported here so existing imports keep working.
+export {
+  AGENT_GROUP_ENTRY_CAP,
+  type AgentGroup,
+  type AgentGroupEntry,
+  type ChatMessage,
+  type DiagnosticEntry
+} from "./chat/transcriptModel.js";
+import type { AgentGroup, ChatMessage, DiagnosticEntry } from "./chat/transcriptModel.js";
 
 /** Freeform notes the user adds from the chat panel, scoped to a task and
  * (when the chat is a subtask session) to that subtask. */
@@ -104,46 +66,6 @@ export interface TaskNote {
   readonly subtaskId?: string;
   readonly createdAt: string;
   readonly text: string;
-}
-
-/** One rendered line inside a subagent group's feed. */
-export interface AgentGroupEntry {
-  readonly createdAt: string;
-  readonly eventType: string;
-  readonly summary: string;
-  readonly detail?: string;
-  /** agent.text entries render as structural markdown, not activity rows. */
-  readonly prose?: boolean;
-}
-
-/** Feed entries kept per group; older activity stays in Diagnostics. */
-export const AGENT_GROUP_ENTRY_CAP = 200;
-
-/**
- * One subagent's collapsible transcript group. Derived entirely from
- * lineage-attributed transcript lines; nested children reference groups by id.
- */
-export interface AgentGroup {
-  readonly nodeId: string;
-  parentNodeId?: string;
-  label: string;
-  subagentType?: string;
-  model?: string;
-  status: "running" | "completed" | "failed" | "cancelled" | "unknown";
-  promptPreview?: string;
-  resultPreview?: string;
-  usage?: unknown;
-  toolCalls: number;
-  commands: number;
-  fileEdits: number;
-  errors: number;
-  lastActivity?: string;
-  lastActivityAt?: string;
-  lastCommand?: string;
-  createdAt: string;
-  endedAt?: string;
-  entries: AgentGroupEntry[];
-  children: string[];
 }
 
 export const CODEX_PROVIDER_ID = "codex";
@@ -198,12 +120,10 @@ export interface AppState {
   providerId: string;
   selectedModel: string;
   thinkingEffort: ThinkingEffort;
-  composerMode: "implementation" | "plan";
   changedFiles: Map<string, string>;
   lastIsolation: IsolationSummary | null;
   workspacePolicy: WorkspacePolicyState | null;
   selectedWorkspaceSetId: string;
-  selectedSessionMode: string;
   openFolderNames: readonly string[];
   /** The window's active editor (host-reported), offered as a composer
    * attachment; null when none. Transient — not persisted. */
@@ -212,12 +132,6 @@ export interface AppState {
   tasks: WorkTaskSummary[];
   /** Board columns (task board and subtasks); ordered by sortOrder at render time. */
   boardColumns: BoardColumnSummary[];
-  /**
-   * Plan documents collected for the selected session (drives the "Plan
-   * documents (N)" pill above the composer); null when the selected session has
-   * none. Summaries only — the panel fetches full content itself.
-   */
-  planDocs: { sessionId: string; docs: readonly { name: string; format: string; revision: number }[] } | null;
   /**
    * Per-session waiting-on-user signal (Phase 3 attention routing). Maps a
    * sessionId to its active attention reasons ("turn-completed" | "turn-failed"
@@ -259,17 +173,14 @@ function freshState(): AppState {
     providerId: CODEX_PROVIDER_ID,
     selectedModel: "",
     thinkingEffort: "medium",
-    composerMode: "implementation",
     changedFiles: new Map(),
     lastIsolation: null,
     workspacePolicy: null,
     selectedWorkspaceSetId: "",
-    selectedSessionMode: "implementation",
     openFolderNames: [],
     activeEditor: null,
     tasks: [],
     boardColumns: [],
-    planDocs: null,
     attention: {},
     memoryCandidates: [],
     taskNotes: []
@@ -355,13 +266,8 @@ export function restore(): AppState {
   if (raw["thinkingEffort"] === "low" || raw["thinkingEffort"] === "medium" || raw["thinkingEffort"] === "high") {
     state.thinkingEffort = raw["thinkingEffort"];
   }
-  if (raw["composerMode"] === "plan" || raw["composerMode"] === "implementation") {
-    state.composerMode = raw["composerMode"];
-  } else if (raw["composerMode"] === "clone") {
-    // Clone is now transfer/sync plumbing for clone sessions, not a composer
-    // mode. Existing persisted blobs fall back to Develop.
-    state.composerMode = "implementation";
-  }
+  // Legacy `composerMode` (the retired [Plan | Develop] switch, ADR 0012) is
+  // ignored: old persisted blobs simply drop it.
   if (Array.isArray(raw["changedFiles"])) {
     for (const entry of raw["changedFiles"] as unknown[]) {
       if (Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string") {
@@ -372,7 +278,6 @@ export function restore(): AppState {
   state.lastIsolation = (raw["lastIsolation"] as IsolationSummary | null | undefined) ?? null;
   state.workspacePolicy = (raw["workspacePolicy"] as WorkspacePolicyState | null | undefined) ?? null;
   if (typeof raw["selectedWorkspaceSetId"] === "string") state.selectedWorkspaceSetId = raw["selectedWorkspaceSetId"];
-  if (typeof raw["selectedSessionMode"] === "string") state.selectedSessionMode = raw["selectedSessionMode"];
   // Legacy `plans`/`selectedPlanId` keys (retired Stage-5 plan gating) are
   // ignored: old persisted blobs simply drop them.
   if (Array.isArray(raw["openFolderNames"])) {
@@ -384,17 +289,6 @@ export function restore(): AppState {
   // shape defensively, else drop to [] (board.state re-hydrates it regardless).
   if (Array.isArray(raw["boardColumns"]) && raw["boardColumns"].every(isBoardColumnSummary)) {
     state.boardColumns = [...(raw["boardColumns"] as BoardColumnSummary[])];
-  }
-  // `planDocs` is new for Phase 2; validate its shape or drop to null.
-  const planDocs = raw["planDocs"];
-  if (typeof planDocs === "object" && planDocs !== null) {
-    const pd = planDocs as Record<string, unknown>;
-    if (typeof pd["sessionId"] === "string" && Array.isArray(pd["docs"])) {
-      state.planDocs = {
-        sessionId: pd["sessionId"],
-        docs: pd["docs"] as readonly { name: string; format: string; revision: number }[]
-      };
-    }
   }
   // `attention` is new for Phase 3; keep only string→string[] entries, drop the
   // rest (a legacy blob without it defaults to {}).
@@ -438,16 +332,13 @@ export function persist(state: AppState): void {
     providerId: state.providerId,
     selectedModel: state.selectedModel,
     thinkingEffort: state.thinkingEffort,
-    composerMode: state.composerMode,
     changedFiles: [...state.changedFiles.entries()],
     lastIsolation: state.lastIsolation,
     workspacePolicy: state.workspacePolicy,
     selectedWorkspaceSetId: state.selectedWorkspaceSetId,
-    selectedSessionMode: state.selectedSessionMode,
     openFolderNames: state.openFolderNames,
     tasks: state.tasks,
     boardColumns: state.boardColumns,
-    planDocs: state.planDocs,
     attention: state.attention,
     memoryCandidates: state.memoryCandidates,
     taskNotes: state.taskNotes

@@ -43,10 +43,11 @@ export class SqliteChatSessionStore implements ChatSessionStore {
         spawned_role,
         workspace_roots,
         read_only_roots,
+        clone_dirty_handling,
         created_at,
         updated_at,
         ended_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.sessionId,
       record.chatId,
@@ -64,6 +65,7 @@ export class SqliteChatSessionStore implements ChatSessionStore {
       record.spawnedRole ?? null,
       record.workspaceRoots === undefined ? null : JSON.stringify(record.workspaceRoots),
       record.readOnlyRoots === undefined ? null : JSON.stringify(record.readOnlyRoots),
+      record.cloneDirtyHandling ?? null,
       record.createdAt,
       record.updatedAt,
       record.endedAt ?? null
@@ -168,6 +170,7 @@ interface ChatSessionRow {
   readonly spawned_role: string | null;
   readonly workspace_roots: string | null;
   readonly read_only_roots: string | null;
+  readonly clone_dirty_handling: string | null;
   readonly created_at: string;
   readonly updated_at: string;
   readonly ended_at: string | null;
@@ -191,6 +194,9 @@ function mapSession(row: ChatSessionRow): ChatSessionRecord {
     ...(row.spawned_role === null ? {} : { spawnedRole: row.spawned_role as AgentRole }),
     ...spreadStringArray("workspaceRoots", row.workspace_roots),
     ...spreadStringArray("readOnlyRoots", row.read_only_roots),
+    ...(row.clone_dirty_handling === "carry" || row.clone_dirty_handling === "fresh"
+      ? { cloneDirtyHandling: row.clone_dirty_handling }
+      : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.ended_at === null ? {} : { endedAt: row.ended_at })

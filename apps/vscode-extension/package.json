@@ -2,7 +2,7 @@
   "name": "drydock",
   "displayName": "Drydock",
   "description": "Drydock \u2014 the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
-  "version": "0.3.32",
+  "version": "0.4.0",
   "publisher": "local",
   "private": true,
   "type": "module",
@@ -69,16 +69,16 @@
         "title": "Drydock: Open Control Panel"
       },
       {
-        "command": "drydock.planDocs.open",
-        "title": "Drydock: Open Plan Documents"
-      },
-      {
         "command": "drydock.taskReview.open",
         "title": "Drydock: Open Task Review"
       },
       {
         "command": "drydock.taskBoard.open",
         "title": "Drydock: Open Task Board"
+      },
+      {
+        "command": "drydock.planner.open",
+        "title": "Drydock: Open Planner"
       },
       {
         "command": "drydock.taskReview.addComment",
@@ -172,12 +172,12 @@
     }
   },
   "dependencies": {
-    "@drydock/agent-adapters": "0.3.12",
-    "@drydock/artifacts": "0.3.12",
-    "@drydock/contracts": "0.3.12",
-    "@drydock/core": "0.3.12",
-    "@drydock/runtime-adapters": "0.3.12",
-    "@drydock/storage-sqlite": "0.3.12",
-    "@drydock/work-management": "0.3.12"
+    "@drydock/agent-adapters": "0.4.0",
+    "@drydock/artifacts": "0.4.0",
+    "@drydock/contracts": "0.4.0",
+    "@drydock/core": "0.4.0",
+    "@drydock/runtime-adapters": "0.4.0",
+    "@drydock/storage-sqlite": "0.4.0",
+    "@drydock/work-management": "0.4.0"
   }
 }

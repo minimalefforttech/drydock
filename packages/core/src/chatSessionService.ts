@@ -20,6 +20,7 @@ import type {
   ChatSessionRecord,
   ChatSessionStatus,
   ChatSessionStore,
+  CloneDirtyHandling,
   EventStore,
   MountPolicy,
   RuntimeHandle,
@@ -65,6 +66,8 @@ export interface StartChatSessionRequest {
   /** Original project mount roots, persisted so a later resume re-mounts them. */
   readonly workspaceRoots?: readonly string[];
   readonly readOnlyRoots?: readonly string[];
+  /** Clone sessions only: persisted so resume recreates the same snapshot policy. */
+  readonly cloneDirtyHandling?: CloneDirtyHandling;
   /**
    * Role-session spawn lineage. When set, the caller has already derived the
    * child template from the parent's mounts and this service enforces the
@@ -181,6 +184,8 @@ interface LiveSession {
 /** Coordinates persistent isolated chat sessions and their turn streams. */
 export class ChatSessionService {
   private readonly liveSessions = new Map<SessionId, LiveSession>();
+  /** Sessions with a sidecar prompt in flight (one at a time per session). */
+  private readonly sidecarBusy = new Set<SessionId>();
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatStaleMs: number;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -207,6 +212,7 @@ export class ChatSessionService {
       ...(request.mode === undefined ? {} : { mode: request.mode }),
       ...(request.workspaceRoots === undefined ? {} : { workspaceRoots: request.workspaceRoots }),
       ...(request.readOnlyRoots === undefined ? {} : { readOnlyRoots: request.readOnlyRoots }),
+      ...(request.cloneDirtyHandling === undefined ? {} : { cloneDirtyHandling: request.cloneDirtyHandling }),
       ...(request.parentSessionId === undefined ? {} : { parentSessionId: request.parentSessionId }),
       ...(request.spawnedRole === undefined ? {} : { spawnedRole: request.spawnedRole }),
       runtimeId,
@@ -482,6 +488,72 @@ export class ChatSessionService {
     }
     await live.adapter.poke(live.connection, live.activeTurn.runId);
     return true;
+  }
+
+  /**
+   * Runs a one-off prompt through a SIDECAR connection on the session's live
+   * runtime: a fresh adapter connection under synthetic ids, sharing the
+   * already-running container but not the session's conversation thread. No
+   * event is appended and nothing is published, so the durable transcript and
+   * the visible chat are untouched by construction. Used for out-of-band asks
+   * (the AI chat summary) whose result must not become part of the chat.
+   * Returns the agent's final text.
+   */
+  async runSidecarPrompt(sessionId: SessionId, prompt: string): Promise<string> {
+    await this.guardRunningElsewhere(sessionId);
+    const live = this.requiredLiveSession(sessionId);
+    if (this.sidecarBusy.has(sessionId)) {
+      throw new Error(`Session ${sessionId} already has a sidecar prompt in flight.`);
+    }
+    this.sidecarBusy.add(sessionId);
+    try {
+      // Synthetic ids: adapter connection state is keyed by generation+agent,
+      // and no session row exists under this id, so the sidecar can neither
+      // clobber the live connection nor leak rows into any transcript.
+      const connection = await live.adapter.startProtocol({
+        sessionId: this.options.ids.sessionId(),
+        agentId: this.options.ids.agentId(),
+        agentRole: sessionRole(live.session),
+        runtime: live.runtime,
+        transport: live.transport
+      });
+      try {
+        const runId = await live.adapter.sendPrompt(connection, {
+          text: prompt,
+          cwd: live.runtime.runtimeCwd ?? live.runtime.workspacePath,
+          metadata: modelMetadata(live.model)
+        });
+        let finalText = "";
+        let failure: string | undefined;
+        for await (const event of live.adapter.streamEvents(connection, runId)) {
+          if (event.type === "agent.text" && event.final && event.text.length > 0) {
+            finalText = event.text;
+          } else if (event.type === "agent.error") {
+            failure = failure ?? event.message;
+          } else if (event.type === "agent.done" && event.status !== "completed") {
+            failure = failure ?? `The sidecar turn was ${event.status}.`;
+          }
+        }
+        if (failure !== undefined) {
+          throw new Error(failure);
+        }
+        if (finalText.length === 0) {
+          throw new Error("The agent returned no text for the sidecar prompt.");
+        }
+        return finalText;
+      } finally {
+        try {
+          await live.adapter.stop(connection, "sidecar prompt finished");
+        } catch (error) {
+          this.options.logger.warn("sidecar connection stop failed", {
+            sessionId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    } finally {
+      this.sidecarBusy.delete(sessionId);
+    }
   }
 
   listModels(sessionId: SessionId): Promise<AgentModelCatalog> {

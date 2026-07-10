@@ -8,6 +8,7 @@
  * event sequence.
  */
 
+import { SEEDED_PLAN_ASPECTS } from "@drydock/contracts";
 import type { SqliteConnection } from "./sqliteConnection.js";
 
 export function applyMigrations(connection: SqliteConnection): void {
@@ -92,6 +93,9 @@ export function applyMigrations(connection: SqliteConnection): void {
   // same folders instead of only the disposable workspace.
   ensureColumn(connection, "chat_sessions", "workspace_roots", "TEXT NULL");
   ensureColumn(connection, "chat_sessions", "read_only_roots", "TEXT NULL");
+  // Clone snapshot choice is session state as well as task policy: a resumed
+  // clone must not silently change from fresh HEAD to a dirty overlay.
+  ensureColumn(connection, "chat_sessions", "clone_dirty_handling", "TEXT NULL");
   connection.database.exec(
     "CREATE INDEX IF NOT EXISTS idx_chat_sessions_parent ON chat_sessions(parent_session_id)"
   );
@@ -282,7 +286,10 @@ export function applyMigrations(connection: SqliteConnection): void {
       description TEXT NULL,
       state TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      clone_workspace_set_id TEXT NULL,
+      clone_project_ids_json TEXT NULL,
+      clone_dirty_handling TEXT NULL
     );
 
     CREATE TABLE IF NOT EXISTS work_task_links (
@@ -302,11 +309,18 @@ export function applyMigrations(connection: SqliteConnection): void {
   `);
   // Session-target links may additionally name the subtask they belong to.
   ensureColumn(connection, "work_task_links", "subtask_id", "TEXT NULL");
+  // Task-level clone policy is additive and nullable: existing tasks remain
+  // valid until a manual start saves an explicit selection.
+  ensureColumn(connection, "work_tasks", "clone_workspace_set_id", "TEXT NULL");
+  ensureColumn(connection, "work_tasks", "clone_project_ids_json", "TEXT NULL");
+  ensureColumn(connection, "work_tasks", "clone_dirty_handling", "TEXT NULL");
 
-  // Chat-panel redesign (Phase 2, plan mode v2): collected plan documents. The
-  // table is named plan_docs, not plan_documents — the Stage 5 plans table
-  // already claims plan_documents (keyed by plan_id); these are per-session
-  // Markdown/mermaid files the agent writes into its workspace `plan/` dir.
+  // LEGACY / ORPHANED (ADR 0012): the per-session plan-docs surface is retired
+  // — the Planner panel (planner_* tables below) supersedes it and planDocStore
+  // is deleted; no code reads or writes this table anymore. The CREATE TABLE is
+  // kept per the additive migration policy so historical DBs still open
+  // unchanged. (Named plan_docs, not plan_documents — the retired Stage 5
+  // subsystem above already claims that name.)
   connection.database.exec(`
     CREATE TABLE IF NOT EXISTS plan_docs (
       session_id TEXT NOT NULL,
@@ -410,6 +424,92 @@ export function applyMigrations(connection: SqliteConnection): void {
   ensureColumn(connection, "work_tasks", "column_id", "TEXT NULL");
   ensureColumn(connection, "work_tasks", "done_at", "TEXT NULL");
   seedDefaultColumnsAndBackfill(connection);
+
+  // Planner (ADR 0012): first-class plans with collected artifacts, anchored
+  // annotations, and the configurable aspect registry. Tables take the
+  // planner_ prefix because the plan_* namespace is crowded: plan_documents/
+  // plan_blocks are the retired legacy subsystem and plan_docs is the
+  // session-scoped surface the planner supersedes.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS planner_plans (
+      plan_id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      brief TEXT NOT NULL,
+      aspect_ids_json TEXT NOT NULL,
+      context_roots_json TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL,
+      session_id TEXT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS planner_artifacts (
+      artifact_id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL,
+      rel_path TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      aspect_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      title_override TEXT NULL,
+      revision INTEGER NOT NULL,
+      content TEXT NULL,
+      blob_sha256 TEXT NULL,
+      byte_size INTEGER NULL,
+      mime TEXT NULL,
+      scripts_enabled INTEGER NOT NULL DEFAULT 0,
+      collected_at TEXT NOT NULL,
+      FOREIGN KEY(plan_id) REFERENCES planner_plans(plan_id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_artifacts_path
+      ON planner_artifacts(plan_id, rel_path);
+
+    CREATE TABLE IF NOT EXISTS planner_annotations (
+      annotation_id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL,
+      artifact_id TEXT NOT NULL,
+      anchor TEXT NOT NULL,
+      body TEXT NOT NULL,
+      status TEXT NOT NULL,
+      delegated_rev INTEGER NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(plan_id) REFERENCES planner_plans(plan_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_planner_annotations_plan
+      ON planner_annotations(plan_id);
+
+    CREATE TABLE IF NOT EXISTS planner_aspects (
+      aspect_id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      instructions TEXT NOT NULL,
+      expected_artifacts_json TEXT NOT NULL,
+      sort_order INTEGER NOT NULL,
+      archived INTEGER NOT NULL DEFAULT 0,
+      seeded INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  seedPlannerAspects(connection);
+}
+
+/**
+ * Seeds the aspect registry once (empty table only), so user edits to seeded
+ * rows — including archiving them — are never overwritten on a later run.
+ */
+function seedPlannerAspects(connection: SqliteConnection): void {
+  const count = connection.database.prepare(`SELECT COUNT(*) AS count FROM planner_aspects`).get() as { readonly count: number };
+  if (count.count > 0) {
+    return;
+  }
+  const insert = connection.database.prepare(`
+    INSERT INTO planner_aspects (aspect_id, label, instructions, expected_artifacts_json, sort_order, archived, seeded)
+    VALUES (?, ?, ?, ?, ?, 0, 1)
+  `);
+  for (const aspect of SEEDED_PLAN_ASPECTS) {
+    insert.run(aspect.aspectId, aspect.label, aspect.instructions, JSON.stringify(aspect.expectedArtifacts), aspect.sortOrder);
+  }
 }
 
 /**

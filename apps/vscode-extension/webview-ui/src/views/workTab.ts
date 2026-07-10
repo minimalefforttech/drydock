@@ -481,10 +481,8 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   workspaceEditor.append(setNameInput, editorMembers, addRow, editorActions, editorHint);
 
   const workspaceSetSelect = select("set-select", "Workspace set mounted into new chats");
-  const modeSelect = select("mode-select", "Session mode for new chats");
-  modeSelect.append(option("plan", "plan (read-only)"), option("implementation", "implementation (read-write)"));
   const setPickRow = el("div", "button-row");
-  setPickRow.append(workspaceSetSelect, modeSelect);
+  setPickRow.append(workspaceSetSelect);
   // Explicit set rows (each a touch-history hover anchor); populated in render.
   const setsList = el("div", "sets-list");
   const projectsList = el("div", "projects-list");
@@ -495,11 +493,6 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     ctx.persist();
     ctx.bridge.chat.render();
   });
-  modeSelect.addEventListener("change", () => {
-    state.selectedSessionMode = modeSelect.value;
-    ctx.persist();
-  });
-
   function projectSummaryById(projectId: string) {
     return (state.workspacePolicy?.projects ?? []).find((project) => project.projectId === projectId);
   }
@@ -1231,7 +1224,20 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     for (const setId of task.linkedWorkspaceSetIds) {
       chips.append(...workspaceSetChip(task, setId));
     }
-    if (task.linkedWorkspaceSetIds.length > 0) {
+    if (task.clonePolicy !== undefined) {
+      const clone = el("span", "task-chip task-clone-policy");
+      const body = el("span", "chip");
+      const selected = task.clonePolicy.projectIds.length;
+      const total = task.clonePolicy.workspaceSetProjectCount;
+      const scope = selected === total ? `all ${String(total)}` : `${String(selected)}/${String(total)}`;
+      body.textContent = `clone · ${scope}${task.clonePolicy.dirtyHandling === "carry" ? " · carry" : ""}`;
+      body.title = task.clonePolicy.dirtyHandling === "carry"
+        ? "Independent clones include current local tracked and untracked changes"
+        : "Independent clones use current local committed HEAD (no fetch or pull)";
+      clone.append(body);
+      chips.append(clone);
+    }
+    if (task.linkedWorkspaceSetIds.length > 0 || task.clonePolicy !== undefined) {
       c.append(chips);
     }
 
@@ -2142,15 +2148,12 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
    */
   async function resumeSession(session: ChatSessionSummary, resumeButton: HTMLButtonElement): Promise<void> {
     resumeButton.disabled = true;
-    // Include an auto workspace only when the host has open folders (else omit so
-    // the host mounts nothing); omit model so the host defaults to the stored one.
-    const workspace = state.openFolderNames.length > 0
-      ? { auto: true as const, mode: "implementation" as const }
-      : undefined;
+    // Send no workspace override: the host restores the session's persisted
+    // roots, mode, and clone snapshot policy. Passing the current open folders
+    // could otherwise revive a clone/plan session with live implementation mounts.
     const response = await request({
       type: "chat.resumeSession",
-      sessionId: session.sessionId,
-      ...(workspace ? { workspace } : {})
+      sessionId: session.sessionId
     });
     if (!response.ok) {
       resumeButton.disabled = false;
@@ -2247,7 +2250,6 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       workspaceSetSelect.value = previousSet;
     }
     state.selectedWorkspaceSetId = workspaceSetSelect.value;
-    modeSelect.value = state.selectedSessionMode || "implementation";
 
     // One row per set, each a touch-history hover anchor (work item 3), with
     // Edit (load into the draft editor) and a two-click Delete.

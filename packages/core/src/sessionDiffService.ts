@@ -107,6 +107,36 @@ export class SessionDiffService {
     return this.options.store.getBaseline(baselineId);
   }
 
+  /**
+   * Copies an existing baseline's file snapshots into a new record with the
+   * given scope — no tree walk, no hashing, no new blobs (blobs are
+   * content-addressed and shared). Backs the session-start and turn scopes,
+   * which start life as exact copies of another frame.
+   */
+  async cloneBaseline(sourceBaselineId: BaselineId, scope: DiffScope): Promise<DiffBaselineRecord> {
+    const source = await this.requiredBaseline(sourceBaselineId);
+    const snapshots = await this.options.store.listFileSnapshots(sourceBaselineId);
+    const record: DiffBaselineRecord = {
+      baselineId: this.options.ids.baselineId(),
+      scope,
+      ...(source.sessionId === undefined ? {} : { sessionId: source.sessionId }),
+      rootPath: source.rootPath,
+      createdAt: this.options.clock.isoNow()
+    };
+    await this.options.store.insertBaseline(record, snapshots);
+    return record;
+  }
+
+  /** Removes a baseline and its snapshot rows; shared content blobs stay. */
+  deleteBaseline(baselineId: BaselineId): Promise<void> {
+    return this.options.store.deleteBaseline(baselineId);
+  }
+
+  /** All file snapshots of a baseline (path-keyed comparisons across frames). */
+  listFileSnapshots(baselineId: BaselineId): Promise<FileBaselineSnapshot[]> {
+    return this.options.store.listFileSnapshots(baselineId);
+  }
+
   // MARK: Diff engine
 
   async computeDiff(baselineId: BaselineId): Promise<DiffFileChange[]> {

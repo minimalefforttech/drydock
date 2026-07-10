@@ -8,7 +8,7 @@
  * "run an isolated prompt". No `vscode` imports belong here.
  */
 
-import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { claudeModelCatalog, fetchCodexHostModelCatalog } from "@drydock/agent-adapters";
 import { TempWorkspaceStore, type TempWorkspace } from "@drydock/artifacts";
@@ -46,7 +46,9 @@ import {
 import {
   assertChildMountsWithinParent,
   assertMountAllowed,
+  buildChatLog,
   buildSessionBriefing,
+  buildSummaryPrompt,
   buildIsolatedRunTemplate,
   ChatSessionService,
   CloneSyncService,
@@ -55,6 +57,7 @@ import {
   RuntimeLifecycleService,
   IsolatedRunWorkflow,
   normalizePathKey,
+  type CloneRepoPreflight,
   type Clock,
   type IdGenerator,
   type Logger
@@ -105,6 +108,8 @@ export interface ChatWorkspaceContext {
   readonly roots: readonly string[];
   /** Subset of roots the set marks read-only; they mount RO even in implementation. */
   readonly readOnlyRoots?: readonly string[];
+  /** Clone mode only: whether local working changes are copied into each clone. */
+  readonly dirtyHandling?: "carry" | "fresh";
 }
 
 /**
@@ -189,6 +194,14 @@ export class IsolatedRunService {
 
   isRunInFlight(): boolean {
     return this.runInFlight;
+  }
+
+  async preflightCloneRepo(localRepoPath: string): Promise<CloneRepoPreflight> {
+    const git = await this.options.cloneSync.detectGit();
+    if (!git.available) {
+      throw new Error("Clone mode requires git on the host PATH, but `git --version` failed. Install git (or fix PATH) and reload the window.");
+    }
+    return this.options.cloneSync.preflightRepo(localRepoPath);
   }
 
   async startPromptRun(promptText: string, hooks?: IsolatedRunHooks): Promise<IsolatedRunOutcome> {
@@ -410,6 +423,9 @@ export class IsolatedRunService {
       ...(workspace?.mode === undefined ? {} : { mode: workspace.mode }),
       ...(workspace?.roots === undefined || workspace.roots.length === 0 ? {} : { workspaceRoots: workspace.roots }),
       ...(workspace?.readOnlyRoots === undefined || workspace.readOnlyRoots.length === 0 ? {} : { readOnlyRoots: workspace.readOnlyRoots }),
+      ...(workspace?.mode === "clone" && workspace.dirtyHandling !== undefined
+        ? { cloneDirtyHandling: workspace.dirtyHandling }
+        : {}),
       disposeWorkspace: () => this.options.workspaceStore.cleanupWorkspace(prepared.workspace)
     });
     await this.refreshModelsForSession(session.sessionId);
@@ -579,20 +595,12 @@ export class IsolatedRunService {
     };
     const normalizedModel = this.normalizeModelSelection(requestedModel);
     this.assertSupportedModelSelection(normalizedModel);
-    // Re-mount the SAME project roots the session started with (persisted on the
-    // record) so a revived session can still edit the project — not just its
-    // disposable workspace. An explicit workspace arg wins; otherwise rebuild the
-    // context from the stored roots + mode. Falls back to no roots only when the
-    // session never had any (a plain no-folder chat).
-    const baseWorkspace: ChatWorkspaceContext | undefined = workspace ?? (
-      stored.workspaceRoots !== undefined && stored.workspaceRoots.length > 0
-        ? {
-            mode: stored.mode ?? "implementation",
-            roots: stored.workspaceRoots,
-            ...(stored.readOnlyRoots === undefined ? {} : { readOnlyRoots: stored.readOnlyRoots })
-          }
-        : undefined
-    );
+    // Re-mount the SAME project roots and mode the session started with. A
+    // caller-supplied workspace is only a legacy fallback when the row has no
+    // persisted roots; it must never downgrade a saved plan/clone session into
+    // live implementation mounts. Clone snapshot handling is persisted too, so
+    // fresh HEAD cannot silently become carry-on-resume.
+    const baseWorkspace = resolveResumeWorkspaceContext(stored, workspace);
     // Merge back the folders granted via approved access requests, so a resume
     // re-mounts what the agent was already allowed (e.g. a project it asked for)
     // instead of losing it and re-requesting every time.
@@ -933,6 +941,32 @@ export class IsolatedRunService {
     }));
   }
 
+  /**
+   * The clipboard-ready trimmed chat log (dialogue + files touched; no
+   * commands, reasoning, or host briefing). Works for any stored session —
+   * live or ended — because it reads only durable events.
+   */
+  async buildChatLogExport(sessionId: string): Promise<string> {
+    const id = asId<"SessionId">(sessionId);
+    const session = await this.options.chatService.getSession(id);
+    if (session === null) {
+      throw new Error(`Session ${sessionId} was not found.`);
+    }
+    const events = await this.options.chatService.getTimeline(id);
+    return buildChatLog(session, events);
+  }
+
+  /**
+   * Asks the session's agent for a structured summary of the trimmed chat
+   * log, out-of-band via a sidecar connection on its live runtime. The
+   * exchange never touches the session transcript. Requires the session to be
+   * live in this window; the caller surfaces the error otherwise.
+   */
+  async generateChatSummary(sessionId: string): Promise<string> {
+    const log = await this.buildChatLogExport(sessionId);
+    return this.options.chatService.runSidecarPrompt(asId<"SessionId">(sessionId), buildSummaryPrompt(log));
+  }
+
   private async refreshModelsForSession(sessionId: SessionId): Promise<void> {
     try {
       const catalog = await this.options.chatService.listModels(sessionId);
@@ -975,53 +1009,80 @@ export class IsolatedRunService {
 
   private async prepareWorkspace(prefix: string, workspaceContext?: ChatWorkspaceContext, providerId?: string): Promise<PreparedWorkspace> {
     const workspace = await this.options.workspaceStore.createWorkspace(prefix);
-    await writeFile(path.join(workspace.workspacePath, "README.md"), "# Isolated run disposable workspace\n", "utf8");
-    // Clone mode: each root is git-cloned INTO the workspace, and buildMountPolicy
-    // yields NO project-root mounts for clone mode — so the only rw mount is the
-    // workspace itself, which now contains the clones. That is the design.
-    const clones = workspaceContext?.mode === "clone"
-      ? await this.prepareClones(workspace.workspacePath, workspaceContext.roots)
-      : [];
-    const template = buildIsolatedRunTemplate({
-      workspacePath: workspace.workspacePath,
-      ids: this.options.ids,
-      approvedAt: this.options.clock.isoNow(),
-      provider: providerId === CLAUDE_PROVIDER_ID ? "claude" : "codex",
-      ...(workspaceContext === undefined ? {} : {
-        projectRoots: workspaceContext.roots,
-        sessionMode: workspaceContext.mode,
-        ...(workspaceContext.readOnlyRoots === undefined ? {} : { readOnlyRoots: workspaceContext.readOnlyRoots })
-      }),
-      ...(this.options.deniedPaths === undefined ? {} : { deniedPaths: this.options.deniedPaths })
-    });
-    return {
-      workspace,
-      template,
-      isolation: isolationSummaryFromTemplate(template, workspace.workspacePath),
-      clones
-    };
+    try {
+      await writeFile(path.join(workspace.workspacePath, "README.md"), "# Isolated run disposable workspace\n", "utf8");
+      // Clone mode: each root is git-cloned INTO the workspace, and buildMountPolicy
+      // yields NO project-root mounts for clone mode — so the only rw mount is the
+      // workspace itself, which now contains the clones. That is the design.
+      const clones = workspaceContext?.mode === "clone"
+        ? await this.prepareClones(workspace.workspacePath, workspaceContext.roots, workspaceContext.dirtyHandling ?? "carry")
+        : [];
+      const template = buildIsolatedRunTemplate({
+        workspacePath: workspace.workspacePath,
+        ids: this.options.ids,
+        approvedAt: this.options.clock.isoNow(),
+        provider: providerId === CLAUDE_PROVIDER_ID ? "claude" : "codex",
+        ...(workspaceContext === undefined ? {} : {
+          projectRoots: workspaceContext.roots,
+          sessionMode: workspaceContext.mode,
+          ...(workspaceContext.readOnlyRoots === undefined ? {} : { readOnlyRoots: workspaceContext.readOnlyRoots })
+        }),
+        ...(this.options.deniedPaths === undefined ? {} : { deniedPaths: this.options.deniedPaths })
+      });
+      return {
+        workspace,
+        template,
+        isolation: isolationSummaryFromTemplate(template, workspace.workspacePath),
+        clones
+      };
+    } catch (error) {
+      await this.cleanupWorkspaceQuietly(workspace);
+      throw error;
+    }
   }
 
   /**
    * Clone-mode workspace preparation. Verifies host git is available, and
    * for each root requires it is a git repo (a non-git root aborts with a clear
    * error rather than silently mounting nothing), then clones the developer's
-   * current branch + dirty state into `<workspace>/repos/<basename>` as the sync
-   * base. Returns the resolved clone list the caller stashes per session id.
+   * current local HEAD with the chosen dirty-state handling into
+   * `<workspace>/repos/<basename>` as the sync base. Returns the resolved clone
+   * list the caller stashes per session id.
    */
-  private async prepareClones(workspacePath: string, roots: readonly string[]): Promise<SessionCloneRepo[]> {
+  private async prepareClones(
+    workspacePath: string,
+    roots: readonly string[],
+    dirtyHandling: "carry" | "fresh"
+  ): Promise<SessionCloneRepo[]> {
     const git = await this.options.cloneSync.detectGit();
     if (!git.available) {
       throw new Error("Clone mode requires git on the host PATH, but `git --version` failed. Install git (or fix PATH) and reload the window.");
     }
     const cloneParentDir = path.join(workspacePath, "repos");
     const clones: SessionCloneRepo[] = [];
+    const usedNames = new Set<string>();
     for (const root of roots) {
-      if (!(await isGitRepo(root))) {
+      const preflight = await this.options.cloneSync.preflightRepo(root);
+      if (!preflight.isGitRepo) {
         throw new Error(`Clone mode requires git repositories; "${root}" is not one.`);
       }
-      const name = path.basename(root);
-      const result = await this.options.cloneSync.initClone({ localRepoPath: root, cloneParentDir, name });
+      // Two workspace-set members can legitimately share a basename (for
+      // example client-a/api and client-b/api). Keep each clone addressable
+      // instead of letting the second `git clone` collide with repos/api.
+      const baseName = path.basename(root) || "repo";
+      let name = baseName;
+      let suffix = 2;
+      while (usedNames.has(name.toLowerCase())) {
+        name = `${baseName}-${String(suffix)}`;
+        suffix += 1;
+      }
+      usedNames.add(name.toLowerCase());
+      const result = await this.options.cloneSync.initClone({
+        localRepoPath: root,
+        cloneParentDir,
+        name,
+        dirtyHandling
+      });
       clones.push({ name, clonePath: result.clonePath, localRepoPath: root, branch: result.branch });
     }
     return clones;
@@ -1209,6 +1270,29 @@ function titleFromPrompt(prompt: string): string {
   return prompt.length > CHAT_TITLE_MAX ? `${prompt.slice(0, CHAT_TITLE_MAX)}…` : prompt;
 }
 
+/**
+ * Restores a session's immutable workspace boundary. Persisted roots win over
+ * a caller hint, and a saved plan/clone mode can never be widened to live
+ * implementation access during resume.
+ */
+export function resolveResumeWorkspaceContext(
+  stored: ChatSessionRecord,
+  requested?: ChatWorkspaceContext
+): ChatWorkspaceContext | undefined {
+  if (requested !== undefined && stored.mode !== undefined && requested.mode !== stored.mode) {
+    throw new Error(`Session ${stored.sessionId} is ${stored.mode} mode and cannot be resumed as ${requested.mode} mode.`);
+  }
+  if (stored.workspaceRoots === undefined || stored.workspaceRoots.length === 0) {
+    return requested;
+  }
+  return {
+    mode: stored.mode ?? "implementation",
+    roots: stored.workspaceRoots,
+    ...(stored.readOnlyRoots === undefined ? {} : { readOnlyRoots: stored.readOnlyRoots }),
+    ...(stored.mode === "clone" ? { dirtyHandling: stored.cloneDirtyHandling ?? "carry" } : {})
+  };
+}
+
 /** Merges approved-access roots into a base workspace context, deduping by normalized path key. */
 function mergeWorkspaceRoots(
   base: ChatWorkspaceContext | undefined,
@@ -1234,18 +1318,9 @@ function mergeWorkspaceRoots(
   return {
     mode: base?.mode ?? storedMode ?? "implementation",
     roots,
-    ...(readOnlyRoots.length === 0 ? {} : { readOnlyRoots })
+    ...(readOnlyRoots.length === 0 ? {} : { readOnlyRoots }),
+    ...(base?.dirtyHandling === undefined ? {} : { dirtyHandling: base.dirtyHandling })
   };
-}
-
-/** True when `<root>/.git` exists (clone mode's git-repo requirement). */
-async function isGitRepo(root: string): Promise<boolean> {
-  try {
-    await stat(path.join(root, ".git"));
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**

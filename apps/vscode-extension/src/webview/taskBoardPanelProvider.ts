@@ -30,6 +30,7 @@ import {
 import type { Logger } from "@drydock/core";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import { buildBoardState, reconcileColumns, requireTaskSummary } from "./boardShared.js";
+import { promptAndSaveTaskClonePolicy } from "./taskClonePolicyPrompt.js";
 
 export class TaskBoardPanelProvider {
   /** Single instance: at most one board panel per window. */
@@ -217,11 +218,23 @@ export class TaskBoardPanelProvider {
       case "subtask.start": {
         // force is the manual-only override for a BLOCKED subtask; typed
         // StartSubtaskError messages surface verbatim via the error-response path.
+        const subtask = await backend.subtasks.getSubtask(payload.subtaskId);
+        if (subtask === null) {
+          throw new Error(`Subtask ${payload.subtaskId} was not found.`);
+        }
+        if (!(await promptAndSaveTaskClonePolicy(backend, subtask.taskId))) {
+          this.respond(request.requestId, { type: "subtask.start", accepted: false });
+          return;
+        }
         await backend.orchestrator.startSubtask(payload.subtaskId, { force: payload.force === true });
         this.respond(request.requestId, { type: "subtask.start", accepted: true });
         return;
       }
       case "task.start": {
+        if (!(await promptAndSaveTaskClonePolicy(backend, payload.taskId))) {
+          this.respond(request.requestId, { type: "task.start", accepted: false });
+          return;
+        }
         await backend.orchestrator.startTask(payload.taskId);
         this.respond(request.requestId, { type: "task.start", accepted: true });
         return;

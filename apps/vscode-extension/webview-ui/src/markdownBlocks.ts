@@ -11,12 +11,10 @@
  * (textContent only, never innerHTML) is the caller's responsibility.
  */
 
-import type { PlanDocDetail } from "@drydock/contracts";
-
 export type BlockKind = "heading" | "paragraph" | "list" | "code" | "mermaid";
 
 /** The document format the splitter honors ("mermaid" → one whole-doc block). */
-export type BlockFormat = PlanDocDetail["format"];
+export type BlockFormat = "markdown" | "mermaid";
 
 export interface DocBlock {
   /** 1-based index within the document; the review comment line anchor. */

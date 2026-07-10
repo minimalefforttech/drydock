@@ -79,6 +79,15 @@ test("diff baselines and review threads persist with per-file replacement", asyn
     });
     await diffs.deleteFileSnapshot(asId<"BaselineId">("baseline-1"), "big.bin");
 
+    // A second baseline for the same session deletes cleanly (record + rows)
+    // without touching its sibling — the turn-frame replacement path.
+    await diffs.insertBaseline({ ...baseline("baseline-2"), scope: "turn" }, [
+      { path: "a.txt", sha256: "d".repeat(64), size: 3, mtimeMs: 444, capturedAtMs: 3000, blobStored: true }
+    ]);
+    await diffs.deleteBaseline(asId<"BaselineId">("baseline-2"));
+    assert.equal(await diffs.getBaseline(asId<"BaselineId">("baseline-2")), null);
+    assert.equal((await diffs.listFileSnapshots(asId<"BaselineId">("baseline-2"))).length, 0);
+
     await reviews.insertReviewSession(reviewSession("review-1"));
     await reviews.insertComment(comment("comment-1", "review-1"));
     await reviews.updateCommentStatus(asId<"ReviewCommentId">("comment-1"), "resolved", "2026-07-02T00:00:09.000Z");

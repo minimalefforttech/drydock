@@ -100,7 +100,9 @@ export class CodexAdapter implements AgentAdapter {
     if (request.transport === "codex-exec-json") {
       return {
         providerId: this.providerId,
-        connectionId: `codex-exec-${String(request.runtime.runtimeGenerationId)}`,
+        // Generation + agent, so a sidecar connection on the same runtime
+        // never collides with the session's own connection state.
+        connectionId: `codex-exec-${String(request.runtime.runtimeGenerationId)}-${String(request.agentId)}`,
         sessionId: request.sessionId,
         agentId: request.agentId,
         agentRole: request.agentRole,
@@ -115,7 +117,7 @@ export class CodexAdapter implements AgentAdapter {
       }
       const connection: AgentConnection = {
         providerId: this.providerId,
-        connectionId: `codex-app-${String(request.runtime.runtimeGenerationId)}`,
+        connectionId: `codex-app-${String(request.runtime.runtimeGenerationId)}-${String(request.agentId)}`,
         sessionId: request.sessionId,
         agentId: request.agentId,
         agentRole: request.agentRole,

@@ -6,6 +6,7 @@ export * from "./accessRequestProtocol.js";
 export * from "./accessRequestService.js";
 export * from "./agentQuestionService.js";
 export * from "./clock.js";
+export * from "./chatExport.js";
 export * from "./chatSessionService.js";
 export * from "./cloneSyncService.js";
 export * from "./codeReviewService.js";

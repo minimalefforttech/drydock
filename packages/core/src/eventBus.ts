@@ -12,7 +12,7 @@ import type {
   AgentEvent,
   ChatSessionRecord,
   MemoryCandidateRecord,
-  PlanDocRecord,
+  PlanId,
   RunId,
   SessionId,
   SubtaskId,
@@ -31,10 +31,11 @@ export type ProductBusEvent =
   | { readonly kind: "access-requested"; readonly request: AccessRequestRecord }
   | { readonly kind: "question-asked"; readonly question: AgentQuestionRecord }
   | { readonly kind: "memory-candidate-added"; readonly candidate: MemoryCandidateRecord }
-  | { readonly kind: "plan-docs-updated"; readonly sessionId: SessionId; readonly docs: readonly PlanDocRecord[] }
   | { readonly kind: "inventory-changed" }
   | { readonly kind: "card-entered-done"; readonly taskId: TaskId; readonly subtaskId: SubtaskId }
-  | { readonly kind: "board-changed" };
+  | { readonly kind: "board-changed" }
+  /** Planner (ADR 0012): a plan, its artifacts, or its annotations changed. */
+  | { readonly kind: "planner-changed"; readonly planId: PlanId };
 
 export type ProductBusHandler = (event: ProductBusEvent) => void;
 

@@ -33,6 +33,7 @@ import {
   type CloneRepoState,
   type CloneSyncResult,
   type DiffFileSummary,
+  type DiffViewMode,
   type IsolationSummary,
   type PanelResponse,
   type RuntimeStatsSummary,
@@ -54,7 +55,6 @@ import {
 import { splitBlocks, type DocBlock } from "../markdownBlocks.js";
 import { onPush, request } from "../messaging.js";
 import {
-  AGENT_GROUP_ENTRY_CAP,
   currentSession,
   fallbackCatalog,
   isSessionLiveish,
@@ -68,6 +68,17 @@ import {
   type TaskNote,
   type ThinkingEffort
 } from "../state.js";
+import { nextMessageId, TranscriptFolder } from "../chat/transcriptModel.js";
+import {
+  appendInline as sharedAppendInline,
+  assistantBlock as sharedAssistantBlock,
+  chatMessageRow as sharedChatMessageRow,
+  codeBlockFigure as sharedCodeBlockFigure,
+  reasoningDisclosure as sharedReasoningDisclosure,
+  reconnectingIndicatorRow as sharedReconnectingIndicatorRow,
+  workingIndicatorRow as sharedWorkingIndicatorRow,
+  type MessageRowContext
+} from "../chat/messageRow.js";
 import { adoptSanitizedSvg } from "../svgAdopt.js";
 import type { PlanDocsMermaidApi } from "../planDocsMermaid.js";
 import type { ChatTabView, ViewContext } from "../viewContext.js";
@@ -150,14 +161,15 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   let turnActive = false;
   let starting = false;
   let backendBusy = false;
+  // One summarize export in flight at a time; holds its target session id so a
+  // late `session.summaryReady` push is matched even after a session switch.
+  let summarizeBusySessionId: string | null = null;
+  let summarizeSafetyTimer: number | undefined;
   // A reconnect (resume/reclaim) or provider switch is booting a fresh runtime
   // before the turn can send. Drives a live indicator so the gap isn't silent.
   let reconnecting = false;
   let reconnectStartedAt: number | undefined;
   let reconnectLabel = "Reconnecting…";
-  // Whether the current turn has streamed any assistant text yet — drives the
-  // "finished without output" notice so a silent turn no longer looks stuck.
-  let sawAssistantTextThisTurn = false;
   // The last prompt actually submitted, for the Retry button on error notices.
   let lastSentPrompt: string | null = null;
   // Set by a caller (e.g. workTab's "Create and start chat") right after it
@@ -181,10 +193,28 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // Auto-expand the Changes section when the file count grows within a session.
   let lastChangeCount = 0;
   let lastChangeSessionId: string | null = null;
-  let activeAssistantId: string | null = null;
-  // Correlates a command's "started" row with its terminal update, keyed by the
-  // command text, so a command shows once and gains its exit code + output.
-  const runningCommands = new Map<string, string>();
+  // Shared line→message reducer (chat/transcriptModel.ts, ADR 0012 P3): owns
+  // the streaming assistant row, command coalescing, and subagent groups for
+  // BOTH this tab and the Planner rail. Store accessors read through `state`
+  // so the session switches that reassign these arrays stay coherent.
+  const folder = new TranscriptFolder(
+    {
+      get messages() { return state.chatMessages; },
+      get groups() { return state.agentGroups; }
+    },
+    {
+      onDiagnostic: (entry, shouldPersist) => appendDiagnostic(entry, shouldPersist),
+      onFileEdit: (filePath, changeKind) => {
+        state.changedFiles.set(filePath, changeKind);
+        renderChangedFiles();
+        scheduleDiffRefresh();
+      },
+      onSystemMessage: (text, tone, retry) => appendSystemMessage(text, tone, retry),
+      onReasoning: (text) => appendReasoning(text),
+      onRender: () => renderChat(),
+      onPersist: () => ctx.persist()
+    }
+  );
   // Live "Thinking" disclosure: accumulates agent.reasoning text for the
   // running turn. Reset at chat.turnStarted; frozen (not cleared) once the
   // turn ends so "Thought for Ns" stays readable until the next turn starts.
@@ -193,6 +223,19 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   /** Expanded subagent groups: render-local so re-renders keep them open. */
   const expandedGroups = new Set<string>();
   let diffChanges: readonly DiffFileSummary[] = [];
+  // Which frame the Changes list diffs against (This Turn / Session / Full
+  // Session). Panel-local UX state — sticky across session switches, reset on
+  // reload. Clone sessions ignore it (their tray is the sync surface).
+  let diffView: DiffViewMode = "session";
+  // Trailing debounce for mid-turn diff refreshes driven by agent.file_edit
+  // transcript lines, so a burst of edits costs one tree walk, not one each.
+  let diffRefreshTimer: number | undefined;
+  // True once the selected session has shown ANY diff rows this panel session.
+  // Keeps the tray (and its view toggle) reachable after everything is
+  // accepted — Session view is then empty but Full Session still has history.
+  // Reset on session switch; a panel reload starts false again, so a fully
+  // accepted session hides its tray after reload (matches pre-frame behaviour).
+  let sessionHadDiffRows = false;
   // Clone-mode sync working set: per-repo agent changes in the clone, shown
   // in the Changes section for a clone session INSTEAD of diffChanges. Kept as a
   // separate source so the two never tangle; cleared on every session switch.
@@ -236,10 +279,18 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const infoButton = iconButton("ⓘ", "Isolation summary");
   const infoPopover = popover(infoButton, (content) => buildIsolationPopover(content));
 
+  // Summarize: copies a session digest to the clipboard — the trimmed chat
+  // log, or an AI summary generated out-of-band. Never posted into the chat.
+  const summarizeButton = iconButton("⧉", "Summarize chat to clipboard", "chat-summarize-button");
+  const summarizePopover = popover(summarizeButton, (content, close) => buildSummarizeMenu(content, close));
+  // Mid-header anchor: narrower minimum keeps the right-anchored popover
+  // inside a slim panel (the default 200px minimum clips at the left edge).
+  summarizePopover.classList.add("chat-summarize-popover");
+
   const overflowButton = iconButton("⋯", "More actions");
   const overflowPopover = popover(overflowButton, (content) => buildOverflowMenu(content));
 
-  header.append(backButton, titleWrap, el("span", "chat-header-spacer"), notesPopover, infoPopover, overflowPopover);
+  header.append(backButton, titleWrap, el("span", "chat-header-spacer"), notesPopover, infoPopover, summarizePopover, overflowPopover);
 
   // --- context strip ----------------------------------------------------------
   // Runtime context stays in the scrollable body; send-time controls live in
@@ -460,27 +511,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   });
 
-  // Mode segmented control [Plan | Develop]. Clone is transfer plumbing for
-  // existing clone sessions, not a composer mode.
-  const modeControl = el("div", "segmented");
-  const planModeBtn = button("Plan", "segment");
-  const developModeBtn = button("Develop", "segment");
-  modeControl.append(planModeBtn, developModeBtn);
-  const applyModeButtons = (): void => {
-    planModeBtn.classList.toggle("active", state.composerMode === "plan");
-    developModeBtn.classList.toggle("active", state.composerMode !== "plan");
-  };
-  planModeBtn.addEventListener("click", () => {
-    state.composerMode = "plan";
-    applyModeButtons();
-    ctx.persist();
-  });
-  developModeBtn.addEventListener("click", () => {
-    state.composerMode = "implementation";
-    applyModeButtons();
-    ctx.persist();
-  });
-
+  // The old [Plan | Develop] composer switch is retired (ADR 0012): chat
+  // sessions always run implementation mode; planning lives in the Planner
+  // panel, which owns plan-mode sessions end to end.
   const sendButton = button("⏎", "primary");
   sendButton.classList.add("composer-send");
   sendButton.title = "Send (Ctrl+Enter)";
@@ -502,7 +535,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   const composerActions = el("div", "composer-actions");
   composerActions.append(
-    modeControl,
     modelPopover,
     thinkingSelect,
     el("span", "composer-spacer"),
@@ -511,10 +543,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     hiddenModelControls
   );
 
-  // Plan-documents pill row (compact; shown above the composer when the
-  // selected session has collected plan documents — issue 7, Phase 2).
-  const planDocsRow = el("div", "plan-docs-row hidden");
-
   // Attachment chips: dropped files + the (clickable) active editor. VS
   // Code-style removable chips; converted to [file:…] tokens on send.
   const attachmentsRow = el("div", "composer-attachments hidden");
@@ -522,7 +550,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const attachments: ComposerAttachment[] = [];
 
   const composer = el("div", "composer");
-  composer.append(planDocsRow, attachmentsRow, promptInput, composerActions);
+  composer.append(attachmentsRow, promptInput, composerActions);
 
   // Live sandbox usage for the selected chat, pinned just below the transcript —
   // the "is this agent actually working" signal right where you're watching it.
@@ -565,6 +593,35 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // a clone session; hidden on the diff path.
   const cloneCaption = el("div", "clone-caption hidden");
   cloneCaption.textContent = "Clone sync — changes move by pull/push, not accept/discard";
+  // View toggle: which frame the list diffs against. Session sessions only —
+  // hidden for clone sessions (sync surface) and the no-session workspace scope.
+  const DIFF_VIEWS: readonly { readonly id: DiffViewMode; readonly label: string; readonly hint: string }[] = [
+    { id: "turn", label: "This Turn", hint: "Changes since your last message" },
+    { id: "session", label: "Session", hint: "Changes this session; accepting a file re-baselines it" },
+    { id: "full-session", label: "Full Session", hint: "Everything this session, including accepted changes" }
+  ];
+  const diffViewToggle = el("div", "diff-view-toggle hidden");
+  diffViewToggle.setAttribute("role", "group");
+  diffViewToggle.setAttribute("aria-label", "Diff view");
+  const diffViewButtons = new Map<DiffViewMode, HTMLButtonElement>();
+  for (const viewDef of DIFF_VIEWS) {
+    const segment = button(viewDef.label, "diff-view-segment");
+    segment.title = viewDef.hint;
+    segment.addEventListener("click", () => {
+      if (diffView === viewDef.id) return;
+      diffView = viewDef.id;
+      renderDiffViewToggle();
+      void loadDiffStatus();
+    });
+    diffViewButtons.set(viewDef.id, segment);
+    diffViewToggle.append(segment);
+  }
+  function renderDiffViewToggle(): void {
+    for (const [id, segment] of diffViewButtons) {
+      segment.classList.toggle("active", id === diffView);
+    }
+  }
+  renderDiffViewToggle();
   const changedFilesList = el("div", "changed-files working-set-files");
 
   pullAllButton.addEventListener("click", () => void runCloneOp(() =>
@@ -575,7 +632,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // Notes moved to the pinned top bar (see notesButton / buildNotesPopover); the
   // list + add-note form are built inside the popover, fresh on each open.
 
-  changes.body.append(cloneCaption, workingSetHeader, changedFilesList);
+  changes.body.append(cloneCaption, diffViewToggle, workingSetHeader, changedFilesList);
 
   refreshDiffButton.addEventListener("click", () => void loadDiffStatus());
   snapshotButton.addEventListener("click", () => {
@@ -639,8 +696,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   });
   onPush("chat.turnStarted", (payload) => {
     if (payload.sessionId === state.selectedSessionId) {
-      activeAssistantId = null;
-      sawAssistantTextThisTurn = false;
+      folder.clearActiveAssistant();
+      folder.resetTurn();
       reasoningText = "";
       reasoningActive = false;
       setTurnActive(true);
@@ -648,7 +705,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   });
   onPush("chat.turnCompleted", (payload) => {
     if (payload.sessionId === state.selectedSessionId) {
-      activeAssistantId = null;
+      folder.clearActiveAssistant();
       logChat(`turn ${payload.status}`);
       setTurnActive(false);
       // Make the outcome visible in the transcript. A failed turn's reason is
@@ -657,7 +714,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       // looked stuck" case), which otherwise leave no trace in the chat.
       if (payload.status === "cancelled") {
         appendSystemMessage("You stopped this turn. Send another message to continue, or End the session to shut the agent down.");
-      } else if (payload.status === "completed" && !sawAssistantTextThisTurn) {
+      } else if (payload.status === "completed" && !folder.sawAssistantTextThisTurn) {
         appendSystemMessage("The agent finished this turn without producing any output. If this keeps happening, check the Launch command in the session menu and the System tab — the backend may not be running correctly.", "info", true);
       }
       // SEEN SIGNAL: the user is watching this session, so pull any lines we
@@ -666,9 +723,13 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       // fromSequence caps it to just the tail; usually empty.
       void loadTimelineIncremental(payload.sessionId);
       // A clone session's agent may have edited the clone this turn; refetch its
-      // sync state so the Changes section reflects the new agent changes.
+      // sync state so the Changes section reflects the new agent changes. Other
+      // sessions refresh the baseline diff so the tray is current without a
+      // manual ↻ (This Turn view especially depends on this).
       if (isCloneSelected()) {
         void loadCloneState();
+      } else {
+        void loadDiffStatus();
       }
     }
   });
@@ -707,16 +768,21 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       renderAccessCards();
     }
   });
-  onPush("planDocs.updated", (payload) => {
-    if (payload.sessionId !== state.selectedSessionId) return;
-    state.planDocs = { sessionId: payload.sessionId, docs: payload.docs.map((doc) => ({ name: doc.name, format: doc.format, revision: doc.revision })) };
-    ctx.persist();
-    renderPlanDocs();
-    logChat(`plan documents updated (${String(payload.docs.length)})`);
-  });
   onPush("editor.active", (payload) => {
     state.activeEditor = payload.editor;
     renderAttachments();
+  });
+  onPush("session.summaryReady", (payload) => {
+    // Match the summary's own session, not the current selection — the user
+    // may have switched chats while the model was writing.
+    if (summarizeBusySessionId !== null && payload.sessionId !== summarizeBusySessionId) return;
+    setSummarizePending(null);
+    markSummarizeButton(payload.ok ? "✓" : "!");
+    if (payload.ok) {
+      logChat("AI summary copied to clipboard");
+    } else {
+      logChat(`AI summary failed: ${payload.error ?? "unknown error"}`);
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -800,8 +866,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     // starts the micro-VM. This is the ONLY path that clears the transcript.
     starting = true;
     refreshControls();
-    const mode = state.composerMode === "plan" ? "plan" : "implementation";
-    const workspace = currentWorkspaceSelection(mode);
+    // Chat sends are always implementation mode; plan-mode sessions belong to
+    // the Planner panel (ADR 0012).
+    const workspace = currentWorkspaceSelection("implementation");
     const workspaceNote = workspace
       ? "workspaceSetId" in workspace
         ? ` · set (${workspace.mode})`
@@ -826,13 +893,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       manualModelSessionId = null;
       state.lastSequence = 0;
       state.chatMessages = [];
-    runningCommands.clear();
+      folder.clearLiveState();
       state.diagnostics = state.diagnostics.slice(-3);
       state.agentGroups = {};
       expandedGroups.clear();
       state.changedFiles.clear();
       openedDiffKeys = new Set();
-      activeAssistantId = null;
       reasoningText = "";
       reasoningActive = false;
       renderHeader();
@@ -1146,6 +1212,76 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     return item;
   }
 
+  /** The two summarize flavors; both land on the clipboard, not in the chat. */
+  function buildSummarizeMenu(content: HTMLElement, close: () => void): void {
+    const log = menuItem("Copy chat log", () => {
+      close();
+      void summarizeAction("log");
+    });
+    log.title = "The conversation plus files touched — commands, thinking, and host preamble trimmed.";
+    const ai = menuItem("Copy AI summary", () => {
+      close();
+      void summarizeAction("ai");
+    });
+    ai.title = "Ask the session's agent for a structured summary (runs beside its live backend).";
+    if (state.selectedSessionId === null || summarizeBusySessionId !== null) {
+      log.classList.add("disabled");
+      ai.classList.add("disabled");
+    } else if (!isSessionLiveish(state, state.selectedSessionId) || selectedRunsElsewhere()) {
+      // The chat log reads durable rows and works for any session; the AI
+      // summary rides the session's live backend in THIS window.
+      ai.classList.add("disabled");
+      ai.title = "AI summary needs the session's backend live in this window — resume it first.";
+    }
+    content.append(log, ai);
+  }
+
+  async function summarizeAction(mode: "log" | "ai"): Promise<void> {
+    const sessionId = state.selectedSessionId;
+    if (sessionId === null || summarizeBusySessionId !== null) return;
+    setSummarizePending(sessionId);
+    const response = await request({ type: "session.summarize", sessionId, mode });
+    if (!response.ok) {
+      setSummarizePending(null);
+      markSummarizeButton("!");
+      logChat(`summarize failed: ${response.error.message}`);
+      return;
+    }
+    if (mode === "log") {
+      setSummarizePending(null);
+      markSummarizeButton("✓");
+      return;
+    }
+    // AI mode is only STARTED here; completion arrives as session.summaryReady.
+    logChat("AI summary started — it will land on the clipboard when ready");
+  }
+
+  function setSummarizePending(sessionId: string | null): void {
+    summarizeBusySessionId = sessionId;
+    summarizeButton.disabled = sessionId !== null;
+    summarizeButton.textContent = sessionId !== null ? "…" : "⧉";
+    if (summarizeSafetyTimer !== undefined) {
+      window.clearTimeout(summarizeSafetyTimer);
+      summarizeSafetyTimer = undefined;
+    }
+    if (sessionId !== null) {
+      // Never leave the button stuck if the completion push is lost (panel
+      // reloaded, backend died). The host still writes the clipboard its side.
+      summarizeSafetyTimer = window.setTimeout(() => {
+        setSummarizePending(null);
+        markSummarizeButton("!");
+        logChat("AI summary is taking too long — the clipboard will still update if it completes");
+      }, 300_000);
+    }
+  }
+
+  function markSummarizeButton(label: string): void {
+    summarizeButton.textContent = label;
+    window.setTimeout(() => {
+      if (summarizeBusySessionId === null) summarizeButton.textContent = "⧉";
+    }, 1_500);
+  }
+
   async function restartBackendAction(): Promise<void> {
     if (!state.selectedSessionId || !isSessionLiveish(state, state.selectedSessionId)) return;
     backendBusy = true;
@@ -1238,12 +1374,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (!response.ok || response.payload.type !== "session.timeline") return;
     if (state.selectedSessionId !== sessionId) return;
     state.chatMessages = [];
-    runningCommands.clear();
+    folder.clearLiveState();
     state.diagnostics = [];
     state.agentGroups = {};
     expandedGroups.clear();
     state.changedFiles.clear();
-    activeAssistantId = null;
     // Reset before replay: applyTranscriptLine below re-accumulates reasoning
     // from this session's own stored agent.reasoning lines (via
     // appendReasoning), so without this reset a switch away from a session
@@ -1255,7 +1390,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       applyTranscriptLine(line, false);
       if (line.sequence > state.lastSequence) state.lastSequence = line.sequence;
     }
-    activeAssistantId = null;
+    folder.clearActiveAssistant();
     renderChat();
     renderDiagnostics();
     renderChangedFiles();
@@ -1286,7 +1421,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   async function loadDiffStatus(): Promise<void> {
-    const response = await request({ type: "diff.status", ...(state.selectedSessionId ? { sessionId: state.selectedSessionId } : {}) });
+    const response = await request({
+      type: "diff.status",
+      ...(state.selectedSessionId ? { sessionId: state.selectedSessionId, view: diffView } : {})
+    });
     if (!response.ok) {
       logChat(`diff failed: ${response.error.message}`);
       return;
@@ -1295,6 +1433,20 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       diffChanges = response.payload.changes;
       renderChangedFiles();
     }
+  }
+
+  /**
+   * Debounced diff refresh for agent.file_edit lines: keeps the tray live
+   * while a turn runs without walking the tree once per edit. Clone sessions
+   * skip it (their tray refreshes from clone.state at turn end).
+   */
+  function scheduleDiffRefresh(): void {
+    if (isCloneSelected() || state.selectedSessionId === null) return;
+    if (diffRefreshTimer !== undefined) window.clearTimeout(diffRefreshTimer);
+    diffRefreshTimer = window.setTimeout(() => {
+      diffRefreshTimer = undefined;
+      void loadDiffStatus();
+    }, 1_500);
   }
 
   // ---------------------------------------------------------------------------
@@ -1377,216 +1529,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // ---------------------------------------------------------------------------
   // Transcript logic (moved verbatim from the single-file panel)
   // ---------------------------------------------------------------------------
+  /** Folds one transcript line through the shared reducer (chat/transcriptModel.ts). */
   function applyTranscriptLine(line: SequencedTranscriptLine | DiagnosticEntry, shouldPersist = true): void {
-    const agentPath = "agentPath" in line && Array.isArray(line.agentPath) ? line.agentPath : undefined;
-    const nodeId = "nodeId" in line && typeof line.nodeId === "string" ? line.nodeId : undefined;
-
-    // Lineage routing. Spawns open a collapsible group at this point in
-    // the flow; node_done closes one; everything else carrying a non-root
-    // agentPath belongs INSIDE its group, never interleaved into the main log.
-    if (line.eventType === "agent.spawn" && nodeId !== undefined) {
-      openAgentGroup(line, nodeId, agentPath ?? [], shouldPersist);
-      return;
-    }
-    if (line.eventType === "agent.node_done" && nodeId !== undefined) {
-      closeAgentGroup(line, nodeId, shouldPersist);
-      return;
-    }
-    if (agentPath !== undefined && agentPath.length > 0) {
-      routeChildLine(line, agentPath, shouldPersist);
-      return;
-    }
-
-    if (line.eventType === "user.message") {
-      appendUserLine(line.summary, line.createdAt, shouldPersist);
-      return;
-    }
-    if (line.eventType === "agent.text") {
-      appendAssistantText(line.summary, "final" in line && line.final === true, line.createdAt, shouldPersist);
-      return;
-    }
-    if (line.eventType === "agent.reasoning") {
-      appendReasoning(line.summary, shouldPersist);
-      return;
-    }
-    if (line.eventType === "agent.error") {
-      // Surface the failure in the chat, not just the Diagnostics feed. The
-      // detail (when present) carries the real reason; fall back to the summary.
-      const detail = "detail" in line && typeof line.detail === "string" && line.detail.length > 0 ? line.detail : line.summary;
-      appendSystemMessage(`The agent hit an error: ${detail}`, "error", true);
-      appendDiagnostic(diagnosticFromLine(line), shouldPersist);
-      return;
-    }
-    if (line.eventType === "agent.command") {
-      // The shell commands the agent runs in the container are the "docker shell"
-      // activity — render them inline (a dev needs to watch them), not just in
-      // the hidden Diagnostics feed. Still diagnose for the flat debug truth.
-      appendCommand(line);
-      appendDiagnostic(diagnosticFromLine(line), shouldPersist);
-      return;
-    }
-    if (line.eventType === "agent.file_edit") {
-      const filePath = "filePath" in line && typeof line.filePath === "string"
-        ? line.filePath
-        : line.summary.split(" ").slice(1).join(" ");
-      const changeKind = "fileChangeKind" in line && typeof line.fileChangeKind === "string"
-        ? line.fileChangeKind
-        : line.summary.split(" ")[0] ?? "update";
-      if (filePath) {
-        state.changedFiles.set(filePath, changeKind);
-        renderChangedFiles();
-      }
-    }
-    appendDiagnostic(diagnosticFromLine(line), shouldPersist);
-    if (line.eventType === "agent.done") {
-      activeAssistantId = null;
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Subagent groups: lineage-attributed lines collect into collapsible
-  // blocks anchored where the spawn happened. Diagnostics still receives every
-  // line (prefixed by owner label) as the flat debug truth.
-  // ---------------------------------------------------------------------------
-
-  /** Carries the structured lineage fields into the flat Diagnostics feed. */
-  function diagnosticFromLine(line: SequencedTranscriptLine | DiagnosticEntry, prefix?: string): DiagnosticEntry {
-    return {
-      createdAt: line.createdAt,
-      eventType: line.eventType,
-      summary: prefix === undefined ? line.summary : `[${prefix}] ${line.summary}`,
-      ...("agentPath" in line && Array.isArray(line.agentPath) && line.agentPath.length > 0 ? { agentPath: line.agentPath } : {}),
-      ...("nodeId" in line && typeof line.nodeId === "string" ? { nodeId: line.nodeId } : {}),
-      ...("label" in line && typeof line.label === "string" ? { label: line.label } : {}),
-      ...("subagentType" in line && typeof line.subagentType === "string" ? { subagentType: line.subagentType } : {}),
-      ...("model" in line && typeof line.model === "string" ? { model: line.model } : {}),
-      ...("nodeStatus" in line && typeof line.nodeStatus === "string" ? { nodeStatus: line.nodeStatus } : {}),
-      ...("toolStatus" in line && typeof line.toolStatus === "string" ? { toolStatus: line.toolStatus } : {}),
-      ...("commandName" in line && typeof line.commandName === "string" ? { commandName: line.commandName } : {}),
-      ...("detail" in line && typeof line.detail === "string" ? { detail: line.detail } : {}),
-      ...("usage" in line && line.usage !== undefined ? { usage: line.usage } : {})
-    };
-  }
-
-  /** Group lookup that synthesizes missing nodes (and ancestors) instead of dropping. */
-  function ensureAgentGroup(nodeId: string, parentPath: readonly string[], createdAt: string): AgentGroup {
-    const existing = state.agentGroups[nodeId];
-    if (existing !== undefined) return existing;
-    let parentNodeId: string | undefined;
-    if (parentPath.length > 0) {
-      const parentId = parentPath[parentPath.length - 1] as string;
-      ensureAgentGroup(parentId, parentPath.slice(0, -1), createdAt);
-      parentNodeId = parentId;
-    }
-    const group: AgentGroup = {
-      nodeId,
-      ...(parentNodeId === undefined ? {} : { parentNodeId }),
-      label: `agent ${nodeId.slice(-8)}`,
-      status: "running",
-      toolCalls: 0,
-      commands: 0,
-      fileEdits: 0,
-      errors: 0,
-      createdAt,
-      entries: [],
-      children: []
-    };
-    state.agentGroups[nodeId] = group;
-    if (parentNodeId === undefined) {
-      state.chatMessages.push({ id: nextMessageId("group"), role: "group", createdAt, text: "", nodeId });
-    } else {
-      const parent = state.agentGroups[parentNodeId];
-      if (parent !== undefined && !parent.children.includes(nodeId)) parent.children.push(nodeId);
-    }
-    return group;
-  }
-
-  function openAgentGroup(line: SequencedTranscriptLine | DiagnosticEntry, nodeId: string, parentPath: readonly string[], shouldPersist: boolean): void {
-    const group = ensureAgentGroup(nodeId, parentPath, line.createdAt);
-    if ("label" in line && typeof line.label === "string") group.label = line.label;
-    if ("subagentType" in line && typeof line.subagentType === "string") group.subagentType = line.subagentType;
-    if ("model" in line && typeof line.model === "string") group.model = line.model;
-    if ("detail" in line && typeof line.detail === "string") group.promptPreview = line.detail;
-    group.lastActivity = line.summary;
-    group.lastActivityAt = line.createdAt;
-    appendDiagnostic(diagnosticFromLine(line), shouldPersist);
-    renderChat();
-    if (shouldPersist) ctx.persist();
-  }
-
-  function closeAgentGroup(line: SequencedTranscriptLine | DiagnosticEntry, nodeId: string, shouldPersist: boolean): void {
-    const group = ensureAgentGroup(nodeId, [], line.createdAt);
-    const status = "nodeStatus" in line ? line.nodeStatus : undefined;
-    if (group.status === "running" && (status === "completed" || status === "failed" || status === "cancelled")) {
-      group.status = status;
-      group.endedAt = line.createdAt;
-    }
-    if ("detail" in line && typeof line.detail === "string") group.resultPreview = line.detail;
-    if ("usage" in line && line.usage !== undefined) group.usage = line.usage;
-    group.lastActivity = line.summary;
-    group.lastActivityAt = line.createdAt;
-    appendDiagnostic(diagnosticFromLine(line, group.label), shouldPersist);
-    renderChat();
-    if (shouldPersist) ctx.persist();
-  }
-
-  function routeChildLine(line: SequencedTranscriptLine | DiagnosticEntry, agentPath: readonly string[], shouldPersist: boolean): void {
-    const nodeId = agentPath[agentPath.length - 1] as string;
-    const group = ensureAgentGroup(nodeId, agentPath.slice(0, -1), line.createdAt);
-    const toolStatus = "toolStatus" in line ? line.toolStatus : undefined;
-    if (line.eventType === "agent.tool_call" && toolStatus === "started") group.toolCalls += 1;
-    if (line.eventType === "agent.command" && toolStatus === "started") group.commands += 1;
-    if ((line.eventType === "agent.tool_call" || line.eventType === "agent.command")
-      && "commandName" in line
-      && typeof line.commandName === "string") {
-      group.lastCommand = line.commandName;
-    }
-    if (line.eventType === "agent.error") group.errors += 1;
-    if (line.eventType === "agent.file_edit") {
-      group.fileEdits += 1;
-      // Child edits land in the SAME runtime/workspace: the working set owns them too.
-      const filePath = "filePath" in line && typeof line.filePath === "string" ? line.filePath : undefined;
-      const changeKind = "fileChangeKind" in line && typeof line.fileChangeKind === "string" ? line.fileChangeKind : "update";
-      if (filePath !== undefined) {
-        state.changedFiles.set(filePath, changeKind);
-        renderChangedFiles();
-      }
-    }
-    group.lastActivity = line.summary;
-    group.lastActivityAt = line.createdAt;
-    group.entries.push({
-      createdAt: line.createdAt,
-      eventType: line.eventType,
-      summary: line.summary,
-      ...("detail" in line && typeof line.detail === "string" ? { detail: line.detail } : {}),
-      ...(line.eventType === "agent.text" ? { prose: true } : {})
-    });
-    if (group.entries.length > AGENT_GROUP_ENTRY_CAP) group.entries.shift();
-    appendDiagnostic(diagnosticFromLine(line, group.label), shouldPersist);
-    renderChat();
-    if (shouldPersist) ctx.persist();
-  }
-
-  function appendAssistantText(text: string, final: boolean, createdAt: string, shouldPersist = true): void {
-    sawAssistantTextThisTurn = true;
-    const currentIndex = activeAssistantId === null
-      ? -1
-      : state.chatMessages.findIndex((message) => message.id === activeAssistantId);
-    if (currentIndex === -1) {
-      const id = nextMessageId("assistant");
-      activeAssistantId = final ? null : id;
-      state.chatMessages.push({ id, role: "assistant", createdAt, text, ...(final ? {} : { streaming: true }) });
-    } else {
-      const current = state.chatMessages[currentIndex];
-      if (current === undefined) return;
-      const nextText = final ? text : `${current.text}${text}`;
-      state.chatMessages[currentIndex] = final
-        ? { id: current.id, role: current.role, createdAt: current.createdAt, text: nextText }
-        : { ...current, text: nextText, streaming: true };
-      if (final) activeAssistantId = null;
-    }
-    renderChat();
-    if (shouldPersist) ctx.persist();
+    folder.apply(line, shouldPersist);
   }
 
   /**
@@ -1608,13 +1553,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     void shouldPersist;
   }
 
-  function appendUserLine(prompt: string, createdAt = new Date().toISOString(), shouldPersist = true): void {
-    state.chatMessages.push({ id: nextMessageId("user"), role: "user", createdAt, text: prompt });
-    activeAssistantId = null;
-    renderChat();
-    if (shouldPersist) ctx.persist();
-  }
-
   /**
    * A visible in-transcript notice. Turn errors, stopped/empty turns, and send
    * failures used to land only in the hidden Diagnostics feed — so a chat that
@@ -1630,19 +1568,13 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     // "Authenticate <provider>" button that runs the provider's sbx-secret login.
     const providerAuth = !signIn && /not logged in|please run \/login|authentication_failed|apikeysource\W+none|invalid api key|401 unauthorized|needs[- ]login/i.test(text);
     const authProviderId = providerAuth ? selectedProviderId() : undefined;
-    state.chatMessages.push({
-      id: nextMessageId("system"),
-      role: "system",
-      createdAt: new Date().toISOString(),
+    folder.appendSystemMessage({
       text,
       tone,
       ...(canRetry ? { retry: true } : {}),
       ...(signIn ? { signIn: true } : {}),
       ...(providerAuth ? { authenticate: true, ...(authProviderId === undefined ? {} : { authProviderId }) } : {})
     });
-    activeAssistantId = null;
-    renderChat();
-    ctx.persist();
   }
 
   /** Provider of the selected session, falling back to the composer's choice. */
@@ -1664,48 +1596,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (lastSentPrompt === null || turnActive || starting || backendBusy) return;
     promptInput.value = lastSentPrompt;
     void onSend();
-  }
-
-  /**
-   * Renders a shell command the agent ran, coalescing its started→terminal
-   * events into one row that gains an exit code + captured output. The summary
-   * is `<cmd> [<status>[ exit N]]`; we split the command text from the suffix so
-   * the row reads like a terminal line.
-   */
-  function appendCommand(line: SequencedTranscriptLine | DiagnosticEntry): void {
-    const summary = line.summary;
-    const status = "toolStatus" in line && (line.toolStatus === "started" || line.toolStatus === "completed" || line.toolStatus === "failed")
-      ? line.toolStatus
-      : "started";
-    const commandText = summary.replace(/\s*\[[^\]]*\]\s*$/, "").trim() || summary;
-    const exitMatch = /exit (-?\d+)/.exec(summary);
-    const commandExit = exitMatch ? Number(exitMatch[1]) : undefined;
-    const output = "detail" in line && typeof line.detail === "string" && line.detail.length > 0 ? line.detail : undefined;
-
-    const existingId = runningCommands.get(commandText);
-    const existingIndex = existingId === undefined ? -1 : state.chatMessages.findIndex((message) => message.id === existingId);
-    const id = existingIndex >= 0 ? state.chatMessages[existingIndex]!.id : nextMessageId("command");
-    const message: ChatMessage = {
-      id,
-      role: "command",
-      createdAt: line.createdAt,
-      text: commandText,
-      commandStatus: status,
-      ...(commandExit === undefined ? {} : { commandExit }),
-      ...(output === undefined ? {} : { commandOutput: output })
-    };
-    if (existingIndex >= 0) {
-      state.chatMessages[existingIndex] = message;
-    } else {
-      state.chatMessages.push(message);
-    }
-    if (status === "started") {
-      runningCommands.set(commandText, id);
-    } else {
-      runningCommands.delete(commandText);
-    }
-    renderChat();
-    ctx.persist();
   }
 
   function appendDiagnostic(entry: DiagnosticEntry, shouldPersist = true): void {
@@ -1872,7 +1762,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   function plannedWorkspaceMounts(): DisplayMount[] {
     const names = plannedWorkspaceProjectNames();
-    const mode = state.composerMode === "plan" ? "read-only" : "read-write";
+    // Chat sessions mount read-write; read-only planning mounts are the
+    // Planner panel's concern now.
+    const mode = "read-write" as const;
     return names.map((name) => {
       const project = state.workspacePolicy?.projects.find((candidate) => candidate.name === name);
       const hostDisplayPath = project?.displayPath ?? name;
@@ -2108,7 +2000,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       const lead = el("div", "chat-empty-lead");
       lead.textContent = "Ask the isolated agent to start.";
       const modes = el("div", "chat-empty-modes");
-      modes.textContent = "Plan = read-only · Develop = edits your files (read-write)";
+      modes.textContent = "Chats edit your mounted files · planning lives in the Planner panel";
       empty.append(lead, modes);
       chatLog.append(empty);
       return;
@@ -2156,32 +2048,15 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * than just "working…".
    */
   function workingIndicatorRow(): HTMLElement {
-    if (reasoningActive) return reasoningDisclosure(true);
-    const row = el("div", "chat-working");
-    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
-    const elapsed = turnStartedAt === undefined ? 0 : Math.max(0, Math.floor((Date.now() - turnStartedAt) / 1000));
-    // Primary signal is time since the last streamed output: a value that keeps
-    // climbing means the turn is running but silent (a likely hang). Total
-    // elapsed lives in the tooltip.
-    const sinceLast = lastActivityAt === undefined ? elapsed : Math.max(0, Math.floor((Date.now() - lastActivityAt) / 1000));
-    row.title = `${String(elapsed)}s since this turn started`;
-    const label = el("span", "chat-working-label");
-    if (reducedMotion) {
-      // No pulsing dots under reduced motion — a static label only.
-      label.textContent = `Working… (${String(sinceLast)}s since last output)`;
-      row.append(label);
-    } else {
-      const dots = el("span", "chat-working-dots");
-      dots.append(el("span", "dot"), el("span", "dot"), el("span", "dot"));
-      label.textContent = `Assistant is working… (${String(sinceLast)}s since last output)`;
-      row.append(dots, label);
-    }
-    // After a sustained silence, offer a gentle nudge instead of leaving the user
-    // to guess whether it's stuck. The poke is a graceful interrupt (not a kill).
-    if (sinceLast >= POKE_AFTER_SECONDS) {
-      row.append(pokeButton());
-    }
-    return row;
+    return sharedWorkingIndicatorRow({
+      ...(turnStartedAt === undefined ? {} : { turnStartedAt }),
+      ...(lastActivityAt === undefined ? {} : { lastActivityAt }),
+      ...(reasoningActive ? { reasoning: { text: reasoningText } } : {}),
+      // After a sustained silence, offer a gentle nudge instead of leaving the
+      // user to guess whether it's stuck. The poke is a graceful interrupt.
+      trailing: () => pokeButton(),
+      trailingAfterSeconds: POKE_AFTER_SECONDS
+    });
   }
 
   /** "Give it a poke?" — a soft turn/interrupt to try to break a quiet standoff. */
@@ -2221,26 +2096,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * reasoning stream.
    */
   function reasoningDisclosure(live: boolean): HTMLElement {
-    const details = document.createElement("details");
-    details.className = "chat-reasoning";
-    const summary = document.createElement("summary");
     const elapsed = turnStartedAt === undefined ? 0 : Math.max(0, Math.floor((Date.now() - turnStartedAt) / 1000));
-    const label = el("span", "chat-reasoning-label");
-    label.textContent = live ? `Thinking… (${String(elapsed)}s)` : `Thought for ${String(elapsed)}s`;
-    summary.append(label);
-    if (live) {
-      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
-      if (!reducedMotion) {
-        const dots = el("span", "chat-working-dots");
-        dots.append(el("span", "dot"), el("span", "dot"), el("span", "dot"));
-        summary.append(dots);
-      }
-    }
-    details.append(summary);
-    const body = el("pre", "chat-reasoning-body");
-    body.textContent = reasoningText;
-    details.append(body);
-    return details;
+    return sharedReasoningDisclosure(live, reasoningText, elapsed);
   }
 
   /** Whole seconds since an ISO timestamp, floored at zero. */
@@ -2289,26 +2146,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * it adds a reassurance that starting a sandbox can take a moment.
    */
   function reconnectingIndicatorRow(): HTMLElement {
-    const row = el("div", "chat-working chat-reconnecting");
     const elapsed = reconnectStartedAt === undefined ? 0 : Math.max(0, Math.floor((Date.now() - reconnectStartedAt) / 1000));
-    const suffix = elapsed >= 45
-      ? " — still trying; if it doesn't recover, End the session or reload the window"
-      : elapsed >= 20
-        ? " — starting the sandbox can take a bit"
-        : "";
-    const text = `${reconnectLabel} (${String(elapsed)}s)${suffix}`;
-    const label = el("span", "chat-working-label");
-    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
-    if (reducedMotion) {
-      label.textContent = text;
-      row.append(label);
-      return row;
-    }
-    const dots = el("span", "chat-working-dots");
-    dots.append(el("span", "dot"), el("span", "dot"), el("span", "dot"));
-    label.textContent = text;
-    row.append(dots, label);
-    return row;
+    return sharedReconnectingIndicatorRow(reconnectLabel, elapsed);
   }
 
   // --- sandbox usage bar (pinned below the transcript) -----------------------
@@ -2396,106 +2235,44 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * FULL-WIDTH structural markdown blocks (no bubble). Both carry a small dim
    * meta line. While streaming, a subtle cursor affordance sits after the body.
    */
-  function chatMessageRow(message: ChatMessage): HTMLElement {
-    if (message.role === "group") {
-      return message.nodeId !== undefined && state.agentGroups[message.nodeId] !== undefined
-        ? agentGroupBlock(message.nodeId)
-        : el("div", "chat-message role-group empty");
-    }
-    if (message.role === "system") {
-      // A visible in-transcript notice: turn errors, stopped/empty turns, and
-      // send failures that used to vanish into the Diagnostics feed.
-      const row = el("div", `chat-message role-system${message.tone === "error" ? " tone-error" : ""}`);
-      const body = el("div", "chat-system-body");
-      body.textContent = message.text;
-      row.append(body);
-      if (message.signIn === true) {
-        const signInButton = button("Sign in to Docker Sandbox", "small primary chat-system-signin");
-        signInButton.addEventListener("click", () => {
-          void request({ type: "runtime.sbxLogin" }).then((response) => {
-            if (!response.ok) logChat(`sbx login failed to launch: ${response.error.message}`);
-            else appendSystemMessage("Opened a terminal running `sbx login`. Complete the sign-in, then reload the window and send again.");
-          });
-        });
-        row.append(signInButton);
-      }
-      if (message.authenticate === true) {
-        const providerId = message.authProviderId ?? selectedProviderId();
-        const authButton = button(`Authenticate ${providerLabel(providerId)}`, "small primary chat-system-signin");
-        authButton.addEventListener("click", () => {
-          authButton.disabled = true;
-          void request({ type: "provider.login", providerId }).then((response) => {
-            authButton.disabled = false;
-            if (!response.ok) {
-              logChat(`login failed to launch: ${response.error.message}`);
-              return;
-            }
-            appendSystemMessage(
-              normalizeProviderId(providerId) === "claude"
-                ? "Opened a terminal running Claude in a sandbox. Type /login there to sign in (a browser opens), then close the terminal and click Retry."
-                : `Opened a terminal to sign ${providerLabel(providerId)} in for the sandbox. Complete the OAuth flow, then click Retry or send again.`
-            );
-          });
-        });
-        row.append(authButton);
-      }
-      if (message.retry === true) {
-        const retryButton = button("Retry", "small chat-system-retry");
-        retryButton.addEventListener("click", () => retryLastTurn());
-        row.append(retryButton);
-      }
-      return row;
-    }
-    if (message.role === "command") {
-      const row = el("div", `chat-message role-command status-${message.commandStatus ?? "started"}`);
-      const commandLine = el("div", "chat-command-line");
-      const promptGlyph = el("span", "chat-command-prompt");
-      promptGlyph.textContent = "$";
-      const commandText = el("span", "chat-command-text");
-      commandText.textContent = message.text;
-      const statusChip = el("span", "chat-command-status");
-      statusChip.textContent = message.commandStatus === "started"
-        ? "running…"
-        : message.commandStatus === "failed"
-          ? `failed${message.commandExit === undefined ? "" : ` · exit ${String(message.commandExit)}`}`
-          : `exit ${message.commandExit === undefined ? "0" : String(message.commandExit)}`;
-      commandLine.append(promptGlyph, commandText, statusChip);
-      row.append(commandLine);
-      if (message.commandOutput !== undefined && message.commandOutput.length > 0) {
-        const lineCount = message.commandOutput.replace(/\n+$/, "").split("\n").length;
-        const output = document.createElement("details");
-        output.className = "chat-command-output";
-        // Short output shows inline; anything over 3 lines collapses by default.
-        output.open = lineCount <= 3;
-        const summary = document.createElement("summary");
-        summary.textContent = lineCount <= 3 ? "output" : `output (${String(lineCount)} lines)`;
-        const pre = document.createElement("pre");
-        pre.textContent = message.commandOutput;
-        output.append(summary, pre);
-        row.append(output);
-      }
-      return row;
-    }
-    const streaming = message.streaming === true;
-    const row = el("div", `chat-message role-${message.role}${streaming ? " streaming" : ""}`);
-    const meta = el("div", "chat-meta");
-    meta.textContent = `${message.role === "user" ? "You" : authorLabel()} · ${formatTime(message.createdAt)}`;
-    row.append(meta);
+  /** Surface-specific hooks for the shared row renderer (chat/messageRow.ts). */
+  const messageRowContext: MessageRowContext = {
+    authorLabel: () => authorLabel(),
+    openLink: (href) => {
+      void request({ type: "chat.openFile", path: href });
+    },
+    copyText: (text, copyButton) => copyText(text, copyButton),
+    renderMermaid: (block) => mermaidBlock(block),
+    renderUserBody: (container, text) => appendUserMessageBody(container, text),
+    renderGroup: (nodeId) => (state.agentGroups[nodeId] !== undefined
+      ? agentGroupBlock(nodeId)
+      : el("div", "chat-message role-group empty")),
+    onRetry: () => retryLastTurn(),
+    onSignIn: () => {
+      void request({ type: "runtime.sbxLogin" }).then((response) => {
+        if (!response.ok) logChat(`sbx login failed to launch: ${response.error.message}`);
+        else appendSystemMessage("Opened a terminal running `sbx login`. Complete the sign-in, then reload the window and send again.");
+      });
+    },
+    onAuthenticate: (authProviderId) => {
+      const providerId = authProviderId ?? selectedProviderId();
+      void request({ type: "provider.login", providerId }).then((response) => {
+        if (!response.ok) {
+          logChat(`login failed to launch: ${response.error.message}`);
+          return;
+        }
+        appendSystemMessage(
+          normalizeProviderId(providerId) === "claude"
+            ? "Opened a terminal running Claude in a sandbox. Type /login there to sign in (a browser opens), then close the terminal and click Retry."
+            : `Opened a terminal to sign ${providerLabel(providerId)} in for the sandbox. Complete the OAuth flow, then click Retry or send again.`
+        );
+      });
+    },
+    authenticateLabel: (authProviderId) => `Authenticate ${providerLabel(authProviderId ?? selectedProviderId())}`
+  };
 
-    if (message.role === "user") {
-      const body = el("div", "chat-user-body");
-      appendUserMessageBody(body, message.text);
-      row.append(body);
-    } else {
-      const body = el("div", "chat-assistant-body");
-      // Structural markdown: mermaid fences render as sanitized diagrams here.
-      for (const block of splitBlocks(message.text, "markdown")) {
-        body.append(assistantBlock(block));
-      }
-      if (streaming) body.append(el("span", "stream-cursor"));
-      row.append(body);
-    }
-    return row;
+  function chatMessageRow(message: ChatMessage): HTMLElement {
+    return sharedChatMessageRow(message, messageRowContext);
   }
 
   /**
@@ -2944,22 +2721,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function codeBlockFigure(block: DocBlock, label?: string, extraClass = ""): HTMLElement {
-    const classes = ["md-code"];
-    if (extraClass.length > 0) classes.push(extraClass);
-    const figure = el("div", classes.join(" "));
-    const header = el("div", "md-code-header");
-    const badge = el("span", "md-code-badge");
-    badge.textContent = label ?? (block.language && block.language.length > 0 ? block.language : "code");
-    const copy = iconButton("⧉", "Copy code", "md-code-copy");
-    copy.addEventListener("click", () => copyText(block.text, copy));
-    header.append(badge, copy);
-    const pre = document.createElement("pre");
-    pre.className = "md-pre";
-    const code = document.createElement("code");
-    code.textContent = block.text;
-    pre.append(code);
-    figure.append(header, pre);
-    return figure;
+    return sharedCodeBlockFigure(block, copyText, label, extraClass);
   }
 
   function mermaidBlock(block: DocBlock): HTMLElement {
@@ -3083,73 +2845,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * plain text node (CSP-safe: no innerHTML). Code fences are handled separately.
    */
   function appendInline(parent: HTMLElement, text: string): void {
-    const pattern = /\[([^\]]+)\]\(([^)\s]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|(?:\*|_)([^*_\s][^*_]*?)(?:\*|_)/g;
-    let last = 0;
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(text)) !== null) {
-      if (match.index > last) parent.append(document.createTextNode(text.slice(last, match.index)));
-      if (match[1] !== undefined && match[2] !== undefined) {
-        parent.append(inlineLink(match[1], match[2]));
-      } else if (match[3] !== undefined) {
-        const code = el("code", "md-inline-code");
-        code.textContent = match[3];
-        parent.append(code);
-      } else if (match[4] !== undefined) {
-        const strong = document.createElement("strong");
-        strong.textContent = match[4];
-        parent.append(strong);
-      } else if (match[5] !== undefined) {
-        const em = document.createElement("em");
-        em.textContent = match[5];
-        parent.append(em);
-      }
-      last = pattern.lastIndex;
-    }
-    if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
-  }
-
-  /** A clickable markdown link; the host decides file-open vs. external. */
-  function inlineLink(label: string, href: string): HTMLElement {
-    const anchor = el("a", "md-link") as HTMLAnchorElement;
-    anchor.textContent = label;
-    anchor.href = "#";
-    anchor.title = href;
-    anchor.addEventListener("click", (event) => {
-      event.preventDefault();
-      void request({ type: "chat.openFile", path: href });
-    });
-    return anchor;
+    sharedAppendInline(parent, text, messageRowContext.openLink);
   }
 
   /** Builds one structural markdown block as DOM (inline markdown + textContent leaves). */
   function assistantBlock(block: DocBlock): HTMLElement {
-    switch (block.kind) {
-      case "heading": {
-        const level = Math.min(block.level ?? 1, 4);
-        const heading = el(`h${String(level)}`, "md-heading");
-        appendInline(heading, block.text);
-        return heading;
-      }
-      case "list": {
-        const ul = el("ul", "md-list");
-        for (const item of block.items ?? []) {
-          const li = el("li");
-          appendInline(li, item);
-          ul.append(li);
-        }
-        return ul;
-      }
-      case "code":
-        return codeBlockFigure(block);
-      case "mermaid":
-        return mermaidBlock(block);
-      case "paragraph":
-      default: {
-        const p = el("p", "md-paragraph");
-        appendInline(p, block.text);
-        return p;
-      }
-    }
+    return sharedAssistantBlock(block, messageRowContext);
   }
 
   /**
@@ -3269,6 +2970,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     workingSetActions.classList.remove("hidden");
     cloneActions.classList.add("hidden");
     cloneCaption.classList.add("hidden");
+    // The view toggle needs a session (the workspace scope has no turns or
+    // accept history to frame).
+    diffViewToggle.classList.toggle("hidden", state.selectedSessionId === null);
     const count = diffChanges.length > 0 ? diffChanges.length : state.changedFiles.size;
     // Aggregate line stats for the tray summary (+A −R); only diff rows carry
     // them, so the legacy in-memory fallback shows the count without stats.
@@ -3283,14 +2987,21 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       : null;
     setChangesSummary(count, stats?.added ?? null, stats?.removed ?? null);
     workingSetTitle.textContent = `Working set (${String(count)} file${count === 1 ? "" : "s"})`;
-    setChangesScrollCap(count);
     autoExpandChangesOnGrowth(count);
-    // Empty-hide: a real chat session with no edits hides the tray entirely. The
-    // no-session (workspace) scope stays visible so Snapshot remains reachable.
-    changes.details.classList.toggle("hidden", count === 0 && state.selectedSessionId !== null);
+    if (diffChanges.length > 0) sessionHadDiffRows = true;
+    // Empty-hide: a session that never showed a diff row hides the tray
+    // entirely, but ONLY in the default Session view — in This Turn / Full
+    // Session an empty list is an answer ("nothing this turn"), and once rows
+    // existed the tray must stay reachable or accepting everything would
+    // strand the toggle away from the Full Session history. The no-session
+    // (workspace) scope stays visible so Snapshot remains reachable.
+    changes.details.classList.toggle(
+      "hidden",
+      count === 0 && state.selectedSessionId !== null && diffView === "session" && !sessionHadDiffRows
+    );
     // Snapshot only makes sense in the no-session (workspace) scope.
     snapshotButton.classList.toggle("hidden", state.selectedSessionId !== null);
-    const actionable = diffChanges.length > 0;
+    const actionable = diffChanges.some((change) => change.accepted !== true);
     acceptAllButton.disabled = !actionable;
     discardAllButton.disabled = !actionable;
 
@@ -3301,7 +3012,13 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
     if (state.changedFiles.size === 0) {
       const empty = el("div", "empty");
-      empty.textContent = "No files changed. Refresh diff to compare against the baseline.";
+      empty.textContent = state.selectedSessionId === null
+        ? "No files changed. Refresh diff to compare against the baseline."
+        : diffView === "turn"
+          ? "No files changed since your last message."
+          : diffView === "full-session"
+            ? "No changes this session."
+            : "No unaccepted changes this session.";
       changedFilesList.append(empty);
       return;
     }
@@ -3347,13 +3064,14 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     cloneActions.classList.remove("hidden");
     cloneCaption.classList.remove("hidden");
     snapshotButton.classList.add("hidden");
+    // The clone tray is a sync surface, not a review frame — no view toggle.
+    diffViewToggle.classList.add("hidden");
     // Clone sessions use the tray as the sync surface — always shown, never
     // empty-hidden (the empty state explains where the agent's changes land).
     changes.details.classList.remove("hidden");
     const total = cloneRepos.reduce((sum, repo) => sum + repo.files.length, 0);
     setChangesSummary(total, null, null);
     workingSetTitle.textContent = `Clone sync (${String(total)} file${total === 1 ? "" : "s"})`;
-    setChangesScrollCap(total);
     autoExpandChangesOnGrowth(total);
     refreshCloneActions();
 
@@ -3440,10 +3158,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     return row;
   }
 
-  function setChangesScrollCap(fileCount: number): void {
-    changedFilesList.classList.toggle("scroll-capped", fileCount > 3);
-  }
-
   /**
    * Writes the docked tray's summary label — "<n> file(s) changed  +A  −R",
    * colouring the added/removed counts. Line stats are omitted (null) for the
@@ -3484,14 +3198,24 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function diffRow(change: DiffFileSummary): HTMLElement {
-    const row = el("div", "changed-file-row working-set-row");
+    const accepted = change.accepted === true;
+    const row = el("div", `changed-file-row working-set-row${accepted ? " accepted" : ""}`);
     const meta = CHANGE_GLYPH[change.changeKind];
     const glyph = el("span", `change-glyph ${meta.cls}`);
     glyph.textContent = meta.glyph;
     glyph.title = change.changeKind;
 
+    // Full Session history rows: name the state as a word (same pill idiom as
+    // the clone `conflict` chip) — the row is kept for the record, not for action.
+    if (accepted) {
+      const acceptedChip = el("span", "chip chip-accepted");
+      acceptedChip.textContent = "accepted";
+      acceptedChip.title = "Already accepted — its current state is the Session baseline";
+      row.append(acceptedChip);
+    }
+
     // "unreviewed" dot for files whose diff was never opened this panel session.
-    const reviewed = openedDiffKeys.has(diffKey(change));
+    const reviewed = accepted || openedDiffKeys.has(diffKey(change));
     if (!reviewed) {
       const unreviewed = el("span", "unreviewed-dot");
       unreviewed.textContent = "•";
@@ -3542,19 +3266,26 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     accept.addEventListener("click", (event) => {
       event.stopPropagation();
       accept.disabled = true;
-      void request({ type: "diff.acceptFile", baselineId: change.baselineId, path: change.path }).then((response) => {
+      void request({ type: "diff.acceptFile", baselineId: change.baselineId, path: change.path, view: diffView }).then((response) => {
         applyDiffActionResponse(response, `accepted ${change.path}`);
       });
     });
     // Discard is inline-confirm: first click arms it, second sends revertFile.
     const discard = iconButton("✕", "Discard — rolls back this change", "row-discard");
-    if (!change.revertSupported) {
+    if (accepted) {
+      // History row: both verbs would be no-ops (or worse, surprise-rollbacks
+      // of accepted work) — state why instead of offering them.
+      accept.disabled = true;
+      accept.title = "Already accepted";
+      discard.disabled = true;
+      discard.title = "Already accepted — switch to Session view to act on pending changes";
+    } else if (!change.revertSupported) {
       discard.disabled = true;
       discard.title = change.reason ?? "revert unsupported";
     } else {
       wireInlineConfirmIcon(discard, "✕", "?", "Discard — rolls back this change", () => {
         discard.disabled = true;
-        void request({ type: "diff.revertFile", baselineId: change.baselineId, path: change.path }).then((response) => {
+        void request({ type: "diff.revertFile", baselineId: change.baselineId, path: change.path, view: diffView }).then((response) => {
           applyDiffActionResponse(response, `discarded ${change.path}`);
         });
       });
@@ -3598,9 +3329,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       event.stopPropagation();
       if (node.disabled) return;
       if (!armed) {
-        const total = diffChanges.length;
+        const pending = diffChanges.filter((change) => change.accepted !== true);
+        const total = pending.length;
         if (total === 0) return;
-        const unreviewed = diffChanges.filter((change) => !openedDiffKeys.has(diffKey(change))).length;
+        const unreviewed = pending.filter((change) => !openedDiffKeys.has(diffKey(change))).length;
         armed = true;
         node.textContent = unreviewed > 0
           ? `Accept ${String(total)} (${String(unreviewed)} unreviewed)?`
@@ -3621,12 +3353,14 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * list, so we snapshot the paths up front and drive off that.
    */
   async function acceptAll(): Promise<void> {
-    const targets = diffChanges.map((change) => ({ baselineId: change.baselineId, path: change.path }));
+    const targets = diffChanges
+      .filter((change) => change.accepted !== true)
+      .map((change) => ({ baselineId: change.baselineId, path: change.path }));
     if (targets.length === 0) return;
     acceptAllButton.disabled = true;
     discardAllButton.disabled = true;
     for (const target of targets) {
-      const response = await request({ type: "diff.acceptFile", baselineId: target.baselineId, path: target.path });
+      const response = await request({ type: "diff.acceptFile", baselineId: target.baselineId, path: target.path, view: diffView });
       if (!response.ok) {
         logChat(`accept all stopped at ${target.path}: ${response.error.message}`);
         break;
@@ -3639,13 +3373,13 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   async function discardAll(): Promise<void> {
     const targets = diffChanges
-      .filter((change) => change.revertSupported)
+      .filter((change) => change.revertSupported && change.accepted !== true)
       .map((change) => ({ baselineId: change.baselineId, path: change.path }));
     if (targets.length === 0) return;
     acceptAllButton.disabled = true;
     discardAllButton.disabled = true;
     for (const target of targets) {
-      const response = await request({ type: "diff.revertFile", baselineId: target.baselineId, path: target.path });
+      const response = await request({ type: "diff.revertFile", baselineId: target.baselineId, path: target.path, view: diffView });
       if (!response.ok) {
         logChat(`discard all stopped at ${target.path}: ${response.error.message}`);
         break;
@@ -3823,50 +3557,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     });
 
     content.append(caption, list, form);
-  }
-
-  /**
-   * Fetches plan documents for the selected session and updates the pill row.
-   * A docless session (or no selection) clears the pill.
-   */
-  async function loadPlanDocs(): Promise<void> {
-    const sessionId = state.selectedSessionId;
-    if (!sessionId) {
-      state.planDocs = null;
-      renderPlanDocs();
-      return;
-    }
-    const response = await request({ type: "planDocs.state", sessionId });
-    // A later selection may have superseded this request; ignore stale results.
-    if (state.selectedSessionId !== sessionId) return;
-    if (response.ok && response.payload.type === "planDocs.state") {
-      const list = response.payload.docs.map((doc) => ({ name: doc.name, format: doc.format, revision: doc.revision }));
-      state.planDocs = list.length > 0 ? { sessionId, docs: list } : null;
-    } else {
-      state.planDocs = null;
-    }
-    ctx.persist();
-    renderPlanDocs();
-  }
-
-  /** Renders the compact "Plan documents (N)" pill row above the composer. */
-  function renderPlanDocs(): void {
-    planDocsRow.replaceChildren();
-    const planDocs = state.planDocs;
-    const visible = planDocs !== null && planDocs.sessionId === state.selectedSessionId && planDocs.docs.length > 0;
-    planDocsRow.classList.toggle("hidden", !visible);
-    if (!visible || planDocs === null) return;
-    const pill = el("span", "plan-docs-pill");
-    pill.textContent = `Plan documents (${String(planDocs.docs.length)})`;
-    const openButton = button("Open", "ghost small");
-    openButton.addEventListener("click", () => {
-      const sessionId = state.selectedSessionId;
-      if (!sessionId) return;
-      void request({ type: "planDocs.open", sessionId }).then((response) => {
-        if (!response.ok) logChat(`could not open plan documents: ${response.error.message}`);
-      });
-    });
-    planDocsRow.append(pill, openButton);
   }
 
   /** True when the selected session is running in another VS Code window (read-only here). */
@@ -4163,21 +3853,19 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     state.selectedSessionId = sessionId;
     manualModelSessionId = null;
     state.chatMessages = [];
-    runningCommands.clear();
+    folder.clearLiveState();
     state.diagnostics = [];
     state.agentGroups = {};
     expandedGroups.clear();
     state.lastSequence = 0;
-    activeAssistantId = null;
     reasoningText = "";
     reasoningActive = false;
     state.changedFiles.clear();
     diffChanges = [];
     cloneRepos = [];
     openedDiffKeys = new Set();
+    sessionHadDiffRows = false;
     setTurnActive(false);
-    // Drop the previous session's pill immediately; loadPlanDocs refreshes it.
-    if (state.planDocs !== null && state.planDocs.sessionId !== sessionId) state.planDocs = null;
     renderHeader();
     renderContextStrip();
     renderProviderControls();
@@ -4187,7 +3875,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderNotesButton();
     renderFacts();
     renderAccessCards();
-    renderPlanDocs();
     renderAttachments();
     ctx.persist();
     if (sessionId) {
@@ -4199,7 +3886,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       } else {
         void loadDiffStatus();
       }
-      void loadPlanDocs();
     }
   }
 
@@ -4208,19 +3894,18 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     state.selectedSessionId = null;
     manualModelSessionId = null;
     state.chatMessages = [];
-    runningCommands.clear();
+    folder.clearLiveState();
     state.diagnostics = [];
     state.agentGroups = {};
     expandedGroups.clear();
     state.lastSequence = 0;
-    activeAssistantId = null;
     reasoningText = "";
     reasoningActive = false;
     state.changedFiles.clear();
     diffChanges = [];
     cloneRepos = [];
     openedDiffKeys = new Set();
-    state.planDocs = null;
+    sessionHadDiffRows = false;
     setTurnActive(false);
     renderHeader();
     renderContextStrip();
@@ -4231,14 +3916,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderNotesButton();
     renderFacts();
     renderAccessCards();
-    renderPlanDocs();
     renderAttachments();
     ctx.persist();
   }
 
   function render(): void {
     root.classList.toggle("code-wrap", state.codeBlockWordWrap);
-    applyModeButtons();
     renderHeader();
     renderContextStrip();
     renderProviderControls();
@@ -4248,7 +3931,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderNotesButton();
     renderFacts();
     renderAccessCards();
-    renderPlanDocs();
     renderAttachments();
     // Refresh the sandbox usage bar promptly on tab activation / session switch
     // (the interval keeps it live thereafter).
@@ -4299,6 +3981,3 @@ function wireInlineConfirmIcon(
   node.addEventListener("blur", disarm);
 }
 
-function nextMessageId(prefix: string): string {
-  return `${prefix}-${String(Date.now())}-${String(Math.random()).slice(2)}`;
-}

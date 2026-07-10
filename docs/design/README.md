@@ -23,6 +23,7 @@ order as needed.
 | [task-board-and-subtasks](task-board-and-subtasks.md) | Subtasks, dependency-driven auto-start, and the configurable kanban Task Board panel. |
 | [task-chat-and-agent-visibility](task-chat-and-agent-visibility.md) | Task-owned chat UI, context mounts, file tokens, safe transcript rendering, composer behavior, and delegated-agent visibility. |
 | [task-review](task-review.md) | The cross-project review surface: aggregates existing diffs/comments and turns them into revision turns; never ships. |
+| [planner](planner.md) | The full planning workspace: durable plans over disposable sessions, a configurable aspect registry, collect+hydrate persistence, and annotatable document/diagram/image/prototype providers. |
 | [clone-mode](clone-mode.md) | The clone-mode operating modes and the symmetric patch sync protocol. |
 | [subagent-workflows](subagent-workflows.md) | Subagent visibility and role-session workflows across Codex and Claude Code transports. |
 | [prevalidation-coverage](prevalidation-coverage.md) | Maps the product feature set to the environment/provider capability checks in `tools/prevalidate/`. |

@@ -54,14 +54,15 @@ What's shipped and what's next for Drydock.
   creation gesture (new task, then pick projects, then start a chat as one
   step), project touch-history ("recently changed by task X"), mini-tasks
   created from review comments.
-- Secret-scanner tripwire on approvals, and a redesigned require-plan policy
-  compatible with plan-mode's current semantics.
+- Secret-scanner tripwire on approvals. (The "redesigned require-plan policy"
+  landed as the Planner panel — ADR 0012, `docs/design/planner.md`: plan-mode
+  sessions exist only under plans, and the composer switch is gone.)
 - Agent-driven (not just user-driven) role spawns, with an approval design
   proportional to blast radius; per-native-node cancel; role-aware model
   routing.
-- Legacy cleanup: retire the old sidebar plan-block approval flow and the
-  docs-review backend once their replacements fully cover the same ground.
-- Bring the plan-docs surface visually closer to the task-board design
-  language: kicker/eyebrow hierarchy, annotated mockups with numbered
-  callouts, behaviour tables, and phased delivery lists (see
-  `docs/design/task-board-and-subtasks.md`).
+- Legacy cleanup: the sidebar plan-block approval flow and the per-session
+  plan-docs surface are retired (ADR 0012); the docs-review backend remains to
+  fold into its replacement.
+- Planner follow-ups: a board "Plan this task" action creating a pre-linked
+  plan, and an "Export plan…" command materializing a plan's artifacts to a
+  chosen folder.

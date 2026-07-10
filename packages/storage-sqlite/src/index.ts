@@ -9,7 +9,7 @@ export * from "./diffReviewStore.js";
 export * from "./eventStore.js";
 export * from "./memoryCandidateStore.js";
 export * from "./migrations.js";
-export * from "./planDocStore.js";
+export * from "./plannerStore.js";
 export * from "./runtimeInventoryStore.js";
 export * from "./sessionStore.js";
 export * from "./sqliteConnection.js";

@@ -9,8 +9,21 @@
 
 import type { BaselineId, ReviewCommentId, ReviewSessionId, SessionId } from "./ids.js";
 
-/** What a baseline (and its review) covers. */
-export type DiffScope = "current-session" | "workspace";
+/**
+ * What a baseline (and its review) covers. A session owns up to three scopes
+ * per root: `session-start` is the immutable snapshot taken when the session
+ * began (never advanced — backs the Full Session view), `current-session` is
+ * the working baseline that accept advances per file (the Session view), and
+ * `turn` is re-captured at each user message send (the This Turn view).
+ */
+export type DiffScope = "current-session" | "session-start" | "turn" | "workspace";
+
+/**
+ * Which frame the Changes list diffs against: `turn` = since the last user
+ * message, `session` = since session start with accepted files re-baselined,
+ * `full-session` = since session start including accepted changes.
+ */
+export type DiffViewMode = "turn" | "session" | "full-session";
 
 export interface DiffBaselineRecord {
   readonly baselineId: BaselineId;
@@ -104,6 +117,8 @@ export interface DiffBaselineStore {
   /** Inserts or replaces the per-file baseline row (accept-one-file). */
   replaceFileSnapshot(baselineId: BaselineId, snapshot: FileBaselineSnapshot): Promise<void>;
   deleteFileSnapshot(baselineId: BaselineId, path: string): Promise<void>;
+  /** Removes the baseline record and all its file snapshots (blobs are shared and stay). */
+  deleteBaseline(baselineId: BaselineId): Promise<void>;
 }
 
 export interface ReviewStore {

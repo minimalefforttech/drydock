@@ -13,12 +13,21 @@
  */
 
 import type { AgentModelCatalog } from "./agent.js";
-import type { DiffChangeKind, ReviewThreadStatus } from "./diffs.js";
+import type { DiffChangeKind, DiffViewMode, ReviewThreadStatus } from "./diffs.js";
 import type { TranscriptLine } from "./events.js";
 import type { AgentRole } from "./ids.js";
 import type { MemoryCandidateStatus } from "./memory.js";
-import type { PlanDocFormat } from "./planDocs.js";
-import { COLUMN_CATEGORIES, WORK_TASK_STATES, type ColumnCategory, type WorkTaskState } from "./tasks.js";
+import {
+  PLAN_ANNOTATION_STATUSES,
+  parsePlanAnchor,
+  type PlanAnnotationStatus,
+  type PlanAnnotationSummary,
+  type PlanArtifactSummary,
+  type PlanAspectSummary,
+  type PlannerStateDetail,
+  type PlanSummary
+} from "./planner.js";
+import { COLUMN_CATEGORIES, WORK_TASK_STATES, type ColumnCategory, type TaskClonePolicy, type WorkTaskState } from "./tasks.js";
 import type { AccessRequestStatus } from "./workspaces.js";
 
 export const WEBVIEW_PROTOCOL_VERSION = 1;
@@ -52,6 +61,13 @@ export type ChatWorkspaceSelection =
 // ---------------------------------------------------------------------------
 // Webview -> extension host
 // ---------------------------------------------------------------------------
+
+/**
+ * What `session.summarize` copies: `log` is the trimmed dialogue + files
+ * touched, built host-side; `ai` asks the session's agent for a structured
+ * summary out-of-band. Both land in the system clipboard, never in the chat.
+ */
+export type ChatSummarizeMode = "log" | "ai";
 
 export type PanelRequestPayload =
   | { readonly type: "panel.init" }
@@ -87,6 +103,7 @@ export type PanelRequestPayload =
   | { readonly type: "session.rename"; readonly sessionId: string; readonly title: string }
   | { readonly type: "session.setDescription"; readonly sessionId: string; readonly description: string }
   | { readonly type: "session.delete"; readonly sessionId: string }
+  | { readonly type: "session.summarize"; readonly sessionId: string; readonly mode: ChatSummarizeMode }
   | { readonly type: "task.list" }
   | { readonly type: "task.create"; readonly title: string; readonly description?: string }
   | { readonly type: "task.update"; readonly taskId: string; readonly title?: string; readonly description?: string; readonly state?: WorkTaskState }
@@ -109,16 +126,13 @@ export type PanelRequestPayload =
   | { readonly type: "policy.requestAccess"; readonly sessionId: string; readonly hostPath: string; readonly mode: "read-only" | "read-write"; readonly reason: string }
   | { readonly type: "policy.resolveAccess"; readonly accessRequestId: string; readonly approve: boolean; readonly editedHostPath?: string }
   | { readonly type: "diff.snapshotWorkspace"; readonly workspaceSetId: string }
-  | { readonly type: "diff.status"; readonly sessionId?: string }
-  | { readonly type: "diff.acceptFile"; readonly baselineId: string; readonly path: string }
-  | { readonly type: "diff.revertFile"; readonly baselineId: string; readonly path: string }
+  | { readonly type: "diff.status"; readonly sessionId?: string; readonly view?: DiffViewMode }
+  | { readonly type: "diff.acceptFile"; readonly baselineId: string; readonly path: string; readonly view?: DiffViewMode }
+  | { readonly type: "diff.revertFile"; readonly baselineId: string; readonly path: string; readonly view?: DiffViewMode }
   | { readonly type: "diff.openFile"; readonly baselineId: string; readonly path: string }
   | { readonly type: "review.state"; readonly sessionId?: string }
   | { readonly type: "review.addComment"; readonly sessionId?: string; readonly filePath: string; readonly startLine: number; readonly endLine: number; readonly body: string }
   | { readonly type: "review.setCommentStatus"; readonly commentId: string; readonly status: ReviewThreadStatus }
-  | { readonly type: "planDocs.state"; readonly sessionId: string }
-  | { readonly type: "planDocs.open"; readonly sessionId: string }
-  | { readonly type: "planDocs.sendComments"; readonly sessionId: string }
   | { readonly type: "clone.state"; readonly sessionId: string }
   | { readonly type: "clone.pull"; readonly sessionId: string; readonly repo?: string; readonly path?: string }
   | { readonly type: "clone.push"; readonly sessionId: string }
@@ -136,7 +150,37 @@ export type PanelRequestPayload =
   | { readonly type: "subtask.dependency.remove"; readonly taskId: string; readonly fromSubtaskId: string; readonly toSubtaskId: string }
   | { readonly type: "subtask.start"; readonly subtaskId: string; readonly force?: boolean }
   | { readonly type: "task.start"; readonly taskId: string }
-  | { readonly type: "taskBoard.open" };
+  | { readonly type: "taskBoard.open" }
+  | { readonly type: "planner.open" }
+  | { readonly type: "planner.plans" }
+  | { readonly type: "planner.state"; readonly planId: string }
+  | { readonly type: "planner.create"; readonly brief: string; readonly aspectIds: readonly string[]; readonly contextRoots: readonly string[]; readonly notes?: string; readonly title?: string; readonly model?: ChatModelSelection }
+  | { readonly type: "planner.updateIntake"; readonly planId: string; readonly title?: string; readonly brief?: string; readonly aspectIds?: readonly string[]; readonly contextRoots?: readonly string[]; readonly notes?: string }
+  | { readonly type: "planner.archive"; readonly planId: string; readonly archived: boolean }
+  | { readonly type: "planner.startSession"; readonly planId: string; readonly model?: ChatModelSelection }
+  | { readonly type: "planner.sendTurn"; readonly planId: string; readonly prompt: string }
+  | { readonly type: "planner.annotation.add"; readonly planId: string; readonly artifactId: string; readonly anchor: string; readonly body: string }
+  | { readonly type: "planner.annotation.setStatus"; readonly annotationId: string; readonly status: PlanAnnotationStatus }
+  | { readonly type: "planner.annotation.remove"; readonly annotationId: string }
+  | { readonly type: "planner.artifact.rename"; readonly artifactId: string; readonly title: string }
+  | { readonly type: "planner.sendInstructions"; readonly planId: string }
+  | { readonly type: "planner.regenerate"; readonly planId: string; readonly aspectId?: string }
+  | { readonly type: "planner.openArtifact"; readonly artifactId: string }
+  | { readonly type: "planner.setPrototypeScripts"; readonly artifactId: string; readonly enabled: boolean }
+  | { readonly type: "planner.aspects.list" }
+  | { readonly type: "planner.aspects.save"; readonly aspect: PlannerAspectSaveInput }
+  | { readonly type: "planner.aspects.archive"; readonly aspectId: string; readonly archived: boolean };
+
+/**
+ * A `planner.aspects.save` input: `aspectId` present updates that aspect,
+ * absent creates a new one (the host slugs the label into a fresh id).
+ */
+export interface PlannerAspectSaveInput {
+  readonly aspectId?: string;
+  readonly label: string;
+  readonly instructions: string;
+  readonly expectedArtifacts: readonly string[];
+}
 
 /**
  * One column entry in a `board.columns.update` request: `columnId` present
@@ -490,6 +534,8 @@ export interface WorkTaskSummary {
    * task.updated pushes may omit it until the next list.
    */
   readonly openReviewCommentCount?: number;
+  /** Durable clone policy plus the set size needed for a concise all/subset chip. */
+  readonly clonePolicy?: TaskClonePolicy & { readonly workspaceSetProjectCount: number };
   /** This task's subtasks, ordered by sortOrder. */
   readonly subtasks: readonly SubtaskSummary[];
 }
@@ -539,6 +585,12 @@ export interface DiffFileSummary {
   readonly removedLines?: number;
   readonly revertSupported: boolean;
   readonly reason?: string;
+  /**
+   * Full Session view only: true when the file's current content already
+   * matches the working (Session) baseline — i.e. the change was accepted and
+   * is shown for history, with no pending accept/discard action.
+   */
+  readonly accepted?: boolean;
 }
 
 /** Display-safe projection of a review comment thread. */
@@ -553,19 +605,6 @@ export interface ReviewCommentSummary {
   readonly intent?: string;
   readonly blockId?: string;
   readonly createdAt: string;
-}
-
-/** Display-safe plan-document listing entry (no content). */
-export interface PlanDocSummary {
-  readonly name: string;
-  readonly format: PlanDocFormat;
-  readonly revision: number;
-  readonly collectedAt: string;
-}
-
-/** Full plan document for the review panel; content renders textContent-only. */
-export interface PlanDocDetail extends PlanDocSummary {
-  readonly content: string;
 }
 
 /** The window's active text editor, surfaced so the composer can offer it as a
@@ -625,6 +664,12 @@ export type PanelResponsePayload =
   | { readonly type: "session.rename"; readonly session: ChatSessionSummary }
   | { readonly type: "session.setDescription"; readonly session: ChatSessionSummary }
   | { readonly type: "session.delete"; readonly sessionId: string }
+  /**
+   * `log` mode has already written the clipboard when this arrives; `ai`
+   * mode has only STARTED the summary — completion lands as a
+   * `session.summaryReady` push (a model turn can outlive the request timeout).
+   */
+  | { readonly type: "session.summarize"; readonly sessionId: string; readonly mode: ChatSummarizeMode; readonly accepted: true }
   | { readonly type: "task.list"; readonly tasks: readonly WorkTaskSummary[] }
   | { readonly type: "task.create"; readonly task: WorkTaskSummary }
   | { readonly type: "task.update"; readonly task: WorkTaskSummary }
@@ -654,9 +699,6 @@ export type PanelResponsePayload =
   | { readonly type: "review.state"; readonly reviewSessionId: string | null; readonly comments: readonly ReviewCommentSummary[] }
   | { readonly type: "review.addComment"; readonly comment: ReviewCommentSummary }
   | { readonly type: "review.setCommentStatus"; readonly comment: ReviewCommentSummary }
-  | { readonly type: "planDocs.state"; readonly sessionId: string; readonly docs: readonly PlanDocDetail[] }
-  | { readonly type: "planDocs.open"; readonly accepted: true }
-  | { readonly type: "planDocs.sendComments"; readonly accepted: true; readonly sentCount: number }
   | { readonly type: "clone.state"; readonly sessionId: string; readonly repos: readonly CloneRepoState[] }
   | { readonly type: "clone.pull"; readonly result: CloneSyncResult }
   | { readonly type: "clone.push"; readonly result: CloneSyncResult }
@@ -672,9 +714,29 @@ export type PanelResponsePayload =
   | { readonly type: "subtask.delete"; readonly task: WorkTaskSummary }
   | { readonly type: "subtask.dependency.add"; readonly task: WorkTaskSummary }
   | { readonly type: "subtask.dependency.remove"; readonly task: WorkTaskSummary }
-  | { readonly type: "subtask.start"; readonly accepted: true }
-  | { readonly type: "task.start"; readonly accepted: true }
-  | { readonly type: "taskBoard.open"; readonly accepted: true };
+  | { readonly type: "subtask.start"; readonly accepted: boolean }
+  | { readonly type: "task.start"; readonly accepted: boolean }
+  | { readonly type: "taskBoard.open"; readonly accepted: true }
+  | { readonly type: "planner.open"; readonly accepted: true }
+  | { readonly type: "planner.plans"; readonly plans: readonly PlanSummary[] }
+  | { readonly type: "planner.state"; readonly state: PlannerStateDetail; readonly session: ChatSessionSummary | null }
+  | { readonly type: "planner.create"; readonly plan: PlanSummary }
+  | { readonly type: "planner.updateIntake"; readonly plan: PlanSummary }
+  | { readonly type: "planner.archive"; readonly plan: PlanSummary }
+  /** Ack only — session boot outlives the request timeout; completion arrives as the planner.sessionReady push. */
+  | { readonly type: "planner.startSession"; readonly accepted: true }
+  | { readonly type: "planner.sendTurn"; readonly accepted: true }
+  | { readonly type: "planner.annotation.add"; readonly annotation: PlanAnnotationSummary }
+  | { readonly type: "planner.annotation.setStatus"; readonly annotation: PlanAnnotationSummary }
+  | { readonly type: "planner.annotation.remove"; readonly removed: true }
+  | { readonly type: "planner.artifact.rename"; readonly artifact: PlanArtifactSummary }
+  | { readonly type: "planner.sendInstructions"; readonly accepted: true; readonly sentCount: number }
+  | { readonly type: "planner.regenerate"; readonly accepted: true }
+  | { readonly type: "planner.openArtifact"; readonly accepted: true }
+  | { readonly type: "planner.setPrototypeScripts"; readonly artifact: PlanArtifactSummary }
+  | { readonly type: "planner.aspects.list"; readonly aspects: readonly PlanAspectSummary[] }
+  | { readonly type: "planner.aspects.save"; readonly aspects: readonly PlanAspectSummary[] }
+  | { readonly type: "planner.aspects.archive"; readonly aspects: readonly PlanAspectSummary[] };
 
 export interface PanelResponseOk {
   readonly protocolVersion: typeof WEBVIEW_PROTOCOL_VERSION;
@@ -708,16 +770,21 @@ export type PanelPushPayload =
   | { readonly type: "session.deleted"; readonly sessionId: string }
   | { readonly type: "session.attention"; readonly sessionId: string; readonly reasons: readonly SessionAttentionReason[] }
   | { readonly type: "session.agentActivity"; readonly sessionId: string; readonly activity: AgentActivitySummary }
+  /** AI summary finished: ok means the text is on the clipboard. */
+  | { readonly type: "session.summaryReady"; readonly sessionId: string; readonly ok: boolean; readonly error?: string }
   | { readonly type: "question.asked"; readonly question: AgentQuestionSummary }
   | { readonly type: "question.resolved"; readonly question: AgentQuestionSummary }
   | { readonly type: "policy.accessRequested"; readonly accessRequest: AccessRequestSummary }
   | { readonly type: "task.updated"; readonly task: WorkTaskSummary }
   | { readonly type: "task.deleted"; readonly taskId: string }
   | { readonly type: "memory.candidateAdded"; readonly candidate: MemoryCandidateSummary }
-  | { readonly type: "planDocs.updated"; readonly sessionId: string; readonly docs: readonly PlanDocSummary[] }
   | { readonly type: "taskReview.updated"; readonly taskId: string }
   | { readonly type: "editor.active"; readonly editor: ActiveEditorRef | null }
-  | { readonly type: "board.changed" };
+  | { readonly type: "board.changed" }
+  /** Coarse invalidation: the planner webview refetches planner.state. */
+  | { readonly type: "planner.changed"; readonly planId: string }
+  /** Terminal result of a planner.create / planner.startSession boot. */
+  | { readonly type: "planner.sessionReady"; readonly planId: string; readonly sessionId: string; readonly ok: boolean; readonly error?: string };
 
 export interface PanelPush {
   readonly protocolVersion: typeof WEBVIEW_PROTOCOL_VERSION;
@@ -1070,9 +1137,6 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
     case "chat.endSession":
     case "runtime.openTerminal":
     case "session.delete":
-    case "planDocs.state":
-    case "planDocs.open":
-    case "planDocs.sendComments":
     case "clone.state":
     case "clone.push": {
       const sessionId = payload["sessionId"];
@@ -1144,6 +1208,13 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       // Empty string is allowed and clears the description.
       if (typeof description !== "string" || description.length > MAX_COMMENT_LENGTH) return null;
       return { type: "session.setDescription", sessionId, description };
+    }
+    case "session.summarize": {
+      const sessionId = payload["sessionId"];
+      if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      const mode = payload["mode"];
+      if (mode !== "log" && mode !== "ai") return null;
+      return { type: "session.summarize", sessionId, mode };
     }
     case "session.timeline": {
       const sessionId = payload["sessionId"];
@@ -1221,7 +1292,17 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (!isBoundedString(workspaceSetId, MAX_ID_LENGTH)) return null;
       return { type: "diff.snapshotWorkspace", workspaceSetId };
     }
-    case "diff.status":
+    case "diff.status": {
+      const sessionId = payload["sessionId"];
+      const view = payload["view"];
+      if (view !== undefined && !isDiffViewMode(view)) return null;
+      if (sessionId !== undefined && !isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      return {
+        type: "diff.status",
+        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(view === undefined ? {} : { view })
+      };
+    }
     case "review.state": {
       const sessionId = payload["sessionId"];
       if (sessionId === undefined) return { type: payload["type"] };
@@ -1229,7 +1310,20 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       return { type: payload["type"], sessionId };
     }
     case "diff.acceptFile":
-    case "diff.revertFile":
+    case "diff.revertFile": {
+      const baselineId = payload["baselineId"];
+      const filePath = payload["path"];
+      const view = payload["view"];
+      if (!isBoundedString(baselineId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(filePath, MAX_PATH_LENGTH)) return null;
+      if (view !== undefined && !isDiffViewMode(view)) return null;
+      return {
+        type: payload["type"],
+        baselineId,
+        path: filePath,
+        ...(view === undefined ? {} : { view })
+      };
+    }
     case "diff.openFile": {
       const baselineId = payload["baselineId"];
       const filePath = payload["path"];
@@ -1262,6 +1356,145 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (!isBoundedString(commentId, MAX_ID_LENGTH)) return null;
       if (!isReviewThreadStatus(status)) return null;
       return { type: "review.setCommentStatus", commentId, status };
+    }
+    case "planner.open":
+    case "planner.plans":
+    case "planner.aspects.list":
+      return { type: payload["type"] };
+    case "planner.state":
+    case "planner.sendInstructions": {
+      const planId = payload["planId"];
+      if (!isBoundedString(planId, MAX_ID_LENGTH)) return null;
+      return { type: payload["type"], planId };
+    }
+    case "planner.create": {
+      const brief = payload["brief"];
+      if (!isBoundedString(brief, MAX_PROMPT_LENGTH)) return null;
+      const aspectIds = parseBoundedStringArray(payload["aspectIds"], MAX_NAME_LENGTH, 40);
+      if (!Array.isArray(aspectIds)) return null;
+      const contextRoots = parseBoundedStringArray(payload["contextRoots"], MAX_PATH_LENGTH, 40);
+      if (!Array.isArray(contextRoots)) return null;
+      const notes = payload["notes"];
+      if (notes !== undefined && !isBoundedText(notes, MAX_PROMPT_LENGTH)) return null;
+      const title = payload["title"];
+      if (title !== undefined && !isBoundedString(title, MAX_NAME_LENGTH)) return null;
+      const model = parseModelSelection(payload["model"]);
+      if (model === null) return null;
+      return {
+        type: "planner.create",
+        brief,
+        aspectIds,
+        contextRoots,
+        ...(notes === undefined ? {} : { notes }),
+        ...(title === undefined ? {} : { title }),
+        ...(model === undefined ? {} : { model })
+      };
+    }
+    case "planner.updateIntake": {
+      const planId = payload["planId"];
+      if (!isBoundedString(planId, MAX_ID_LENGTH)) return null;
+      const title = payload["title"];
+      if (title !== undefined && !isBoundedString(title, MAX_NAME_LENGTH)) return null;
+      const brief = payload["brief"];
+      if (brief !== undefined && !isBoundedString(brief, MAX_PROMPT_LENGTH)) return null;
+      const aspectIds = parseBoundedStringArray(payload["aspectIds"], MAX_NAME_LENGTH, 40);
+      if (aspectIds === null) return null;
+      const contextRoots = parseBoundedStringArray(payload["contextRoots"], MAX_PATH_LENGTH, 40);
+      if (contextRoots === null) return null;
+      const notes = payload["notes"];
+      if (notes !== undefined && !isBoundedText(notes, MAX_PROMPT_LENGTH)) return null;
+      return {
+        type: "planner.updateIntake",
+        planId,
+        ...(title === undefined ? {} : { title }),
+        ...(brief === undefined ? {} : { brief }),
+        ...(aspectIds === undefined ? {} : { aspectIds }),
+        ...(contextRoots === undefined ? {} : { contextRoots }),
+        ...(notes === undefined ? {} : { notes })
+      };
+    }
+    case "planner.archive": {
+      const planId = payload["planId"];
+      const archived = payload["archived"];
+      if (!isBoundedString(planId, MAX_ID_LENGTH)) return null;
+      if (typeof archived !== "boolean") return null;
+      return { type: "planner.archive", planId, archived };
+    }
+    case "planner.startSession": {
+      const planId = payload["planId"];
+      if (!isBoundedString(planId, MAX_ID_LENGTH)) return null;
+      const model = parseModelSelection(payload["model"]);
+      if (model === null) return null;
+      return { type: "planner.startSession", planId, ...(model === undefined ? {} : { model }) };
+    }
+    case "planner.sendTurn": {
+      const planId = payload["planId"];
+      const prompt = payload["prompt"];
+      if (!isBoundedString(planId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(prompt, MAX_PROMPT_LENGTH)) return null;
+      return { type: "planner.sendTurn", planId, prompt };
+    }
+    case "planner.annotation.add": {
+      const planId = payload["planId"];
+      const artifactId = payload["artifactId"];
+      const anchor = payload["anchor"];
+      const body = payload["body"];
+      if (!isBoundedString(planId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(artifactId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(anchor, MAX_ID_LENGTH) || parsePlanAnchor(anchor) === null) return null;
+      if (!isBoundedString(body, MAX_COMMENT_LENGTH)) return null;
+      return { type: "planner.annotation.add", planId, artifactId, anchor, body };
+    }
+    case "planner.annotation.setStatus": {
+      const annotationId = payload["annotationId"];
+      const status = payload["status"];
+      if (!isBoundedString(annotationId, MAX_ID_LENGTH)) return null;
+      if (!isPlanAnnotationStatus(status)) return null;
+      return { type: "planner.annotation.setStatus", annotationId, status };
+    }
+    case "planner.annotation.remove": {
+      const annotationId = payload["annotationId"];
+      if (!isBoundedString(annotationId, MAX_ID_LENGTH)) return null;
+      return { type: "planner.annotation.remove", annotationId };
+    }
+    case "planner.artifact.rename": {
+      const artifactId = payload["artifactId"];
+      const title = payload["title"];
+      if (!isBoundedString(artifactId, MAX_ID_LENGTH)) return null;
+      // An empty title clears the override back to the collected title.
+      if (!isBoundedText(title, MAX_NAME_LENGTH)) return null;
+      return { type: "planner.artifact.rename", artifactId, title };
+    }
+    case "planner.regenerate": {
+      const planId = payload["planId"];
+      if (!isBoundedString(planId, MAX_ID_LENGTH)) return null;
+      const aspectId = payload["aspectId"];
+      if (aspectId !== undefined && !isBoundedString(aspectId, MAX_NAME_LENGTH)) return null;
+      return { type: "planner.regenerate", planId, ...(aspectId === undefined ? {} : { aspectId }) };
+    }
+    case "planner.openArtifact": {
+      const artifactId = payload["artifactId"];
+      if (!isBoundedString(artifactId, MAX_ID_LENGTH)) return null;
+      return { type: "planner.openArtifact", artifactId };
+    }
+    case "planner.setPrototypeScripts": {
+      const artifactId = payload["artifactId"];
+      const enabled = payload["enabled"];
+      if (!isBoundedString(artifactId, MAX_ID_LENGTH)) return null;
+      if (typeof enabled !== "boolean") return null;
+      return { type: "planner.setPrototypeScripts", artifactId, enabled };
+    }
+    case "planner.aspects.save": {
+      const aspect = parsePlannerAspectSaveInput(payload["aspect"]);
+      if (aspect === null) return null;
+      return { type: "planner.aspects.save", aspect };
+    }
+    case "planner.aspects.archive": {
+      const aspectId = payload["aspectId"];
+      const archived = payload["archived"];
+      if (!isBoundedString(aspectId, MAX_NAME_LENGTH)) return null;
+      if (typeof archived !== "boolean") return null;
+      return { type: "planner.aspects.archive", aspectId, archived };
     }
     default:
       return null;
@@ -1370,4 +1603,50 @@ function parseModelSelection(value: unknown): ChatModelSelection | undefined | n
 
 function isBoundedString(value: unknown, maxLength: number): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= maxLength;
+}
+
+/** Like isBoundedString but admits the empty string (clear/blank semantics). */
+function isBoundedText(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" && value.length <= maxLength;
+}
+
+/**
+ * Validates an array of bounded strings. `undefined` passes through for
+ * optional fields; an empty array is valid; any bad entry rejects the whole
+ * array (null).
+ */
+function parseBoundedStringArray(value: unknown, maxLength: number, maxItems: number): string[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > maxItems) return null;
+  const result: string[] = [];
+  for (const entry of value) {
+    if (!isBoundedString(entry, maxLength)) return null;
+    result.push(entry);
+  }
+  return result;
+}
+
+function isPlanAnnotationStatus(value: unknown): value is PlanAnnotationStatus {
+  return typeof value === "string" && (PLAN_ANNOTATION_STATUSES as readonly string[]).includes(value);
+}
+
+/** Aspect ids double as `plan/<aspectId>/` directory names, so they stay slugs. */
+const PLAN_ASPECT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function parsePlannerAspectSaveInput(value: unknown): PlannerAspectSaveInput | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const aspectId = record["aspectId"];
+  if (aspectId !== undefined && (typeof aspectId !== "string" || !PLAN_ASPECT_ID_RE.test(aspectId))) return null;
+  const label = record["label"];
+  if (!isBoundedString(label, MAX_NAME_LENGTH)) return null;
+  const instructions = record["instructions"];
+  if (!isBoundedString(instructions, MAX_PROMPT_LENGTH)) return null;
+  const expectedArtifacts = parseBoundedStringArray(record["expectedArtifacts"], MAX_NAME_LENGTH, 20);
+  if (!Array.isArray(expectedArtifacts)) return null;
+  return { ...(aspectId === undefined ? {} : { aspectId }), label, instructions, expectedArtifacts };
+}
+
+function isDiffViewMode(value: unknown): value is DiffViewMode {
+  return value === "turn" || value === "session" || value === "full-session";
 }

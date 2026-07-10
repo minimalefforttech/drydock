@@ -62,16 +62,84 @@ test("workspace and policy payloads validate their fields", () => {
   })), null);
 });
 
-test("planDocs payloads validate their session id", () => {
-  for (const type of ["planDocs.state", "planDocs.open", "planDocs.sendComments"] as const) {
-    const parsed = parsePanelRequest(wrap({ type, sessionId: "session-1" }));
-    assert.ok(parsed);
-    assert.equal(parsed.payload.type, type);
-    assert.equal(parsed.payload.type === type ? parsed.payload.sessionId : undefined, "session-1");
-    // A missing or empty session id is rejected at the boundary.
-    assert.equal(parsePanelRequest(wrap({ type })), null);
-    assert.equal(parsePanelRequest(wrap({ type, sessionId: "" })), null);
+test("retired planDocs payloads are rejected at the boundary (ADR 0012)", () => {
+  for (const type of ["planDocs.state", "planDocs.open", "planDocs.sendComments"]) {
+    assert.equal(parsePanelRequest(wrap({ type, sessionId: "session-1" })), null);
   }
+});
+
+test("planner payloads validate ids, arrays, anchors, and statuses", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "planner.open" })));
+  assert.ok(parsePanelRequest(wrap({ type: "planner.plans" })));
+  assert.ok(parsePanelRequest(wrap({ type: "planner.aspects.list" })));
+  assert.ok(parsePanelRequest(wrap({ type: "planner.state", planId: "plan-1" })));
+  assert.equal(parsePanelRequest(wrap({ type: "planner.state" })), null);
+
+  // create: brief + the two arrays are required (arrays may be empty).
+  assert.ok(parsePanelRequest(wrap({ type: "planner.create", brief: "Build a planner.", aspectIds: ["ui-ux"], contextRoots: [] })));
+  const created = parsePanelRequest(wrap({
+    type: "planner.create",
+    brief: "b",
+    aspectIds: [],
+    contextRoots: ["C:\\repo"],
+    notes: "",
+    title: "T",
+    model: { providerId: "claude" }
+  }));
+  assert.ok(created);
+  assert.equal(created.payload.type === "planner.create" ? created.payload.title : undefined, "T");
+  assert.equal(parsePanelRequest(wrap({ type: "planner.create", brief: "b" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "planner.create", brief: "", aspectIds: [], contextRoots: [] })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "planner.create", brief: "b", aspectIds: [42], contextRoots: [] })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "planner.create", brief: "b", aspectIds: [], contextRoots: [], model: { providerId: "" } })), null);
+
+  assert.ok(parsePanelRequest(wrap({ type: "planner.updateIntake", planId: "plan-1", notes: "" })));
+  assert.equal(parsePanelRequest(wrap({ type: "planner.updateIntake", planId: "plan-1", brief: "" })), null);
+  assert.ok(parsePanelRequest(wrap({ type: "planner.archive", planId: "plan-1", archived: true })));
+  assert.equal(parsePanelRequest(wrap({ type: "planner.archive", planId: "plan-1", archived: "yes" })), null);
+  assert.ok(parsePanelRequest(wrap({ type: "planner.startSession", planId: "plan-1" })));
+  assert.ok(parsePanelRequest(wrap({ type: "planner.sendTurn", planId: "plan-1", prompt: "go" })));
+  assert.equal(parsePanelRequest(wrap({ type: "planner.sendTurn", planId: "plan-1", prompt: "" })), null);
+
+  // Annotations: the anchor must satisfy the grammar, not just the length cap.
+  for (const anchor of ["block:3", "node:Gateway", "point:0.5,0.5", "region:0.1,0.1,0.5,0.5"]) {
+    assert.ok(parsePanelRequest(wrap({ type: "planner.annotation.add", planId: "p", artifactId: "a", anchor, body: "note" })), anchor);
+  }
+  assert.equal(parsePanelRequest(wrap({ type: "planner.annotation.add", planId: "p", artifactId: "a", anchor: "line:3", body: "note" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "planner.annotation.add", planId: "p", artifactId: "a", anchor: "block:3", body: "" })), null);
+  assert.ok(parsePanelRequest(wrap({ type: "planner.annotation.setStatus", annotationId: "n-1", status: "resolved" })));
+  assert.equal(parsePanelRequest(wrap({ type: "planner.annotation.setStatus", annotationId: "n-1", status: "acknowledged" })), null);
+  assert.ok(parsePanelRequest(wrap({ type: "planner.annotation.remove", annotationId: "n-1" })));
+
+  // Rename admits the empty string (clears the override); type errors do not pass.
+  assert.ok(parsePanelRequest(wrap({ type: "planner.artifact.rename", artifactId: "a", title: "" })));
+  assert.equal(parsePanelRequest(wrap({ type: "planner.artifact.rename", artifactId: "a", title: 7 })), null);
+
+  assert.ok(parsePanelRequest(wrap({ type: "planner.sendInstructions", planId: "plan-1" })));
+  assert.ok(parsePanelRequest(wrap({ type: "planner.regenerate", planId: "plan-1", aspectId: "ui-ux" })));
+  assert.ok(parsePanelRequest(wrap({ type: "planner.regenerate", planId: "plan-1" })));
+  assert.ok(parsePanelRequest(wrap({ type: "planner.openArtifact", artifactId: "a" })));
+  assert.ok(parsePanelRequest(wrap({ type: "planner.setPrototypeScripts", artifactId: "a", enabled: true })));
+  assert.equal(parsePanelRequest(wrap({ type: "planner.setPrototypeScripts", artifactId: "a", enabled: "on" })), null);
+
+  // Aspect saves: slug ids only (they double as plan/<aspectId>/ directories).
+  assert.ok(parsePanelRequest(wrap({
+    type: "planner.aspects.save",
+    aspect: { label: "Brand review", instructions: "Check the brand book.", expectedArtifacts: ["Brand notes (document)"] }
+  })));
+  assert.ok(parsePanelRequest(wrap({
+    type: "planner.aspects.save",
+    aspect: { aspectId: "brand-review", label: "Brand review", instructions: "x", expectedArtifacts: [] }
+  })));
+  assert.equal(parsePanelRequest(wrap({
+    type: "planner.aspects.save",
+    aspect: { aspectId: "Brand Review", label: "Brand review", instructions: "x", expectedArtifacts: [] }
+  })), null);
+  assert.equal(parsePanelRequest(wrap({
+    type: "planner.aspects.save",
+    aspect: { aspectId: "../evil", label: "Brand review", instructions: "x", expectedArtifacts: [] }
+  })), null);
+  assert.ok(parsePanelRequest(wrap({ type: "planner.aspects.archive", aspectId: "performance", archived: true })));
 });
 
 test("provider.login validates its provider id", () => {
@@ -87,6 +155,19 @@ test("clipboard.writeText validates bounded text", () => {
   assert.equal(parsed.payload.type === "clipboard.writeText" ? parsed.payload.text : undefined, "copy me");
   assert.equal(parsePanelRequest(wrap({ type: "clipboard.writeText", text: "" })), null);
   assert.equal(parsePanelRequest(wrap({ type: "clipboard.writeText", text: 42 })), null);
+});
+
+test("session.summarize validates its session id and mode", () => {
+  for (const mode of ["log", "ai"] as const) {
+    const parsed = parsePanelRequest(wrap({ type: "session.summarize", sessionId: "session-1", mode }));
+    assert.ok(parsed);
+    assert.equal(parsed.payload.type, "session.summarize");
+    assert.equal(parsed.payload.type === "session.summarize" ? parsed.payload.mode : undefined, mode);
+  }
+  assert.equal(parsePanelRequest(wrap({ type: "session.summarize", sessionId: "", mode: "log" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "session.summarize", mode: "log" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "session.summarize", sessionId: "session-1", mode: "haiku" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "session.summarize", sessionId: "session-1" })), null);
 });
 
 test("clone.state and clone.push validate their session id", () => {
@@ -311,7 +392,18 @@ test("workspace selection accepts the auto/set union and rejects mixed or bad sh
 test("diff and review payloads validate ids, paths, and line ranges", () => {
   assert.ok(parsePanelRequest(wrap({ type: "diff.status" })));
   assert.ok(parsePanelRequest(wrap({ type: "diff.status", sessionId: "session-1" })));
+  // The view frame is optional and closed to the three known modes.
+  assert.deepEqual(
+    parsePanelRequest(wrap({ type: "diff.status", sessionId: "session-1", view: "full-session" }))?.payload,
+    { type: "diff.status", sessionId: "session-1", view: "full-session" }
+  );
+  assert.equal(parsePanelRequest(wrap({ type: "diff.status", sessionId: "session-1", view: "git" })), null);
   assert.ok(parsePanelRequest(wrap({ type: "diff.acceptFile", baselineId: "baseline-1", path: "src/a.ts" })));
+  assert.deepEqual(
+    parsePanelRequest(wrap({ type: "diff.acceptFile", baselineId: "baseline-1", path: "src/a.ts", view: "turn" }))?.payload,
+    { type: "diff.acceptFile", baselineId: "baseline-1", path: "src/a.ts", view: "turn" }
+  );
+  assert.equal(parsePanelRequest(wrap({ type: "diff.revertFile", baselineId: "baseline-1", path: "src/a.ts", view: "nope" })), null);
   assert.equal(parsePanelRequest(wrap({ type: "diff.revertFile", baselineId: "baseline-1", path: "" })), null);
   assert.ok(parsePanelRequest(wrap({ type: "diff.openFile", baselineId: "baseline-1", path: "src/a.ts" })));
   assert.equal(parsePanelRequest(wrap({ type: "diff.openFile", baselineId: "baseline-1" })), null);

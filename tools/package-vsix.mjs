@@ -36,13 +36,13 @@ const stagedFiles = [
   "dist/extension.js",
   "dist/webview/main.js",
   "dist/webview/main.css",
-  "dist/webview/planDocs.js",
-  "dist/webview/planDocs.css",
   "dist/webview/planDocsMermaid.js",
   "dist/webview/taskReview.js",
   "dist/webview/taskReview.css",
   "dist/webview/taskBoard.js",
   "dist/webview/taskBoard.css",
+  "dist/webview/planner.js",
+  "dist/webview/planner.css",
   "media/icon.svg"
 ];
 for (const relativePath of stagedFiles) {
@@ -65,13 +65,13 @@ const stagedManifest = {
     "dist/extension.js",
     "dist/webview/main.js",
     "dist/webview/main.css",
-    "dist/webview/planDocs.js",
-    "dist/webview/planDocs.css",
     "dist/webview/planDocsMermaid.js",
     "dist/webview/taskReview.js",
     "dist/webview/taskReview.css",
     "dist/webview/taskBoard.js",
     "dist/webview/taskBoard.css",
+    "dist/webview/planner.js",
+    "dist/webview/planner.css",
     "media/icon.svg"
   ]
 };
@@ -134,13 +134,13 @@ function assertPackagedFiles(stdout) {
     "extension/dist/extension.js",
     "extension/dist/webview/main.js",
     "extension/dist/webview/main.css",
-    "extension/dist/webview/planDocs.js",
-    "extension/dist/webview/planDocs.css",
     "extension/dist/webview/planDocsMermaid.js",
     "extension/dist/webview/taskReview.js",
     "extension/dist/webview/taskReview.css",
     "extension/dist/webview/taskBoard.js",
     "extension/dist/webview/taskBoard.css",
+    "extension/dist/webview/planner.js",
+    "extension/dist/webview/planner.css",
     "extension/media/icon.svg"
   ]);
   for (const entry of required) {

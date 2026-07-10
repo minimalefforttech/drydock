@@ -49,6 +49,19 @@ export interface InitCloneInput {
   readonly localRepoPath: string;
   readonly cloneParentDir: string;
   readonly name: string;
+  /** carry overlays tracked/untracked working state; fresh uses current local HEAD only. */
+  readonly dirtyHandling?: "carry" | "fresh";
+}
+
+/** Read-only facts shown before a task starts cloning a repository. */
+export interface CloneRepoPreflight {
+  readonly localRepoPath: string;
+  readonly isGitRepo: boolean;
+  readonly branch?: string;
+  readonly detached: boolean;
+  readonly trackedChanges: number;
+  readonly untrackedFiles: number;
+  readonly dirty: boolean;
 }
 
 export interface InitCloneResult {
@@ -87,12 +100,54 @@ export class CloneSyncService {
   }
 
   /**
-   * Clone the local repo's current branch into `<cloneParentDir>/<name>` and
-   * overlay the developer's dirty working state, producing a faithful
-   * `refs/sync/base` snapshot of *what the developer sees* (not just HEAD).
+   * Inspect a local repository without fetching, pulling, checking out, or
+   * otherwise changing it. A non-repository is reported, not thrown.
+   */
+  async preflightRepo(localRepoPath: string): Promise<CloneRepoPreflight> {
+    const inside = await this.runner.run(this.git, ["rev-parse", "--is-inside-work-tree"], {
+      cwd: localRepoPath,
+      timeoutMs: this.timeoutMs
+    });
+    if (inside.exitCode !== 0 || inside.stdout.trim() !== "true") {
+      return {
+        localRepoPath,
+        isGitRepo: false,
+        detached: false,
+        trackedChanges: 0,
+        untrackedFiles: 0,
+        dirty: false
+      };
+    }
+    const head = await this.gitIn(localRepoPath, ["rev-parse", "--abbrev-ref", "HEAD"], "resolve local HEAD for preflight");
+    const detached = head.stdout.trim() === "HEAD";
+    const branch = detached
+      ? (await this.gitIn(localRepoPath, ["rev-parse", "HEAD"], "resolve detached HEAD for preflight")).stdout.trim()
+      : head.stdout.trim();
+    const status = await this.gitIn(
+      localRepoPath,
+      ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      "read local repository status"
+    );
+    const counts = countPreflightStatus(status.stdout);
+    return {
+      localRepoPath,
+      isGitRepo: true,
+      branch,
+      detached,
+      trackedChanges: counts.trackedChanges,
+      untrackedFiles: counts.untrackedFiles,
+      dirty: counts.trackedChanges + counts.untrackedFiles > 0
+    };
+  }
+
+  /**
+   * Clone the local repo's current branch into `<cloneParentDir>/<name>`.
+   * carry overlays the developer's dirty working state; fresh snapshots only
+   * current local HEAD. Neither path fetches or pulls a remote.
    */
   async initClone(input: InitCloneInput): Promise<InitCloneResult> {
     const { localRepoPath, cloneParentDir, name } = input;
+    const dirtyHandling = input.dirtyHandling ?? "carry";
     const clonePath = join(cloneParentDir, name);
 
     // The clone target's parent must exist before `git clone` runs there (the
@@ -126,34 +181,36 @@ export class CloneSyncService {
       await this.gitIn(clonePath, ["checkout", "--detach", branch], "checkout detached commit in clone");
     }
 
-    // Overlay tracked dirty changes: the patch of local working tree vs its HEAD.
-    const dirty = await this.diffToFile(localRepoPath, ["diff", "--binary", "HEAD"], "capture local dirty diff");
-    try {
-      if (dirty.bytes > 0) {
-        await this.applyPatchFile(clonePath, dirty.patchFile, ["--binary", "--whitespace=nowarn"], "overlay local dirty diff onto clone");
+    if (dirtyHandling === "carry") {
+      // Overlay tracked dirty changes: the patch of local working tree vs its HEAD.
+      const dirty = await this.diffToFile(localRepoPath, ["diff", "--binary", "HEAD"], "capture local dirty diff");
+      try {
+        if (dirty.bytes > 0) {
+          await this.applyPatchFile(clonePath, dirty.patchFile, ["--binary", "--whitespace=nowarn"], "overlay local dirty diff onto clone");
+        }
+      } finally {
+        await dirty.cleanup();
       }
-    } finally {
-      await dirty.cleanup();
+
+      // Copy untracked (but not ignored) files verbatim — copy-win, no merge.
+      const untracked = await this.gitIn(
+        localRepoPath,
+        ["ls-files", "-o", "--exclude-standard", "-z"],
+        "list local untracked files"
+      );
+      for (const rel of splitZ(untracked.stdout)) {
+        const src = join(localRepoPath, rel);
+        const dest = join(clonePath, rel);
+        await copyFileThrough(src, dest);
+      }
     }
 
-    // Copy untracked (but not ignored) files verbatim — copy-win, no merge.
-    const untracked = await this.gitIn(
-      localRepoPath,
-      ["ls-files", "-o", "--exclude-standard", "-z"],
-      "list local untracked files"
-    );
-    for (const rel of splitZ(untracked.stdout)) {
-      const src = join(localRepoPath, rel);
-      const dest = join(clonePath, rel);
-      await copyFileThrough(src, dest);
-    }
-
-    // Freeze the snapshot as the sync base. --allow-empty so a pristine repo
-    // (no dirty state) still produces a base commit both sides can diff against.
+    // Freeze the selected snapshot as the sync base. --allow-empty means both
+    // clean carry and fresh HEAD still produce a base commit for sync diffs.
     await this.gitIn(clonePath, ["add", "-A"], "stage snapshot in clone");
     await this.gitIn(
       clonePath,
-      [...SYNC_AUTHOR, "commit", "--allow-empty", "-m", "[sync] local snapshot"],
+      [...SYNC_AUTHOR, "commit", "--allow-empty", "-m", dirtyHandling === "carry" ? "[sync] local snapshot" : "[sync] fresh local HEAD"],
       "commit snapshot in clone"
     );
     await this.gitIn(clonePath, ["update-ref", "refs/sync/base", "HEAD"], "set refs/sync/base");
@@ -639,6 +696,23 @@ function gitError(step: string, repoPath: string, result: CommandResult): Error 
 /** Split a NUL-delimited git list into non-empty entries. */
 function splitZ(value: string): string[] {
   return value.split("\0").filter((entry) => entry.length > 0);
+}
+
+function countPreflightStatus(value: string): { trackedChanges: number; untrackedFiles: number } {
+  const tokens = value.split("\0");
+  let trackedChanges = 0;
+  let untrackedFiles = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const entry = tokens[index];
+    if (entry === undefined || entry.length < 3) continue;
+    const code = entry.slice(0, 2);
+    if (code === "??") untrackedFiles += 1;
+    else trackedChanges += 1;
+    // Porcelain v1 -z emits the source path as the following token for a
+    // rename/copy. It belongs to this same status entry, not another file.
+    if (code.includes("R") || code.includes("C")) index += 1;
+  }
+  return { trackedChanges, untrackedFiles };
 }
 
 function mapStatusLetter(letter: string): DiffChangeKind {
