@@ -17,6 +17,17 @@ session whose first turn carries a composed briefing: the brief, per-aspect
 instructions with expected artifacts, the file conventions, and the
 pre-information.
 
+Plans, like edits, generally belong to tasks (`task_id`, nullable). Every
+create surface leads with a task picker (the Plan tab composer, the panel
+intake, and a "Plan" action on task cards that arrives with the task
+preselected); "no task (orphan)" stays available but is copy-discouraged. The
+owning task's title renders as a chip beside the plan title and in list metas,
+and on every session boot — new or reclaim — the plan's session is linked to
+the task (`work_task_links`, idempotent), so the task's chats dropdown, board
+chips, and touch history see planning sessions like any other. `planner.create`
+takes `taskId?`; `planner.updateIntake` takes `taskId?` where `""` clears the
+link back to an orphan.
+
 ### Aspect registry
 
 Aspects are data, not code (`planner_aspects`): id, label, briefing
@@ -91,6 +102,28 @@ against, and fires the turn detached. When a later collection bumps that
 artifact's revision, the delegated card asks "addressed in rev N?" — resolve
 or reopen, never auto-closed. Regenerate re-sends the briefing for the whole
 plan or one aspect's subdirectory.
+
+## The Plan tab (sidebar companion)
+
+The control panel's tab strip reads Tasks | **Plan** | **Edit** | System: the
+old Chat tab is renamed Edit (its sessions always run implementation mode),
+and the Plan tab IS the planning chat. With no plan underway, the first
+message typed becomes a new plan's brief — the host creates the plan, boots
+its session, and the Planner panel auto-opens on that plan while the
+conversation streams in the tab (the composed briefing rides inside the
+turn's collapsed host-briefing disclosure, so the transcript leads with the
+user's own words). Above the transcript, a collapsible **Recent plans** list
+is the history: each row carries an in-progress dot while its session is live
+and a click opens that plan in the Planner (and points the tab's rail at it);
+"＋ New plan" returns the composer to create mode, and "Open Planner ↗" jumps
+to the current plan. The transcript renders on the same shared components as
+every other rail; sends revive a dormant session automatically.
+
+Plan-targeted panel opens ride the `drydock.planner.open` command's optional
+planId: the provider queues it until the webview's first `planner.plans`
+fetch proves the document is listening, then delivers it as the
+`planner.showPlan` push — the same mechanism the `planner-session-started`
+auto-open uses, so the panel always lands on the plan that just began.
 
 ## Sessions and modes
 

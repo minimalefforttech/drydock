@@ -24,11 +24,13 @@ import {
   type PlanArtifactDetail,
   type PlanAspectSummary,
   type PlannerStateDetail,
-  type PlanSummary
+  type PlanSummary,
+  type WorkTaskSummary
 } from "@drydock/contracts";
-import { badge, button, chip, el, popover, relativeTime, statusDot } from "./components.js";
+import { badge, button, chip, el, option, popover, relativeTime, select, statusDot } from "./components.js";
 import {
   chatMessageRow,
+  renderBriefedUserBody,
   workingIndicatorRow,
   type MessageRowContext
 } from "./chat/messageRow.js";
@@ -126,6 +128,8 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
 
 let plans: readonly PlanSummary[] = [];
 let aspects: readonly PlanAspectSummary[] = [];
+/** Task-picker options (plans belong to tasks, ADR 0006 doctrine). */
+let workTasks: readonly WorkTaskSummary[] = [];
 let currentPlanId: string | null = null;
 let currentState: PlannerStateDetail | null = null;
 let currentSession: ChatSessionSummary | null = null;
@@ -198,52 +202,9 @@ const railContext: MessageRowContext = {
   openLink: (href) => {
     void request({ type: "chat.openFile", path: href });
   },
-  renderUserBody: (container, text) => renderRailUserBody(container, text),
+  renderUserBody: (container, text) => renderBriefedUserBody(container, text),
   groups: () => railGroups
 };
-
-const RAIL_BRIEFING_START = "[host briefing";
-const RAIL_BRIEFING_END = "[end host briefing";
-
-/**
- * First turns carry host briefings (the session mount briefing and the
- * planner's own). Collapse any leading `[host briefing…]…[end host briefing…]`
- * spans into disclosures so the rail leads with what was actually asked.
- */
-function renderRailUserBody(container: HTMLElement, text: string): void {
-  let rest = text;
-  for (let guard = 0; guard < 3; guard += 1) {
-    const start = rest.indexOf(RAIL_BRIEFING_START);
-    if (start === -1) break;
-    const endMark = rest.indexOf(RAIL_BRIEFING_END, start);
-    if (endMark === -1) break;
-    const endLine = rest.indexOf("]", endMark);
-    if (endLine === -1) break;
-    const briefing = rest.slice(start, endLine + 1);
-    const before = rest.slice(0, start).trim();
-    if (before.length > 0) {
-      const lead = el("div", "host-briefing-remainder");
-      lead.textContent = before;
-      container.append(lead);
-    }
-    const disclosure = document.createElement("details");
-    disclosure.className = "host-briefing-detail";
-    const summary = document.createElement("summary");
-    summary.textContent = "Host briefing";
-    const pre = document.createElement("pre");
-    pre.className = "host-briefing-pre";
-    pre.textContent = briefing;
-    disclosure.append(summary, pre);
-    container.append(disclosure);
-    rest = rest.slice(endLine + 1);
-  }
-  const remainder = rest.trim();
-  if (remainder.length > 0 || container.childElementCount === 0) {
-    const body = el("div", "host-briefing-remainder");
-    body.textContent = remainder.length > 0 ? remainder : text;
-    container.append(body);
-  }
-}
 
 function resetRail(sessionId: string | null): void {
   railSessionId = sessionId;
@@ -367,6 +328,13 @@ function applyPush(payload: PanelPushPayload): void {
       }
       void refreshState();
       return;
+    case "planner.showPlan":
+      // Another surface (the sidebar Plan tab, an auto-open on session start)
+      // asked this panel to land on a specific plan.
+      if (payload.planId !== currentPlanId) {
+        void openPlan(payload.planId);
+      }
+      return;
     case "chat.event":
       if (payload.sessionId === railSessionId && payload.line.sequence > railLastSequence) {
         railLastSequence = payload.line.sequence;
@@ -425,6 +393,13 @@ async function refreshAspects(): Promise<void> {
   const response = await request({ type: "planner.aspects.list" });
   if (response.ok && response.payload.type === "planner.aspects.list") {
     aspects = response.payload.aspects;
+  }
+}
+
+async function refreshTasks(): Promise<void> {
+  const response = await request({ type: "task.list" });
+  if (response.ok && response.payload.type === "task.list") {
+    workTasks = response.payload.tasks;
   }
 }
 
@@ -586,6 +561,8 @@ function renderNotice(): HTMLElement {
 const intake = {
   brief: "",
   notes: "",
+  /** Owning task ("" = orphan; allowed but discouraged). */
+  taskId: "",
   selectedAspects: new Set<string>(),
   contextRoots: [] as string[],
   manageOpen: false
@@ -634,6 +611,24 @@ function renderLanding(): HTMLElement {
     createButton.disabled = intake.brief.trim().length === 0;
   });
   form.append(brief);
+
+  // Plans belong to tasks — the picker leads with the recommendation; the
+  // orphan option stays available but names itself as the exception.
+  form.append(fieldLabel("For task", "task-based planning is recommended"));
+  const taskField = select("pl-input pl-task-select", "The task this plan belongs to");
+  taskField.append(option("", "no task (orphan)"));
+  for (const task of workTasks) {
+    if (task.state === "done") continue;
+    taskField.append(option(task.taskId, task.title));
+  }
+  if (intake.taskId !== "" && !workTasks.some((task) => task.taskId === intake.taskId)) {
+    intake.taskId = "";
+  }
+  taskField.value = intake.taskId;
+  taskField.addEventListener("change", () => {
+    intake.taskId = taskField.value;
+  });
+  form.append(taskField);
 
   const aspectHead = el("div", "pl-field-row");
   aspectHead.append(fieldLabel("Working on"), hint("select all that apply"));
@@ -727,7 +722,8 @@ function planCard(plan: PlanSummary): HTMLElement {
   const title = el("div", "pl-plan-title");
   title.textContent = plan.title;
   const meta = el("div", "pl-plan-meta");
-  meta.textContent = `${String(plan.artifactCount)} artifact${plan.artifactCount === 1 ? "" : "s"} · ${String(plan.openAnnotationCount)} open ✎ · ${relativeTime(plan.updatedAt)}`;
+  const taskPart = plan.taskTitle === undefined ? "" : `${plan.taskTitle} · `;
+  meta.textContent = `${taskPart}${String(plan.artifactCount)} artifact${plan.artifactCount === 1 ? "" : "s"} · ${String(plan.openAnnotationCount)} open ✎ · ${relativeTime(plan.updatedAt)}`;
   cardNode.append(title, meta);
   cardNode.addEventListener("click", () => void openPlan(plan.planId));
   return cardNode;
@@ -741,7 +737,8 @@ async function createPlan(trigger: HTMLButtonElement): Promise<void> {
     brief: intake.brief.trim(),
     aspectIds: [...intake.selectedAspects],
     contextRoots: [...intake.contextRoots],
-    ...(intake.notes.trim().length === 0 ? {} : { notes: intake.notes.trim() })
+    ...(intake.notes.trim().length === 0 ? {} : { notes: intake.notes.trim() }),
+    ...(intake.taskId === "" ? {} : { taskId: intake.taskId })
   });
   if (!response.ok) {
     notice = { text: response.error.message, tone: "error" };
@@ -753,6 +750,7 @@ async function createPlan(trigger: HTMLButtonElement): Promise<void> {
   notice = { text: "Plan created — starting the planning session…", tone: "info" };
   intake.brief = "";
   intake.notes = "";
+  intake.taskId = "";
   intake.selectedAspects.clear();
   intake.contextRoots = [];
   await openPlan(response.payload.plan.planId);
@@ -875,6 +873,13 @@ function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
   const title = el("span", "pl-title");
   title.textContent = state.plan.title;
   header.append(back, title);
+
+  if (state.plan.taskId !== null) {
+    const taskChip = el("span", "pl-task-chip");
+    taskChip.textContent = state.plan.taskTitle ?? "task";
+    taskChip.title = `Belongs to task: ${state.plan.taskTitle ?? state.plan.taskId}`;
+    header.append(taskChip);
+  }
 
   const aspectMap = new Map(aspects.map((aspect) => [aspect.aspectId, aspect]));
   for (const aspectId of state.plan.aspectIds) {
@@ -1432,6 +1437,7 @@ function openInstructionBox(
 // ---------------------------------------------------------------------------
 
 void (async () => {
+  await refreshTasks();
   await refreshAspects();
   await refreshPlans();
   if (currentPlanId !== null && plans.some((plan) => plan.planId === currentPlanId)) {

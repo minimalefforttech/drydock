@@ -22,7 +22,8 @@ import type {
   PlanRecord,
   PlanStore,
   PlanStoreUpdate,
-  SessionId
+  SessionId,
+  TaskId
 } from "@drydock/contracts";
 import type { SqliteConnection } from "./sqliteConnection.js";
 
@@ -37,8 +38,8 @@ export class SqlitePlanStore implements PlanStore {
     this.connection.database.prepare(`
       INSERT INTO planner_plans (
         plan_id, title, brief, aspect_ids_json, context_roots_json,
-        notes, status, session_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        notes, status, session_id, task_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.planId,
       record.title,
@@ -48,6 +49,7 @@ export class SqlitePlanStore implements PlanStore {
       record.notes,
       record.status,
       record.sessionId,
+      record.taskId,
       record.createdAt,
       record.updatedAt
     );
@@ -83,6 +85,10 @@ export class SqlitePlanStore implements PlanStore {
     if (update.sessionId !== undefined) {
       assignments.push("session_id = ?");
       values.push(update.sessionId);
+    }
+    if (update.taskId !== undefined) {
+      assignments.push("task_id = ?");
+      values.push(update.taskId);
     }
     if (update.updatedAt !== undefined) {
       assignments.push("updated_at = ?");
@@ -135,6 +141,7 @@ interface PlanRow {
   readonly notes: string;
   readonly status: string;
   readonly session_id: string | null;
+  readonly task_id: string | null;
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -149,6 +156,7 @@ function mapPlan(row: PlanRow): PlanRecord {
     notes: row.notes,
     status: row.status as PlanRecord["status"],
     sessionId: row.session_id === null ? null : (row.session_id as SessionId),
+    taskId: row.task_id === null ? null : (row.task_id as TaskId),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };

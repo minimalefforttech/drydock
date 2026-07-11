@@ -45,12 +45,14 @@ test("planner records round-trip and survive a database reopen", async () => {
       notes: "OIDC only.",
       status: "draft",
       sessionId: null,
+      taskId: null,
       createdAt: "2026-07-10T00:00:00.000Z",
       updatedAt: "2026-07-10T00:00:00.000Z"
     });
     await plans.updatePlan(PLAN_ID, {
       status: "active",
       sessionId: asId<"SessionId">("session-9"),
+      taskId: asId<"TaskId">("task-7"),
       updatedAt: "2026-07-10T01:00:00.000Z"
     });
 
@@ -102,6 +104,7 @@ test("planner records round-trip and survive a database reopen", async () => {
     assert.ok(plan);
     assert.equal(plan.status, "active");
     assert.equal(plan.sessionId, "session-9");
+    assert.equal(plan.taskId, "task-7");
     assert.deepEqual(plan.aspectIds, ["architecture", "testing"]);
     assert.equal(plan.notes, "OIDC only.");
 
@@ -187,6 +190,7 @@ test("deletePlan removes the plan with its artifacts and annotations", async () 
       notes: "",
       status: "draft",
       sessionId: null,
+      taskId: null,
       createdAt: "2026-07-10T00:00:00.000Z",
       updatedAt: "2026-07-10T00:00:00.000Z"
     });

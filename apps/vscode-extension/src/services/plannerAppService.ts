@@ -72,6 +72,17 @@ export interface PlannerChatPort {
   getSession(sessionId: SessionId): Promise<ChatSessionRecord | null>;
 }
 
+/**
+ * Task linkage, satisfied structurally by TaskService. Plans generally belong
+ * to tasks (ADR 0006 doctrine); the plan's session is linked to its task on
+ * every boot so the task's chats, board chips, and touch history see it.
+ */
+export interface PlannerTasksPort {
+  /** Idempotent (INSERT OR IGNORE store semantics). */
+  link(taskId: string, target: { readonly sessionId: string }): Promise<void>;
+  listTaskSummaries(): Promise<readonly { readonly taskId: string; readonly title: string }[]>;
+}
+
 export interface PlannerAppServiceOptions {
   readonly logger: Logger;
   readonly clock: Clock;
@@ -83,6 +94,7 @@ export interface PlannerAppServiceOptions {
   readonly blobs: BlobStore;
   readonly sessions: PlannerSessionsPort;
   readonly chat: PlannerChatPort;
+  readonly tasks?: PlannerTasksPort;
   readonly bus: ProductEventBus;
   /**
    * Optional department aspect packs (e.g. a repo's .drydock/planner-aspects.json),
@@ -97,6 +109,8 @@ export interface CreatePlanInput {
   readonly contextRoots: readonly string[];
   readonly notes?: string;
   readonly title?: string;
+  /** The owning task; omitted/null = an orphan plan (allowed, discouraged). */
+  readonly taskId?: string | null;
 }
 
 export interface UpdatePlanIntakeInput {
@@ -105,6 +119,8 @@ export interface UpdatePlanIntakeInput {
   readonly aspectIds?: readonly string[];
   readonly contextRoots?: readonly string[];
   readonly notes?: string;
+  /** null clears the link back to an orphan plan. */
+  readonly taskId?: string | null;
 }
 
 const PLAN_TITLE_MAX = 64;
@@ -128,6 +144,7 @@ export class PlannerAppService {
       notes: input.notes ?? "",
       status: "draft",
       sessionId: null,
+      taskId: input.taskId == null ? null : asId<"TaskId">(input.taskId),
       createdAt: now,
       updatedAt: now
     };
@@ -137,8 +154,17 @@ export class PlannerAppService {
 
   async updateIntake(planId: string, input: UpdatePlanIntakeInput): Promise<PlanRecord> {
     const id = asId<"PlanId">(planId);
-    await this.options.plans.updatePlan(id, { ...input, updatedAt: this.options.clock.isoNow() });
+    const { taskId, ...rest } = input;
+    await this.options.plans.updatePlan(id, {
+      ...rest,
+      ...(taskId === undefined ? {} : { taskId: taskId === null ? null : asId<"TaskId">(taskId) }),
+      updatedAt: this.options.clock.isoNow()
+    });
     const updated = await this.requirePlan(id);
+    // A (re)linked task adopts the existing session immediately.
+    if (taskId !== undefined && taskId !== null && updated.sessionId !== null) {
+      await this.linkPlanTask(updated.taskId, updated.sessionId);
+    }
     this.publishChanged(id);
     return updated;
   }
@@ -154,7 +180,8 @@ export class PlannerAppService {
 
   async listPlans(): Promise<PlanSummary[]> {
     const records = await this.options.plans.listPlans();
-    return Promise.all(records.map((record) => this.toPlanSummary(record)));
+    const titles = await this.taskTitles();
+    return Promise.all(records.map((record) => this.toPlanSummary(record, titles)));
   }
 
   async getPlan(planId: string): Promise<PlanRecord | null> {
@@ -188,17 +215,34 @@ export class PlannerAppService {
         });
       }
     }
-    const [artifacts, annotations, aspects] = await Promise.all([
+    const [artifacts, annotations, aspects, titles] = await Promise.all([
       this.options.artifacts.listArtifacts(id),
       this.options.annotations.listAnnotations(id),
-      this.listAspects(true)
+      this.listAspects(true),
+      this.taskTitles()
     ]);
     return {
-      plan: await this.toPlanSummary(plan),
+      plan: await this.toPlanSummary(plan, titles),
       artifacts: await Promise.all(artifacts.map((artifact) => this.toArtifactDetail(artifact))),
       annotations: annotations.map(toAnnotationSummary),
       aspects: aspects.map(toAspectSummary)
     };
+  }
+
+  /** taskId → title, one summaries fetch per call site; empty without a port. */
+  private async taskTitles(): Promise<ReadonlyMap<string, string>> {
+    if (this.options.tasks === undefined) {
+      return new Map();
+    }
+    try {
+      const summaries = await this.options.tasks.listTaskSummaries();
+      return new Map(summaries.map((summary) => [summary.taskId, summary.title]));
+    } catch (error) {
+      this.options.logger.warn("plan task title lookup failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return new Map();
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -306,6 +350,8 @@ export class PlannerAppService {
     if (plan.sessionId !== null) {
       await this.options.sessions.reclaimChatSession(plan.sessionId, model);
       await this.hydrateWorkspace(plan.planId, plan.sessionId);
+      await this.linkPlanTask(plan.taskId, plan.sessionId);
+      this.options.bus.publish({ kind: "planner-session-started", planId: plan.planId, sessionId: plan.sessionId });
       return plan.sessionId;
     }
     const workspace: ChatWorkspaceContext = {
@@ -320,8 +366,30 @@ export class PlannerAppService {
       updatedAt: this.options.clock.isoNow()
     });
     await this.hydrateWorkspace(plan.planId, sessionId);
+    await this.linkPlanTask(plan.taskId, sessionId);
     this.publishChanged(plan.planId);
+    this.options.bus.publish({ kind: "planner-session-started", planId: plan.planId, sessionId });
     return sessionId;
+  }
+
+  /**
+   * Links the plan's session to its owning task (best-effort, idempotent) so
+   * the task's chats dropdown, board chips, and touch history all see the
+   * planning session like any other.
+   */
+  private async linkPlanTask(taskId: string | null, sessionId: SessionId): Promise<void> {
+    if (taskId === null || this.options.tasks === undefined) {
+      return;
+    }
+    try {
+      await this.options.tasks.link(taskId, { sessionId });
+    } catch (error) {
+      this.options.logger.warn("plan session task link failed", {
+        taskId,
+        sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 
   private sendDetached(planId: PlanId, sessionId: SessionId, prompt: string): void {
@@ -711,8 +779,7 @@ export class PlannerAppService {
       });
     const sections = [
       `[host briefing — planner]`,
-      `You are drafting the plan "${plan.title}".`,
-      `What we are building: ${plan.brief}`,
+      `You are drafting the plan "${plan.title}". The ask follows after this briefing.`,
       ...(plan.notes.trim().length === 0 ? [] : [`Pre-information from the reviewer:\n${plan.notes}`]),
       [
         "Write every artifact under the `plan/` directory of your workspace, one subdirectory per aspect below.",
@@ -725,6 +792,9 @@ export class PlannerAppService {
       "The project context is mounted read-only; the plan directory is writable.",
       "[end host briefing — planner]",
       "",
+      // The brief sits OUTSIDE the briefing delimiters so a rail's collapsed
+      // rendering leads with the user's own words, not host preamble.
+      plan.brief,
       "Draft the initial plan artifacts now."
     ];
     return sections.join("\n\n");
@@ -734,11 +804,12 @@ export class PlannerAppService {
   // Projections & helpers
   // -------------------------------------------------------------------------
 
-  private async toPlanSummary(record: PlanRecord): Promise<PlanSummary> {
+  private async toPlanSummary(record: PlanRecord, taskTitles: ReadonlyMap<string, string>): Promise<PlanSummary> {
     const [artifactCount, openAnnotationCount] = await Promise.all([
       this.options.artifacts.countArtifacts(record.planId),
       this.options.annotations.countOpenAnnotations(record.planId)
     ]);
+    const taskTitle = record.taskId === null ? undefined : taskTitles.get(record.taskId);
     return {
       planId: record.planId,
       title: record.title,
@@ -748,6 +819,8 @@ export class PlannerAppService {
       notes: record.notes,
       status: record.status,
       sessionId: record.sessionId,
+      taskId: record.taskId,
+      ...(taskTitle === undefined ? {} : { taskTitle }),
       artifactCount,
       openAnnotationCount,
       updatedAt: record.updatedAt

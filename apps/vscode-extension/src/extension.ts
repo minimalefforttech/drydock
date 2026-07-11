@@ -135,13 +135,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // three-column plan view all live inside it. The control panel's
   // planner.open relay routes here.
   const plannerPanel = new PlannerPanelProvider(context.extensionUri, backend, logger);
-  context.subscriptions.push(vscode.commands.registerCommand("drydock.planner.open", async () => {
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.planner.open", async (planId?: unknown) => {
     if (!backend.available) {
       void vscode.window.showErrorMessage(backend.reason);
       return;
     }
-    await plannerPanel.open();
+    await plannerPanel.open(typeof planId === "string" ? planId : undefined);
   }));
+  if (backend.available) {
+    // A plan session booting (from the panel, the sidebar Plan tab, or a
+    // revive-on-send) auto-opens the full planning workspace ON that plan.
+    backend.bus.subscribe((event) => {
+      if (event.kind === "planner-session-started") {
+        void plannerPanel.open(event.planId).catch((error: unknown) => {
+          logger.warn("planner auto-open failed", {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
+      }
+    });
+  }
   registerIsolatedRunCommands(context, output, backend);
 
   if (backend.available) {

@@ -582,6 +582,206 @@ h3 {
   min-height: 0;
 }
 
+/* --------------------------------------------------------------------------
+   Plan tab (ADR 0012): the planning session's rail in the sidebar. Message
+   rows reuse the shared chat styles (chat/chatView.css); only the shell —
+   header/status/log/composer — is styled here.
+   -------------------------------------------------------------------------- */
+.plan-tab {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.plan-tab-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 2px;
+}
+
+.plan-tab-current {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The owning task, right where the plan is named; orphans read as the
+   exception (dimmed + dashed). */
+.plan-tab-task-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.75em;
+  font-weight: 400;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-badge-background, rgba(128, 128, 128, 0.4));
+  color: var(--vscode-descriptionForeground);
+}
+
+.plan-tab-task-chip.orphan {
+  border-style: dashed;
+  opacity: 0.7;
+  font-style: italic;
+}
+
+/* Create mode: pick the owning task before the first message. */
+.plan-tab-task-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plan-tab-task-row .plan-tab-footnote { flex: 0 0 auto; }
+
+.plan-tab-task-select {
+  flex: 1;
+  min-width: 0;
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 0.85em;
+}
+
+/* Recent plans: the collapsible history; each row opens its plan in the
+   Planner panel and carries the in-progress dot while its session runs. */
+.plan-tab-recent {
+  flex: 0 0 auto;
+  margin: 4px 0 2px;
+}
+
+.plan-tab-recent-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 6px;
+  border-radius: 4px;
+  color: var(--vscode-foreground);
+}
+
+.plan-tab-recent-row:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.plan-tab-recent-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-tab-recent-meta {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 0.78em;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.85;
+}
+
+.plan-tab-recent-empty {
+  padding: 4px 6px;
+  font-size: 0.86em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.plan-tab-status {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 2px 6px;
+  font-size: 0.86em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.plan-tab-notice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 2px 6px;
+  padding: 5px 9px;
+  border-radius: 4px;
+  font-size: 0.86em;
+  color: var(--vscode-errorForeground, #e28579);
+  border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(226, 133, 121, 0.5));
+  background: var(--vscode-inputValidation-errorBackground, rgba(226, 133, 121, 0.08));
+}
+
+.plan-tab-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 2px 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 2px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 82%, #000000);
+}
+
+.plan-tab-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 26px 12px;
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+}
+
+.plan-tab-composer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 2px 4px;
+}
+
+.plan-tab-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.plan-tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-tab-footnote {
+  flex: 1;
+  font-size: 0.78em;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-tab-status .plan-tab-footnote { flex: 0 1 auto; }
+
 .chat-scroll {
   flex: 1 1 auto;
   min-height: 0;

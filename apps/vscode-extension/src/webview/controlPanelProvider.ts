@@ -47,6 +47,7 @@ import {
 import { normalizePathKey, sandboxRuntimePath, type AgentQuestionService, type Logger, type ProductBusEvent } from "@drydock/core";
 import type { BoardService, MemoryService, SubtaskService, TaskService } from "@drydock/work-management";
 import type { Backend, BackendReady } from "../compositionRoot.js";
+import type { PlannerAppService } from "../services/plannerAppService.js";
 import { buildBoardState, decorateTaskSummary, joinOpenCommentCounts, reconcileColumns } from "./boardShared.js";
 import { promptAndSaveTaskClonePolicy } from "./taskClonePolicyPrompt.js";
 import {
@@ -278,6 +279,14 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.push({ type: "session.deleted", sessionId: event.sessionId });
         // A deleted session can no longer wait on the user; drop its attention.
         this.dropAttention(event.sessionId);
+        return;
+      case "planner-changed":
+        // Coarse planner invalidation: the Plan tab refetches planner.plans.
+        this.push({ type: "planner.changed", planId: event.planId });
+        return;
+      case "planner-session-started":
+        // A plan session booted (any surface): the Plan tab picks up its rail.
+        this.push({ type: "planner.sessionReady", planId: event.planId, sessionId: event.sessionId, ok: true });
         return;
       case "access-requested":
         // Detected agent access requests arrive here; forward the display-safe
@@ -1101,11 +1110,67 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "planner.open": {
         this.requireBackend();
         try {
-          await vscode.commands.executeCommand("drydock.planner.open");
+          await vscode.commands.executeCommand("drydock.planner.open", payload.planId);
           this.respond(request.requestId, { type: "planner.open", accepted: true });
         } catch {
           this.respondError(request.requestId, "Planner panel not available yet.");
         }
+        return;
+      }
+      case "planner.create": {
+        // The Plan tab's chat-first start: the typed message IS the brief; the
+        // intake (aspects, context roots) refines later in the panel. The boot
+        // runs detached — auto-open lands the panel on this plan when the
+        // session starts, and failures surface as the sessionReady error push.
+        const planner = this.requirePlanner();
+        const plan = await planner.createPlan({
+          brief: payload.brief,
+          aspectIds: payload.aspectIds,
+          contextRoots: payload.contextRoots,
+          ...(payload.notes === undefined ? {} : { notes: payload.notes }),
+          ...(payload.title === undefined ? {} : { title: payload.title }),
+          ...(payload.taskId === undefined ? {} : { taskId: payload.taskId })
+        });
+        const summary = (await planner.listPlans()).find((candidate) => candidate.planId === plan.planId);
+        if (summary === undefined) {
+          throw new Error("The plan was created but could not be read back.");
+        }
+        this.respond(request.requestId, { type: "planner.create", plan: summary });
+        void planner.startPlanSession(plan.planId, payload.model === undefined ? undefined : payload.model)
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error("plan tab create boot failed", { planId: plan.planId, error: message });
+            this.push({ type: "planner.sessionReady", planId: plan.planId, sessionId: "", ok: false, error: message });
+          });
+        return;
+      }
+      case "planner.plans": {
+        // The Plan tab's switcher + rail source (summaries carry sessionId).
+        const plans = await this.requirePlanner().listPlans();
+        this.respond(request.requestId, { type: "planner.plans", plans });
+        return;
+      }
+      case "planner.startSession": {
+        // Ack-then-push: the boot outlives the request timeout. Success lands
+        // as planner.sessionReady via the bus; only failure is pushed here.
+        const planner = this.requirePlanner();
+        this.respond(request.requestId, { type: "planner.startSession", accepted: true });
+        void planner.startPlanSession(payload.planId, payload.model === undefined ? undefined : payload.model)
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error("plan tab session boot failed", { planId: payload.planId, error: message });
+            this.push({ type: "planner.sessionReady", planId: payload.planId, sessionId: "", ok: false, error: message });
+          });
+        return;
+      }
+      case "planner.sendTurn": {
+        const planner = this.requirePlanner();
+        this.respond(request.requestId, { type: "planner.sendTurn", accepted: true });
+        void planner.sendPlanTurn(payload.planId, payload.prompt).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.error("plan tab turn failed", { planId: payload.planId, error: message });
+          this.push({ type: "planner.sessionReady", planId: payload.planId, sessionId: "", ok: false, error: message });
+        });
         return;
       }
       case "taskBoard.open": {
@@ -1767,6 +1832,13 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       throw new Error(this.backend.reason);
     }
     return this.backend.workInsights;
+  }
+
+  private requirePlanner(): PlannerAppService {
+    if (!this.backend.available) {
+      throw new Error(this.backend.reason);
+    }
+    return this.backend.planner;
   }
 
   /** Refreshed summary (with current links, columnId/doneAt, and subtasks) for one task after a mutation. */

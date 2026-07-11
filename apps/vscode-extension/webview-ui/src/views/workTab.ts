@@ -1261,6 +1261,15 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       });
       actions.append(review);
     }
+    // Plan: the task-first planning entry (plans belong to tasks). Flips the
+    // Plan tab into create mode with this task preselected.
+    const planAction = button("Plan", "small task-plan");
+    planAction.title = "Start a plan for this task in the Plan tab";
+    planAction.addEventListener("click", () => {
+      ctx.bridge.plan.startForTask(task.taskId);
+      ctx.bridge.switchTab("plan");
+    });
+    actions.append(planAction);
     const linkChat = button("Link current chat", "small");
     linkChat.disabled = state.selectedSessionId === null;
     linkChat.title = state.selectedSessionId === null

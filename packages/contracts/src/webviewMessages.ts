@@ -151,11 +151,12 @@ export type PanelRequestPayload =
   | { readonly type: "subtask.start"; readonly subtaskId: string; readonly force?: boolean }
   | { readonly type: "task.start"; readonly taskId: string }
   | { readonly type: "taskBoard.open" }
-  | { readonly type: "planner.open" }
+  | { readonly type: "planner.open"; readonly planId?: string }
   | { readonly type: "planner.plans" }
   | { readonly type: "planner.state"; readonly planId: string }
-  | { readonly type: "planner.create"; readonly brief: string; readonly aspectIds: readonly string[]; readonly contextRoots: readonly string[]; readonly notes?: string; readonly title?: string; readonly model?: ChatModelSelection }
-  | { readonly type: "planner.updateIntake"; readonly planId: string; readonly title?: string; readonly brief?: string; readonly aspectIds?: readonly string[]; readonly contextRoots?: readonly string[]; readonly notes?: string }
+  | { readonly type: "planner.create"; readonly brief: string; readonly aspectIds: readonly string[]; readonly contextRoots: readonly string[]; readonly notes?: string; readonly title?: string; readonly taskId?: string; readonly model?: ChatModelSelection }
+  /** `taskId: ""` clears the task link (back to an orphan plan). */
+  | { readonly type: "planner.updateIntake"; readonly planId: string; readonly title?: string; readonly brief?: string; readonly aspectIds?: readonly string[]; readonly contextRoots?: readonly string[]; readonly notes?: string; readonly taskId?: string }
   | { readonly type: "planner.archive"; readonly planId: string; readonly archived: boolean }
   | { readonly type: "planner.startSession"; readonly planId: string; readonly model?: ChatModelSelection }
   | { readonly type: "planner.sendTurn"; readonly planId: string; readonly prompt: string }
@@ -783,6 +784,8 @@ export type PanelPushPayload =
   | { readonly type: "board.changed" }
   /** Coarse invalidation: the planner webview refetches planner.state. */
   | { readonly type: "planner.changed"; readonly planId: string }
+  /** Panel navigation: another surface asked the panel to show this plan. */
+  | { readonly type: "planner.showPlan"; readonly planId: string }
   /** Terminal result of a planner.create / planner.startSession boot. */
   | { readonly type: "planner.sessionReady"; readonly planId: string; readonly sessionId: string; readonly ok: boolean; readonly error?: string };
 
@@ -1357,10 +1360,14 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (!isReviewThreadStatus(status)) return null;
       return { type: "review.setCommentStatus", commentId, status };
     }
-    case "planner.open":
     case "planner.plans":
     case "planner.aspects.list":
       return { type: payload["type"] };
+    case "planner.open": {
+      const planId = payload["planId"];
+      if (planId !== undefined && !isBoundedString(planId, MAX_ID_LENGTH)) return null;
+      return { type: "planner.open", ...(planId === undefined ? {} : { planId }) };
+    }
     case "planner.state":
     case "planner.sendInstructions": {
       const planId = payload["planId"];
@@ -1378,6 +1385,8 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (notes !== undefined && !isBoundedText(notes, MAX_PROMPT_LENGTH)) return null;
       const title = payload["title"];
       if (title !== undefined && !isBoundedString(title, MAX_NAME_LENGTH)) return null;
+      const taskId = payload["taskId"];
+      if (taskId !== undefined && !isBoundedString(taskId, MAX_ID_LENGTH)) return null;
       const model = parseModelSelection(payload["model"]);
       if (model === null) return null;
       return {
@@ -1387,6 +1396,7 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
         contextRoots,
         ...(notes === undefined ? {} : { notes }),
         ...(title === undefined ? {} : { title }),
+        ...(taskId === undefined ? {} : { taskId }),
         ...(model === undefined ? {} : { model })
       };
     }
@@ -1403,6 +1413,9 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (contextRoots === null) return null;
       const notes = payload["notes"];
       if (notes !== undefined && !isBoundedText(notes, MAX_PROMPT_LENGTH)) return null;
+      // An empty taskId clears the link back to an orphan plan.
+      const taskId = payload["taskId"];
+      if (taskId !== undefined && !isBoundedText(taskId, MAX_ID_LENGTH)) return null;
       return {
         type: "planner.updateIntake",
         planId,
@@ -1410,7 +1423,8 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
         ...(brief === undefined ? {} : { brief }),
         ...(aspectIds === undefined ? {} : { aspectIds }),
         ...(contextRoots === undefined ? {} : { contextRoots }),
-        ...(notes === undefined ? {} : { notes })
+        ...(notes === undefined ? {} : { notes }),
+        ...(taskId === undefined ? {} : { taskId })
       };
     }
     case "planner.archive": {

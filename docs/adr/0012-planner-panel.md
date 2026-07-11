@@ -24,6 +24,11 @@ Planning becomes a place, not a mode. A single editor-area Planner panel
   registry** (seeded with ten angles, extensible as data — plus optional
   read-only repo packs in `.drydock/planner-aspects.json`), read-only context
   roots, pre-information, at most one chat session, artifacts, annotations.
+- Plans, like edits, **generally belong to tasks** (`task_id`, nullable):
+  every create surface leads with a task picker (orphans allowed, discouraged
+  in copy), the owning task's title chips plan headers and lists, and each
+  session boot links the plan's session to the task so board chips and task
+  history see planning work like any other.
 - The agent writes into its workspace `plan/` directory (a host bind mount —
   crash-safe by construction). After every turn and on panel open the host
   **collects** artifacts into the durable store: text kinds inline in SQLite,

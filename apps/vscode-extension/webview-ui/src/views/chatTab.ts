@@ -2000,7 +2000,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       const lead = el("div", "chat-empty-lead");
       lead.textContent = "Ask the isolated agent to start.";
       const modes = el("div", "chat-empty-modes");
-      modes.textContent = "Chats edit your mounted files · planning lives in the Planner panel";
+      modes.textContent = "Edit sessions change your mounted files · planning lives in the Plan tab";
       empty.append(lead, modes);
       chatLog.append(empty);
       return;

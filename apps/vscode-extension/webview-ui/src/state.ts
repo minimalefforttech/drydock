@@ -41,7 +41,7 @@ declare function acquireVsCodeApi(): VsCodeApi;
 
 export const vscode: VsCodeApi = acquireVsCodeApi();
 
-export type TabId = "chat" | "work" | "system";
+export type TabId = "work" | "plan" | "chat" | "system";
 export type ThinkingEffort = "low" | "medium" | "high";
 
 // The transcript message/group model moved to the shared chat module (ADR
@@ -124,6 +124,8 @@ export interface AppState {
   lastIsolation: IsolationSummary | null;
   workspacePolicy: WorkspacePolicyState | null;
   selectedWorkspaceSetId: string;
+  /** The plan whose session the Plan tab's rail follows; null = most recent. */
+  planTabPlanId: string | null;
   openFolderNames: readonly string[];
   /** The window's active editor (host-reported), offered as a composer
    * attachment; null when none. Transient — not persisted. */
@@ -177,6 +179,7 @@ function freshState(): AppState {
     lastIsolation: null,
     workspacePolicy: null,
     selectedWorkspaceSetId: "",
+    planTabPlanId: null,
     openFolderNames: [],
     activeEditor: null,
     tasks: [],
@@ -188,7 +191,7 @@ function freshState(): AppState {
 }
 
 function isTabId(value: unknown): value is TabId {
-  return value === "chat" || value === "work" || value === "system";
+  return value === "work" || value === "plan" || value === "chat" || value === "system";
 }
 
 function isTaskNote(value: unknown): value is TaskNote {
@@ -278,6 +281,7 @@ export function restore(): AppState {
   state.lastIsolation = (raw["lastIsolation"] as IsolationSummary | null | undefined) ?? null;
   state.workspacePolicy = (raw["workspacePolicy"] as WorkspacePolicyState | null | undefined) ?? null;
   if (typeof raw["selectedWorkspaceSetId"] === "string") state.selectedWorkspaceSetId = raw["selectedWorkspaceSetId"];
+  if (typeof raw["planTabPlanId"] === "string") state.planTabPlanId = raw["planTabPlanId"];
   // Legacy `plans`/`selectedPlanId` keys (retired Stage-5 plan gating) are
   // ignored: old persisted blobs simply drop them.
   if (Array.isArray(raw["openFolderNames"])) {
@@ -336,6 +340,7 @@ export function persist(state: AppState): void {
     lastIsolation: state.lastIsolation,
     workspacePolicy: state.workspacePolicy,
     selectedWorkspaceSetId: state.selectedWorkspaceSetId,
+    planTabPlanId: state.planTabPlanId,
     openFolderNames: state.openFolderNames,
     tasks: state.tasks,
     boardColumns: state.boardColumns,

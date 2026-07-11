@@ -35,7 +35,9 @@ export type ProductBusEvent =
   | { readonly kind: "card-entered-done"; readonly taskId: TaskId; readonly subtaskId: SubtaskId }
   | { readonly kind: "board-changed" }
   /** Planner (ADR 0012): a plan, its artifacts, or its annotations changed. */
-  | { readonly kind: "planner-changed"; readonly planId: PlanId };
+  | { readonly kind: "planner-changed"; readonly planId: PlanId }
+  /** A plan's session booted (new or revived): surfaces auto-open the panel. */
+  | { readonly kind: "planner-session-started"; readonly planId: PlanId; readonly sessionId: SessionId };
 
 export type ProductBusHandler = (event: ProductBusEvent) => void;
 

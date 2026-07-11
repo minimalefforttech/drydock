@@ -427,6 +427,12 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     blobs: new ContentAddressedBlobStore(path.join(stateRootPath, "artifacts", "blobs")),
     sessions: appService,
     chat: chatService,
+    // Plans belong to tasks: the plan's session is linked to its owning task
+    // on every boot, and summaries resolve task titles for display.
+    tasks: {
+      link: (taskId, target) => tasks.link(taskId, target),
+      listTaskSummaries: () => tasks.listTaskSummaries()
+    },
     bus,
     ...(options.plannerAspectOverlays === undefined ? {} : { aspectOverlays: options.plannerAspectOverlays })
   });

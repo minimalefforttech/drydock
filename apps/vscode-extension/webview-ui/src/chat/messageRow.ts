@@ -288,6 +288,55 @@ export function defaultCopyText(text: string, copyButton: HTMLButtonElement): vo
 }
 
 // ---------------------------------------------------------------------------
+// Briefed user bodies (plan rails)
+// ---------------------------------------------------------------------------
+
+const BRIEFING_START = "[host briefing";
+const BRIEFING_END = "[end host briefing";
+
+/**
+ * First turns carry host briefings (the session mount briefing and the
+ * planner's own). Collapses any leading `[host briefing…]…[end host briefing…]`
+ * spans into disclosures so a rail leads with what was actually asked. Plain
+ * textContent rendering throughout (no file tokens — the Chat tab supplies its
+ * richer renderUserBody itself).
+ */
+export function renderBriefedUserBody(container: HTMLElement, text: string): void {
+  let rest = text;
+  for (let guard = 0; guard < 3; guard += 1) {
+    const start = rest.indexOf(BRIEFING_START);
+    if (start === -1) break;
+    const endMark = rest.indexOf(BRIEFING_END, start);
+    if (endMark === -1) break;
+    const endLine = rest.indexOf("]", endMark);
+    if (endLine === -1) break;
+    const briefing = rest.slice(start, endLine + 1);
+    const before = rest.slice(0, start).trim();
+    if (before.length > 0) {
+      const lead = el("div", "host-briefing-remainder");
+      lead.textContent = before;
+      container.append(lead);
+    }
+    const disclosure = document.createElement("details");
+    disclosure.className = "host-briefing-detail";
+    const summary = document.createElement("summary");
+    summary.textContent = "Host briefing";
+    const pre = document.createElement("pre");
+    pre.className = "host-briefing-pre";
+    pre.textContent = briefing;
+    disclosure.append(summary, pre);
+    container.append(disclosure);
+    rest = rest.slice(endLine + 1);
+  }
+  const remainder = rest.trim();
+  if (remainder.length > 0 || container.childElementCount === 0) {
+    const body = el("div", "host-briefing-remainder");
+    body.textContent = remainder.length > 0 ? remainder : text;
+    container.append(body);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Turn indicators
 // ---------------------------------------------------------------------------
 

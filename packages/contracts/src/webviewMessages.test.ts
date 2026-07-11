@@ -70,6 +70,8 @@ test("retired planDocs payloads are rejected at the boundary (ADR 0012)", () => 
 
 test("planner payloads validate ids, arrays, anchors, and statuses", () => {
   assert.ok(parsePanelRequest(wrap({ type: "planner.open" })));
+  assert.ok(parsePanelRequest(wrap({ type: "planner.open", planId: "plan-1" })));
+  assert.equal(parsePanelRequest(wrap({ type: "planner.open", planId: "" })), null);
   assert.ok(parsePanelRequest(wrap({ type: "planner.plans" })));
   assert.ok(parsePanelRequest(wrap({ type: "planner.aspects.list" })));
   assert.ok(parsePanelRequest(wrap({ type: "planner.state", planId: "plan-1" })));
@@ -93,7 +95,12 @@ test("planner payloads validate ids, arrays, anchors, and statuses", () => {
   assert.equal(parsePanelRequest(wrap({ type: "planner.create", brief: "b", aspectIds: [42], contextRoots: [] })), null);
   assert.equal(parsePanelRequest(wrap({ type: "planner.create", brief: "b", aspectIds: [], contextRoots: [], model: { providerId: "" } })), null);
 
+  assert.ok(parsePanelRequest(wrap({ type: "planner.create", brief: "b", aspectIds: [], contextRoots: [], taskId: "t-1" })));
+  assert.equal(parsePanelRequest(wrap({ type: "planner.create", brief: "b", aspectIds: [], contextRoots: [], taskId: "" })), null);
   assert.ok(parsePanelRequest(wrap({ type: "planner.updateIntake", planId: "plan-1", notes: "" })));
+  // taskId admits "" on update: it clears the link back to an orphan plan.
+  assert.ok(parsePanelRequest(wrap({ type: "planner.updateIntake", planId: "plan-1", taskId: "" })));
+  assert.ok(parsePanelRequest(wrap({ type: "planner.updateIntake", planId: "plan-1", taskId: "t-2" })));
   assert.equal(parsePanelRequest(wrap({ type: "planner.updateIntake", planId: "plan-1", brief: "" })), null);
   assert.ok(parsePanelRequest(wrap({ type: "planner.archive", planId: "plan-1", archived: true })));
   assert.equal(parsePanelRequest(wrap({ type: "planner.archive", planId: "plan-1", archived: "yes" })), null);

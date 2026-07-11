@@ -15,7 +15,7 @@
  * `plan/<aspectId>/` collection subdirectory, so it stays a plain slug string.
  */
 
-import type { PlanAnnotationId, PlanArtifactId, PlanId, SessionId } from "./ids.js";
+import type { PlanAnnotationId, PlanArtifactId, PlanId, SessionId, TaskId } from "./ids.js";
 
 // ---------------------------------------------------------------------------
 // Records
@@ -44,6 +44,12 @@ export interface PlanRecord {
   readonly notes: string;
   readonly status: PlanStatus;
   readonly sessionId: SessionId | null;
+  /**
+   * The owning task (ADR 0006 doctrine: plans, like edits, generally belong to
+   * tasks). Null = an orphan plan — allowed, but the surfaces discourage it.
+   * The plan's session is auto-linked to this task on every boot.
+   */
+  readonly taskId: TaskId | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -341,6 +347,9 @@ export interface PlanSummary {
   readonly notes: string;
   readonly status: PlanStatus;
   readonly sessionId: string | null;
+  readonly taskId: string | null;
+  /** Resolved for display when the owning task still exists. */
+  readonly taskTitle?: string;
   readonly artifactCount: number;
   readonly openAnnotationCount: number;
   readonly updatedAt: string;
@@ -407,6 +416,7 @@ export interface PlanStoreUpdate {
   readonly notes?: string;
   readonly status?: PlanStatus;
   readonly sessionId?: SessionId | null;
+  readonly taskId?: TaskId | null;
   readonly updatedAt?: string;
 }
 

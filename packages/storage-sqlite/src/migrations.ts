@@ -492,6 +492,9 @@ export function applyMigrations(connection: SqliteConnection): void {
     );
   `);
   seedPlannerAspects(connection);
+  // Plans belong to tasks (ADR 0006 doctrine extended to planning): additive
+  // and nullable — existing rows stay valid as orphan plans.
+  ensureColumn(connection, "planner_plans", "task_id", "TEXT NULL");
 }
 
 /**

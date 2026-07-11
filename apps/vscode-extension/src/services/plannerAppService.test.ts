@@ -88,6 +88,8 @@ interface Harness {
   readonly sessions: FakeSessions;
   readonly busEvents: ProductBusEvent[];
   readonly setWorkspace: (dir: string | null) => void;
+  /** Every tasks-port link call, in order (plans belong to tasks). */
+  readonly taskLinks: { taskId: string; sessionId: string }[];
   readonly dir: string;
   readonly connection: SqliteConnection;
 }
@@ -101,6 +103,7 @@ async function makeHarness(): Promise<Harness> {
   const bus = new ProductEventBus();
   bus.subscribe((event) => busEvents.push(event));
   let workspaceDir: string | null = null;
+  const taskLinks: { taskId: string; sessionId: string }[] = [];
   const service = new PlannerAppService({
     logger: new NullLogger(),
     clock: new TickingClock(),
@@ -112,6 +115,12 @@ async function makeHarness(): Promise<Harness> {
     blobs: new ContentAddressedBlobStore(path.join(dir, "blobs")),
     sessions,
     chat: { getSessionWorkspacePath: () => workspaceDir, getSession: async () => null },
+    tasks: {
+      link: async (taskId, target) => {
+        taskLinks.push({ taskId, sessionId: target.sessionId });
+      },
+      listTaskSummaries: async () => [{ taskId: "task-7", title: "OIDC migration" }]
+    },
     bus
   });
   return {
@@ -119,6 +128,7 @@ async function makeHarness(): Promise<Harness> {
     sessions,
     busEvents,
     setWorkspace: (value) => { workspaceDir = value; },
+    taskLinks,
     dir,
     connection
   };
@@ -173,6 +183,34 @@ test("create → start boots a plan-mode session, hydrates, and sends the briefi
     assert.ok(briefing.includes("plan/architecture/"));
     assert.ok(briefing.includes("Server-side sessions only."));
     assert.ok(briefing.includes("Testing & verification"));
+  } finally {
+    harness.connection.close();
+    await rm(harness.dir, { recursive: true, force: true });
+  }
+});
+
+test("a task-owned plan links its session to the task on boot; orphans never link", async () => {
+  const harness = await makeHarness();
+  try {
+    const owned = await harness.service.createPlan({ brief: "task-first", aspectIds: [], contextRoots: [], taskId: "task-7" });
+    assert.equal(owned.taskId, "task-7");
+    const workspace = path.join(harness.dir, "ws-task");
+    await mkdir(workspace, { recursive: true });
+    harness.setWorkspace(workspace);
+    const sessionId = await harness.service.startPlanSession(owned.planId);
+    assert.deepEqual(harness.taskLinks, [{ taskId: "task-7", sessionId }]);
+
+    // Summaries resolve the owning task's title for display.
+    const summary = (await harness.service.listPlans()).find((entry) => entry.planId === owned.planId);
+    assert.ok(summary);
+    assert.equal(summary.taskId, "task-7");
+    assert.equal(summary.taskTitle, "OIDC migration");
+
+    // An orphan plan boots without ever touching the tasks port.
+    const orphan = await harness.service.createPlan({ brief: "orphan", aspectIds: [], contextRoots: [] });
+    assert.equal(orphan.taskId, null);
+    await harness.service.startPlanSession(orphan.planId);
+    assert.equal(harness.taskLinks.length, 1);
   } finally {
     harness.connection.close();
     await rm(harness.dir, { recursive: true, force: true });

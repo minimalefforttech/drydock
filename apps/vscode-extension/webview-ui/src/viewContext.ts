@@ -40,6 +40,18 @@ export interface WorkTabView {
   renderAttention(): void;
 }
 
+export interface PlanTabView {
+  readonly root: HTMLElement;
+  render(): void;
+  /** Refetches the plan list + rail timeline on tab activation. */
+  refresh(): void;
+  /**
+   * Task-first entry (a task card's "Plan" action): flips the composer to
+   * create mode with the task preselected. The caller switches the tab.
+   */
+  startForTask(taskId: string): void;
+}
+
 export interface SystemTabView {
   readonly root: HTMLElement;
   render(): void;
@@ -55,6 +67,7 @@ export interface SystemTabView {
 export interface PanelBridge {
   switchTab(tab: TabId): void;
   chat: ChatTabView;
+  plan: PlanTabView;
   work: WorkTabView;
   system: SystemTabView;
 }

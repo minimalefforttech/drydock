@@ -63,6 +63,7 @@ What's shipped and what's next for Drydock.
 - Legacy cleanup: the sidebar plan-block approval flow and the per-session
   plan-docs surface are retired (ADR 0012); the docs-review backend remains to
   fold into its replacement.
-- Planner follow-ups: a board "Plan this task" action creating a pre-linked
-  plan, and an "Export plan…" command materializing a plan's artifacts to a
-  chosen folder.
+- Planner follow-ups: an "Export plan…" command materializing a plan's
+  artifacts to a chosen folder. (Task ownership shipped: plans carry `task_id`,
+  create surfaces lead with a task picker, and task cards have a "Plan"
+  action — see docs/design/planner.md.)

@@ -286,6 +286,21 @@ button {
   flex-wrap: wrap;
 }
 .pl-title { font-weight: 650; font-size: 1.05em; }
+/* The owning task (plans belong to tasks), pinned beside the title. */
+.pl-task-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--pl-mono);
+  font-size: 0.72em;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--pl-line);
+  color: var(--pl-muted);
+}
+.pl-task-select { max-width: 100%; }
 .pl-session-status { display: inline-flex; align-items: center; gap: 6px; color: var(--pl-muted); font-size: 0.88em; }
 
 .pl-body { flex: 1; display: flex; min-height: 0; }

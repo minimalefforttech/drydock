@@ -793,6 +793,9 @@
       case "taskReview.open":
         harnessLog(`taskReview.open ${String(payload.taskId)}`);
         return respond(requestId, { type, accepted: true });
+      case "planner.open":
+        harnessLog(`planner.open${payload.planId ? ` ${String(payload.planId)}` : ""}`);
+        return respond(requestId, { type, accepted: true });
       case "planner.plans":
         return respond(requestId, { type, plans: plannerPlans.map(plannerPlanSummary) });
       case "planner.aspects.list":
@@ -814,12 +817,13 @@
           notes: payload.notes ?? "",
           status: "draft",
           sessionId: null,
+          taskId: payload.taskId ?? null,
           updatedAt: new Date().toISOString()
         };
         plannerPlans.unshift(plan);
         plannerArtifacts[plan.planId] = [];
         plannerAnnotations[plan.planId] = [];
-        harnessLog(`planner.create ${plan.planId} aspects=${String(payload.aspectIds.length)} roots=${String(payload.contextRoots.length)}`);
+        harnessLog(`planner.create ${plan.planId} aspects=${String(payload.aspectIds.length)} roots=${String(payload.contextRoots.length)} task=${plan.taskId ?? "none"}`);
         respond(requestId, { type, plan: plannerPlanSummary(plan) });
         setTimeout(() => {
           plan.sessionId = "s-live";
@@ -836,6 +840,7 @@
         if (payload.aspectIds !== undefined) plan.aspectIds = payload.aspectIds;
         if (payload.contextRoots !== undefined) plan.contextRoots = payload.contextRoots;
         if (payload.notes !== undefined) plan.notes = payload.notes;
+        if (payload.taskId !== undefined) plan.taskId = payload.taskId === "" ? null : payload.taskId;
         plan.updatedAt = new Date().toISOString();
         return respond(requestId, { type, plan: plannerPlanSummary(plan) });
       }
@@ -1032,13 +1037,15 @@
     "pl-2": []
   };
   const plannerPlans = [
-    { planId: "pl-1", title: "Auth service revamp", brief: "Replace the legacy cookie stack with OIDC; sessions stay server-side.", aspectIds: ["architecture", "ui-ux", "testing"], contextRoots: ["C:\\hitl\\asset_api\\src"], notes: "Server-side sessions only.", status: "active", sessionId: "s-live", updatedAt: iso(5) },
-    { planId: "pl-2", title: "Docs portal spike", brief: "A static docs portal for the pipeline team.", aspectIds: ["requirements"], contextRoots: [], notes: "", status: "archived", sessionId: null, updatedAt: iso(4000) }
+    { planId: "pl-1", title: "Auth service revamp", brief: "Replace the legacy cookie stack with OIDC; sessions stay server-side.", aspectIds: ["architecture", "ui-ux", "testing"], contextRoots: ["C:\\hitl\\asset_api\\src"], notes: "Server-side sessions only.", status: "active", sessionId: "s-live", taskId: "t-1", updatedAt: iso(5) },
+    { planId: "pl-2", title: "Docs portal spike", brief: "A static docs portal for the pipeline team.", aspectIds: ["requirements"], contextRoots: [], notes: "", status: "archived", sessionId: null, taskId: null, updatedAt: iso(4000) }
   ];
   function plannerPlanSummary(plan) {
     const annotations = plannerAnnotations[plan.planId] ?? [];
+    const taskTitle = plan.taskId === null ? undefined : tasks.find((task) => task.taskId === plan.taskId)?.title;
     return {
       ...plan,
+      ...(taskTitle === undefined ? {} : { taskTitle }),
       artifactCount: (plannerArtifacts[plan.planId] ?? []).length,
       openAnnotationCount: annotations.filter((annotation) => annotation.status === "open").length
     };

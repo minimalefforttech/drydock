@@ -43,6 +43,13 @@ export class PlannerPanelProvider {
   private sequence = 0;
   /** Sessions belonging to plans this panel has served; chat pushes forward only for these. */
   private readonly watchedSessions = new Set<string>();
+  /**
+   * A plan another surface asked us to show before the webview booted. The
+   * webview always fetches planner.plans on boot; the pending navigation
+   * flushes as a planner.showPlan push right after that response, so it can
+   * never race a not-yet-listening document.
+   */
+  private pendingShowPlanId: string | null = null;
   /** planner.changed debounce: collection bursts collapse into one push per plan. */
   private readonly pendingChangedPlanIds = new Set<string>();
   private changedDebounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -66,6 +73,12 @@ export class PlannerPanelProvider {
     switch (event.kind) {
       case "planner-changed":
         this.scheduleChanged(event.planId);
+        return;
+      case "planner-session-started":
+        // Watch the session as soon as it exists so its chat stream forwards,
+        // and tell the webview the boot completed (the ack-then-push contract).
+        this.watchedSessions.add(event.sessionId);
+        this.push({ type: "planner.sessionReady", planId: event.planId, sessionId: event.sessionId, ok: true });
         return;
       case "agent-event":
         if (!this.watchedSessions.has(event.sessionId)) return;
@@ -113,10 +126,16 @@ export class PlannerPanelProvider {
     }, 200);
   }
 
-  async open(): Promise<void> {
+  async open(planId?: string): Promise<void> {
     if (this.panel !== undefined) {
       this.panel.reveal(vscode.ViewColumn.Active);
+      if (planId !== undefined) {
+        this.push({ type: "planner.showPlan", planId });
+      }
       return;
+    }
+    if (planId !== undefined) {
+      this.pendingShowPlanId = planId;
     }
     const panel = vscode.window.createWebviewPanel(
       "drydock.planner",
@@ -138,6 +157,7 @@ export class PlannerPanelProvider {
       this.panel = undefined;
       this.watchedSessions.clear();
       this.pendingChangedPlanIds.clear();
+      this.pendingShowPlanId = null;
       if (this.changedDebounceTimer !== undefined) {
         clearTimeout(this.changedDebounceTimer);
         this.changedDebounceTimer = undefined;
@@ -172,6 +192,12 @@ export class PlannerPanelProvider {
       case "planner.plans": {
         const plans = await backend.planner.listPlans();
         this.respond(request.requestId, { type: "planner.plans", plans });
+        if (this.pendingShowPlanId !== null) {
+          // The webview is provably alive (it just asked); deliver the
+          // navigation another surface queued before the panel existed.
+          this.push({ type: "planner.showPlan", planId: this.pendingShowPlanId });
+          this.pendingShowPlanId = null;
+        }
         return;
       }
       case "planner.state": {
@@ -189,7 +215,8 @@ export class PlannerPanelProvider {
           aspectIds: payload.aspectIds,
           contextRoots: payload.contextRoots,
           ...(payload.notes === undefined ? {} : { notes: payload.notes }),
-          ...(payload.title === undefined ? {} : { title: payload.title })
+          ...(payload.title === undefined ? {} : { title: payload.title }),
+          ...(payload.taskId === undefined ? {} : { taskId: payload.taskId })
         });
         const summary = (await backend.planner.listPlans()).find((candidate) => candidate.planId === plan.planId);
         if (summary === undefined) {
@@ -206,7 +233,9 @@ export class PlannerPanelProvider {
           ...(payload.brief === undefined ? {} : { brief: payload.brief }),
           ...(payload.aspectIds === undefined ? {} : { aspectIds: payload.aspectIds }),
           ...(payload.contextRoots === undefined ? {} : { contextRoots: payload.contextRoots }),
-          ...(payload.notes === undefined ? {} : { notes: payload.notes })
+          ...(payload.notes === undefined ? {} : { notes: payload.notes }),
+          // "" clears the link back to an orphan plan.
+          ...(payload.taskId === undefined ? {} : { taskId: payload.taskId === "" ? null : payload.taskId })
         });
         const summary = (await backend.planner.listPlans()).find((candidate) => candidate.planId === payload.planId);
         if (summary === undefined) {
@@ -299,6 +328,12 @@ export class PlannerPanelProvider {
         this.respond(request.requestId, { type: "planner.aspects.archive", aspects });
         return;
       }
+      case "task.list": {
+        // The intake's task picker (plans belong to tasks, ADR 0006 doctrine).
+        const tasks = await backend.tasks.listTaskSummaries();
+        this.respond(request.requestId, { type: "task.list", tasks });
+        return;
+      }
       case "session.timeline": {
         // Rail backfill: same replay mechanism the Chat tab uses.
         const lines = await backend.appService.getChatTimeline(payload.sessionId, payload.fromSequence);
@@ -327,11 +362,10 @@ export class PlannerPanelProvider {
    * planner.sessionReady push.
    */
   private bootDetached(backend: BackendReady, planId: string, model?: { providerId: string; model?: string }): void {
+    // Success is announced via the bus planner-session-started event (every
+    // provider translates it to the planner.sessionReady push); only the
+    // failure path is local to the surface that initiated the boot.
     void backend.planner.startPlanSession(planId, model)
-      .then((sessionId) => {
-        this.watchedSessions.add(sessionId);
-        this.push({ type: "planner.sessionReady", planId, sessionId, ok: true });
-      })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.error("planner session boot failed", { planId, error: message });

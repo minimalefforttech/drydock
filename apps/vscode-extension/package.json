@@ -2,7 +2,7 @@
   "name": "drydock",
   "displayName": "Drydock",
   "description": "Drydock \u2014 the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
-  "version": "0.4.0",
+  "version": "0.4.3",
   "publisher": "local",
   "private": true,
   "type": "module",
