@@ -39,6 +39,8 @@ export interface IsolatedRunWorkflowOptions {
   readonly cleanup: RuntimeCleanupService;
   readonly agentAdapter: AgentAdapter;
   readonly eventStore: EventStore;
+  /** Re-checks current policy immediately before prompt content leaves the host. */
+  readonly authorizePrompt?: () => void | Promise<void>;
 }
 
 export class IsolatedRunWorkflow {
@@ -63,21 +65,32 @@ export class IsolatedRunWorkflow {
 
     const events: AgentEvent[] = [];
     let cleanupStatus: IsolatedRunResult["cleanupStatus"] = "kept";
+    let connection: Awaited<ReturnType<AgentAdapter["startProtocol"]>> | undefined;
     try {
-      const connection = await this.options.agentAdapter.startProtocol({
+      connection = await this.options.agentAdapter.startProtocol({
         sessionId,
         agentId,
         agentRole: "worker",
         runtime,
         transport: "codex-exec-json"
       });
+      await this.options.authorizePrompt?.();
       const runId = await this.options.agentAdapter.sendPrompt(connection, { text: request.prompt, cwd: runtime.workspacePath });
       for await (const event of this.options.agentAdapter.streamEvents(connection, runId)) {
         events.push(event);
         await this.options.eventStore.appendAgentEvent(event);
       }
-      await this.options.agentAdapter.stop(connection, "isolated-run-complete");
     } finally {
+      if (connection !== undefined) {
+        try {
+          await this.options.agentAdapter.stop(connection, "isolated run finished");
+        } catch (error) {
+          this.options.logger.warn("isolated run protocol cleanup failed", {
+            sessionId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
       if (request.keepRuntime !== true) {
         const cleanup = await this.options.cleanup.cleanupRuntime(runtime.runtimeId, "graceful");
         cleanupStatus = cleanup.status === "removed" ? "removed" : "failed";

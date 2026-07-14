@@ -3,8 +3,8 @@
 Subagent visibility and the role-session workflows below ship together.
 Codex support is REQUIRED in v1; the design uses one common
 normalized standard across providers, degrading per provider with honest UI
-states rather than silent gaps. The hierarchy view is a `[Chat|Agents]` toggle
-in Chat. Related: `task-chat-and-agent-visibility.md`, roadmap, the role-based extension points
+states rather than silent gaps. The hierarchy view is a `[Chat|Agents]` lens
+toggle inside the Edit transcript. Related: `task-chat-and-agent-visibility.md`, roadmap, the role-based extension points
 that let panels contribute `sessionChips`/`sessionMetaSegments`/
 `sessionLoudness` per session role, `task-review.md` (role-flow-view
 deferral), `threat-model.md` (subagent access rule), `workflow-scenarios.md`
@@ -213,7 +213,7 @@ cannot occur.
 
 ## UX
 
-**Transcript (Chat tab) — collapsible subagent groups.** An `agent.spawn`
+**Transcript (Edit tab, Chat lens) — collapsible subagent groups.** An `agent.spawn`
 line inserts a group block at its chronological position in the transcript
 flow. Header: `⑂ <label> · <model/type chip> · <status> · N calls ·
 duration` — collapsed by default, counts/last-activity tick live while
@@ -229,7 +229,7 @@ assistant stream (the misattribution fix). Tier `lifecycle` renders the same
 header/prompt/result card with an honest no-feed note. The flat Diagnostics
 section keeps receiving everything, prefixed `[<label>]`.
 
-**Agents lens — the alternate view (decided: toggle in Chat).** A
+**Agents lens — the alternate Edit view.** A
 `[Chat | Agents]` segmented toggle on the transcript region. The Agents lens
 renders the tree: one row per node, indent = depth, status dot + label +
 model/type chip + counts + last activity + duration (+ tokens where

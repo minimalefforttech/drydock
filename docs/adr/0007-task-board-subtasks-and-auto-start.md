@@ -1,8 +1,12 @@
-# 0007 - Task board, subtasks, and auto-start
+# 0007 - Task board and bounded subtask workflows
 
 Status: Accepted - 2026-07-07
 
-Refs: `docs/design/task-board-and-subtasks.md`, `docs/design/work-management.md`, `packages/contracts/src/tasks.ts`, `packages/work-management/src/subtaskOrchestrator.ts`, `packages/contracts/src/webviewMessages.ts`
+Refs: `docs/design/task-board-and-subtasks.md`, `docs/design/work-management.md`,
+0013 (fleet presentation), 0015 (bounded orchestration),
+`packages/contracts/src/tasks.ts`,
+`packages/work-management/src/subtaskOrchestrator.ts`,
+`packages/contracts/src/webviewMessages.ts`
 
 ## Context
 
@@ -41,6 +45,20 @@ Orchestration is event-driven through the product bus (`turn-completed`,
 provider, owns run lifecycle, and concurrent chat sessions carry parallel
 starts. Manual drags always win over automation and are never reverted.
 
+Recipes are data templates that create a task, ordered subtasks, their DAG,
+and per-subtask defaults such as prompt, auto-start, clone seed, model, and
+human verification. Materialization never starts work. The registry combines
+seeded product rows with read-only `.drydock/recipes.json` workspace overlays.
+Repository overlays are ignored until VS Code trusts the workspace; recipes
+cannot carry ambient access, and starting still goes through the normal clone
+and approval paths.
+
+A subtask or recipe step may require human verification. While it is in a
+done-category column without a `verifiedAt` stamp, every board density level
+shows an unmet `verify` state and offers a human `Verified` action. This is an
+honest requirement marker, not automated test machinery: it does not let an
+agent verify itself and does not move work past Review.
+
 ## Consequences
 
 Migrations map the legacy task states onto seeded default columns; column
@@ -48,5 +66,7 @@ edits are cosmetic by construction. A finishing run can fan out new runs, so
 surfaces refresh off one coarse `board-changed` push instead of fine-grained
 deltas. Auto-start fires when an upstream reaches Review — before a human has
 reviewed it — and pulling a card back out of done does not cancel dependents
-already started. In-memory run projections (`isRunning`, `lastFailureAt`)
-reset with the host; durable truth stays in the store and session links.
+already started. Live run projections may reset with the host; queued and
+parked intent is durable and restored under 0015. Recipes make repeated fleet
+shapes cheap without collapsing creation, start, review, and verification into
+one implicit action.

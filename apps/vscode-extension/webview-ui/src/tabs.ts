@@ -1,8 +1,10 @@
 /**
- * Tab bar + router for the chat panel (Tasks | Chat | System).
+ * Tab bar + router for the control panel (Tasks | Plan | Edit | System).
  *
- * Tasks is the home surface — a lean session list — and Chat is the detail view
- * entered from it (its own back button "‹" returns to Tasks).
+ * Tasks is the home surface — a lean session list. Plan is the planning
+ * session's chat rail (the Planner panel's sidebar companion, ADR 0012). Edit
+ * is the implementation chat entered from Tasks (its own back button "‹"
+ * returns there).
  *
  * Hidden tabs keep their DOM (display:none) so switching is instant and view
  * state survives. The active tab is persisted; switching notifies a callback so
@@ -16,7 +18,8 @@ import type { AppState, TabId } from "./state.js";
 
 const TABS: readonly { id: TabId; label: string }[] = [
   { id: "work", label: "Tasks" },
-  { id: "chat", label: "Chat" },
+  { id: "plan", label: "Plan" },
+  { id: "chat", label: "Edit" },
   { id: "system", label: "System" }
 ];
 
@@ -57,9 +60,9 @@ export function buildTabs(state: AppState, onActivate: (tab: TabId) => void): Ta
     buttons[id] = btn;
     bar.append(btn);
 
-    // The chat panel fills the whole viewport (flex column to the bottom); the
-    // Tasks/System panels keep their natural, document-scrolled height.
-    const panel = el("div", `tab-panel hidden${id === "chat" ? " panel-fill" : ""}`);
+    // The Edit and Plan panels fill the whole viewport (flex column to the
+    // bottom); Tasks/System keep their natural, document-scrolled height.
+    const panel = el("div", `tab-panel hidden${id === "chat" || id === "plan" ? " panel-fill" : ""}`);
     panel.setAttribute("role", "tabpanel");
     panels[id] = panel;
   }

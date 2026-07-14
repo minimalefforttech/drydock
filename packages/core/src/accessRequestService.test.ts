@@ -39,6 +39,29 @@ test("approval prepares a mount and only resolves after markApproved", async () 
   await assert.rejects(service.markApproved(request.accessRequestId, "user"), /already approved/);
 });
 
+test("Windows drive and UNC paths stay absolute and unchanged on every runner OS", async () => {
+  const service = makeService([]);
+  const drive = await service.createRequest({
+    sessionId: asId<"SessionId">("session-drive"),
+    hostPath: "C:\\shared\\lib",
+    mode: "read-only",
+    reason: "drive path"
+  });
+  const unc = await service.createRequest({
+    sessionId: asId<"SessionId">("session-unc"),
+    hostPath: "\\\\server\\share\\lib",
+    mode: "read-only",
+    reason: "UNC path"
+  });
+
+  assert.equal(drive.hostPath, "C:\\shared\\lib");
+  assert.equal(unc.hostPath, "\\\\server\\share\\lib");
+  assert.equal((await service.prepareApproval(unc.accessRequestId)).mount.hostPath, "\\\\server\\share\\lib");
+
+  await assert.rejects(service.editRequestPath(drive.accessRequestId, "C:relative"), /absolute/);
+  await assert.rejects(service.editRequestPath(drive.accessRequestId, "\\current-drive-relative"), /absolute/);
+});
+
 test("denied paths and relative paths are refused", async () => {
   const service = makeService(["C:\\secrets"]);
   await assert.rejects(service.createRequest({

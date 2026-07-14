@@ -5,9 +5,10 @@
 - Keep all AI model execution, shell commands, package managers, test runners, and generated tools outside the host system.
 - Keep all agent prompts, chat turns, model-generated outputs, provider tool calls, and AI protocol sessions inside isolated runtimes. Host-side provider checks are limited to inert detection, version, auth status, and schema/capability discovery.
 - Treat prompts, model output, web content, repository files, review comments, and external task data as untrusted input.
+- Ignore repository-supplied task-recipe prompts and automation defaults until VS Code marks the workspace trusted.
 - Treat model selection as a routing decision, not a permission decision.
 - Enforce filesystem access through runtime mounts and deny rules, not prompt instructions.
-- Make plan mode read-only at the runtime boundary.
+- Make planning sessions read-only at the runtime boundary.
 - Make implementation mode writable only for approved workspace roots or approved shared write paths.
 - Ensure clone mode never mounts the live workspace.
 - Provide no command-level permission elevation path.
@@ -49,7 +50,7 @@
 - Calling Codex, Claude, or any other AI backend directly on the host for a prompt, chat turn, agent session, tool call, or model-generated output.
 - Granting `danger-full-access` or equivalent host access.
 - Reusing a chat runtime across unrelated sessions without explicit policy.
-- Mutating the workspace in plan mode.
+- Mutating workspace roots from a planning session.
 - Mounting live workspace folders in clone mode.
 - Silently adding directories to the runtime.
 - Restarting sibling subagents/runtimes as a side effect of one session's access request.
@@ -65,7 +66,7 @@
 - Allowing remote/server execution against a live local workspace.
 - Falling back to a different model/provider in a way that broadens mounts, network, tools, secrets, or approval policy.
 - Treating agreement between multiple models as human approval or as an access-control decision.
-- Treating review comments, doc comments, or mini-task creation as permission to broaden access.
+- Treating review comments, doc comments, or subtask creation as permission to broaden access.
 - Reusing arbitrary local branch names for cross-boundary code or patch transfer. Network-bound Git handoff uses product-generated temporary branch refs.
 
 ## Runtime Assumptions
@@ -101,7 +102,9 @@
 - Runtime-local artifacts that are not on mounted paths are ephemeral unless the orchestrator copies them to a checkpoint/shared-write location before restart.
 - Generated memory must be proposed with evidence and reviewed before becoming shared memory.
 - Context packs should record classification metadata such as public/internal/secret-like, source type, and guard result. This keeps security visible without asking the user to read every token.
-- Review comments should record source file, line range, author, intent, and linked task/run IDs. Delegated mini tasks must preserve that provenance.
+- Review comments should record source file, line range, author, intent, and
+  linked task/run IDs. Delegated review-origin subtasks must preserve that
+  provenance.
 - Prompt and artifact retention should be configurable by class so low-risk diagnostics can expire while reviewed memory and task-linked audit evidence remain available.
 - Redacted structured logging is the default. Expanded logs and metrics are an explicit configuration choice, not a hidden debugging mode.
 - When expanded logging is enabled, records must carry retention class and PII policy so they can be expired, redacted, or excluded from prompts.
@@ -130,7 +133,8 @@ Before VS Code implementation begins, the prevalidation harness must prove or cl
 - Git clone/worktree/patch flows work for clone mode.
 - Local diff checkpoints can accept and revert files independently of Git.
 - Serialized diff checkpoints survive runtime restart/replay.
-- Markdown plan blocks can be parsed, commented, approved, and linked to runs.
+- Durable plan artifacts can be collected, hydrated, annotated, and linked to
+  tasks without treating model agreement or plan state as human approval.
 - Multiple orchestrated role sessions can run independently and one can be cancelled without killing the rest.
 - Role timeline, task registry, related project history, prompt history, memory review, automated-test, and HITL records can be represented before UI implementation begins.
 

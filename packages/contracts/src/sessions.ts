@@ -7,6 +7,7 @@
  */
 
 import type { AgentRole, ChatId, RunId, RuntimeId, SessionId } from "./ids.js";
+import type { CloneDirtyHandling } from "./tasks.js";
 import type { SessionMode } from "./workspaces.js";
 
 export type ChatSessionStatus =
@@ -37,6 +38,8 @@ export interface ChatSessionRecord {
   readonly workspaceRoots?: readonly string[];
   /** Subset of workspaceRoots mounted read-only (per-set read-only flags). */
   readonly readOnlyRoots?: readonly string[];
+  /** Clone sessions only: the snapshot choice to preserve across resume/reclaim. */
+  readonly cloneDirtyHandling?: CloneDirtyHandling;
   readonly runtimeId?: RuntimeId;
   /**
    * Multi-window ownership: which extension-host instance currently

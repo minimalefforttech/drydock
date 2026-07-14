@@ -1,6 +1,7 @@
 # 0006 - Task-scoped chat and agent visibility
 
-Status: Accepted - 2026-07-06
+Status: Accepted - 2026-07-06; planning/composer portion amended by
+[0012](0012-planner-panel.md)
 
 Supersedes: [0003](0003-webview-and-host-contract.md)
 
@@ -25,11 +26,14 @@ Drydock's primary unit of work is a task. Chats belong to tasks. Unlinked chats
 may appear only as a cleanup or migration drawer; they are not the main product
 stack.
 
-The main panel uses a `Tasks | Chat | System` model:
+The main panel uses a `Tasks | Plan | Edit | System` model:
 
 - `Tasks` owns task selection, task state, linked chats, workspace-set links,
   attention summaries, memory, and advanced workspace-set controls.
-- `Chat` owns the selected task chat, prompt composer, transcript, changes,
+- `Plan` owns the planning chat and opens the durable Planner workspace
+  defined by 0012.
+- `Edit` owns the selected implementation chat, prompt composer, transcript,
+  changes,
   open questions, task notes, context mounts, and agent visibility.
 - `System` owns diagnostics and low-level runtime/provider messages.
 
@@ -40,10 +44,12 @@ tool counts, last activity, last command word, duration, and token usage when
 reported. A configurable idle threshold labels delegated agents that have not
 emitted activity recently.
 
-Composer modes are `Plan` and `Develop`. Clone is a transfer/sync mechanism,
-not a chat mode. Model selection is free within the same provider. Changing
-provider restarts the backend/runtime generation for that chat while preserving
-the task, transcript, and selected chat identity.
+Planning is a place, not an Edit-composer mode (0012). Edit sessions run in
+implementation mode; the internal `plan` literal is reserved for Planner and
+read-only role sessions. Clone is a transfer/sync mechanism selected when a
+session starts, not a mid-chat composer mode. Model selection is free within
+the same provider. Changing provider restarts the backend/runtime generation
+for that chat while preserving the task, transcript, and selected identity.
 
 File references in user prompts use explicit text tokens:
 
@@ -69,8 +75,9 @@ single validation gate. New host-only actions, such as clipboard writes and
 provider restarts, still cross the envelope boundary explicitly.
 
 Subagent visibility becomes a shared contract instead of a UI-only projection.
-The same reducer drives the Chat Agents lens and compact task-row summaries,
-which keeps the scan view and detailed transcript consistent.
+The same reducer drives the Edit session's Chat/Agents lenses and compact
+task-row summaries, which keeps the scan view and detailed transcript
+consistent.
 
 The UI can show host and container paths, but path tokens are references, not
 permission grants. Runtime access still follows mount policy, denied-path

@@ -3,8 +3,10 @@
  */
 
 export * from "./boardService.js";
+export * from "./changesetService.js";
 export * from "./memoryService.js";
 export * from "./projectCatalogService.js";
+export * from "./recipeService.js";
 export * from "./subtaskOrchestrator.js";
 export * from "./subtaskService.js";
 export * from "./taskService.js";

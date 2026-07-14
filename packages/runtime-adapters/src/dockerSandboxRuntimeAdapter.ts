@@ -5,7 +5,6 @@
  * control commands. Agent prompts run inside the created sandbox.
  */
 
-import path from "node:path";
 import type {
   CommandResult,
   CommandRunner,
@@ -13,7 +12,7 @@ import type {
   RuntimeInventoryRecord,
   StartRuntimeRequest
 } from "@drydock/contracts";
-import { sandboxRuntimePath } from "@drydock/core";
+import { normalizePathKey, sandboxRuntimePath } from "@drydock/core";
 import type { RuntimeAdapter } from "@drydock/core";
 import type { Logger } from "@drydock/core";
 
@@ -40,9 +39,9 @@ export class DockerSandboxRuntimeAdapter implements RuntimeAdapter {
   async createRuntime(request: StartRuntimeRequest, externalName: string): Promise<RuntimeHandle> {
     // The workspace path is sbx's positional arg; every other mount (project
     // roots, shared paths, approved access requests) passes as `path[:ro]`.
-    const workspaceKey = path.resolve(request.workspacePath);
+    const workspaceKey = normalizePathKey(request.workspacePath);
     const mountArgs = request.template.mounts
-      .filter((mount) => path.resolve(mount.hostPath) !== workspaceKey)
+      .filter((mount) => normalizePathKey(mount.hostPath) !== workspaceKey)
       .map((mount) => mount.mode === "read-only" ? `${mount.hostPath}:ro` : mount.hostPath);
     const agent = typeof request.template.advancedOptions["sandboxAgent"] === "string"
       ? request.template.advancedOptions["sandboxAgent"]
@@ -71,6 +70,19 @@ export class DockerSandboxRuntimeAdapter implements RuntimeAdapter {
     if (request.template.network === "allowed" && resources) {
       const allow = await this.allowNetwork(handle, resources);
       if (allow.exitCode !== 0) {
+        try {
+          const removed = await this.removeRuntime(handle, true);
+          if (removed.exitCode !== 0) {
+            this.options.logger.warn("sandbox cleanup failed after network policy rejection", {
+              runtimeId: handle.runtimeId
+            });
+          }
+        } catch (cleanupError) {
+          this.options.logger.warn("sandbox cleanup errored after network policy rejection", {
+            runtimeId: handle.runtimeId,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          });
+        }
         throw new Error(`sbx network allow failed: ${allow.stderr || allow.error || allow.stdout}`);
       }
       this.networkPolicies.set(handle.externalName, resources);

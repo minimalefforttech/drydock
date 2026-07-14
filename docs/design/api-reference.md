@@ -1,10 +1,19 @@
 # Implementation API Reference
 
+> Design-reference status: this began as the Stage 0 contract and retains
+> forward-looking provider shapes. Current ADRs and exported TypeScript
+> interfaces under `packages/contracts` are authoritative for implemented
+> behavior and exact wire/storage fields.
+
 ## Purpose
 
-This document is the Stage 0 API contract for building the security-first VS Code agent extension. It records the product-facing service boundaries, durable state, command surfaces, lifecycle rules, and cleanup model that implementation stages must follow.
+This document records the intended product-facing service boundaries, durable
+state, command surfaces, lifecycle rules, and cleanup model.
 
-The extension must treat runtime isolation, auth continuity, diff preservation, task traceability, and cleanup accounting as backend capabilities before UI work depends on them. The API names here are stable references for Stage 1 and later implementation.
+The extension treats runtime isolation, auth continuity, diff preservation,
+task traceability, and cleanup accounting as backend capabilities before UI
+depends on them. Names here are architectural vocabulary, not a substitute for
+the implemented TypeScript contracts.
 
 ## Source Alignment
 
@@ -39,14 +48,14 @@ type DocumentId = string;
 type ReviewSessionId = string;
 type ReviewThreadId = string;
 type ReviewCommentId = string;
-type MiniTaskId = string;
+type SubtaskId = string;
 type SecretRef = string;
 type StateStoreId = string;
 type ProjectId = string;
 type WorkspaceSetId = string;
 type WorkspaceRootId = string;
 type MountId = string;
-type PlanBlockId = string;
+type PlanId = string;
 type TaskWorkSessionId = string;
 type DayPlanId = string;
 type DayPlanItemId = string;
@@ -367,7 +376,8 @@ Routing rules:
 - Profiles are configured aliases. Product code must not bake in a single model name such as `codex-5.5`.
 - Routing decisions are stored with the run and event stream.
 - Routing failure pauses or degrades only the affected role.
-- Routing cannot add mounts, enable network, expose secrets, or approve plan blocks.
+- Routing cannot add mounts, enable network, expose secrets, or change approval
+  policy.
 
 ## Security Evaluation API
 
@@ -411,7 +421,8 @@ Evaluation rules:
 
 - Guard checks can combine deterministic rules, secret scanning, deny-path checks, and a local guard model.
 - Guard checks may block, warn, or request user approval.
-- Guard checks cannot grant new access. Access still flows through `AccessRequestService`, mount policy, network policy, and plan approval.
+- Guard checks cannot grant new access. Access still flows through
+  `AccessRequestService`, mount policy, and network policy.
 - A denied guard result is stored as evidence, not as a prompt for another model to override.
 
 ## Auth Provider Service
@@ -463,26 +474,35 @@ Diff rules:
 - Removed files disappear from the changed-file strip only after accept or revert resolves them.
 - Checkpoints must survive runtime restart and extension host restart.
 
-## Plan Service
+## Planner Service
 
-`PlanService` creates Markdown plans with stable block IDs, block comments, approvals, revisions, and run links.
+The Planner service owns durable, optionally task-linked plans over disposable
+read-only planning sessions. It collects artifacts from the planning workspace,
+hydrates them into a replacement session, and stores annotations independently
+of session lifetime.
 
 ```ts
-interface PlanService {
-  createPlan(taskId: TaskId, request: PlanCreateRequest): Promise<PlanDocument>;
-  parsePlan(path: string): Promise<PlanDocument>;
-  addBlockComment(blockId: PlanBlockId, comment: PlanComment): Promise<void>;
-  setApproval(blockId: PlanBlockId, state: ApprovalState): Promise<void>;
-  linkRun(blockId: PlanBlockId, runId: RunId): Promise<void>;
+interface PlannerService {
+  createPlan(taskId: TaskId | undefined, request: PlanCreateRequest): Promise<PlanSummary>;
+  updateIntake(planId: PlanId, request: PlanIntakeUpdate): Promise<PlanSummary>;
+  collect(planId: PlanId): Promise<PlanArtifact[]>;
+  hydrate(planId: PlanId, sessionId: SessionId): Promise<void>;
+  addAnnotation(planId: PlanId, request: PlanAnnotationCreate): Promise<PlanAnnotation>;
+  materializeSubtasks(planId: PlanId, titles: string[]): Promise<Subtask[]>;
 }
 ```
 
-Plan rules:
+Planner rules:
 
-- Implementation is blocked until relevant plan blocks are approved.
-- Plan files are human-readable Markdown.
-- Block IDs must remain stable across revisions unless the block is replaced.
-- Agent runs must cite approved plan block IDs.
+- Planning is a separate Plan/Planner surface, not an Edit-composer mode or an
+  implementation approval gate.
+- Context roots are read-only by runtime mount policy; the plan workspace is a
+  disposable writing surface whose collected artifacts are durable.
+- Documents, diagrams, images, and sandboxed prototypes share one annotation
+  lifecycle.
+- Board materialization proposes only literal document checkbox items and
+  creates backlog subtasks after preview; it never starts work or invents DAG
+  edges.
 
 ## Documentation Review Service
 
@@ -509,7 +529,7 @@ interface ReviewLineRange {
 interface ReviewComment {
   id: ReviewCommentId;
   threadId: ReviewThreadId;
-  author: "user" | "agent" | "system";
+  author: "user" | "agent-reviewer" | "guard";
   body: string;
   range: ReviewLineRange;
   createdAt: string;
@@ -571,12 +591,13 @@ interface ReviewThread {
   status: ReviewThreadStatus;
   severity: "note" | "minor" | "major" | "blocking";
   intent?: string;
-  miniTaskId?: MiniTaskId;
+  subtaskId?: SubtaskId;
 }
 
-interface MiniTask {
-  id: MiniTaskId;
+interface Subtask {
+  id: SubtaskId;
   parentTaskId: TaskId;
+  origin: "review";
   title: string;
   reviewThreadIds: ReviewThreadId[];
   assignedRole: AgentRole;
@@ -588,8 +609,8 @@ interface CodeReviewService {
   startReview(request: StartCodeReviewRequest): Promise<ReviewSession>;
   addComment(request: ReviewCommentCreate): Promise<ReviewComment>;
   classifyThreads(sessionId: ReviewSessionId): Promise<ReviewThread[]>;
-  proposeMiniTasks(sessionId: ReviewSessionId): Promise<MiniTask[]>;
-  delegateMiniTask(miniTaskId: MiniTaskId): Promise<AgentSession>;
+  proposeSubtasks(sessionId: ReviewSessionId): Promise<Subtask[]>;
+  delegateSubtask(subtaskId: SubtaskId): Promise<AgentSession>;
   resolveThread(threadId: ReviewThreadId, resolution: ReviewResolution): Promise<void>;
 }
 ```
@@ -597,8 +618,8 @@ interface CodeReviewService {
 Code review rules:
 
 - Human comments, agent reviewer findings, guard findings, and test findings share the same review-thread model.
-- Repeated feedback can be grouped into mini tasks by normalized intent, file area, risk, and likely owner.
-- Mini tasks inherit the original review scope's runtime policy; delegation cannot broaden mounts, network, tools, or secrets.
+- Repeated feedback can be grouped into review-origin subtasks by normalized intent, file area, risk, and likely owner. There is no separate MiniTask persistence model.
+- Review-origin subtasks inherit the original review scope's runtime policy; delegation cannot broaden mounts, network, tools, or secrets.
 - Review threads close only after a follow-up diff is reviewed, or the thread is explicitly marked `wont-fix`.
 
 ## Orchestrator Service
@@ -778,7 +799,7 @@ interface TaskService {
   recordActivity(taskId: TaskId, activity: TaskActivity): Promise<void>;
   linkPrompt(taskId: TaskId, promptId: string): Promise<void>;
   linkRun(taskId: TaskId, runId: RunId): Promise<void>;
-  linkPlanBlock(taskId: TaskId, blockId: PlanBlockId): Promise<void>;
+  linkPlan(taskId: TaskId, planId: PlanId): Promise<void>;
   linkChangedFile(taskId: TaskId, fileRef: string): Promise<void>;
   linkMemory(taskId: TaskId, memoryRef: string): Promise<void>;
   linkTest(taskId: TaskId, testRunId: string): Promise<void>;
@@ -915,7 +936,8 @@ Transaction rules:
 - Record checkpoint metadata before runtime restart.
 - Record event stream offsets so replay can resume without duplicated UI state.
 - Record model routing decisions and security evaluation outcomes with run/session IDs.
-- Record review comments, normalized intent, mini-task promotion, delegation, and thread resolution as durable events.
+- Record review comments, normalized intent, review-origin subtask creation,
+  delegation, and thread resolution as durable events.
 
 ## Command Surface
 
@@ -1019,7 +1041,8 @@ Every error record must include service, operation, provider or adapter when app
 - Model outputs, tool outputs, repository files, tickets, and memory candidates remain untrusted even when multiple models agree.
 - Security-sensitive source files must be navigable and self-explaining at boundaries: module/file docs, exported API docs, and `MARK` regions are required for large service, adapter, runtime, and policy files.
 - Review comments are structured workflow inputs, not hidden prompt text. Every delegated fix must preserve the original file/line range and thread provenance.
-- Mini tasks created from review comments inherit the parent review scope and cannot expand runtime permissions.
+- Review-origin subtasks inherit the parent review scope and cannot expand
+  runtime permissions.
 - Packaging remains VSIX-only until explicitly changed, and each generated VSIX increments the extension version.
 - Branches used for cross-boundary Git transfer are temporary product-generated refs, even when local development work uses a developer-selected branch.
 
@@ -1032,7 +1055,9 @@ Stage 1 may begin only after Stage 0 prevalidation confirms:
 - Codex provider discovery/auth/schema communication is validated on host, and executable prompt/session communication is validated in at least one sandbox target.
 - Model profile and guard evaluation contracts exist for role defaults, cost/context budgets, local guard checks, and non-expanding fallback behavior.
 - Code documentation standards exist for source file docs, exported API docs, and `MARK` navigation in large files.
-- Documentation and code review contracts exist for file/line comments, intent preprocessing, thread resolution, mini-task promotion, and delegation provenance.
+- Documentation and code review contracts exist for file/line comments,
+  intent preprocessing, thread resolution, review-origin subtask creation, and
+  delegation provenance.
 - Git, plan, diff, orchestration, HITL, auth, access restart, and cleanup accounting probes pass or are explicitly deferred with reasons.
 
 Later stages must extend this document when a new backend contract is introduced.

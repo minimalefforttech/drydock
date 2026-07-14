@@ -65,12 +65,13 @@
   </style>
   <link rel="stylesheet" href="/assets/taskBoard.css" />
 </head>
-<body class="vscode-dark">
+<body class="vscode-dark" data-card-detail="minimal">
   <div id="stage">
     <div id="app"></div>
   </div>
   <div id="stage-note">
     <p><strong>Task Board harness.</strong> Real bundled panel, mock host, dummy fixtures: 3 tasks (<code>t-3</code> in Review), 6 subtasks (<code>st-2</code> blocked + auto, <code>st-6</code> finished ~2 days ago → age-hidden by default).</p>
+    <p>Density (ADR 0013): <code>data-card-detail</code> on <code>&lt;body&gt;</code> plays the config default (minimal); the toolbar <code>Detail:</code> select overrides per panel. Hover a card for its hover card.</p>
     <p>Drive scenarios from the console: <code>__harness.scenario.boardChanged()</code> (refetch push — mutate <code>__harness.fixtures.tasks</code> first to see a delta land).</p>
     <p>Inspect sends: <code>__harness.log</code> (board.moveCard / board.columns.update / taskBoard.open lines).</p>
   </div>

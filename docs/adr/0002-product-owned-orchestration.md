@@ -30,8 +30,15 @@ Before freezing a provider contract, run a live probe for the feature and keep
 a trimmed capture as a normalizer fixture. Synthetic fixtures are allowed, but
 they must say what real probe is still missing.
 
+Provider and model selection for a subtask is product state, not provider
+state. Recipes may supply a per-subtask `{providerId, model?}` default; the run
+bridge resolves it before session start and sends it through the same guarded
+session path as a manual selection. A model profile can change capability or
+cost, but it cannot widen mounts, network, tools, or secrets.
+
 ## Consequences
 
 Adding a provider means writing a normalizer, not forking the app. Unsupported
 subagent visibility is shown as unsupported. Per-child cancel stays out until a
-transport can actually do it.
+transport can actually do it. Unknown configured providers fail the start
+loudly rather than silently falling back to a different model or access shape.

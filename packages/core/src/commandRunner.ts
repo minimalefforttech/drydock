@@ -13,6 +13,8 @@ import type { CommandResult, CommandRunner, CommandRunnerOptions } from "@drydoc
 const MAX_CAPTURED_OUTPUT = 120_000;
 
 export class SpawnCommandRunner implements CommandRunner {
+  constructor(private readonly environment: NodeJS.ProcessEnv = process.env) {}
+
   run(command: string, args: readonly string[], options: CommandRunnerOptions): Promise<CommandResult> {
     const started = Date.now();
     return new Promise<CommandResult>((resolve) => {
@@ -65,7 +67,7 @@ export class SpawnCommandRunner implements CommandRunner {
       try {
         child = spawn(invocation.command, invocation.args, {
           cwd: options.cwd,
-          env: options.env ?? process.env,
+          env: options.env ?? this.environment,
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true
         });

@@ -653,7 +653,16 @@ function dockEntry(comment: ReviewCommentSummary): HTMLElement {
   const ownerId = sessionForComment(comment.commentId);
   const ownerRef = reviewState?.sessions.find((s) => s.sessionId === ownerId);
   const ownerName = ownerRef ? sessionLabel(ownerRef) : sessionTitle(ownerId);
-  authorEl.textContent = `${comment.author} · ${ownerName}`;
+  if (comment.author === "user") {
+    authorEl.textContent = `${comment.author} · ${ownerName}`;
+  } else {
+    // ADR 0004: machine authorship is visibly labeled — an agent-reviewer's
+    // comment must never read as the developer's own.
+    const badge = el("span", "tr-author-agent");
+    badge.textContent = comment.author === "guard" ? "guard" : "agent";
+    badge.title = `Authored by ${comment.author}, not a person`;
+    authorEl.append(badge, document.createTextNode(` · ${ownerName}`));
+  }
 
   const statusSelect = document.createElement("select");
   statusSelect.className = "tr-dock-status";

@@ -36,6 +36,31 @@ What's shipped and what's next for Drydock.
   rejection; per-subtask auto-start flags cascade prompt-backed runs in
   parallel as upstream chats finish (Backlog never auto-starts, Force start
   is manual-only). Work-tab memories open as read-only documents.
+- **Planner and plan → board** — durable task-owned plans collect/hydrate
+  documents, diagrams, images, and sandboxed prototypes across disposable
+  sessions; annotations become revision turns, while literal document
+  checkboxes can be previewed into backlog subtasks without inference or
+  auto-start (ADR 0012).
+- **Agents panel** — the fleet view (ADR 0013): every session across every
+  task grouped under its board column, role children nested, subagent rows
+  from the same activity summaries as the sidebar chips, honest
+  running-elsewhere/capability-tier states, attention chips for pending
+  questions/access, click-through to the sidebar Edit session, configurable quiet
+  density, live token rollups, and explicit starting/resuming state. The
+  session overview adds no polling or parallel session store.
+- **Chained clone output and landing** — Review entry captures durable
+  per-repo changesets; dependents may explicitly seed from unlanded upstream
+  output before their sync base freezes. The fleet Landing drawer orders
+  path-disjoint, unknown, and overlapping work and reuses the two-click full
+  Pull into the developer's working tree (ADR 0014).
+- **Fleet workflow rails** — seeded/repo-overlay task recipes create DAGs with
+  model/seed/verification defaults but never start them; a machine-derived
+  run-slot budget exposes a durable queue, automatic failures retry once then
+  park, and doubly-opt-in task FAQ answers leave transcript receipts while
+  never touching access requests (ADRs 0007 and 0015).
+- **Verification and review provenance** — recipes can mark a done subtask as
+  needing human verification, and machine-authored Task Review comments are
+  visibly labeled `agent` or `guard` rather than presented as the user's.
 
 ## Next
 
@@ -52,16 +77,18 @@ What's shipped and what's next for Drydock.
 
 - Deeper work-management flows: task activation history, a task-first
   creation gesture (new task, then pick projects, then start a chat as one
-  step), project touch-history ("recently changed by task X"), mini-tasks
-  created from review comments.
-- Secret-scanner tripwire on approvals, and a redesigned require-plan policy
-  compatible with plan-mode's current semantics.
+  step), project touch-history ("recently changed by task X"), and creation
+  of `origin: "review"` subtasks directly from review comments.
+- Secret-scanner tripwire on approvals. The old require-plan gate was retired
+  in favor of the separate Planner workflow (ADR 0012); any future
+  workspace-level planning policy needs a new explicit decision.
 - Agent-driven (not just user-driven) role spawns, with an approval design
   proportional to blast radius; per-native-node cancel; role-aware model
   routing.
-- Legacy cleanup: retire the old sidebar plan-block approval flow and the
-  docs-review backend once their replacements fully cover the same ground.
-- Bring the plan-docs surface visually closer to the task-board design
-  language: kicker/eyebrow hierarchy, annotated mockups with numbered
-  callouts, behaviour tables, and phased delivery lists (see
-  `docs/design/task-board-and-subtasks.md`).
+- Legacy cleanup: the sidebar plan-block approval flow and the per-session
+  plan-docs surface are retired (ADR 0012); the docs-review backend remains to
+  fold into its replacement.
+- Planner follow-ups: an "Export plan…" command materializing a plan's
+  artifacts to a chosen folder. (Task ownership shipped: plans carry `task_id`,
+  create surfaces lead with a task picker, and task cards have a "Plan"
+  action — see docs/design/planner.md.)

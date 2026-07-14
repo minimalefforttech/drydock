@@ -121,7 +121,7 @@ interface PrevalidationReport {
 interface CheckContext {
   root: string;
   docsDir: string;
-  planningDocsDir: string;
+  designDocsDir: string;
   tempRoot: string;
   options: CliOptions;
   commands: Map<string, CommandProbe>;
@@ -149,12 +149,12 @@ async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   const root = process.cwd();
   const docsDir = path.join(root, "docs");
-  const planningDocsDir = path.join(docsDir, "planning");
+  const designDocsDir = path.join(docsDir, "design");
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "drydock-prevalidate-"));
   const context: CheckContext = {
     root,
     docsDir,
-    planningDocsDir,
+    designDocsDir,
     tempRoot,
     options,
     commands: new Map()
@@ -352,7 +352,7 @@ function skipCheck(id: string, title: string, category: string, required: boolea
 }
 
 async function validateProductPlan(context: CheckContext): Promise<Omit<CheckResult, "id" | "title" | "category" | "required" | "startedAt" | "durationMs">> {
-  const file = path.join(context.planningDocsDir, "product-plan.md");
+  const file = path.join(context.designDocsDir, "product-plan.md");
   const text = await readFile(file, "utf8");
   const requiredSections = [
     "## Stage 0: Plan, Threat Model, And Prevalidation",
@@ -375,7 +375,7 @@ async function validateProductPlan(context: CheckContext): Promise<Omit<CheckRes
 }
 
 async function validateThreatModel(context: CheckContext): Promise<Omit<CheckResult, "id" | "title" | "category" | "required" | "startedAt" | "durationMs">> {
-  const file = path.join(context.planningDocsDir, "threat-model.md");
+  const file = path.join(context.designDocsDir, "threat-model.md");
   const text = await readFile(file, "utf8");
   const requiredSections = [
     "## Security Goals",
@@ -399,7 +399,7 @@ async function validateThreatModel(context: CheckContext): Promise<Omit<CheckRes
 }
 
 async function validatePrevalidationCoverage(context: CheckContext): Promise<Omit<CheckResult, "id" | "title" | "category" | "required" | "startedAt" | "durationMs">> {
-  const file = path.join(context.planningDocsDir, "prevalidation-coverage.md");
+  const file = path.join(context.designDocsDir, "prevalidation-coverage.md");
   const text = await readFile(file, "utf8");
   const requiredPhrases = [
     "Coverage Matrix",
@@ -433,7 +433,7 @@ async function validatePrevalidationCoverage(context: CheckContext): Promise<Omi
 }
 
 async function validateApiReference(context: CheckContext): Promise<Omit<CheckResult, "id" | "title" | "category" | "required" | "startedAt" | "durationMs">> {
-  const file = path.join(context.planningDocsDir, "api-reference.md");
+  const file = path.join(context.designDocsDir, "api-reference.md");
   const text = await readFile(file, "utf8");
   const requiredPhrases = [
     "# Implementation API Reference",
@@ -473,7 +473,7 @@ async function validateApiReference(context: CheckContext): Promise<Omit<CheckRe
 }
 
 async function validateExtensionPointsPlan(context: CheckContext): Promise<Omit<CheckResult, "id" | "title" | "category" | "required" | "startedAt" | "durationMs">> {
-  const file = path.join(context.planningDocsDir, "extension-points.md");
+  const file = path.join(context.designDocsDir, "extension-points.md");
   const text = await readFile(file, "utf8");
   const requiredPhrases = [
     "# Extension Points And Task Integration Plan",
@@ -506,7 +506,7 @@ async function validateExtensionPointsPlan(context: CheckContext): Promise<Omit<
 }
 
 async function validateWorkManagementPlan(context: CheckContext): Promise<Omit<CheckResult, "id" | "title" | "category" | "required" | "startedAt" | "durationMs">> {
-  const file = path.join(context.planningDocsDir, "work-management.md");
+  const file = path.join(context.designDocsDir, "work-management.md");
   const text = await readFile(file, "utf8");
   const requiredPhrases = [
     "# Work Management, Workspaces, Tasks, And Day Planning",
@@ -4214,12 +4214,12 @@ function buildReport(context: CheckContext, checks: CheckResult[]): Prevalidatio
       optionalIssues
     },
     artifacts: {
-      productPlan: path.join(context.planningDocsDir, "product-plan.md"),
-      threatModel: path.join(context.planningDocsDir, "threat-model.md"),
-      coverage: path.join(context.planningDocsDir, "prevalidation-coverage.md"),
-      apiReference: path.join(context.planningDocsDir, "api-reference.md"),
-      extensionPoints: path.join(context.planningDocsDir, "extension-points.md"),
-      workManagement: path.join(context.planningDocsDir, "work-management.md"),
+      productPlan: path.join(context.designDocsDir, "product-plan.md"),
+      threatModel: path.join(context.designDocsDir, "threat-model.md"),
+      coverage: path.join(context.designDocsDir, "prevalidation-coverage.md"),
+      apiReference: path.join(context.designDocsDir, "api-reference.md"),
+      extensionPoints: path.join(context.designDocsDir, "extension-points.md"),
+      workManagement: path.join(context.designDocsDir, "work-management.md"),
       schemasDir: path.join(context.root, "schemas"),
       report: context.options.reportPath,
       json: context.options.outputJson

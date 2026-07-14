@@ -8,10 +8,22 @@
  * event sequence.
  */
 
+import { SEEDED_PLAN_ASPECTS, type JsonObject } from "@drydock/contracts";
 import type { SqliteConnection } from "./sqliteConnection.js";
+import { sanitizePersistedEventPayload } from "./persistenceSanitizer.js";
+
+const SANITIZE_SESSION_EVENTS_MIGRATION = "sanitize-session-events-v2";
 
 export function applyMigrations(connection: SqliteConnection): void {
+  const legacySessionEventsTable = connection.database.prepare(`
+    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_events'
+  `).get() !== undefined;
   connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS storage_migrations (
+      migration_id TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS runtime_instances (
       runtime_id TEXT PRIMARY KEY,
       runtime_generation_id TEXT NOT NULL,
@@ -57,6 +69,26 @@ export function applyMigrations(connection: SqliteConnection): void {
     CREATE INDEX IF NOT EXISTS idx_session_events_session_created
       ON session_events(session_id, created_at);
 
+    CREATE TABLE IF NOT EXISTS security_events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      occurred_at TEXT NOT NULL,
+      event_code TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      actor_id TEXT,
+      host_id TEXT,
+      policy_id TEXT,
+      session_id TEXT,
+      runtime_id TEXT,
+      project_id TEXT,
+      metadata_json TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_security_events_occurred
+      ON security_events(occurred_at, sequence);
+
+    CREATE INDEX IF NOT EXISTS idx_security_events_session
+      ON security_events(session_id, sequence);
+
     CREATE TABLE IF NOT EXISTS chat_sessions (
       session_id TEXT PRIMARY KEY,
       chat_id TEXT NOT NULL,
@@ -92,6 +124,9 @@ export function applyMigrations(connection: SqliteConnection): void {
   // same folders instead of only the disposable workspace.
   ensureColumn(connection, "chat_sessions", "workspace_roots", "TEXT NULL");
   ensureColumn(connection, "chat_sessions", "read_only_roots", "TEXT NULL");
+  // Clone snapshot choice is session state as well as task policy: a resumed
+  // clone must not silently change from fresh HEAD to a dirty overlay.
+  ensureColumn(connection, "chat_sessions", "clone_dirty_handling", "TEXT NULL");
   connection.database.exec(
     "CREATE INDEX IF NOT EXISTS idx_chat_sessions_parent ON chat_sessions(parent_session_id)"
   );
@@ -282,7 +317,10 @@ export function applyMigrations(connection: SqliteConnection): void {
       description TEXT NULL,
       state TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      clone_workspace_set_id TEXT NULL,
+      clone_project_ids_json TEXT NULL,
+      clone_dirty_handling TEXT NULL
     );
 
     CREATE TABLE IF NOT EXISTS work_task_links (
@@ -302,11 +340,18 @@ export function applyMigrations(connection: SqliteConnection): void {
   `);
   // Session-target links may additionally name the subtask they belong to.
   ensureColumn(connection, "work_task_links", "subtask_id", "TEXT NULL");
+  // Task-level clone policy is additive and nullable: existing tasks remain
+  // valid until a manual start saves an explicit selection.
+  ensureColumn(connection, "work_tasks", "clone_workspace_set_id", "TEXT NULL");
+  ensureColumn(connection, "work_tasks", "clone_project_ids_json", "TEXT NULL");
+  ensureColumn(connection, "work_tasks", "clone_dirty_handling", "TEXT NULL");
 
-  // Chat-panel redesign (Phase 2, plan mode v2): collected plan documents. The
-  // table is named plan_docs, not plan_documents — the Stage 5 plans table
-  // already claims plan_documents (keyed by plan_id); these are per-session
-  // Markdown/mermaid files the agent writes into its workspace `plan/` dir.
+  // LEGACY / ORPHANED (ADR 0012): the per-session plan-docs surface is retired
+  // — the Planner panel (planner_* tables below) supersedes it and planDocStore
+  // is deleted; no code reads or writes this table anymore. The CREATE TABLE is
+  // kept per the additive migration policy so historical DBs still open
+  // unchanged. (Named plan_docs, not plan_documents — the retired Stage 5
+  // subsystem above already claims that name.)
   connection.database.exec(`
     CREATE TABLE IF NOT EXISTS plan_docs (
       session_id TEXT NOT NULL,
@@ -404,12 +449,305 @@ export function applyMigrations(connection: SqliteConnection): void {
   // stripe palette); NULL means "use the parent task's stripe hue" (the
   // pre-existing default behaviour), so this column is purely additive.
   ensureColumn(connection, "subtasks", "color_override", "INTEGER NULL");
+  // Chain changesets (ADR 0014): the user's per-subtask clone seeding choice
+  // ("local" | "upstream"); NULL means local (the pre-existing behaviour).
+  ensureColumn(connection, "subtasks", "seed_mode", "TEXT NULL");
+  // Per-role model profile (ADR 0002), set by recipe materialization; NULL
+  // means the provider default (JSON: { providerId, model? }).
+  ensureColumn(connection, "subtasks", "model_json", "TEXT NULL");
+  // Task FAQ auto-answer toggle (ADR 0007); 0 = off (the safe default —
+  // the global config is a second gate).
+  ensureColumn(connection, "work_tasks", "auto_answer_faq", "INTEGER NOT NULL DEFAULT 0");
+  // HITL verify gate (ADR 0007): "hitl" arms it (NULL = no gate);
+  // verified_at is the human's stamp, cleared when the gate re-arms.
+  ensureColumn(connection, "subtasks", "verify_mode", "TEXT NULL");
+  ensureColumn(connection, "subtasks", "verified_at", "TEXT NULL");
+
+  // Orchestrator holds (ADR 0015): queued/parked starts survive a window
+  // reload. One row per subtask; a park replaces a queue entry.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS subtask_holds (
+      subtask_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      origin TEXT NOT NULL,
+      force INTEGER NOT NULL DEFAULT 0,
+      held_at TEXT NOT NULL
+    );
+  `);
+
+  // Task FAQ entries (ADR 0007): pattern → answer pairs auto-answering
+  // matching agent questions when the task's toggle (and global config) is on.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS task_faqs (
+      faq_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      pattern TEXT NOT NULL,
+      answer TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_faqs_task
+      ON task_faqs(task_id);
+  `);
+
+  // Task recipes (ADR 0007): templates that materialize a task + subtask DAG
+  // with per-role defaults. Steps ride as JSON (the planner_aspects
+  // expected_artifacts_json pattern); seeded rows insert once when empty.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS task_recipes (
+      recipe_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NULL,
+      source TEXT NOT NULL,
+      archived INTEGER NOT NULL DEFAULT 0,
+      subtasks_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  seedTaskRecipes(connection);
+
+  // Chain changesets (ADR 0014): durable outbound patches captured from a
+  // subtask's clone at Review entry. One row per (subtask, repo); a fresh
+  // capture replaces the subtask's prior set. Patch bytes live in the
+  // content-addressed blob store (patch_sha256), mirroring planner_artifacts.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS task_changesets (
+      changeset_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      subtask_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      patch_sha256 TEXT NOT NULL,
+      patch_bytes INTEGER NOT NULL,
+      file_count INTEGER NOT NULL,
+      captured_at TEXT NOT NULL,
+      landed_at TEXT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_changesets_subtask
+      ON task_changesets(subtask_id);
+
+    CREATE INDEX IF NOT EXISTS idx_task_changesets_session
+      ON task_changesets(session_id);
+  `);
+  // Landing overlap pre-check (ADR 0014): the patch's touched paths as JSON.
+  // NULL on older captures — overlap is then unknown, not assumed absent.
+  ensureColumn(connection, "task_changesets", "paths_json", "TEXT NULL");
   // work_tasks.state is replaced by column_id (+ optional done_at); state is
   // kept transitionally (see WorkTaskRecord doc comment) until the board UI
   // lands and the webview stops reading it.
   ensureColumn(connection, "work_tasks", "column_id", "TEXT NULL");
   ensureColumn(connection, "work_tasks", "done_at", "TEXT NULL");
   seedDefaultColumnsAndBackfill(connection);
+
+  // Planner (ADR 0012): first-class plans with collected artifacts, anchored
+  // annotations, and the configurable aspect registry. Tables take the
+  // planner_ prefix because the plan_* namespace is crowded: plan_documents/
+  // plan_blocks are the retired legacy subsystem and plan_docs is the
+  // session-scoped surface the planner supersedes.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS planner_plans (
+      plan_id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      brief TEXT NOT NULL,
+      aspect_ids_json TEXT NOT NULL,
+      context_roots_json TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL,
+      session_id TEXT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS planner_artifacts (
+      artifact_id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL,
+      rel_path TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      aspect_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      title_override TEXT NULL,
+      revision INTEGER NOT NULL,
+      content TEXT NULL,
+      blob_sha256 TEXT NULL,
+      byte_size INTEGER NULL,
+      mime TEXT NULL,
+      scripts_enabled INTEGER NOT NULL DEFAULT 0,
+      collected_at TEXT NOT NULL,
+      FOREIGN KEY(plan_id) REFERENCES planner_plans(plan_id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_artifacts_path
+      ON planner_artifacts(plan_id, rel_path);
+
+    CREATE TABLE IF NOT EXISTS planner_annotations (
+      annotation_id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL,
+      artifact_id TEXT NOT NULL,
+      anchor TEXT NOT NULL,
+      body TEXT NOT NULL,
+      status TEXT NOT NULL,
+      delegated_rev INTEGER NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(plan_id) REFERENCES planner_plans(plan_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_planner_annotations_plan
+      ON planner_annotations(plan_id);
+
+    CREATE TABLE IF NOT EXISTS planner_aspects (
+      aspect_id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      instructions TEXT NOT NULL,
+      expected_artifacts_json TEXT NOT NULL,
+      sort_order INTEGER NOT NULL,
+      archived INTEGER NOT NULL DEFAULT 0,
+      seeded INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  seedPlannerAspects(connection);
+  // Plans belong to tasks (ADR 0006 doctrine extended to planning): additive
+  // and nullable — existing rows stay valid as orphan plans.
+  ensureColumn(connection, "planner_plans", "task_id", "TEXT NULL");
+  sanitizeLegacySessionEvents(connection, legacySessionEventsTable);
+}
+
+/** One-time cleanup for payloads written before the persistence boundary hardened. */
+function sanitizeLegacySessionEvents(connection: SqliteConnection, legacySessionEventsTable: boolean): void {
+  connection.database.exec("BEGIN IMMEDIATE");
+  try {
+    // Check only after taking the write lock: two extension windows may run
+    // migrations against the shared state file at the same time.
+    const applied = connection.database.prepare(`
+      SELECT migration_id FROM storage_migrations WHERE migration_id = ?
+    `).get(SANITIZE_SESSION_EVENTS_MIGRATION);
+    if (applied !== undefined) {
+      connection.database.exec("COMMIT");
+      return;
+    }
+    const rows = connection.database.prepare(`
+      SELECT id, payload_json FROM session_events
+    `).all() as { readonly id: string; readonly payload_json: string }[];
+    const update = connection.database.prepare(`
+      UPDATE session_events SET payload_json = ? WHERE id = ?
+    `);
+    for (const row of rows) {
+      let payload: JsonObject;
+      try {
+        const parsed = JSON.parse(row.payload_json) as unknown;
+        payload = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+          ? parsed as JsonObject
+          : { redacted: "legacy event payload was not an object" };
+      } catch {
+        payload = { redacted: "legacy event payload could not be parsed" };
+      }
+      const sanitized = JSON.stringify(sanitizePersistedEventPayload(payload));
+      if (sanitized !== row.payload_json) update.run(sanitized, row.id);
+    }
+    connection.database.exec("COMMIT");
+  } catch (error) {
+    try {
+      connection.database.exec("ROLLBACK");
+    } catch {
+      // COMMIT may already have completed; preserve the original error.
+    }
+    throw error;
+  }
+  if (legacySessionEventsTable) {
+    // Checkpoint the redaction, then rebuild the database so credentials from
+    // rows deleted before secure_delete was enabled cannot survive in freelist
+    // pages. VACUUM may create a fresh WAL, which is verified and truncated too.
+    checkpointWalOrThrow(connection);
+    connection.database.exec("VACUUM");
+    checkpointWalOrThrow(connection);
+  }
+
+  connection.database.exec("BEGIN IMMEDIATE");
+  try {
+    connection.database.prepare(`
+      INSERT OR IGNORE INTO storage_migrations (migration_id, applied_at) VALUES (?, ?)
+    `).run(SANITIZE_SESSION_EVENTS_MIGRATION, new Date().toISOString());
+    connection.database.exec("COMMIT");
+  } catch (error) {
+    try {
+      connection.database.exec("ROLLBACK");
+    } catch {
+      // Preserve the marker write error.
+    }
+    throw error;
+  }
+}
+
+function checkpointWalOrThrow(connection: SqliteConnection): void {
+  const checkpoint = connection.database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as {
+    readonly busy: number;
+    readonly log: number;
+    readonly checkpointed: number;
+  };
+  if (checkpoint.busy !== 0) {
+    throw new Error("Could not securely finalize legacy event redaction because the SQLite WAL is busy. Close other windows and reload.");
+  }
+}
+
+/**
+ * Seeds the aspect registry once (empty table only), so user edits to seeded
+ * rows — including archiving them — are never overwritten on a later run.
+ */
+function seedPlannerAspects(connection: SqliteConnection): void {
+  const count = connection.database.prepare(`SELECT COUNT(*) AS count FROM planner_aspects`).get() as { readonly count: number };
+  if (count.count > 0) {
+    return;
+  }
+  const insert = connection.database.prepare(`
+    INSERT INTO planner_aspects (aspect_id, label, instructions, expected_artifacts_json, sort_order, archived, seeded)
+    VALUES (?, ?, ?, ?, ?, 0, 1)
+  `);
+  for (const aspect of SEEDED_PLAN_ASPECTS) {
+    insert.run(aspect.aspectId, aspect.label, aspect.instructions, JSON.stringify(aspect.expectedArtifacts), aspect.sortOrder);
+  }
+}
+
+/**
+ * Seeds the recipe registry once (empty table only), so user edits to seeded
+ * rows — including archiving them — are never overwritten on a later run
+ * (the planner-aspects rule). Prompts use `{title}` for the task title.
+ */
+function seedTaskRecipes(connection: SqliteConnection): void {
+  const count = connection.database.prepare(`SELECT COUNT(*) AS count FROM task_recipes`).get() as { readonly count: number };
+  if (count.count > 0) {
+    return;
+  }
+  const now = "2026-01-01T00:00:00.000Z";
+  const insert = connection.database.prepare(`
+    INSERT INTO task_recipes (recipe_id, name, description, source, archived, subtasks_json, created_at, updated_at)
+    VALUES (?, ?, ?, 'seeded', 0, ?, ?, ?)
+  `);
+  const seeded = [
+    {
+      recipeId: "recipe-implement-verify",
+      name: "Implement + verify",
+      description: "One implementer, then a verifier that builds on its output.",
+      subtasks: [
+        { key: "implement", title: "Implement", prompt: "Implement the work described by the task \"{title}\". Keep changes focused; note anything you deliberately left out.", autoStart: false, dependsOnKeys: [] },
+        { key: "verify", title: "Verify", prompt: "Review and verify the implementation produced for \"{title}\": run the relevant tests, probe edge cases, and report gaps as concrete findings.", autoStart: true, seedMode: "upstream", dependsOnKeys: ["implement"] }
+      ]
+    },
+    {
+      recipeId: "recipe-research-implement-test",
+      name: "Research → implement → test",
+      description: "A researcher scopes the change, an implementer builds on it, a tester chains off both.",
+      subtasks: [
+        { key: "research", title: "Research", prompt: "Research how to approach the task \"{title}\": map the code involved, constraints, and a recommended plan. Write findings to notes files.", autoStart: false, dependsOnKeys: [] },
+        { key: "implement", title: "Implement", prompt: "Following the researcher's notes in this clone, implement \"{title}\".", autoStart: true, seedMode: "upstream", dependsOnKeys: ["research"] },
+        { key: "test", title: "Test", prompt: "Write and run tests covering the implementation of \"{title}\"; report failures as findings rather than silently fixing unrelated code.", autoStart: true, seedMode: "upstream", dependsOnKeys: ["implement"] }
+      ]
+    }
+  ];
+  for (const recipe of seeded) {
+    insert.run(recipe.recipeId, recipe.name, recipe.description, JSON.stringify(recipe.subtasks), now, now);
+  }
 }
 
 /**

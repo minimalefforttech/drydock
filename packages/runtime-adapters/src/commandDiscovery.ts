@@ -11,23 +11,28 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export function discoverDockerSandboxCommand(): string | null {
+export function discoverDockerSandboxCommand(environment: NodeJS.ProcessEnv = process.env): string | null {
   return findCommand(["sbx", "sbx.exe"], "SBX_PATH", [
     path.join(os.homedir(), "AppData", "Local", "DockerSandboxes", "bin", "sbx.exe")
-  ]);
+  ], environment);
 }
 
-export function discoverStandaloneCodexCommand(): string | null {
-  const localAppData = process.env["LOCALAPPDATA"];
+export function discoverStandaloneCodexCommand(environment: NodeJS.ProcessEnv = process.env): string | null {
+  const localAppData = environment["LOCALAPPDATA"];
   const candidates: string[] = [];
   if (localAppData) {
     candidates.push(...discoverCodexBins(path.join(localAppData, "OpenAI", "Codex", "bin")));
   }
-  return findCommand(["codex", "codex.exe"], "CODEX_PATH", candidates);
+  return findCommand(["codex", "codex.exe"], "CODEX_PATH", candidates, environment);
 }
 
-export function findCommand(names: readonly string[], envKey: string, preferred: readonly string[] = []): string | null {
-  const override = process.env[envKey];
+export function findCommand(
+  names: readonly string[],
+  envKey: string,
+  preferred: readonly string[] = [],
+  environment: NodeJS.ProcessEnv = process.env
+): string | null {
+  const override = environment[envKey];
   if (override && existsSync(override)) {
     return override;
   }
@@ -37,9 +42,9 @@ export function findCommand(names: readonly string[], envKey: string, preferred:
     }
   }
 
-  const pathEntries = (process.env["PATH"] ?? "").split(path.delimiter).filter(Boolean);
+  const pathEntries = (environment["PATH"] ?? "").split(path.delimiter).filter(Boolean);
   const extensions = process.platform === "win32"
-    ? safeWindowsExtensions(process.env["PATHEXT"])
+    ? safeWindowsExtensions(environment["PATHEXT"])
     : [""];
   for (const entry of pathEntries) {
     for (const name of names) {

@@ -54,6 +54,12 @@ export class MemoryDiffBaselineStore implements DiffBaselineStore {
     this.snapshots.get(baselineId)?.delete(path);
     return Promise.resolve();
   }
+
+  deleteBaseline(baselineId: BaselineId): Promise<void> {
+    this.baselines.delete(baselineId);
+    this.snapshots.delete(baselineId);
+    return Promise.resolve();
+  }
 }
 
 /** File-content-in-memory blob store; digests match the production store. */
@@ -62,9 +68,14 @@ export class MemoryBlobStore implements BlobStore {
 
   async putFile(absolutePath: string): Promise<{ readonly sha256: string; readonly size: number }> {
     const content = await readFile(absolutePath);
+    return this.putBytes(content);
+  }
+
+  putBytes(bytes: Uint8Array): Promise<{ readonly sha256: string; readonly size: number }> {
+    const content = Uint8Array.from(bytes);
     const sha256 = createHash("sha256").update(content).digest("hex");
     this.blobs.set(sha256, content);
-    return { sha256, size: content.byteLength };
+    return Promise.resolve({ sha256, size: content.byteLength });
   }
 
   readBlob(sha256: string): Promise<Uint8Array | null> {

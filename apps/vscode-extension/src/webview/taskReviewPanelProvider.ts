@@ -237,6 +237,20 @@ export class TaskReviewPanelProvider {
             } catch {
               return undefined;
             }
+          },
+          onDispatchFailed: (failure) => {
+            // sendChatTurn resolves at terminal, after the submit response has
+            // already returned. Recovery has reopened the still-delegated
+            // threads; refresh both review surfaces and tell the user that a
+            // retry is available instead of silently stranding the comments.
+            this.refreshComments();
+            this.push(taskId, { type: "taskReview.updated", taskId });
+            const recovery = failure.reopenedCount === failure.commentCount
+              ? `${String(failure.reopenedCount)} comment${failure.reopenedCount === 1 ? " was" : "s were"} reopened for retry.`
+              : `${String(failure.reopenedCount)} of ${String(failure.commentCount)} comments could be reopened; inspect the review before retrying.`;
+            void vscode.window.showWarningMessage(
+              `Review revision for "${failure.sessionTitle}" ${failure.reason}. ${recovery}`
+            );
           }
         });
         this.respond(taskId, request.requestId, {

@@ -29,6 +29,91 @@ export interface BuildMountPolicyRequest {
   readonly approvedAt?: string;
 }
 
+const WINDOWS_DRIVE_ABSOLUTE = /^[A-Za-z]:[\\/]/;
+const WINDOWS_UNC_ABSOLUTE = /^[\\/]{2}(?![?.][\\/])[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/;
+const WINDOWS_EXTENDED_DRIVE_ABSOLUTE = /^\\\\\?\\[A-Za-z]:\\/;
+const WINDOWS_EXTENDED_UNC_ABSOLUTE = /^\\\\\?\\UNC\\[^\\/]+\\[^\\/]+(?:\\|$)/i;
+
+/**
+ * True when a host path is fully qualified without relying on the current
+ * process platform. In particular, Windows drive and UNC paths remain valid
+ * inputs when validation or tests run on a POSIX host. Drive-relative paths
+ * (`C:folder`) and current-drive-rooted paths (`\\folder`) stay rejected
+ * because their meaning depends on process state.
+ */
+export function isHostPathAbsolute(value: string): boolean {
+  // Backslash pairs and exactly-two-slash server prefixes are Windows UNC
+  // syntax. Three or more leading forward slashes remain valid POSIX roots.
+  if (value.startsWith("\\\\") || /^\/\/[^/]/.test(value)) {
+    return WINDOWS_UNC_ABSOLUTE.test(value)
+      || WINDOWS_EXTENDED_DRIVE_ABSOLUTE.test(value)
+      || WINDOWS_EXTENDED_UNC_ABSOLUTE.test(value);
+  }
+  return path.posix.isAbsolute(value) || WINDOWS_DRIVE_ABSOLUTE.test(value);
+}
+
+/**
+ * True only when an absolute path belongs to the selected host platform.
+ * Use this before filesystem access; `isHostPathAbsolute` is intentionally
+ * broader for persisted/displayed paths and cross-platform protocol input.
+ */
+export function isNativeHostPathAbsolute(
+  value: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (platform === "win32") {
+    return isWindowsAbsolutePath(value);
+  }
+  return path.posix.isAbsolute(value) && !isWindowsAbsolutePath(value);
+}
+
+/** Normalize an absolute foreign host path with its own platform semantics. */
+export function normalizeHostPath(value: string): string {
+  const ordinaryWindowsPath = withoutExtendedWindowsPrefix(value);
+  if (ordinaryWindowsPath !== null) {
+    return path.win32.normalize(ordinaryWindowsPath);
+  }
+  if (isWindowsAbsolutePath(value)) {
+    return path.win32.normalize(value);
+  }
+  if (path.posix.isAbsolute(value)) {
+    return path.posix.normalize(value);
+  }
+  return path.resolve(value);
+}
+
+/** Join a child name without rewriting a foreign Windows/UNC host path. */
+function joinHostPath(root: string, child: string): string {
+  const normalizedRoot = normalizeHostPath(root);
+  if (isWindowsAbsolutePath(normalizedRoot)) {
+    return path.win32.join(normalizedRoot, child);
+  }
+  return path.posix.isAbsolute(normalizedRoot)
+    ? path.posix.join(normalizedRoot, child)
+    : path.join(normalizedRoot, child);
+}
+
+function isWindowsAbsolutePath(value: string): boolean {
+  return WINDOWS_DRIVE_ABSOLUTE.test(value)
+    || WINDOWS_UNC_ABSOLUTE.test(value)
+    || WINDOWS_EXTENDED_DRIVE_ABSOLUTE.test(value)
+    || WINDOWS_EXTENDED_UNC_ABSOLUTE.test(value);
+}
+
+/**
+ * Collapse Windows' extended-length aliases before comparison. Keeping both
+ * spellings would let the same directory acquire different policy keys.
+ */
+function withoutExtendedWindowsPrefix(value: string): string | null {
+  if (WINDOWS_EXTENDED_DRIVE_ABSOLUTE.test(value)) {
+    return value.slice(4);
+  }
+  if (WINDOWS_EXTENDED_UNC_ABSOLUTE.test(value)) {
+    return `\\\\${value.slice(8)}`;
+  }
+  return null;
+}
+
 export function buildMountPolicy(request: BuildMountPolicyRequest, ids: IdGenerator): MountPolicy[] {
   const deniedPaths = request.deniedPaths ?? [];
   const readOnlyKeys = new Set((request.readOnlyRoots ?? []).map((root) => normalizePathKey(root)));
@@ -85,9 +170,9 @@ export function buildMountPolicy(request: BuildMountPolicyRequest, ids: IdGenera
  * unmounted container overlay and its edits never reach the host.
  */
 export function sandboxRuntimePath(hostPath: string): string {
-  const resolved = path.resolve(hostPath);
+  const resolved = normalizeHostPath(hostPath);
   const drive = /^([A-Za-z]):[\\/]?(.*)$/.exec(resolved);
-  if (drive && path.sep === "\\") {
+  if (drive) {
     return `/${drive[1]!.toLowerCase()}/${(drive[2] ?? "").replace(/\\/g, "/")}`;
   }
   return resolved.replace(/\\/g, "/");
@@ -122,8 +207,7 @@ export function assertChildMountsWithinParent(
 }
 
 export function assertWorkspaceInsideOwner(workspacePath: string, ownerRoot: string): void {
-  const relative = path.relative(path.resolve(ownerRoot), path.resolve(workspacePath));
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+  if (!isPathWithin(workspacePath, ownerRoot)) {
     throw new Error(`Workspace ${workspacePath} is outside owner root ${ownerRoot}.`);
   }
 }
@@ -134,8 +218,12 @@ export function assertWorkspaceInsideOwner(workspacePath: string, ownerRoot: str
  * Canonical comparison key for host paths: resolved, forward slashes, no
  * trailing separator, case-folded on case-insensitive platforms (Windows).
  */
-export function normalizePathKey(value: string, caseInsensitive: boolean = process.platform === "win32"): string {
-  let key = path.resolve(value).replace(/\\/g, "/");
+export function normalizePathKey(
+  value: string,
+  caseInsensitive: boolean = isWindowsAbsolutePath(value)
+    || (process.platform === "win32" && !path.posix.isAbsolute(value))
+): string {
+  let key = normalizeHostPath(value).replace(/\\/g, "/");
   if (key.length > 1 && key.endsWith("/")) {
     key = key.slice(0, -1);
   }
@@ -146,7 +234,8 @@ export function normalizePathKey(value: string, caseInsensitive: boolean = proce
 export function isPathWithin(child: string, parent: string, caseInsensitive?: boolean): boolean {
   const childKey = normalizePathKey(child, caseInsensitive);
   const parentKey = normalizePathKey(parent, caseInsensitive);
-  return childKey === parentKey || childKey.startsWith(`${parentKey}/`);
+  const descendantPrefix = parentKey.endsWith("/") ? parentKey : `${parentKey}/`;
+  return childKey === parentKey || childKey.startsWith(descendantPrefix);
 }
 
 /** True when the path is denied or contains/lives inside a denied path. */
@@ -181,18 +270,18 @@ export function assertMountAllowed(hostPath: string, deniedPaths: readonly strin
  * from `\\srv\share\dir` (mountable).
  */
 export function isFilesystemRoot(hostPath: string): boolean {
-  const resolved = path.resolve(hostPath);
-  const parsed = path.parse(resolved);
-  if (resolved === parsed.root) {
+  const resolved = normalizeHostPath(hostPath);
+  if (!isWindowsAbsolutePath(resolved)) {
+    return resolved === path.posix.parse(resolved).root;
+  }
+  const withoutTrailingSeparators = resolved.replace(/[\\/]+$/, "");
+  if (/^[A-Za-z]:$/.test(withoutTrailingSeparators)) {
     return true;
   }
-  // A UNC share root: the resolved path equals `\\server\share` with nothing
-  // after it. path.parse leaves `.base`/`.name` empty only at the true root,
-  // but Windows UNC parsing keeps the share in `.root`; compare against a
-  // normalized separator form to catch a trailing-slash variant too.
-  const normalized = resolved.replace(/[\\/]+$/, "");
-  const uncMatch = /^\\\\[^\\/]+\\[^\\/]+$/.exec(normalized);
-  return uncMatch !== null;
+  if (/^\\\\[^\\/]+\\[^\\/]+$/i.test(withoutTrailingSeparators)) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -202,7 +291,7 @@ export function isFilesystemRoot(hostPath: string): boolean {
  */
 export function defaultDeniedPaths(homeDir: string): string[] {
   return [".ssh", ".aws", ".gnupg", ".kube", ".azure", ".docker"].map((segment) =>
-    path.join(homeDir, segment)
+    joinHostPath(homeDir, segment)
   );
 }
 
@@ -283,7 +372,7 @@ function policy(input: {
 }): MountPolicy {
   const base = {
     mountId: input.ids.mountId(),
-    hostPath: path.resolve(input.hostPath),
+    hostPath: normalizeHostPath(input.hostPath),
     runtimePath: input.runtimePath,
     mode: input.mode,
     source: input.source

@@ -11,6 +11,7 @@ import type {
   ColumnId,
   SubtaskDependencyRecord,
   SubtaskId,
+  SubtaskModelSelection,
   SubtaskRecord,
   SubtaskStore,
   SubtaskUpdate,
@@ -36,8 +37,12 @@ export class SqliteSubtaskStore implements SubtaskStore {
         created_at,
         updated_at,
         done_at,
-        color_override
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        color_override,
+        seed_mode,
+        model_json,
+        verify_mode,
+        verified_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.subtaskId,
       record.taskId,
@@ -51,7 +56,11 @@ export class SqliteSubtaskStore implements SubtaskStore {
       record.createdAt,
       record.updatedAt,
       record.doneAt ?? null,
-      record.colorOverride ?? null
+      record.colorOverride ?? null,
+      record.seedMode ?? null,
+      record.model === undefined ? null : JSON.stringify(record.model),
+      record.verifyMode ?? null,
+      record.verifiedAt ?? null
     );
   }
 
@@ -96,6 +105,15 @@ export class SqliteSubtaskStore implements SubtaskStore {
       assignments.push("color_override = ?");
       values.push(update.colorOverride);
     }
+    if (update.seedMode !== undefined) {
+      assignments.push("seed_mode = ?");
+      values.push(update.seedMode);
+    }
+    if (update.verifiedAt !== undefined) {
+      // null re-arms the verify gate; a string is the human's stamp.
+      assignments.push("verified_at = ?");
+      values.push(update.verifiedAt);
+    }
     this.connection.database.prepare(`
       UPDATE subtasks
       SET ${assignments.join(", ")}
@@ -132,15 +150,24 @@ export class SqliteSubtaskStore implements SubtaskStore {
   }
 
   async deleteSubtask(subtaskId: SubtaskId): Promise<void> {
-    // Edges first, then the subtask row, so no orphaned edges survive.
-    this.connection.database.prepare(`
-      DELETE FROM subtask_dependencies
-      WHERE from_subtask_id = ? OR to_subtask_id = ?
-    `).run(subtaskId, subtaskId);
-    this.connection.database.prepare(`
-      DELETE FROM subtasks
-      WHERE subtask_id = ?
-    `).run(subtaskId);
+    const db = this.connection.database;
+    db.exec("BEGIN");
+    try {
+      // Durable orchestration and Landing projections do not use foreign keys,
+      // so their rows must disappear with the owning subtask.
+      db.prepare("DELETE FROM subtask_holds WHERE subtask_id = ?").run(subtaskId);
+      db.prepare("DELETE FROM task_changesets WHERE subtask_id = ?").run(subtaskId);
+      db.prepare("DELETE FROM work_task_links WHERE subtask_id = ?").run(subtaskId);
+      db.prepare(`
+        DELETE FROM subtask_dependencies
+        WHERE from_subtask_id = ? OR to_subtask_id = ?
+      `).run(subtaskId, subtaskId);
+      db.prepare("DELETE FROM subtasks WHERE subtask_id = ?").run(subtaskId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   async reassignSubtasksColumn(fromColumnId: ColumnId, toColumnId: ColumnId): Promise<void> {
@@ -199,6 +226,10 @@ interface SubtaskRow {
   readonly updated_at: string;
   readonly done_at: string | null;
   readonly color_override: number | null;
+  readonly seed_mode: string | null;
+  readonly model_json: string | null;
+  readonly verify_mode: string | null;
+  readonly verified_at: string | null;
 }
 
 interface SubtaskDependencyRow {
@@ -222,8 +253,32 @@ function mapSubtask(row: SubtaskRow): SubtaskRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.done_at === null ? {} : { doneAt: row.done_at }),
-    ...(row.color_override === null ? {} : { colorOverride: row.color_override })
+    ...(row.color_override === null ? {} : { colorOverride: row.color_override }),
+    // Tolerate any historical junk: only the two valid modes surface.
+    ...(row.seed_mode === "local" || row.seed_mode === "upstream" ? { seedMode: row.seed_mode } : {}),
+    ...(parseModel(row.model_json) ?? {}),
+    ...(row.verify_mode === "hitl" ? { verifyMode: "hitl" as const } : {}),
+    ...(row.verified_at === null ? {} : { verifiedAt: row.verified_at })
   };
+}
+
+/** Validated model profile from the JSON column; junk degrades to absent. */
+function parseModel(json: string | null): { model: SubtaskModelSelection } | null {
+  if (json === null) return null;
+  try {
+    const value = JSON.parse(json) as unknown;
+    if (typeof value !== "object" || value === null) return null;
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate["providerId"] !== "string" || candidate["providerId"].length === 0) return null;
+    return {
+      model: {
+        providerId: candidate["providerId"],
+        ...(typeof candidate["model"] === "string" ? { model: candidate["model"] } : {})
+      }
+    };
+  } catch {
+    return null;
+  }
 }
 
 function mapDependency(row: SubtaskDependencyRow): SubtaskDependencyRecord {

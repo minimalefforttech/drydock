@@ -4,11 +4,11 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { DiffFileChange } from "@drydock/contracts";
+import type { DiffFileChange, SessionId } from "@drydock/contracts";
 import type { Clock } from "./clock.js";
 import { RandomIdGenerator } from "./ids.js";
 import type { Logger } from "./logger.js";
@@ -140,6 +140,36 @@ test("accepting one file resets only that file's baseline", async () => {
   }
 });
 
+test("cloneBaseline copies snapshots into a new scope without re-walking; delete removes it", async () => {
+  const harness = await makeHarness();
+  try {
+    await writeFile(file(harness.root, "a.txt"), "a1");
+    const working = await harness.service.createBaseline({
+      scope: "current-session",
+      sessionId: "session-1" as SessionId,
+      rootPath: harness.root
+    });
+    const copy = await harness.service.cloneBaseline(working.baselineId, "session-start");
+
+    assert.equal(copy.scope, "session-start");
+    assert.equal(copy.sessionId, "session-1");
+    assert.equal(copy.rootPath, working.rootPath);
+    assert.notEqual(copy.baselineId, working.baselineId);
+    // The copy diffs independently: an edit shows against BOTH, and accepting
+    // into the working baseline leaves the copy's snapshot untouched.
+    await writeFile(file(harness.root, "a.txt"), "a2");
+    await harness.service.acceptFile(working.baselineId, "a.txt");
+    assert.deepEqual(await harness.service.computeDiff(working.baselineId), []);
+    assert.equal((await harness.service.computeDiff(copy.baselineId)).length, 1);
+
+    await harness.service.deleteBaseline(copy.baselineId);
+    assert.equal(await harness.service.getBaseline(copy.baselineId), null);
+    await assert.rejects(harness.service.computeDiff(copy.baselineId), /not found/);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("revert restores modified and deleted files and deletes added files", async () => {
   const harness = await makeHarness();
   try {
@@ -162,6 +192,66 @@ test("revert restores modified and deleted files and deletes added files", async
 
     // Traversal outside the root is refused before any write happens.
     await assert.rejects(harness.service.revertFile(baseline.baselineId, "../escape.txt"), /escapes/);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("accept and revert refuse intermediate links that redirect outside the baseline root", async (t) => {
+  const harness = await makeHarness();
+  try {
+    const originalDirectory = path.join(harness.root, "redirect");
+    const outsideDirectory = path.join(path.dirname(harness.root), "outside");
+    await mkdir(originalDirectory);
+    await mkdir(outsideDirectory);
+    await writeFile(path.join(originalDirectory, "tracked.txt"), "baseline");
+    const baseline = await harness.service.createBaseline({ scope: "current-session", rootPath: harness.root });
+
+    await rm(originalDirectory, { recursive: true });
+    await writeFile(path.join(outsideDirectory, "tracked.txt"), "outside-safe");
+    await writeFile(path.join(outsideDirectory, "added.txt"), "must-not-delete");
+    try {
+      await symlink(outsideDirectory, originalDirectory, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        t.skip("This Windows account cannot create symbolic links.");
+        return;
+      }
+      throw error;
+    }
+
+    await assert.rejects(
+      harness.service.acceptFile(baseline.baselineId, "redirect/tracked.txt"),
+      /symbolic link|junction/
+    );
+    await assert.rejects(
+      harness.service.revertFile(baseline.baselineId, "redirect/tracked.txt"),
+      /symbolic link|junction/
+    );
+    await assert.rejects(
+      harness.service.revertFile(baseline.baselineId, "redirect/added.txt"),
+      /symbolic link|junction/
+    );
+    assert.equal(await readFile(path.join(outsideDirectory, "tracked.txt"), "utf8"), "outside-safe");
+    assert.equal(await readFile(path.join(outsideDirectory, "added.txt"), "utf8"), "must-not-delete");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("diff file APIs reject absolute and drive-qualified paths on every host", async () => {
+  const harness = await makeHarness();
+  try {
+    const baseline = await harness.service.createBaseline({ scope: "current-session", rootPath: harness.root });
+    await assert.rejects(harness.service.revertFile(baseline.baselineId, "/outside.txt"), /relative/);
+    await assert.rejects(harness.service.acceptFile(baseline.baselineId, "C:\\outside.txt"), /relative/);
+    await assert.rejects(harness.service.revertFile(baseline.baselineId, "\\\\server\\share\\outside.txt"), /relative/);
+
+    const gitConfig = file(harness.root, ".git/config");
+    await mkdir(path.dirname(gitConfig), { recursive: true });
+    await writeFile(gitConfig, "safe");
+    await assert.rejects(harness.service.revertFile(baseline.baselineId, ".git/config"), /excluded/);
+    assert.equal(await readFile(gitConfig, "utf8"), "safe");
   } finally {
     await harness.cleanup();
   }
@@ -207,6 +297,9 @@ test("denied paths are excluded from snapshots and diffs", async () => {
     await writeFile(file(harness.root, "denied/secret.txt"), "changed secret");
     const changes = await denyingService.computeDiff(baseline.baselineId);
     assert.deepEqual(changes, []);
+    await assert.rejects(denyingService.acceptFile(baseline.baselineId, "denied/secret.txt"), /denied/);
+    await assert.rejects(denyingService.revertFile(baseline.baselineId, "denied/secret.txt"), /denied/);
+    assert.equal(await readFile(file(harness.root, "denied/secret.txt"), "utf8"), "changed secret");
   } finally {
     await harness.cleanup();
   }

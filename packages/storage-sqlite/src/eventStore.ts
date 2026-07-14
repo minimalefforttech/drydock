@@ -5,6 +5,7 @@
  */
 
 import type { AgentEvent, EventStore, JsonObject, SessionId, StoredEvent } from "@drydock/contracts";
+import { sanitizePersistedEventPayload } from "./persistenceSanitizer.js";
 import type { SqliteConnection } from "./sqliteConnection.js";
 
 export class SqliteEventStore implements EventStore {
@@ -34,7 +35,7 @@ export class SqliteEventStore implements EventStore {
       event.runId ?? null,
       event.eventType,
       event.createdAt,
-      JSON.stringify(event.payload)
+      JSON.stringify(sanitizePersistedEventPayload(event.payload))
     );
     if (Number(result.changes) > 0) {
       // The durable sequence is the rowid the insert just assigned.

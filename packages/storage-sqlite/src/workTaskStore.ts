@@ -11,6 +11,7 @@ import type {
   ColumnId,
   SessionId,
   SubtaskId,
+  TaskClonePolicy,
   TaskId,
   WorkTaskLinkRecord,
   WorkTaskRecord,
@@ -34,8 +35,11 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
         column_id,
         created_at,
         updated_at,
-        done_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        done_at,
+        clone_workspace_set_id,
+        clone_project_ids_json,
+        clone_dirty_handling
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.taskId,
       record.title,
@@ -44,7 +48,10 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
       record.columnId,
       record.createdAt,
       record.updatedAt,
-      record.doneAt ?? null
+      record.doneAt ?? null,
+      record.clonePolicy?.workspaceSetId ?? null,
+      record.clonePolicy === undefined ? null : JSON.stringify(record.clonePolicy.projectIds),
+      record.clonePolicy?.dirtyHandling ?? null
     );
   }
 
@@ -52,7 +59,7 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
     // Only the provided fields are written so partial updates never clobber a
     // column set by another code path.
     const assignments: string[] = ["updated_at = ?"];
-    const values: (string | null)[] = [update.updatedAt];
+    const values: (string | number | null)[] = [update.updatedAt];
     if (update.title !== undefined) {
       assignments.push("title = ?");
       values.push(update.title);
@@ -74,6 +81,10 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
       // null clears doneAt; a string stamps it.
       assignments.push("done_at = ?");
       values.push(update.doneAt);
+    }
+    if (update.autoAnswerFaq !== undefined) {
+      assignments.push("auto_answer_faq = ?");
+      values.push(update.autoAnswerFaq ? 1 : 0);
     }
     this.connection.database.prepare(`
       UPDATE work_tasks
@@ -102,16 +113,35 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
     return rows.map(mapTask);
   }
 
+  async setClonePolicy(taskId: TaskId, policy: TaskClonePolicy | undefined): Promise<void> {
+    this.connection.database.prepare(`
+      UPDATE work_tasks
+      SET clone_workspace_set_id = ?, clone_project_ids_json = ?, clone_dirty_handling = ?
+      WHERE task_id = ?
+    `).run(
+      policy?.workspaceSetId ?? null,
+      policy === undefined ? null : JSON.stringify(policy.projectIds),
+      policy?.dirtyHandling ?? null,
+      taskId
+    );
+  }
+
   async deleteTask(taskId: TaskId): Promise<void> {
-    // Links first, then the task row, so no orphaned links survive.
-    this.connection.database.prepare(`
-      DELETE FROM work_task_links
-      WHERE task_id = ?
-    `).run(taskId);
-    this.connection.database.prepare(`
-      DELETE FROM work_tasks
-      WHERE task_id = ?
-    `).run(taskId);
+    const db = this.connection.database;
+    db.exec("BEGIN");
+    try {
+      // TaskService normally removes subtasks first. These task-keyed deletes
+      // are also kept here so direct store use cannot leave FAQ or Landing
+      // projections detached from their owner.
+      db.prepare("DELETE FROM task_changesets WHERE task_id = ?").run(taskId);
+      db.prepare("DELETE FROM task_faqs WHERE task_id = ?").run(taskId);
+      db.prepare("DELETE FROM work_task_links WHERE task_id = ?").run(taskId);
+      db.prepare("DELETE FROM work_tasks WHERE task_id = ?").run(taskId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   async insertLink(record: WorkTaskLinkRecord): Promise<void> {
@@ -197,6 +227,10 @@ interface WorkTaskRow {
   readonly created_at: string;
   readonly updated_at: string;
   readonly done_at: string | null;
+  readonly clone_workspace_set_id: string | null;
+  readonly clone_project_ids_json: string | null;
+  readonly clone_dirty_handling: string | null;
+  readonly auto_answer_faq: number;
 }
 
 interface WorkTaskLinkRow {
@@ -208,6 +242,7 @@ interface WorkTaskLinkRow {
 }
 
 function mapTask(row: WorkTaskRow): WorkTaskRecord {
+  const clonePolicy = mapClonePolicy(row);
   return {
     taskId: row.task_id as TaskId,
     title: row.title,
@@ -216,8 +251,34 @@ function mapTask(row: WorkTaskRow): WorkTaskRecord {
     columnId: row.column_id as ColumnId,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    ...(row.done_at === null ? {} : { doneAt: row.done_at })
+    ...(row.done_at === null ? {} : { doneAt: row.done_at }),
+    ...(clonePolicy === undefined ? {} : { clonePolicy }),
+    ...(row.auto_answer_faq ? { autoAnswerFaq: true } : {})
   };
+}
+
+function mapClonePolicy(row: WorkTaskRow): TaskClonePolicy | undefined {
+  if (row.clone_workspace_set_id === null || row.clone_project_ids_json === null) {
+    return undefined;
+  }
+  if (row.clone_dirty_handling !== "carry" && row.clone_dirty_handling !== "fresh") {
+    return undefined;
+  }
+  try {
+    const projectIds: unknown = JSON.parse(row.clone_project_ids_json);
+    if (!Array.isArray(projectIds) || projectIds.length === 0 || projectIds.some((id) => typeof id !== "string")) {
+      return undefined;
+    }
+    return {
+      workspaceSetId: row.clone_workspace_set_id as WorkspaceSetId,
+      projectIds: projectIds as TaskClonePolicy["projectIds"],
+      dirtyHandling: row.clone_dirty_handling
+    };
+  } catch {
+    // Corrupt/partial legacy data degrades to "no policy" and is replaced by
+    // the next manual start rather than crashing every task listing.
+    return undefined;
+  }
 }
 
 function mapLink(row: WorkTaskLinkRow): WorkTaskLinkRecord {

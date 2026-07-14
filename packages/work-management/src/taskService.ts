@@ -8,6 +8,7 @@
  * it is still accepted/derived for the webview until the board UI lands.
  */
 
+import { randomUUID } from "node:crypto";
 import {
   WORK_TASK_STATES,
   asId
@@ -19,6 +20,9 @@ import type {
   SessionId,
   SubtaskId,
   SubtaskStore,
+  TaskClonePolicy,
+  TaskFaqRecord,
+  TaskFaqStore,
   TaskId,
   WorkSessionRecord,
   WorkSessionStore,
@@ -27,9 +31,11 @@ import type {
   WorkTaskState,
   WorkTaskStore,
   WorkTaskSummary,
+  WorkspaceSetRecord,
+  WorkspaceSetStore,
   WorkspaceSetId
 } from "@drydock/contracts";
-import type { Clock, IdGenerator } from "@drydock/core";
+import type { Clock, IdGenerator, ProductEventBus } from "@drydock/core";
 
 export interface TaskServiceOptions {
   readonly ids: IdGenerator;
@@ -40,6 +46,16 @@ export interface TaskServiceOptions {
   readonly workSessions?: WorkSessionStore;
   /** Presence enables cascading subtask deletion when a task is deleted. */
   readonly subtasks?: SubtaskStore;
+  /** Presence enables validation and display of durable clone policies. */
+  readonly workspaceSets?: WorkspaceSetStore;
+  /**
+   * Optional, mirroring SubtaskService: task mutations (create/update/delete/
+   * link/unlink) announce `board-changed` so board-shaped surfaces refetch;
+   * the service works identically without a bus.
+   */
+  readonly bus?: ProductEventBus;
+  /** Presence enables the task FAQ (ADR 0007): entries + summary counts. */
+  readonly faqs?: TaskFaqStore;
 }
 
 /** One link target; exactly one field is set per call. subtaskId only applies alongside sessionId. */
@@ -58,6 +74,14 @@ export interface TaskUpdateInput {
    */
   readonly state?: WorkTaskState;
   readonly columnId?: string;
+  /** ADR 0007: the per-task FAQ auto-answer toggle. */
+  readonly autoAnswerFaq?: boolean;
+}
+
+export interface TaskClonePolicyInput {
+  readonly workspaceSetId: string;
+  readonly projectIds: readonly string[];
+  readonly dirtyHandling: "carry" | "fresh";
 }
 
 /** Legacy WorkTaskState -> seeded default BoardColumnRecord.columnId (mirrors the migration backfill). */
@@ -95,11 +119,15 @@ export class TaskService {
       updatedAt: now
     };
     await this.options.store.insertTask(record);
+    this.options.bus?.publish({ kind: "board-changed" });
     return record;
   }
 
   async updateTask(taskId: string, input: TaskUpdateInput): Promise<WorkTaskRecord> {
-    if (input.title === undefined && input.description === undefined && input.state === undefined && input.columnId === undefined) {
+    if (
+      input.title === undefined && input.description === undefined && input.state === undefined
+      && input.columnId === undefined && input.autoAnswerFaq === undefined
+    ) {
       throw new Error("Task update must change at least one field.");
     }
     if (input.title !== undefined && input.title.trim() === "") {
@@ -134,12 +162,14 @@ export class TaskService {
       ...(input.title === undefined ? {} : { title: input.title.trim() }),
       // "" clears the description; the store maps null to a NULL column.
       ...(input.description === undefined ? {} : { description: input.description === "" ? null : input.description }),
+      ...(input.autoAnswerFaq === undefined ? {} : { autoAnswerFaq: input.autoAnswerFaq }),
       ...columnUpdate
     });
     const updated = await this.options.store.getTask(id);
     if (updated === null) {
       throw new Error(`Task ${taskId} vanished during update.`);
     }
+    this.options.bus?.publish({ kind: "board-changed" });
     return updated;
   }
 
@@ -159,6 +189,7 @@ export class TaskService {
     if (this.options.workSessions !== undefined) {
       await this.options.workSessions.deleteForTask(id);
     }
+    this.options.bus?.publish({ kind: "board-changed" });
   }
 
   /**
@@ -209,16 +240,57 @@ export class TaskService {
 
   /** Idempotent: a duplicate link is a no-op via the store's INSERT OR IGNORE. */
   async link(taskId: string, target: TaskLinkTarget): Promise<void> {
+    const id = asId<"TaskId">(taskId);
     const record: WorkTaskLinkRecord = {
-      taskId: asId<"TaskId">(taskId),
+      taskId: id,
       ...resolveTarget(target),
       createdAt: this.options.clock.isoNow()
     };
     await this.options.store.insertLink(record);
+    if ("workspaceSetId" in target) {
+      await this.clearPolicyIfWorkspaceSelectionChanged(id);
+    }
+    this.options.bus?.publish({ kind: "board-changed" });
   }
 
   async unlink(taskId: string, target: TaskLinkTarget): Promise<void> {
-    await this.options.store.deleteLink(asId<"TaskId">(taskId), resolveTarget(target));
+    const id = asId<"TaskId">(taskId);
+    await this.options.store.deleteLink(id, resolveTarget(target));
+    if ("workspaceSetId" in target) {
+      await this.clearPolicyIfWorkspaceSelectionChanged(id);
+    }
+    this.options.bus?.publish({ kind: "board-changed" });
+  }
+
+  /** Saves a validated, non-empty ordered project subset for the task's sole linked set. */
+  async saveClonePolicy(taskId: string, input: TaskClonePolicyInput): Promise<TaskClonePolicy> {
+    const id = asId<"TaskId">(taskId);
+    const task = await this.options.store.getTask(id);
+    if (task === null) {
+      throw new Error(`Task ${taskId} was not found.`);
+    }
+    const policy: TaskClonePolicy = {
+      workspaceSetId: asId<"WorkspaceSetId">(input.workspaceSetId),
+      projectIds: input.projectIds.map((projectId) => asId<"ProjectId">(projectId)),
+      dirtyHandling: input.dirtyHandling
+    };
+    await this.validateClonePolicy(id, policy);
+    await this.options.store.setClonePolicy(id, policy);
+    return policy;
+  }
+
+  /** Reads and revalidates the durable policy immediately before a run uses it. */
+  async requireClonePolicy(taskId: string): Promise<TaskClonePolicy> {
+    const id = asId<"TaskId">(taskId);
+    const task = await this.options.store.getTask(id);
+    if (task === null) {
+      throw new Error(`Task ${taskId} was not found.`);
+    }
+    if (task.clonePolicy === undefined) {
+      throw new Error(`Task ${taskId} has no clone policy. Start it manually once to select the repositories and dirty-change handling.`);
+    }
+    await this.validateClonePolicy(id, task.clonePolicy);
+    return task.clonePolicy;
   }
 
   /** Session ids linked to one subtask (session-target links carrying that subtaskId), in link order. */
@@ -257,12 +329,22 @@ export class TaskService {
     const categoryByColumnId = new Map(columns.map((column) => [column.columnId as string, column.category]));
     const workspaceSetsByTask = new Map<string, string[]>();
     const sessionsByTask = new Map<string, string[]>();
+    const linkedSetIdsByTask = new Map<string, Set<string>>();
     for (const link of links) {
       if (link.workspaceSetId !== undefined) {
         pushInto(workspaceSetsByTask, link.taskId, link.workspaceSetId);
+        const setIds = linkedSetIdsByTask.get(link.taskId) ?? new Set<string>();
+        setIds.add(link.workspaceSetId);
+        linkedSetIdsByTask.set(link.taskId, setIds);
       }
       if (link.sessionId !== undefined) {
         pushInto(sessionsByTask, link.taskId, link.sessionId);
+      }
+    }
+    const workspaceSetById = new Map<string, WorkspaceSetRecord>();
+    if (this.options.workspaceSets !== undefined) {
+      for (const set of await this.options.workspaceSets.listWorkspaceSets()) {
+        workspaceSetById.set(set.workspaceSetId, set);
       }
     }
     const lastWorkedByTask = new Map<string, string>();
@@ -274,10 +356,13 @@ export class TaskService {
         }
       }
     }
+    const faqCounts = this.options.faqs === undefined ? new Map<string, number>() : await this.options.faqs.countByTask();
     return tasks.map((task) => {
       const lastWorkedAt = lastWorkedByTask.get(task.taskId);
       const category = categoryByColumnId.get(task.columnId);
       const state = category === undefined ? "todo" : CATEGORY_TO_STATE[category];
+      const clonePolicy = validSummaryClonePolicy(task.clonePolicy, linkedSetIdsByTask.get(task.taskId), workspaceSetById);
+      const faqCount = faqCounts.get(task.taskId) ?? 0;
       return {
         taskId: task.taskId,
         title: task.title,
@@ -290,10 +375,132 @@ export class TaskService {
         updatedAt: task.updatedAt,
         ...(task.doneAt === undefined ? {} : { doneAt: task.doneAt }),
         ...(lastWorkedAt === undefined ? {} : { lastWorkedAt }),
+        ...(clonePolicy === undefined ? {} : { clonePolicy }),
+        ...(faqCount > 0 ? { faqCount } : {}),
+        ...(task.autoAnswerFaq === true ? { autoAnswerFaq: true } : {}),
         subtasks: []
       };
     });
   }
+
+  // --- Task FAQ (ADR 0007) ---------------------------------------------------
+
+  async listFaqs(taskId: string): Promise<TaskFaqRecord[]> {
+    const store = this.requireFaqStore();
+    return store.listForTask(asId<"TaskId">(taskId));
+  }
+
+  async addFaq(taskId: string, pattern: string, answer: string): Promise<TaskFaqRecord> {
+    const store = this.requireFaqStore();
+    const trimmedPattern = pattern.trim();
+    const trimmedAnswer = answer.trim();
+    if (trimmedPattern.length === 0) {
+      throw new Error("An FAQ pattern must not be empty.");
+    }
+    if (trimmedAnswer.length === 0) {
+      throw new Error("An FAQ answer must not be empty.");
+    }
+    // The question service caps answers at 4000 chars; refuse here so the
+    // entry can never exist in a state auto-answering would reject.
+    if (trimmedAnswer.length > 4_000) {
+      throw new Error("An FAQ answer is capped at 4000 characters.");
+    }
+    const id = asId<"TaskId">(taskId);
+    if (await this.options.store.getTask(id) === null) {
+      throw new Error(`Task ${taskId} was not found.`);
+    }
+    const record: TaskFaqRecord = {
+      faqId: `faq-${randomUUID().slice(0, 8)}`,
+      taskId: id,
+      pattern: trimmedPattern,
+      answer: trimmedAnswer,
+      createdAt: this.options.clock.isoNow()
+    };
+    await store.insertFaq(record);
+    this.options.bus?.publish({ kind: "board-changed" });
+    return record;
+  }
+
+  async removeFaq(taskId: string, faqId: string): Promise<void> {
+    const store = this.requireFaqStore();
+    await store.deleteFaq(asId<"TaskId">(taskId), faqId);
+    this.options.bus?.publish({ kind: "board-changed" });
+  }
+
+  private requireFaqStore(): TaskFaqStore {
+    if (this.options.faqs === undefined) {
+      throw new Error("Task FAQs are unavailable because no FAQ store is configured.");
+    }
+    return this.options.faqs;
+  }
+
+  private async validateClonePolicy(taskId: TaskId, policy: TaskClonePolicy): Promise<WorkspaceSetRecord> {
+    const workspaceSets = this.options.workspaceSets;
+    if (workspaceSets === undefined) {
+      throw new Error("Task clone policies are unavailable because no workspace-set store is configured.");
+    }
+    if (policy.dirtyHandling !== "carry" && policy.dirtyHandling !== "fresh") {
+      throw new Error(`Unknown clone dirty handling ${String(policy.dirtyHandling)}.`);
+    }
+    if (policy.projectIds.length === 0) {
+      throw new Error("A task clone policy must select at least one project.");
+    }
+    const selected = new Set<string>();
+    for (const projectId of policy.projectIds) {
+      if (selected.has(projectId)) {
+        throw new Error(`Project ${projectId} is selected more than once in the task clone policy.`);
+      }
+      selected.add(projectId);
+    }
+    const links = await this.options.store.listLinks(taskId);
+    const linkedSetIds = [...new Set(links.flatMap((link) => link.workspaceSetId === undefined ? [] : [link.workspaceSetId as string]))];
+    if (linkedSetIds.length !== 1) {
+      throw new Error(`Task ${taskId} must link exactly one workspace set before it can start an isolated clone run; found ${String(linkedSetIds.length)}.`);
+    }
+    if (linkedSetIds[0] !== policy.workspaceSetId) {
+      throw new Error(`Task ${taskId}'s clone policy selects workspace set ${policy.workspaceSetId}, but its linked set is ${linkedSetIds[0]}.`);
+    }
+    const set = await workspaceSets.getWorkspaceSet(policy.workspaceSetId);
+    if (set === null) {
+      throw new Error(`Task ${taskId}'s clone policy references missing workspace set ${policy.workspaceSetId}.`);
+    }
+    const memberIds = new Set(set.projectIds as readonly string[]);
+    for (const projectId of policy.projectIds) {
+      if (!memberIds.has(projectId)) {
+        throw new Error(`Task ${taskId}'s clone policy selects project ${projectId}, which is not in workspace set ${policy.workspaceSetId}.`);
+      }
+    }
+    return set;
+  }
+
+  private async clearPolicyIfWorkspaceSelectionChanged(taskId: TaskId): Promise<void> {
+    const task = await this.options.store.getTask(taskId);
+    if (task?.clonePolicy === undefined) return;
+    const links = await this.options.store.listLinks(taskId);
+    const setIds = [...new Set(links.flatMap((link) => link.workspaceSetId === undefined ? [] : [link.workspaceSetId as string]))];
+    if (setIds.length !== 1 || setIds[0] !== task.clonePolicy.workspaceSetId) {
+      await this.options.store.setClonePolicy(taskId, undefined);
+    }
+  }
+}
+
+function validSummaryClonePolicy(
+  policy: TaskClonePolicy | undefined,
+  linkedSetIds: ReadonlySet<string> | undefined,
+  workspaceSetById: ReadonlyMap<string, WorkspaceSetRecord>
+): (TaskClonePolicy & { readonly workspaceSetProjectCount: number }) | undefined {
+  if (policy === undefined || linkedSetIds?.size !== 1 || !linkedSetIds.has(policy.workspaceSetId) || policy.projectIds.length === 0) {
+    return undefined;
+  }
+  const set = workspaceSetById.get(policy.workspaceSetId);
+  if (set === undefined) return undefined;
+  const memberIds = new Set(set.projectIds as readonly string[]);
+  const selected = new Set<string>();
+  for (const projectId of policy.projectIds) {
+    if (!memberIds.has(projectId) || selected.has(projectId)) return undefined;
+    selected.add(projectId);
+  }
+  return { ...policy, workspaceSetProjectCount: set.projectIds.length };
 }
 
 function resolveTarget(target: TaskLinkTarget): { workspaceSetId?: WorkspaceSetId; sessionId?: SessionId; subtaskId?: SubtaskId } {

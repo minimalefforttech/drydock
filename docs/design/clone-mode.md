@@ -7,7 +7,7 @@ Related: roadmap, `architecture-implementation-plan.md`, threat model.
 | Mode | What the VM sees | Where changes land |
 |---|---|---|
 | Standard (implementation) | live work folders mounted rw | directly on disk |
-| Plan | live folders mounted ro | plan documents only |
+| Planning session | live folders mounted ro | durable Planner artifacts only |
 | **Clone** | a git clone of each repo, inside its disposable workspace — **no live mounts** | a patch the developer pulls into the editor |
 | Remote (future, specced below) | a clone on a separate networked machine | the same patch protocol over a transport |
 
@@ -26,16 +26,35 @@ local repo gains no commits.
 ### Why full clones, not worktrees
 A `git worktree`'s gitdir points back into the primary repo's `.git`
 directory — mounting a worktree rw into a VM hands the container a path into
-the live repository. Disqualified. `git clone --local` from a local path is
-cheap (hardlinked objects where the filesystem allows) and fully detached.
+the live repository. Disqualified. Drydock uses `git clone --local
+--no-hardlinks`: local clone transport stays fast, while object files are
+physically copied so a VM write cannot reach the developer's real object store.
 
-### Snapshot fidelity
-"Clone the current branch" must mean *what the developer sees*, not just
-HEAD: after cloning `-b <branch>`, the local dirty state is overlaid —
-`git -C <local> diff --binary HEAD` applied to the clone, plus untracked
-files (`ls-files -o --exclude-standard`, honoring .gitignore) copied in.
-Then `git -C <clone> add -A && commit` creates the **sync base**, tracked as
-ref `refs/sync/base`. The VM starts from a faithful snapshot.
+### Snapshot choice and fidelity
+Before a manual task/subtask start, Drydock selects a non-empty ordered subset
+of the task's sole linked workspace set and preflights each selected repository
+without changing it. Preflight reports branch/detached HEAD and tracked versus
+untracked dirtiness. The selection and dirty handling are saved as the task's
+durable clone policy, so automatic dependency cascades reuse exactly the same
+scope without prompting. The chosen dirty handling is also stamped onto each
+session row, so resume/reclaim recreates the same snapshot policy instead of
+falling back to a dirty overlay.
+
+If a selected repository is dirty, the user chooses one of two snapshots:
+
+- **Carry local changes** clones current local HEAD, then overlays
+  `git -C <local> diff --binary HEAD` plus untracked, non-ignored files.
+- **Fresh committed checkout** clones the repository's **current local
+  committed HEAD** and excludes tracked working changes and untracked files.
+
+"Fresh" never means refresh from a remote: this start path performs no
+`fetch`, `pull`, or remote checkout. In both cases `git -C <clone> add -A &&
+commit` creates the **sync base**, tracked as `refs/sync/base`.
+
+Every automated subtask gets its own disposable clone workspace and never a
+live implementation mount. A task with zero or multiple linked workspace sets,
+a missing policy, an empty/stale project selection, or a non-git selected root
+fails with an actionable error rather than running against an empty workspace.
 
 ### The sync protocol (symmetric 3-way patches through the clone)
 All bookkeeping lives in the clone; `refs/sync/base` always names the last
@@ -78,8 +97,9 @@ same click-to-open-diff against the sync base). Only the verbs change:
 - ✕ per-file → **Discard in clone** (`checkout sync/base -- <path>`, confirm)
 - Header: **Pull all into editor** / **Push local → VM** / conflict rows
   flagged until resolved.
-The composer mode control becomes **[Chat | Plan | Clone]**; the mounts
-expandable shows `clone: <repo>@<branch> · no live mounts`; the session
+An Edit session started in clone mode exposes the sync verbs instead of live
+mount edits; the mounts expandable shows
+`clone: <repo>@<branch> · no live mounts`; the session
 briefing tells the agent it is on a disposable clone whose changes reach the
 developer only through sync.
 
@@ -88,6 +108,26 @@ git-not-found on host → clone mode unavailable with an actionable error;
 a failed 3-way apply never half-applies (git apply is atomic per invocation;
 per-file pulls are one file per invocation); sync ops are disabled while a
 turn is running (the agent may be mid-write).
+
+### Chain changesets and landing (ADR 0014)
+Dependent subtasks can seed from their upstreams' output without the user
+pulling first: Review entry captures each clone's `sync/base..HEAD` patch
+durably (blob store + `task_changesets` row, latest capture wins) together
+with its repo-relative touched paths, and a
+subtask whose stored `seedMode` is `upstream` 3-way applies its upstreams'
+unlanded changesets into the fresh clone BEFORE `refs/sync/base` freezes —
+so each subtask's own changeset stays scoped to its own work. A full Pull
+marks the session's changesets landed (they stop seeding). Conflicting
+seeds fail the start loudly; the user chooses the mode (start QuickPick or
+the card's ⎘ toggle), automation never invents one.
+
+The Agents panel folds unlanded rows into a Landing drawer. It compares
+repo-namespaced path sets to order known-disjoint work before unknown and
+overlapping work; this is an advisory overlap signal, not a Git dry run.
+Two-click Pull calls the same full clone Pull as the session Changes tray,
+and lost-clone or mid-turn refusals stay visible. The durable patch cannot yet
+rehydrate a lost clone, so landing still requires that live process-local clone
+state.
 
 ## Remote mode (future) — specification only
 

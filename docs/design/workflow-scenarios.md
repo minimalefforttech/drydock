@@ -116,8 +116,8 @@ path — each approval mounts a host directory into a writable runtime.
     task touched `\\studio\prod` even if the approver didn't notice.
 
 ### B2. The vibe coder (accepts everything, reads nothing, ships)
-Runs turn after turn, hits **Accept all** without opening a diff, never enters
-plan mode, treats the working set as a "make it green" button.
+Runs turn after turn, hits **Accept all** without opening a diff, never uses the
+Plan/Planner workflow, treats the working set as a "make it green" button.
 - **What holds today:** work happens in a disposable micro-VM over mounted
   copies — a bad run is contained, not sprayed across the host. Accept only
   *resets the diff baseline*; the real changes are on disk in the workspace and
@@ -136,15 +136,16 @@ plan mode, treats the working set as a "make it green" button.
     the same flow as a one-liner. **Mitigation: soft gate** — when a single
     turn's working set crosses a threshold (files or lines), suggest (don't
     force) dropping into plan/review before Accept all.
-  - *Plan-gating exists but is unused on the happy path.* `assertPlanApproved`
-    already blocks implementation turns when a governing plan isn't approved
-    (Stage 5) — the vibe path simply never attaches a plan. **Mitigation:
-    per-workspace policy** to *require* an approved plan for implementation
-    chats on designated repos (the ones that matter), turning an opt-in guard
-    into an opt-out one where it counts.
-  - *No test/verification gate before Accept.* **Mitigation:** optional
-    "changes with no passing test run" badge so green-chasing is at least
-    visible.
+  - *Planning is separate from implementation and is not a hard gate.* The
+    Planner supports deliberate plan/review work, but implementation does not
+    require an approved plan. **Possible mitigation:** a future per-workspace
+    policy or a soft plan suggestion for designated repos and unusually large
+    changes. Such a policy must be explicit and must not silently revive the
+    retired block-approval gate.
+  - *No automated test gate before Accept.* Review cards can carry an explicit
+    human-verification requirement and record its result, but Drydock does not
+    currently run or attest tests. **Mitigation:** add a test-provider-backed
+    "no passing test run" badge so green-chasing is at least visible.
 
 ### B3. The exfiltration-by-approval path (data leaves, not code)
 The subtle one: the agent doesn't escape, but a careless approver mounts a

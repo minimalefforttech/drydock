@@ -36,13 +36,15 @@ const stagedFiles = [
   "dist/extension.js",
   "dist/webview/main.js",
   "dist/webview/main.css",
-  "dist/webview/planDocs.js",
-  "dist/webview/planDocs.css",
   "dist/webview/planDocsMermaid.js",
   "dist/webview/taskReview.js",
   "dist/webview/taskReview.css",
   "dist/webview/taskBoard.js",
   "dist/webview/taskBoard.css",
+  "dist/webview/planner.js",
+  "dist/webview/planner.css",
+  "dist/webview/agents.js",
+  "dist/webview/agents.css",
   "media/icon.svg"
 ];
 for (const relativePath of stagedFiles) {
@@ -55,6 +57,8 @@ const stagedManifest = {
   displayName: sourceManifest.displayName,
   version: sourceManifest.version,
   publisher: sourceManifest.publisher,
+  description: sourceManifest.description,
+  repository: sourceManifest.repository,
   type: sourceManifest.type,
   main: sourceManifest.main,
   engines: sourceManifest.engines,
@@ -65,13 +69,15 @@ const stagedManifest = {
     "dist/extension.js",
     "dist/webview/main.js",
     "dist/webview/main.css",
-    "dist/webview/planDocs.js",
-    "dist/webview/planDocs.css",
     "dist/webview/planDocsMermaid.js",
     "dist/webview/taskReview.js",
     "dist/webview/taskReview.css",
     "dist/webview/taskBoard.js",
     "dist/webview/taskBoard.css",
+    "dist/webview/planner.js",
+    "dist/webview/planner.css",
+    "dist/webview/agents.js",
+    "dist/webview/agents.css",
     "media/icon.svg"
   ]
 };
@@ -81,11 +87,7 @@ await writeFile(
   `${JSON.stringify(stagedManifest, null, 2)}\n`,
   "utf8"
 );
-await writeFile(
-  path.join(stageRoot, "README.md"),
-  "# Drydock\n\nInternal stage VSIX package.\n",
-  "utf8"
-);
+await copyFile(path.join(extensionRoot, "README.md"), path.join(stageRoot, "README.md"));
 
 const vsixPath = path.join(outRoot, `${sourceManifest.name}-${sourceManifest.version}.vsix`);
 await rm(vsixPath, { force: true });
@@ -95,8 +97,12 @@ await run(process.execPath, [vsceBin, "package", "--out", vsixPath], stageRoot);
 // tar happens to be first on PATH — GNU tar cannot read zip archives.
 const tarBin = process.platform === "win32"
   ? path.join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "tar.exe")
-  : "tar";
+  : process.platform === "linux" ? "bsdtar" : "tar";
 const listing = await runCapture(tarBin, ["-tf", vsixPath], root);
+if (listing.stderr) process.stderr.write(listing.stderr);
+if (listing.exitCode !== 0) {
+  throw new Error(`${tarBin} failed to list the packaged VSIX (exit ${String(listing.exitCode)})`);
+}
 assertPackagedFiles(listing.stdout);
 
 console.log(`VSIX created: ${vsixPath}`);
@@ -134,13 +140,15 @@ function assertPackagedFiles(stdout) {
     "extension/dist/extension.js",
     "extension/dist/webview/main.js",
     "extension/dist/webview/main.css",
-    "extension/dist/webview/planDocs.js",
-    "extension/dist/webview/planDocs.css",
     "extension/dist/webview/planDocsMermaid.js",
     "extension/dist/webview/taskReview.js",
     "extension/dist/webview/taskReview.css",
     "extension/dist/webview/taskBoard.js",
     "extension/dist/webview/taskBoard.css",
+    "extension/dist/webview/planner.js",
+    "extension/dist/webview/planner.css",
+    "extension/dist/webview/agents.js",
+    "extension/dist/webview/agents.css",
     "extension/media/icon.svg"
   ]);
   for (const entry of required) {
@@ -148,11 +156,9 @@ function assertPackagedFiles(stdout) {
       throw new Error(`VSIX is missing expected entry: ${entry}`);
     }
   }
-  const unexpectedExtensionEntries = entries.filter((entry) => (
-    entry.startsWith("extension/") && !required.has(entry)
-  ));
-  if (unexpectedExtensionEntries.length > 0) {
-    throw new Error(`VSIX has unexpected extension files: ${unexpectedExtensionEntries.join(", ")}`);
+  const unexpectedEntries = entries.filter((entry) => !required.has(entry));
+  if (unexpectedEntries.length > 0) {
+    throw new Error(`VSIX has unexpected files: ${unexpectedEntries.join(", ")}`);
   }
 }
 

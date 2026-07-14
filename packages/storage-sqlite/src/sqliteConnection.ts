@@ -15,6 +15,10 @@ export class SqliteConnection {
   constructor(readonly databasePath: string) {
     mkdirSync(path.dirname(databasePath), { recursive: true });
     this.database = new DatabaseSync(databasePath);
+    // Overwrite deleted/replaced cells so redaction migrations do not leave
+    // recoverable credential bytes in SQLite freelist pages.
+    this.database.exec("PRAGMA secure_delete = ON;");
+    this.database.exec("PRAGMA busy_timeout = 5000;");
     this.database.exec("PRAGMA journal_mode = WAL;");
     this.database.exec("PRAGMA foreign_keys = ON;");
   }
@@ -23,4 +27,3 @@ export class SqliteConnection {
     this.database.close();
   }
 }
-

@@ -33,3 +33,17 @@ test("SpawnCommandRunner aborts a running child process", async () => {
   assert.equal(result.timedOut, false);
   assert.equal(result.error, "Aborted");
 });
+
+test("SpawnCommandRunner inherits its private environment without mutating the host", async () => {
+  const variable = "DRYDOCK_PRIVATE_ENV_TEST";
+  const original = process.env[variable];
+  const runner = new SpawnCommandRunner({ ...process.env, [variable]: "private-value" });
+  const result = await runner.run(process.execPath, ["-e", `process.stdout.write(process.env.${variable} ?? "missing");`], {
+    cwd: process.cwd(),
+    timeoutMs: 10_000
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, "private-value");
+  assert.equal(process.env[variable], original);
+});

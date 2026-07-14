@@ -30,6 +30,9 @@ export interface CodexAppServerTransportOptions {
   readonly command: string;
   readonly argsForRuntime: (runtime: RuntimeHandle) => readonly string[];
   readonly cwd: string;
+  readonly environment?: NodeJS.ProcessEnv;
+  /** Re-check current allocation policy at the final prompt-bearing boundary. */
+  readonly authorizePrompt?: () => void | Promise<void>;
   readonly ids?: IdGenerator;
   readonly clock?: Clock;
   readonly logger?: Logger;
@@ -112,6 +115,7 @@ export class CodexAppServerTransport {
   }
 
   async sendPrompt(session: CodexAppServerSession, prompt: AgentPrompt, runId: RunId): Promise<void> {
+    await this.options.authorizePrompt?.();
     const turnStart = await session.client.request("turn/start", {
       threadId: session.threadId,
       cwd: prompt.cwd ?? session.cwd,
@@ -274,6 +278,7 @@ export class CodexAppServerTransport {
         };
       }
 
+      await this.options.authorizePrompt?.();
       const turnStart = await client.request("turn/start", {
         threadId,
         cwd,
@@ -307,7 +312,8 @@ export class CodexAppServerTransport {
       this.options.command,
       [...this.options.argsForRuntime(runtime), "codex", "app-server", "--listen", "stdio://"],
       this.options.cwd,
-      onStderr
+      onStderr,
+      this.options.environment
     );
   }
 

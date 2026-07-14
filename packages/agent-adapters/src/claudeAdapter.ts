@@ -95,7 +95,10 @@ export class ClaudeAdapter implements AgentAdapter {
     }
     const connection: AgentConnection = {
       providerId: this.providerId,
-      connectionId: `claude-exec-${String(request.runtime.runtimeGenerationId)}`,
+      // Generation + agent: a sidecar connection on the SAME runtime (e.g. an
+      // out-of-band summary prompt) must never share state with — or clobber —
+      // the session's own connection.
+      connectionId: `claude-exec-${String(request.runtime.runtimeGenerationId)}-${String(request.agentId)}`,
       sessionId: request.sessionId,
       agentId: request.agentId,
       agentRole: request.agentRole,

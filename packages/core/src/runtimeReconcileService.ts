@@ -44,6 +44,13 @@ export class RuntimeReconcileService {
 
     for (const runtime of inventory) {
       if (external.has(runtime.externalName)) {
+        if (runtime.status === "lost") {
+          await this.options.inventory.updateRuntimeStatus(runtime.runtimeId, "quarantined", reconciledAt);
+          this.options.logger.warn("lost runtime found during reconciliation", {
+            runtimeId: runtime.runtimeId,
+            externalName: runtime.externalName
+          });
+        }
         await this.options.inventory.updateRuntimeMetadata(runtime.runtimeId, { lastReconciledAt: reconciledAt }, reconciledAt);
         continue;
       }

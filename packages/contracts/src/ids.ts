@@ -31,6 +31,9 @@ export type ReviewSessionId = Brand<string, "ReviewSessionId">;
 export type ReviewCommentId = Brand<string, "ReviewCommentId">;
 export type ColumnId = Brand<string, "ColumnId">;
 export type SubtaskId = Brand<string, "SubtaskId">;
+export type PlanId = Brand<string, "PlanId">;
+export type PlanArtifactId = Brand<string, "PlanArtifactId">;
+export type PlanAnnotationId = Brand<string, "PlanAnnotationId">;
 
 export type AgentRole = "researcher" | "planner" | "worker" | "tester" | "reviewer" | "memory-extractor";
 

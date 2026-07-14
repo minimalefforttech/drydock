@@ -15,6 +15,9 @@ import type {
   EventId,
   MemoryCandidateId,
   MountId,
+  PlanAnnotationId,
+  PlanArtifactId,
+  PlanId,
   ProjectId,
   ReviewCommentId,
   ReviewSessionId,
@@ -48,6 +51,9 @@ export interface IdGenerator {
   memoryCandidateId(): MemoryCandidateId;
   columnId(): ColumnId;
   subtaskId(): SubtaskId;
+  planId(): PlanId;
+  planArtifactId(): PlanArtifactId;
+  planAnnotationId(): PlanAnnotationId;
 }
 
 export class RandomIdGenerator implements IdGenerator {
@@ -125,6 +131,18 @@ export class RandomIdGenerator implements IdGenerator {
 
   subtaskId(): SubtaskId {
     return asId<"SubtaskId">(`subtask-${shortUuid()}`);
+  }
+
+  planId(): PlanId {
+    return asId<"PlanId">(`plan-${shortUuid()}`);
+  }
+
+  planArtifactId(): PlanArtifactId {
+    return asId<"PlanArtifactId">(`plart-${shortUuid()}`);
+  }
+
+  planAnnotationId(): PlanAnnotationId {
+    return asId<"PlanAnnotationId">(`plnote-${shortUuid()}`);
   }
 }
 

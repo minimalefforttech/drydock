@@ -83,6 +83,33 @@ test("autoStart defaults to false on create, is settable on create, and toggles 
   assert.equal(disabled.autoStart, false);
 });
 
+test("HITL verification is accepted only in Done and is re-armed when work leaves Done", async () => {
+  const { service, tasks } = harness();
+  await tasks.insertTask(task("task-1"));
+  const plain = await service.createSubtask("task-1", { title: "Plain" });
+  const gated = await service.createSubtask("task-1", { title: "Gated", verifyMode: "hitl" });
+
+  await service.moveCard({ subtaskId: plain.subtaskId }, "col-review");
+  await assert.rejects(
+    () => service.updateSubtask(plain.subtaskId, { verified: true }),
+    /SUBTASK_VERIFICATION_NOT_ARMED/
+  );
+  await assert.rejects(
+    () => service.updateSubtask(gated.subtaskId, { verified: true }),
+    /SUBTASK_VERIFICATION_NOT_READY/
+  );
+
+  await service.moveCard({ subtaskId: gated.subtaskId }, "col-review");
+  const verified = await service.updateSubtask(gated.subtaskId, { verified: true });
+  assert.equal(verified.verifiedAt, "2026-07-03T00:00:00.000Z");
+
+  const stillDone = await service.moveCard({ subtaskId: gated.subtaskId }, "col-finished") as SubtaskRecord;
+  assert.equal(stillDone.verifiedAt, "2026-07-03T00:00:00.000Z", "moving within Done preserves the completed-result stamp");
+
+  const rework = await service.moveCard({ subtaskId: gated.subtaskId }, "col-todo") as SubtaskRecord;
+  assert.equal(rework.verifiedAt, undefined, "leaving Done re-arms the HITL gate");
+});
+
 test("addDependency rejects self-edges, cross-task edges, duplicates, and cycles", async () => {
   const { service, tasks } = harness();
   await tasks.insertTask(task("task-1"));
@@ -253,6 +280,15 @@ class MemoryWorkTaskStore implements WorkTaskStore {
     return Promise.resolve([...this.tasks.values()]);
   }
 
+  setClonePolicy(taskId: TaskId, policy: WorkTaskRecord["clonePolicy"]): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (task !== undefined) {
+      const { clonePolicy: _old, ...withoutPolicy } = task;
+      this.tasks.set(taskId, policy === undefined ? withoutPolicy : { ...withoutPolicy, clonePolicy: policy });
+    }
+    return Promise.resolve();
+  }
+
   deleteTask(taskId: TaskId): Promise<void> {
     this.tasks.delete(taskId);
     return Promise.resolve();
@@ -323,6 +359,13 @@ class MemorySubtaskStore implements SubtaskStore {
         delete (next as { doneAt?: string }).doneAt;
       } else {
         (next as { doneAt?: string }).doneAt = update.doneAt;
+      }
+    }
+    if (update.verifiedAt !== undefined) {
+      if (update.verifiedAt === null) {
+        delete (next as { verifiedAt?: string }).verifiedAt;
+      } else {
+        (next as { verifiedAt?: string }).verifiedAt = update.verifiedAt;
       }
     }
     this.subtasks.set(subtaskId, next);

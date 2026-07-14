@@ -4,18 +4,17 @@
  * Builds the `StartSubtaskRun` callback the SubtaskOrchestrator is
  * constructed with, out of the SAME backend services the control panel's
  * "chat.start" flow delegates to: `IsolatedRunService.startChat` boots the
- * isolated session (title derived from the prompt), implementation-mode
- * workspaces get per-root diff baselines, and the first turn is dispatched
- * fire-and-forget — completion arrives via the product bus `turn-completed`
- * event, which the orchestrator subscribes to. No `vscode` imports belong
- * here; ports are narrow and structural so tests can stub them without
+ * isolated clone session (title derived from the prompt), then returns a
+ * fire-and-forget first-turn dispatcher. The orchestrator calls it only after
+ * its session map, durable link, and card state are committed; completion
+ * arrives via the product bus `turn-completed` event. No `vscode` imports
+ * belong here; ports are narrow and structural so tests can stub them without
  * booting docker (the taskReviewAppService pattern).
  *
- * Workspace inheritance: the subtask's parent task links to workspace sets;
- * when it links to EXACTLY ONE the session mounts that set (an unambiguous
- * "where", mirroring TaskService.recordSessionActivity's sole-set rule) in
- * implementation mode. Zero or several sets fall back to a plain disposable
- * workspace — guessing between sets would mount the wrong project silently.
+ * Workspace inheritance: every automated subtask uses the parent task's
+ * durable clone policy. The task service revalidates its sole linked set and
+ * selected project subset before each run; missing/ambiguous policy fails
+ * loudly instead of silently starting without the intended code.
  *
  * Concurrency: `IsolatedRunService.startChat` -> `startChatSession` never
  * touches the single-flight `runInFlight` slot — that guard only covers
@@ -25,8 +24,7 @@
  * serialize), so parallel dependent dispatch needs no FIFO queue here.
  */
 
-import { asId } from "@drydock/contracts";
-import type { ChatModelSelection, ChatSessionRecord, TaskId, WorkTaskLinkRecord } from "@drydock/contracts";
+import type { ChatModelSelection, ChatSessionRecord, TaskClonePolicy } from "@drydock/contracts";
 import type { Logger } from "@drydock/core";
 import type { StartSubtaskRun } from "@drydock/work-management";
 import type { ChatWorkspaceContext } from "./isolatedRunService.js";
@@ -37,87 +35,89 @@ export interface SubtaskRunSessionPort {
   sendChatTurn(sessionId: string, prompt: string): Promise<unknown>;
 }
 
-/** Workspace resolution + baselining; WorkspaceReviewAppService satisfies this. */
+/** Task-clone workspace resolution; WorkspaceReviewAppService satisfies this. */
 export interface SubtaskRunWorkspacePort {
-  resolveWorkspaceSelection(
-    selection: { readonly workspaceSetId: string; readonly mode: "plan" | "implementation" | "clone" },
-    openFolderRoots?: readonly string[]
-  ): Promise<ChatWorkspaceContext>;
-  createSessionBaselines(sessionId: string, roots: readonly string[]): Promise<void>;
+  resolveTaskCloneWorkspace(policy: TaskClonePolicy): Promise<ChatWorkspaceContext>;
 }
 
-/** Task-link facts (which workspace sets the parent task points at); WorkTaskStore satisfies this. */
-export interface SubtaskRunLinkPort {
-  listLinks(taskId?: TaskId): Promise<WorkTaskLinkRecord[]>;
+/** Durable task policy; TaskService satisfies this. */
+export interface SubtaskRunTaskPort {
+  requireClonePolicy(taskId: string): Promise<TaskClonePolicy>;
+}
+
+/** Unlanded upstream changesets (ADR 0014); ChangesetService satisfies this. */
+export interface SubtaskRunChangesetPort {
+  seedPatchesFor(upstreamSubtaskIds: readonly string[]): Promise<readonly { readonly repoName: string; readonly label: string; readonly patch: string }[]>;
 }
 
 export interface SubtaskRunBridgeOptions {
   readonly logger: Logger;
   readonly sessions: SubtaskRunSessionPort;
   readonly workspaces: SubtaskRunWorkspacePort;
-  readonly taskLinks: SubtaskRunLinkPort;
+  readonly tasks: SubtaskRunTaskPort;
+  /** Optional: absent keeps every start seeding local HEAD (classic behavior). */
+  readonly changesets?: SubtaskRunChangesetPort;
 }
 
 /**
- * The returned callback mirrors the control panel's chat.start sequence:
- * resolve workspace -> startChat -> baseline -> detached first turn. The
- * turn is deliberately NOT awaited — the orchestrator treats startRun as
- * "session is up and the prompt is on its way"; the terminal status flows
- * back through the bus.
+ * The returned callback prepares the control panel's chat.start sequence:
+ * resolve clone workspace -> startChat -> return a detached first-turn
+ * dispatcher. The orchestrator invokes that dispatcher only after committing
+ * the session's orchestration state; terminal status flows back through the
+ * bus and is deliberately not awaited by the start request.
  */
 export function createSubtaskRunBridge(options: SubtaskRunBridgeOptions): StartSubtaskRun {
-  return async ({ taskId, subtaskId, prompt, title }) => {
-    const workspace = await resolveTaskWorkspace(options, taskId);
-    // The subtask's title names the chat (survives the first-turn auto-rename).
-    const started = await options.sessions.startChat(prompt, undefined, workspace, title);
-    const sessionId = started.session.sessionId as string;
-    if (workspace !== undefined && workspace.mode === "implementation") {
-      // Mirrors baselineWorkspaceSession in the chat.start flow: baselines are
-      // best-effort; a failure must not sink the run that already started.
-      try {
-        await options.workspaces.createSessionBaselines(sessionId, workspace.roots);
-      } catch (error) {
-        options.logger.warn("subtask session baseline failed", {
-          sessionId,
-          subtaskId,
-          error: error instanceof Error ? error.message : String(error)
-        });
+  return async ({ taskId, subtaskId, prompt, title, seedMode, dependsOn, model }) => {
+    let workspace = await resolveTaskWorkspace(options, taskId);
+    // Stored `upstream` seed choice (ADR 0014): resolve the upstream subtasks'
+    // unlanded changesets and ride them into clone init. No unlanded output is
+    // NOT an error — the upstreams simply produced nothing to carry — but a
+    // resolution failure (missing blob) aborts the start honestly.
+    if (seedMode === "upstream" && dependsOn.length > 0 && options.changesets !== undefined) {
+      const seeds = await options.changesets.seedPatchesFor(dependsOn);
+      if (seeds.length > 0) {
+        workspace = { ...workspace, seedPatches: seeds };
+      } else {
+        options.logger.info("upstream seed chosen but no unlanded changesets exist; cloning local HEAD only", { subtaskId });
       }
     }
-    // Fire-and-forget, mirroring runTurnDetached: completion (completed /
-    // failed / cancelled) reaches the orchestrator via the bus.
-    void options.sessions.sendChatTurn(sessionId, prompt).catch((error: unknown) => {
+    // The subtask's title names the chat (survives the first-turn auto-rename).
+    // A per-role model profile (ADR 0002) rides through; absent = provider default.
+    const started = await options.sessions.startChat(prompt, model, workspace, title);
+    const sessionId = started.session.sessionId as string;
+    const logDispatchFailure = (error: unknown): void => {
       options.logger.error("subtask first turn failed to run", {
         sessionId,
         subtaskId,
         error: error instanceof Error ? error.message : String(error)
       });
-    });
-    return { sessionId };
+    };
+    return {
+      sessionId,
+      // Fire-and-forget, mirroring runTurnDetached: completion (completed /
+      // failed / cancelled) reaches the orchestrator via the bus. Protect the
+      // no-throw dispatcher contract even if a structural test double throws
+      // before returning its promise.
+      dispatchFirstTurn: () => {
+        try {
+          void options.sessions.sendChatTurn(sessionId, prompt).catch(logDispatchFailure);
+        } catch (error) {
+          logDispatchFailure(error);
+        }
+      }
+    };
   };
 }
 
 /**
- * The parent task's workspace context: its sole linked workspace set,
- * resolved to implementation-mode mount roots — or undefined when the task
- * links to zero or several sets (ambiguous, so no project mounts).
+ * Resolve the parent task's durable, revalidated policy to a non-empty clone
+ * workspace. Missing or ambiguous configuration is an actionable hard error.
  */
-async function resolveTaskWorkspace(options: SubtaskRunBridgeOptions, taskId: string): Promise<ChatWorkspaceContext | undefined> {
-  const links = await options.taskLinks.listLinks(asId<"TaskId">(taskId));
-  const setIds = [...new Set(links.filter((link) => link.workspaceSetId !== undefined).map((link) => link.workspaceSetId as string))];
-  const soleSetId = setIds.length === 1 ? setIds[0] : undefined;
-  if (soleSetId === undefined) {
-    return undefined;
+async function resolveTaskWorkspace(options: SubtaskRunBridgeOptions, taskId: string): Promise<ChatWorkspaceContext> {
+  const policy = await options.tasks.requireClonePolicy(taskId);
+  const workspace = await options.workspaces.resolveTaskCloneWorkspace(policy);
+  if (workspace.mode !== "clone" || workspace.roots.length === 0) {
+    throw new Error(`Task ${taskId}'s clone policy did not resolve to a non-empty clone workspace.`);
   }
-  try {
-    return await options.workspaces.resolveWorkspaceSelection({ workspaceSetId: soleSetId, mode: "implementation" });
-  } catch (error) {
-    // A stale/deleted set must not stop the run; it just loses its mounts.
-    options.logger.warn("subtask workspace resolution failed; starting without project mounts", {
-      taskId,
-      workspaceSetId: soleSetId,
-      error: error instanceof Error ? error.message : String(error)
-    });
-    return undefined;
-  }
+  return workspace;
 }

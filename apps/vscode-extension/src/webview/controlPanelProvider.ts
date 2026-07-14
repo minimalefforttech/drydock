@@ -14,6 +14,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as vscode from "vscode";
 import {
+  agentActivitySummaryOfTree,
   asId,
   parsePanelRequest,
   reduceAgentTree,
@@ -47,18 +48,19 @@ import {
 import { normalizePathKey, sandboxRuntimePath, type AgentQuestionService, type Logger, type ProductBusEvent } from "@drydock/core";
 import type { BoardService, MemoryService, SubtaskService, TaskService } from "@drydock/work-management";
 import type { Backend, BackendReady } from "../compositionRoot.js";
+import type { PlannerAppService } from "../services/plannerAppService.js";
 import { buildBoardState, decorateTaskSummary, joinOpenCommentCounts, reconcileColumns } from "./boardShared.js";
+import { promptAndSaveSubtaskSeedMode } from "./subtaskSeedPrompt.js";
+import { promptAndSaveTaskClonePolicy } from "./taskClonePolicyPrompt.js";
 import {
   toRuntimeSummary,
   type ChatWorkspaceContext,
   type IsolatedRunService
 } from "../services/isolatedRunService.js";
-import type { PlanDocsAppService } from "../services/planDocsAppService.js";
 import type { WorkHistoryFilter, WorkInsightsAppService } from "../services/workInsightsAppService.js";
 import { toAccessRequestSummary, type WorkspaceReviewAppService } from "../services/workspaceReviewAppService.js";
 import { openBaselineDiff } from "./baselineDiff.js";
 import { memoryUri } from "./memoryContentProvider.js";
-import { composePlanDocsSend, toPlanDocDetail, toPlanDocSummary } from "./planDocsShared.js";
 
 export function toChatSessionSummary(record: ChatSessionRecord, runningElsewhere = false): ChatSessionSummary {
   return {
@@ -79,7 +81,7 @@ export function toChatSessionSummary(record: ChatSessionRecord, runningElsewhere
 }
 
 /** Display-safe projection of an agent question (records carry no host paths). */
-function toAgentQuestionSummary(record: AgentQuestionRecord): AgentQuestionSummary {
+export function toAgentQuestionSummary(record: AgentQuestionRecord): AgentQuestionSummary {
   return {
     questionId: record.questionId,
     sessionId: record.sessionId,
@@ -129,7 +131,7 @@ function toMemoryCandidateSummary(record: MemoryCandidateRecord): MemoryCandidat
  * drive-mirror path form (`/c/Users/...` → `C:\Users\...`) so links to mounted
  * host folders open in the editor at the right line.
  */
-async function openAgentFileRef(ref: string): Promise<boolean> {
+export async function openAgentFileRef(ref: string): Promise<boolean> {
   const trimmed = ref.trim();
   if (/^https?:\/\//i.test(trimmed)) {
     await vscode.env.openExternal(vscode.Uri.parse(trimmed));
@@ -178,15 +180,19 @@ function taskLinkTarget(payload: { readonly workspaceSetId?: string; readonly se
     : { sessionId: payload.sessionId as string };
 }
 
-function usageTokens(usage: unknown): number | null {
-  if (typeof usage !== "object" || usage === null) return null;
-  const record = usage as Record<string, unknown>;
-  if (typeof record["totalTokens"] === "number") return record["totalTokens"];
-  const total = record["total"];
-  if (typeof total === "object" && total !== null && typeof (total as Record<string, unknown>)["totalTokens"] === "number") {
-    return (total as Record<string, unknown>)["totalTokens"] as number;
-  }
-  return null;
+/**
+ * A session runs "elsewhere" when it is stored active/starting, is not live
+ * in this host process, carries a fresh heartbeat, and is owned by a
+ * different host instance (ADR 0008). Exported so every surface (sidebar,
+ * Agents panel) applies the identical read-only posture test.
+ */
+export function isSessionRunningElsewhere(appService: IsolatedRunService, record: ChatSessionRecord): boolean {
+  const storedActive = record.status === "active" || record.status === "starting";
+  return storedActive
+    && !appService.isChatSessionLive(record.sessionId)
+    && appService.isHeartbeatFresh(record.heartbeatAt)
+    && record.hostInstanceId !== undefined
+    && record.hostInstanceId !== appService.hostInstanceId;
 }
 
 export class ControlPanelProvider implements vscode.WebviewViewProvider {
@@ -203,12 +209,22 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   private readonly attention = new Map<string, Set<SessionAttentionReason>>();
   /** Seeded once so a reloaded webview re-derives startup pending-request attention. */
   private attentionSeeded = false;
+  /** Seeded independently when the Work tab first requests pending questions. */
+  private questionAttentionSeeded = false;
   /**
    * Live subagent summaries per session, folded from the bus agent-events this
    * host streams. Sessions running in another window stream nothing here, so
    * their chip stays empty (read-only posture).
    */
   private readonly agentActivity = new Map<string, { sources: AgentTreeSource[] }>();
+  /**
+   * A session another surface (the Agents panel) asked us to show before the
+   * webview booted. The webview always fetches session.list on boot; the
+   * pending navigation flushes as a panel.showSession push right after that
+   * response, so it can never race a not-yet-listening document (the
+   * planner's pendingShowPlanId pattern).
+   */
+  private pendingShowSession: { readonly sessionId: string; readonly nodeId?: string } | null = null;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -225,6 +241,23 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     vscode.window.onDidChangeActiveTextEditor(() => {
       this.push({ type: "editor.active", editor: this.activeEditorRef() ?? null });
     });
+  }
+
+  /**
+   * Navigation entry point for other surfaces (the Agents panel): reveal the
+   * sidebar and land the Chat tab on this session (nodeId → Agents lens).
+   * With no live webview yet, the navigation parks until the fresh view's
+   * boot session.list proves it is listening.
+   */
+  showSession(sessionId: string, nodeId?: string): void {
+    const target = { sessionId, ...(nodeId === undefined ? {} : { nodeId }) };
+    // Focus is best-effort: the push is what carries the navigation.
+    void vscode.commands.executeCommand("drydock.controlPanel.focus").then(undefined, () => undefined);
+    if (this.view === undefined) {
+      this.pendingShowSession = target;
+      return;
+    }
+    this.push({ type: "panel.showSession", ...target });
   }
 
   /** The active file-scheme editor as a display-safe ref, or undefined. */
@@ -280,10 +313,13 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // A deleted session can no longer wait on the user; drop its attention.
         this.dropAttention(event.sessionId);
         return;
-      case "plan-docs-updated":
-        // Forward as the summaries-only push (no content over the boundary
-        // beyond an explicit planDocs.state request).
-        this.push({ type: "planDocs.updated", sessionId: event.sessionId, docs: event.docs.map(toPlanDocSummary) });
+      case "planner-changed":
+        // Coarse planner invalidation: the Plan tab refetches planner.plans.
+        this.push({ type: "planner.changed", planId: event.planId });
+        return;
+      case "planner-session-started":
+        // A plan session booted (any surface): the Plan tab picks up its rail.
+        this.push({ type: "planner.sessionReady", planId: event.planId, sessionId: event.sessionId, ok: true });
         return;
       case "access-requested":
         // Detected agent access requests arrive here; forward the display-safe
@@ -298,6 +334,12 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // card in the panel, badge + toast via the attention path.
         this.push({ type: "question.asked", question: toAgentQuestionSummary(event.question) });
         void this.flagAttention(event.question.sessionId, "question", "asked a question");
+        return;
+      case "question-resolved":
+        // Resolutions may originate in any surface (including FAQ automation),
+        // so the bus is the single source for removing cards and attention.
+        this.push({ type: "question.resolved", question: toAgentQuestionSummary(event.question) });
+        void this.settleQuestionAttention(event.question.sessionId);
         return;
       case "memory-candidate-added":
         // A proposed memory is not urgent: forward the display-safe summary as
@@ -576,6 +618,12 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         const appService = this.requireBackend();
         const sessions = await appService.listChatSessions();
         this.respond(request.requestId, { type: "session.list", sessions: sessions.map((session) => this.decorateSessionSummary(session)) });
+        if (this.pendingShowSession !== null) {
+          // The webview is provably alive (it just asked); deliver the
+          // navigation another surface queued before the view existed.
+          this.push({ type: "panel.showSession", ...this.pendingShowSession });
+          this.pendingShowSession = null;
+        }
         return;
       }
       case "session.rename": {
@@ -613,6 +661,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       }
       case "provider.login": {
         const appService = this.requireBackend();
+        // loginCommand enforces the interactive/network policy before it
+        // returns anything that can be launched.
         const login = appService.loginCommand(payload.providerId);
         // The OAuth flow is interactive and user-driven; it runs in a visible
         // terminal so no secret ever passes through the extension.
@@ -629,6 +679,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         if (!this.backend.available) {
           throw new Error("Docker Sandbox is not available in this window.");
         }
+        const appService = this.requireBackend();
+        appService.assertInteractiveSetupAllowed("Docker Sandbox sign-in");
         // Interactive Docker Sandbox sign-in in a visible terminal: `sbx login`
         // drives its own OAuth flow; no secret passes through the extension.
         const sbxPath = this.backend.sbxDisplayPath;
@@ -642,6 +694,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         if (!this.backend.available) {
           throw new Error("Docker Sandbox is not available in this window.");
         }
+        appService.assertRuntimeTerminalAllowed();
         // A real VS Code terminal INTO the chat's container, so the developer can
         // watch/interrupt what the agent is running (e.g. a hung command).
         const runtime = (await appService.listRuntimes())
@@ -695,6 +748,32 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.clearAttention(payload.sessionId, ["turn-completed", "turn-failed"]);
         return;
       }
+      case "session.summarize": {
+        const appService = this.requireBackend();
+        if (payload.mode === "log") {
+          // Host-side clipboard write: the log can exceed the webview→host
+          // clipboard request bound, and the host API takes any string.
+          await vscode.env.clipboard.writeText(await appService.buildChatLogExport(payload.sessionId));
+          this.respond(request.requestId, { type: "session.summarize", sessionId: payload.sessionId, mode: "log", accepted: true });
+          return;
+        }
+        // AI mode: a model turn can outlive the webview request timeout, so
+        // ack now and deliver the outcome as a push. The clipboard is written
+        // here regardless of whether the panel is still listening.
+        this.respond(request.requestId, { type: "session.summarize", sessionId: payload.sessionId, mode: "ai", accepted: true });
+        void appService
+          .generateChatSummary(payload.sessionId)
+          .then(async (summary) => {
+            await vscode.env.clipboard.writeText(summary);
+            this.push({ type: "session.summaryReady", sessionId: payload.sessionId, ok: true });
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.warn("chat AI summary failed", { sessionId: payload.sessionId, error: message });
+            this.push({ type: "session.summaryReady", sessionId: payload.sessionId, ok: false, error: message });
+          });
+        return;
+      }
       case "task.list": {
         const backend = this.requireBackendReady();
         const tasks = await joinOpenCommentCounts(backend, this.logger, await this.requireTasks().listTaskSummaries());
@@ -717,11 +796,29 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         await tasks.updateTask(payload.taskId, {
           ...(payload.title === undefined ? {} : { title: payload.title }),
           ...(payload.description === undefined ? {} : { description: payload.description }),
-          ...(payload.state === undefined ? {} : { state: payload.state })
+          ...(payload.state === undefined ? {} : { state: payload.state }),
+          ...(payload.autoAnswerFaq === undefined ? {} : { autoAnswerFaq: payload.autoAnswerFaq })
         });
         const summary = await this.requireTaskSummary(tasks, payload.taskId);
         this.respond(request.requestId, { type: "task.update", task: summary });
         this.push({ type: "task.updated", task: summary });
+        return;
+      }
+      case "task.faq.list": {
+        const faqs = await this.requireTasks().listFaqs(payload.taskId);
+        this.respond(request.requestId, { type: "task.faq.list", faqs });
+        return;
+      }
+      case "task.faq.add": {
+        const tasks = this.requireTasks();
+        await tasks.addFaq(payload.taskId, payload.pattern, payload.answer);
+        this.respond(request.requestId, { type: "task.faq.add", faqs: await tasks.listFaqs(payload.taskId) });
+        return;
+      }
+      case "task.faq.remove": {
+        const tasks = this.requireTasks();
+        await tasks.removeFaq(payload.taskId, payload.faqId);
+        this.respond(request.requestId, { type: "task.faq.remove", faqs: await tasks.listFaqs(payload.taskId) });
         return;
       }
       case "task.delete": {
@@ -751,6 +848,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "question.list": {
         const questions = await this.requireQuestions().listQuestions("pending");
         this.respond(request.requestId, { type: "question.list", questions: questions.map(toAgentQuestionSummary) });
+        this.seedPendingQuestionAttention(questions);
         return;
       }
       case "question.answer": {
@@ -770,15 +868,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
             `[host] The developer answered your question.\nQ: ${record.question}\nA: ${record.answer ?? ""}\nContinue with this answer.`
           );
         }
-        await this.settleQuestionAttention(record.sessionId);
-        this.push({ type: "question.resolved", question: toAgentQuestionSummary(record) });
         this.respond(request.requestId, { type: "question.answer", question: toAgentQuestionSummary(record), dispatched });
         return;
       }
       case "question.dismiss": {
         const record = await this.requireQuestions().dismiss(asId<"AgentQuestionId">(payload.questionId));
-        await this.settleQuestionAttention(record.sessionId);
-        this.push({ type: "question.resolved", question: toAgentQuestionSummary(record) });
         this.respond(request.requestId, { type: "question.dismiss", question: toAgentQuestionSummary(record) });
         return;
       }
@@ -894,17 +988,17 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "diff.status": {
-        const changes = await this.requireWorkspaceReview().diffStatus(payload.sessionId);
+        const changes = await this.requireWorkspaceReview().diffStatus(payload.sessionId, payload.view);
         this.respond(request.requestId, { type: "diff.status", changes });
         return;
       }
       case "diff.acceptFile": {
-        const changes = await this.requireWorkspaceReview().acceptFile(payload.baselineId, payload.path);
+        const changes = await this.requireWorkspaceReview().acceptFile(payload.baselineId, payload.path, payload.view);
         this.respond(request.requestId, { type: "diff.acceptFile", changes });
         return;
       }
       case "diff.revertFile": {
-        const changes = await this.requireWorkspaceReview().revertFile(payload.baselineId, payload.path);
+        const changes = await this.requireWorkspaceReview().revertFile(payload.baselineId, payload.path, payload.view);
         this.respond(request.requestId, { type: "diff.revertFile", changes });
         return;
       }
@@ -928,38 +1022,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.respond(request.requestId, { type: "review.setCommentStatus", comment });
         return;
       }
-      case "planDocs.state": {
-        this.requireBackend();
-        const docs = await this.requirePlanDocs().listDocs(payload.sessionId);
-        this.respond(request.requestId, { type: "planDocs.state", sessionId: payload.sessionId, docs: docs.map(toPlanDocDetail) });
-        return;
-      }
-      case "planDocs.open": {
-        // Editor-panel open is a host action; route through the command.
-        this.requireBackend();
-        await vscode.commands.executeCommand("drydock.planDocs.open", payload.sessionId);
-        this.respond(request.requestId, { type: "planDocs.open", accepted: true });
-        return;
-      }
       case "taskReview.open": {
         // Editor-panel open is a host action; route through the command.
         this.requireBackend();
         await vscode.commands.executeCommand("drydock.taskReview.open", payload.taskId);
         this.respond(request.requestId, { type: "taskReview.open", accepted: true });
-        return;
-      }
-      case "planDocs.sendComments": {
-        const appService = this.requireBackend();
-        if (!this.backend.available) {
-          throw new Error(this.backend.reason);
-        }
-        // Nothing open → accepted no-op; otherwise the guarded send returns a
-        // prompt to run detached.
-        const send = await composePlanDocsSend(this.backend, appService, payload.sessionId);
-        this.respond(request.requestId, { type: "planDocs.sendComments", accepted: true, sentCount: send.sentCount });
-        if (send.prompt !== undefined) {
-          this.runTurnDetached(appService, payload.sessionId, send.prompt);
-        }
         return;
       }
       case "clone.state": {
@@ -972,6 +1039,18 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         const appService = this.requireCloneSession(payload.sessionId);
         // Contracts enforce the repo+path XOR rule; a full pull names neither.
         const result = await appService.clonePull(payload.sessionId, payload.repo, payload.path);
+        // Landing (ADR 0014): a full pull moved this session's captured output
+        // into local HEAD, so its changesets stop seeding dependents. Per-file
+        // pulls never land (the sync base did not advance). Bookkeeping only —
+        // a failure logs and never un-pulls.
+        if (payload.path === undefined && this.backend.available) {
+          void this.backend.changesets.markLandedBySession(payload.sessionId, payload.repo).catch((error: unknown) => {
+            this.logger.warn("changeset landing bookkeeping failed", {
+              sessionId: payload.sessionId,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
+        }
         this.respond(request.requestId, { type: "clone.pull", result });
         return;
       }
@@ -1033,14 +1112,17 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
           throw new Error(`Subtask ${payload.subtaskId} was not found.`);
         }
         const hasFieldUpdate = payload.title !== undefined || payload.description !== undefined
-          || payload.prompt !== undefined || payload.autoStart !== undefined || payload.colorOverride !== undefined;
+          || payload.prompt !== undefined || payload.autoStart !== undefined || payload.colorOverride !== undefined
+          || payload.seedMode !== undefined || payload.verified !== undefined;
         if (hasFieldUpdate) {
           await this.requireSubtasks().updateSubtask(payload.subtaskId, {
             ...(payload.title === undefined ? {} : { title: payload.title }),
             ...(payload.description === undefined ? {} : { description: payload.description }),
             ...(payload.prompt === undefined ? {} : { prompt: payload.prompt }),
             ...(payload.autoStart === undefined ? {} : { autoStart: payload.autoStart }),
-            ...(payload.colorOverride === undefined ? {} : { colorOverride: payload.colorOverride })
+            ...(payload.colorOverride === undefined ? {} : { colorOverride: payload.colorOverride }),
+            ...(payload.seedMode === undefined ? {} : { seedMode: payload.seedMode }),
+            ...(payload.verified === undefined ? {} : { verified: payload.verified })
           });
         }
         if (payload.columnId !== undefined) {
@@ -1083,14 +1165,125 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // force is the manual-only override for a BLOCKED subtask; typed
         // StartSubtaskError messages surface verbatim via the error-response path.
         const backend = this.requireBackendReady();
+        const subtask = await backend.subtasks.getSubtask(payload.subtaskId);
+        if (subtask === null) {
+          throw new Error(`Subtask ${payload.subtaskId} was not found.`);
+        }
+        if (!(await promptAndSaveTaskClonePolicy(backend, subtask.taskId))) {
+          this.respond(request.requestId, { type: "subtask.start", accepted: false });
+          return;
+        }
+        // Seed choice (ADR 0014): prompts only when upstreams exist and no
+        // seedMode is stored yet; the pick persists on the subtask.
+        if (!(await promptAndSaveSubtaskSeedMode(backend, payload.subtaskId))) {
+          this.respond(request.requestId, { type: "subtask.start", accepted: false });
+          return;
+        }
         await backend.orchestrator.startSubtask(payload.subtaskId, { force: payload.force === true });
         this.respond(request.requestId, { type: "subtask.start", accepted: true });
         return;
       }
       case "task.start": {
         const backend = this.requireBackendReady();
+        if (!(await promptAndSaveTaskClonePolicy(backend, payload.taskId))) {
+          this.respond(request.requestId, { type: "task.start", accepted: false });
+          return;
+        }
         await backend.orchestrator.startTask(payload.taskId);
         this.respond(request.requestId, { type: "task.start", accepted: true });
+        return;
+      }
+      case "recipes.list": {
+        const backend = this.requireBackendReady();
+        const recipes = await backend.recipes.listRecipes();
+        this.respond(request.requestId, { type: "recipes.list", recipes });
+        return;
+      }
+      case "task.createFromRecipe": {
+        // Materializes task + subtasks + DAG with per-role defaults; never starts.
+        const backend = this.requireBackendReady();
+        const created = await backend.recipes.materializeTask(payload.recipeId, payload.title);
+        const summary = await this.requireTaskSummary(this.requireTasks(), created.taskId);
+        this.respond(request.requestId, { type: "task.createFromRecipe", task: summary });
+        this.push({ type: "task.updated", task: summary });
+        return;
+      }
+      case "planner.open": {
+        this.requireBackend();
+        try {
+          await vscode.commands.executeCommand("drydock.planner.open", payload.planId);
+          this.respond(request.requestId, { type: "planner.open", accepted: true });
+        } catch {
+          this.respondError(request.requestId, "Planner panel not available yet.");
+        }
+        return;
+      }
+      case "planner.create": {
+        // The Plan tab's chat-first start: the typed message IS the brief; the
+        // intake (aspects, context roots) refines later in the panel. The boot
+        // runs detached — auto-open lands the panel on this plan when the
+        // session starts, and failures surface as the sessionReady error push.
+        const planner = this.requirePlanner();
+        const plan = await planner.createPlan({
+          brief: payload.brief,
+          aspectIds: payload.aspectIds,
+          contextRoots: payload.contextRoots,
+          ...(payload.notes === undefined ? {} : { notes: payload.notes }),
+          ...(payload.title === undefined ? {} : { title: payload.title }),
+          ...(payload.taskId === undefined ? {} : { taskId: payload.taskId })
+        });
+        const summary = (await planner.listPlans()).find((candidate) => candidate.planId === plan.planId);
+        if (summary === undefined) {
+          throw new Error("The plan was created but could not be read back.");
+        }
+        this.respond(request.requestId, { type: "planner.create", plan: summary });
+        void planner.startPlanSession(plan.planId, payload.model === undefined ? undefined : payload.model)
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error("plan tab create boot failed", { planId: plan.planId, error: message });
+            this.push({ type: "planner.sessionReady", planId: plan.planId, sessionId: "", ok: false, error: message });
+          });
+        return;
+      }
+      case "planner.plans": {
+        // The Plan tab's switcher + rail source (summaries carry sessionId).
+        const plans = await this.requirePlanner().listPlans();
+        this.respond(request.requestId, { type: "planner.plans", plans });
+        return;
+      }
+      case "planner.startSession": {
+        // Ack-then-push: the boot outlives the request timeout. Success lands
+        // as planner.sessionReady via the bus; only failure is pushed here.
+        const planner = this.requirePlanner();
+        this.respond(request.requestId, { type: "planner.startSession", accepted: true });
+        void planner.startPlanSession(payload.planId, payload.model === undefined ? undefined : payload.model)
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error("plan tab session boot failed", { planId: payload.planId, error: message });
+            this.push({ type: "planner.sessionReady", planId: payload.planId, sessionId: "", ok: false, error: message });
+          });
+        return;
+      }
+      case "planner.sendTurn": {
+        const planner = this.requirePlanner();
+        this.respond(request.requestId, { type: "planner.sendTurn", accepted: true });
+        void planner.sendPlanTurn(payload.planId, payload.prompt).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.error("plan tab turn failed", { planId: payload.planId, error: message });
+          this.push({ type: "planner.sessionReady", planId: payload.planId, sessionId: "", ok: false, error: message });
+        });
+        return;
+      }
+      case "agents.open": {
+        this.requireBackend();
+        try {
+          await vscode.commands.executeCommand("drydock.agents.open");
+          this.respond(request.requestId, { type: "agents.open", accepted: true });
+        } catch {
+          // Defensive: the command registers during activation; surface a
+          // readable error if the relay ever beats registration.
+          this.respondError(request.requestId, "Agents panel not available yet.");
+        }
         return;
       }
       case "taskBoard.open": {
@@ -1155,30 +1348,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   private agentActivitySummary(sessionId: string): AgentActivitySummary {
     const entry = this.agentActivity.get(sessionId);
     if (entry === undefined) return { running: 0, failed: 0 };
-    const tree = reduceAgentTree(entry.sources);
-    const agents = tree.nodes
-      .filter((node) => node.kind === "native")
-      .map((node) => {
-        const tokens = usageTokens(node.usage);
-        return {
-          nodeId: node.nodeId,
-          ...(node.parentId === undefined ? {} : { parentNodeId: node.parentId }),
-          label: node.label,
-          status: node.status,
-          ...(node.startedAt === undefined ? {} : { startedAt: node.startedAt }),
-          ...(node.endedAt === undefined ? {} : { endedAt: node.endedAt }),
-          ...(node.lastActivityAt === undefined ? {} : { lastActivityAt: node.lastActivityAt }),
-          ...(node.lastActivity === undefined ? {} : { lastActivity: node.lastActivity }),
-          ...(node.lastCommand === undefined ? {} : { lastCommand: node.lastCommand }),
-          toolUses: node.counts.toolCalls + node.counts.commands + node.counts.fileEdits,
-          ...(tokens === null ? {} : { tokens })
-        };
-      });
-    const running = agents.filter((agent) => agent.status === "running").length;
-    const failed = agents.filter((agent) => agent.status === "failed").length;
-    return agents.length === 0
-      ? { running, failed }
-      : { running, failed, agents };
+    // Shared projection (contracts): the Agents panel folds the same events
+    // through the same function, so chips and fleet rows cannot disagree.
+    return agentActivitySummaryOfTree(reduceAgentTree(entry.sources));
   }
 
   /**
@@ -1206,13 +1378,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     if (!this.backend.available) {
       return false;
     }
-    const appService = this.backend.appService;
-    const storedActive = record.status === "active" || record.status === "starting";
-    return storedActive
-      && !appService.isChatSessionLive(record.sessionId)
-      && appService.isHeartbeatFresh(record.heartbeatAt)
-      && record.hostInstanceId !== undefined
-      && record.hostInstanceId !== appService.hostInstanceId;
+    return isSessionRunningElsewhere(this.backend.appService, record);
   }
 
   private async resolveWorkspace(selection: ChatWorkspaceSelection | undefined): Promise<ChatWorkspaceContext | undefined> {
@@ -1463,7 +1629,21 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
 
   /** Turn results surface via bus pushes; failures here are protocol-level. */
   private runTurnDetached(appService: IsolatedRunService, sessionId: string, prompt: string, model?: ChatModelSelection): void {
-    void appService.sendChatTurn(sessionId, prompt, model).catch((error: unknown) => {
+    void (async () => {
+      // "This Turn" frame: snapshot the send moment BEFORE the agent can edit.
+      // Best-effort like session baselining — a capture failure must not block
+      // the turn (the view then falls back to its previous frame). No-op for
+      // sessions without diff baselines (clone/plan).
+      try {
+        await this.requireWorkspaceReview().beginTurnBaselines(sessionId);
+      } catch (error) {
+        this.logger.warn("turn diff baseline capture failed", {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+      await appService.sendChatTurn(sessionId, prompt, model);
+    })().catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error("chat turn failed to run", { sessionId, error: message });
       this.push({ type: "run.failed", message });
@@ -1623,6 +1803,25 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /** Re-derives durable question attention after a panel/window reload. */
+  private seedPendingQuestionAttention(
+    questions: readonly { readonly sessionId: string; readonly status: string }[]
+  ): void {
+    if (this.questionAttentionSeeded) return;
+    this.questionAttentionSeeded = true;
+    let changed = false;
+    for (const question of questions) {
+      if (question.status !== "pending") continue;
+      const reasons = this.attention.get(question.sessionId) ?? new Set<SessionAttentionReason>();
+      if (reasons.has("question")) continue;
+      reasons.add("question");
+      this.attention.set(question.sessionId, reasons);
+      this.pushAttention(question.sessionId);
+      changed = true;
+    }
+    if (changed) this.refreshAttentionBadge();
+  }
+
   /** Pushes a session's current attention reasons (empty when it was dropped). */
   private pushAttention(sessionId: string): void {
     const reasons = [...(this.attention.get(sessionId) ?? [])];
@@ -1740,11 +1939,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     return this.backend.workInsights;
   }
 
-  private requirePlanDocs(): PlanDocsAppService {
+  private requirePlanner(): PlannerAppService {
     if (!this.backend.available) {
       throw new Error(this.backend.reason);
     }
-    return this.backend.planDocs;
+    return this.backend.planner;
   }
 
   /** Refreshed summary (with current links, columnId/doneAt, and subtasks) for one task after a mutation. */

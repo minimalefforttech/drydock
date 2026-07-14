@@ -4,6 +4,8 @@
    rendering (chat-log, chat-message, diagnostics-log, status, runtime-row…)
    are preserved to minimize churn. */
 
+@import "./chat/chatView.css";
+
 /* Full-height chain: the chat tab fills the panel to the bottom (a flex column),
    while the Tasks/System tabs keep their natural, document-scrolled height. */
 html,
@@ -494,6 +496,12 @@ h3 {
   margin: 2px 0;
 }
 
+/* The summarize menu (two short rows) anchors mid-header; the default 200px
+   popover minimum would clip past the panel's left edge on slim panels. */
+.chat-summarize-popover .popover {
+  min-width: 140px;
+}
+
 .popover-mount {
   margin: 2px 0;
   font-family: var(--vscode-editor-font-family);
@@ -573,6 +581,206 @@ h3 {
   flex: 1;
   min-height: 0;
 }
+
+/* --------------------------------------------------------------------------
+   Plan tab (ADR 0012): the planning session's rail in the sidebar. Message
+   rows reuse the shared chat styles (chat/chatView.css); only the shell —
+   header/status/log/composer — is styled here.
+   -------------------------------------------------------------------------- */
+.plan-tab {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.plan-tab-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 2px;
+}
+
+.plan-tab-current {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The owning task, right where the plan is named; orphans read as the
+   exception (dimmed + dashed). */
+.plan-tab-task-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.75em;
+  font-weight: 400;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-badge-background, rgba(128, 128, 128, 0.4));
+  color: var(--vscode-descriptionForeground);
+}
+
+.plan-tab-task-chip.orphan {
+  border-style: dashed;
+  opacity: 0.7;
+  font-style: italic;
+}
+
+/* Create mode: pick the owning task before the first message. */
+.plan-tab-task-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plan-tab-task-row .plan-tab-footnote { flex: 0 0 auto; }
+
+.plan-tab-task-select {
+  flex: 1;
+  min-width: 0;
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 0.85em;
+}
+
+/* Recent plans: the collapsible history; each row opens its plan in the
+   Planner panel and carries the in-progress dot while its session runs. */
+.plan-tab-recent {
+  flex: 0 0 auto;
+  margin: 4px 0 2px;
+}
+
+.plan-tab-recent-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 6px;
+  border-radius: 4px;
+  color: var(--vscode-foreground);
+}
+
+.plan-tab-recent-row:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.plan-tab-recent-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-tab-recent-meta {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 0.78em;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.85;
+}
+
+.plan-tab-recent-empty {
+  padding: 4px 6px;
+  font-size: 0.86em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.plan-tab-status {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 2px 6px;
+  font-size: 0.86em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.plan-tab-notice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 2px 6px;
+  padding: 5px 9px;
+  border-radius: 4px;
+  font-size: 0.86em;
+  color: var(--vscode-errorForeground, #e28579);
+  border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(226, 133, 121, 0.5));
+  background: var(--vscode-inputValidation-errorBackground, rgba(226, 133, 121, 0.08));
+}
+
+.plan-tab-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 2px 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 2px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 82%, #000000);
+}
+
+.plan-tab-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 26px 12px;
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+}
+
+.plan-tab-composer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 2px 4px;
+}
+
+.plan-tab-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.plan-tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-tab-footnote {
+  flex: 1;
+  font-size: 0.78em;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-tab-status .plan-tab-footnote { flex: 0 1 auto; }
 
 .chat-scroll {
   flex: 1 1 auto;
@@ -827,6 +1035,23 @@ h3 {
   margin-right: 4px;
 }
 
+/* Full Session history rows: already-accepted changes stay listed but read
+   as record, not pending work — dimmed, with a small named-state chip. */
+.working-set-row.accepted {
+  opacity: 0.65;
+}
+
+.chip.chip-accepted {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border-color: transparent;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  margin-right: 4px;
+}
+
 /* R12: dim one-line caption above the clone Pull/Push action row, explaining the
    pull/push vs accept/discard vocabulary shift where it happens. */
 .clone-caption {
@@ -895,76 +1120,7 @@ h3 {
   margin: 0 0 8px;
 }
 
-.chat-message {
-  width: 100%;
-}
-
-.chat-meta {
-  margin: 0 0 3px;
-  opacity: 0.6;
-  font-size: 0.76em;
-}
-
-/* User turn: a compact tinted card, blue-accented left border. */
-.chat-user-body {
-  border-left: 3px solid var(--vscode-focusBorder, var(--vscode-button-background));
-  background: color-mix(in srgb, var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.08)) 76%, transparent);
-  border-radius: 3px;
-  padding: 6px 10px;
-  word-break: break-word;
-  white-space: pre-wrap;
-}
-
-.chat-file-token {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  margin: 0 2px;
-  padding: 0 5px;
-  border-radius: 3px;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
-  background: color-mix(in srgb, var(--vscode-badge-background, #4d4d4d) 48%, transparent);
-  color: var(--vscode-foreground);
-  font-family: var(--vscode-editor-font-family);
-  font-size: 0.92em;
-  line-height: 1.45;
-  vertical-align: 1px;
-}
-
-.chat-file-token.unmounted {
-  border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 48%, transparent);
-  color: var(--vscode-editorWarning-foreground, #cca700);
-}
-
-/* CH·5: the host briefing prepended to a session's first prompt collapses
-   into its own disclosure so the transcript leads with what the user typed. */
-.host-briefing-detail {
-  margin: 0 0 6px;
-  font-size: 0.9em;
-}
-.host-briefing-detail > summary {
-  cursor: pointer;
-  opacity: 0.7;
-}
-.host-briefing-detail > summary:hover {
-  opacity: 1;
-}
-.host-briefing-pre {
-  margin: 4px 0 0;
-  padding: 5px 7px;
-  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
-  border-radius: 3px;
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.85em;
-  line-height: 1.4;
-  white-space: pre-wrap;
-  word-break: break-word;
-  user-select: text;
-}
-.host-briefing-remainder {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+/* Chat transcript message styles moved to chat/chatView.css (shared with the Planner). */
 
 /* Attention stack: pending questions + access requests share ONE card slot
    with a small ‹ i/N › pager top-right, instead of a pile of full cards. */
@@ -1016,504 +1172,9 @@ h3 {
 .question-answer-row input { flex: 1; min-width: 0; }
 .attention-card.busy { opacity: 0.6; pointer-events: none; }
 
-/* Subagent group: collapsed one-liner that ticks live; expanding
-   reveals the child's own feed. Left rail marks it as delegated work. */
-.agent-group {
-  border-left: 2px solid var(--vscode-tree-indentGuidesStroke, rgba(128, 128, 128, 0.35));
-  border-radius: 3px;
-  padding: 2px 0 2px 8px;
-  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.05));
-}
+/* Subagent group styles moved to chat/chatView.css (shared with the Planner). */
 
-.agent-group-header {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  cursor: pointer;
-  list-style: none;
-  font-size: 0.86em;
-  padding: 2px 4px;
-}
-
-.agent-group-header::-webkit-details-marker { display: none; }
-.agent-group-header::before { content: "▸"; opacity: 0.6; font-size: 0.8em; }
-.agent-group[open] > .agent-group-header::before { content: "▾"; }
-
-.agent-group-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: none;
-  align-self: center;
-  background: var(--vscode-descriptionForeground, #999);
-}
-.agent-group-dot.status-running {
-  background: var(--vscode-charts-green, #3fb950);
-  animation: agent-group-pulse 1.6s ease-in-out infinite;
-}
-.agent-group-dot.status-completed { background: var(--vscode-charts-green, #3fb950); animation: none; }
-.agent-group-dot.status-failed { background: var(--vscode-editorError-foreground, #f14c4c); }
-.agent-group-dot.status-cancelled,
-.agent-group-dot.status-unknown { background: var(--vscode-descriptionForeground, #999); }
-
-@keyframes agent-group-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
-.agent-group-label { font-weight: 600; }
-.agent-group-type,
-.agent-group-stats { opacity: 0.6; font-size: 0.92em; }
-.agent-group-activity {
-  opacity: 0.55;
-  font-size: 0.92em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 40%;
-}
-.agent-group-chip.chip-failed {
-  color: var(--vscode-editorError-foreground, #f14c4c);
-  font-weight: 700;
-}
-.agent-group-chip.chip-done { color: var(--vscode-charts-green, #3fb950); opacity: 0.8; }
-.agent-group-chip.chip-idle {
-  color: var(--vscode-editorWarning-foreground, #cca700);
-  font-weight: 600;
-}
-
-.agent-group-body {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 4px 4px 6px 12px;
-}
-
-.agent-group-prompt,
-.agent-group-result,
-.agent-group-usage,
-.agent-group-note {
-  opacity: 0.65;
-  font-size: 0.82em;
-  word-break: break-word;
-  white-space: pre-wrap;
-}
-.agent-group-note { font-style: italic; }
-
-.agent-group-prose { font-size: 0.94em; }
-.agent-group-prose > * { margin: 0 0 6px; }
-.agent-group-prose > *:last-child { margin-bottom: 0; }
-
-.agent-group-entry {
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.78em;
-  word-break: break-all;
-}
-
-.agent-entry-detail { margin: 2px 0 0 14px; font-size: 0.95em; }
-.agent-entry-detail > summary { cursor: pointer; opacity: 0.6; list-style: none; }
-.agent-entry-detail > summary::before { content: "⋯ "; }
-.agent-entry-detail-pre {
-  margin: 2px 0 0;
-  padding: 4px 6px;
-  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
-  border-radius: 3px;
-  max-height: 200px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-/* Nested child groups indent inside their parent's body. */
-.agent-group-body > .agent-group { margin-left: 2px; }
-
-/* Assistant turn: full-width structural markdown, no bubble. */
-.chat-assistant-body {
-  word-break: break-word;
-}
-
-.chat-assistant-body > * {
-  margin: 0 0 8px;
-}
-
-.chat-assistant-body > *:last-child {
-  margin-bottom: 0;
-}
-
-/* System notice: an inline, centered status/error line in the transcript. */
-.chat-message.role-system {
-  align-self: center;
-  max-width: 90%;
-  margin: 4px 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-}
-
-.chat-system-retry {
-  align-self: center;
-}
-
-.chat-system-body {
-  font-size: 0.85em;
-  line-height: 1.45;
-  /* Preserve authored line breaks (multi-step hints) but wrap long lines. When
-     a notice has newlines it reads as steps, so left-align for legibility. */
-  white-space: pre-line;
-  text-align: left;
-  color: var(--vscode-descriptionForeground, #9aabb3);
-  background: var(--vscode-editorWidget-background, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--vscode-editorWidget-border, transparent);
-  border-radius: 6px;
-  padding: 6px 12px;
-  word-break: break-word;
-}
-
-.chat-message.role-system.tone-error .chat-system-body {
-  color: var(--vscode-errorForeground, #e28579);
-  border-color: var(--vscode-inputValidation-errorBorder, rgba(226, 133, 121, 0.5));
-  background: var(--vscode-inputValidation-errorBackground, rgba(226, 133, 121, 0.08));
-}
-
-/* Command the agent ran in the container: a terminal-style inline row. */
-.chat-message.role-command {
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.85em;
-  border-left: 2px solid var(--vscode-panel-border, #263740);
-  padding: 3px 0 3px 8px;
-  margin: 2px 0;
-}
-
-.chat-command-line {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-  flex-wrap: wrap;
-}
-
-.chat-command-prompt {
-  color: var(--vscode-charts-green, #74b57e);
-  font-weight: 700;
-}
-
-.chat-command-text {
-  color: var(--vscode-foreground);
-  word-break: break-all;
-  flex: 1 1 auto;
-}
-
-.chat-command-status {
-  flex: 0 0 auto;
-  opacity: 0.75;
-  font-size: 0.9em;
-}
-
-.chat-message.role-command.status-started .chat-command-status {
-  color: var(--vscode-charts-blue, #4fa3b6);
-}
-
-.chat-message.role-command.status-failed {
-  border-left-color: var(--vscode-errorForeground, #d66a5f);
-}
-
-.chat-message.role-command.status-failed .chat-command-status {
-  color: var(--vscode-errorForeground, #d66a5f);
-}
-
-.chat-command-output {
-  margin: 3px 0 0 12px;
-}
-
-.chat-command-output > summary {
-  cursor: pointer;
-  opacity: 0.7;
-  font-size: 0.9em;
-}
-
-.chat-command-output pre {
-  margin: 3px 0 0;
-  padding: 5px 7px;
-  max-height: 300px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
-  border-radius: 3px;
-}
-
-.md-heading {
-  font-weight: 600;
-  line-height: 1.3;
-}
-
-h1.md-heading { font-size: 1.25em; }
-h2.md-heading { font-size: 1.15em; }
-h3.md-heading { font-size: 1.05em; }
-h4.md-heading { font-size: 1em; }
-
-.md-paragraph {
-  white-space: pre-wrap;
-  line-height: 1.45;
-}
-
-.md-link {
-  color: var(--vscode-textLink-foreground);
-  cursor: pointer;
-  text-decoration: none;
-}
-
-.md-link:hover {
-  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
-  text-decoration: underline;
-}
-
-.md-inline-code {
-  font-family: var(--vscode-editor-font-family);
-  font-size: 0.92em;
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.16));
-}
-
-.md-list {
-  margin: 0 0 8px;
-  padding-left: 20px;
-  line-height: 1.45;
-}
-
-.md-list li {
-  margin: 1px 0;
-}
-
-.md-code {
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  border-radius: 4px;
-  overflow: hidden;
-  background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background, rgba(128, 128, 128, 0.08)));
-}
-
-.md-code-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  padding: 2px 6px 2px 8px;
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
-}
-
-.md-code-badge {
-  display: block;
-  min-width: 0;
-  padding: 0;
-  font-size: 0.72em;
-  text-transform: lowercase;
-  opacity: 0.7;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.md-pre {
-  margin: 0;
-  padding: 8px 10px;
-  overflow-x: auto;
-  font-family: var(--vscode-editor-font-family);
-  font-size: 0.85em;
-  white-space: pre;
-}
-
-.md-pre code {
-  font-family: inherit;
-  white-space: inherit;
-}
-
-.chat-tab.code-wrap .md-pre {
-  overflow-x: hidden;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.md-code-copy {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  margin-left: auto;
-  padding: 0;
-  font-size: 0.86em;
-  line-height: 1;
-}
-
-.md-mermaid-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 26px;
-  height: 22px;
-  padding: 0;
-  font-family: var(--vscode-editor-font-family);
-  font-size: 0.72em;
-  line-height: 1;
-}
-
-.md-mermaid-placeholder {
-  padding: 8px 10px;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  border-radius: 4px;
-  background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background, rgba(128, 128, 128, 0.08)));
-  opacity: 0.75;
-}
-
-.md-mermaid-figure {
-  margin: 0;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  border-radius: 4px;
-  overflow: hidden;
-  background: var(--vscode-editor-background);
-}
-
-.md-mermaid-svg-wrap {
-  padding: 10px;
-  overflow: auto;
-}
-
-.md-mermaid-svg-wrap svg {
-  display: block;
-  max-width: 100%;
-  height: auto;
-}
-
-.md-mermaid-source {
-  border-top: 0;
-}
-
-.md-mermaid-error {
-  margin-top: 4px;
-  color: var(--vscode-editorWarning-foreground, #d7ba7d);
-  font-size: 0.85em;
-}
-
-/* Subtle streaming affordance appended after the assistant body. */
-.stream-cursor {
-  display: inline-block;
-  width: 6px;
-  height: 1em;
-  margin-left: 1px;
-  vertical-align: -2px;
-  background: var(--vscode-foreground);
-  opacity: 0.55;
-  animation: stream-blink 1s step-end infinite;
-}
-
-@keyframes stream-blink {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 0.1; }
-}
-
-/* FIX 4: "Assistant is working…" activity indicator at the bottom of the
-   transcript for the duration of a running turn — fills the gap between
-   turnStarted and the first streamed output. Shown only when the turn has
-   produced no agent.reasoning yet; once reasoning arrives, .chat-reasoning
-   (below) takes over as the live indicator instead. */
-.chat-working {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 2px;
-  opacity: 0.75;
-  font-size: 0.9em;
-}
-
-/* The poke offer sits at full opacity so it reads as an actionable prompt even
-   though the surrounding working indicator is dimmed. */
-.chat-working .chat-poke {
-  opacity: 1;
-  border-color: var(--vscode-inputValidation-warningBorder, #cca700);
-}
-
-.chat-working-dots {
-  display: inline-flex;
-  gap: 3px;
-}
-
-.chat-working-dots .dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.4;
-  animation: chat-working-pulse 1.2s ease-in-out infinite;
-}
-
-.chat-working-dots .dot:nth-child(2) { animation-delay: 0.2s; }
-.chat-working-dots .dot:nth-child(3) { animation-delay: 0.4s; }
-
-@keyframes chat-working-pulse {
-  0%, 80%, 100% { opacity: 0.3; }
-  40% { opacity: 1; }
-}
-
-/* Reasoning follow-up to FIX 4: live "Thinking" disclosure that replaces
-   .chat-working once the turn has produced agent.reasoning text — fills the
-   same working-indicator slot but lets the user expand into the actual
-   reasoning stream instead of a generic "working…" label. Collapsed by
-   default (muted, monospace-ish body) so it never dominates the transcript;
-   stays mounted (relabeled "Thought for Ns") after the turn ends. */
-.chat-reasoning {
-  margin: 4px 0;
-  padding: 6px 2px;
-  font-size: 0.9em;
-  opacity: 0.85;
-}
-
-.chat-reasoning > summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  list-style: none;
-  opacity: 0.85;
-}
-
-.chat-reasoning > summary::-webkit-details-marker { display: none; }
-
-.chat-reasoning > summary::before {
-  content: "▸";
-  display: inline-block;
-  font-size: 0.85em;
-  opacity: 0.6;
-}
-
-.chat-reasoning[open] > summary::before { content: "▾"; }
-
-.chat-reasoning > summary:hover {
-  opacity: 1;
-}
-
-.chat-reasoning-label {
-  font-style: italic;
-}
-
-.chat-reasoning-body {
-  margin: 6px 0 0 16px;
-  padding: 6px 8px;
-  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
-  border-radius: 3px;
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.88em;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
-  opacity: 0.8;
-  max-height: 240px;
-  overflow-y: auto;
-  user-select: text;
-}
+/* Assistant markdown + indicator styles moved to chat/chatView.css (shared with the Planner). */
 
 /* Composer */
 
@@ -1924,6 +1585,43 @@ h4.md-heading { font-size: 1em; }
    Working set (Copilot-style Changes section)
    -------------------------------------------------------------------------- */
 
+/* Segmented view toggle: This Turn | Session | Full Session. One bordered
+   pill split into equal segments; the active frame fills like a button. */
+.diff-view-toggle {
+  display: flex;
+  margin: 4px 0 6px;
+  border: 1px solid var(--vscode-button-secondaryBackground);
+  border-radius: 4px;
+  overflow: hidden;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.diff-view-toggle .diff-view-segment {
+  border: none;
+  border-radius: 0;
+  padding: 2px 10px;
+  font-size: 0.8em;
+  background: transparent;
+  color: var(--vscode-foreground);
+  opacity: 0.75;
+}
+
+.diff-view-toggle .diff-view-segment + .diff-view-segment {
+  border-left: 1px solid var(--vscode-button-secondaryBackground);
+}
+
+.diff-view-toggle .diff-view-segment:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.diff-view-toggle .diff-view-segment.active {
+  opacity: 1;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
 .working-set-header {
   display: flex;
   align-items: center;
@@ -1954,12 +1652,9 @@ h4.md-heading { font-size: 1em; }
   opacity: 0.7;
 }
 
+/* Height follows content: one changed file costs one row, never a fixed
+   block; long lists scroll inside the cap instead of growing the tray. */
 .working-set-files {
-  min-height: 74px;
-  overflow-y: visible;
-}
-
-.working-set-files.scroll-capped {
   max-height: 30vh;
   overflow-y: auto;
   padding-right: 2px;
@@ -2827,6 +2522,10 @@ h4.md-heading { font-size: 1em; }
 .task-chip .chip {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.task-clone-policy .chip {
+  background: color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 22%, transparent);
 }
 
 .chip-remove,

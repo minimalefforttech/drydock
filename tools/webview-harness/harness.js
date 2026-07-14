@@ -32,7 +32,10 @@
         agents: [
           { nodeId: "task-audit", label: "Audit publish hooks", status: "running", startedAt: iso(13), lastActivityAt: iso(6), lastActivity: "grep allowlist", lastCommand: "grep", toolUses: 29, tokens: 257000 },
           { nodeId: "task-exporter", label: "Patch alembic exporter", status: "running", startedAt: iso(3), lastActivityAt: iso(1), lastActivity: "edit exporters/alembic.py", lastCommand: "Edit", toolUses: 52, tokens: 59900 }
-        ]
+        ],
+        // Root item (ADR 0013): the fleet keys its pulse/activity line/Stop off
+        // this; the sidebar ⑂ chip ignores it (counts stay children-only).
+        root: { nodeId: "root", label: "agent", status: "running", startedAt: iso(14), lastActivityAt: iso(1), lastActivity: "wiring exporter registry", lastCommand: "Edit", toolUses: 96, tokens: 412000 }
       },
       createdAt: iso(180),
       updatedAt: iso(2)
@@ -41,6 +44,7 @@
     { sessionId: "s-ended", title: "Investigate USD 24 upgrade", status: "ended", providerId: "codex", model: "gpt-5.4", createdAt: iso(2000), updatedAt: iso(1900) },
     { sessionId: "s-failed", title: "Docs generation spike", status: "failed", providerId: "codex", model: "gpt-5.5", createdAt: iso(500), updatedAt: iso(480) },
     { sessionId: "s-elsewhere", title: "Nightly test triage (window 2)", status: "active", providerId: "claude", model: "claude-opus-4-8", runningElsewhere: true, createdAt: iso(120), updatedAt: iso(8) },
+    { sessionId: "s-resuming", title: "Reclaimed: shader cache warmup", status: "starting", providerId: "codex", model: "gpt-5.5", createdAt: iso(300), updatedAt: iso(1) },
     { sessionId: "s-clone", title: "Clone: rewire asset_api publish", status: "active", providerId: "codex", model: "gpt-5.5", mode: "clone", createdAt: iso(90), updatedAt: iso(4) }
   ];
 
@@ -99,7 +103,13 @@
       { projectId: "p-asset", name: "asset_api", displayPath: "C:\\hitl\\asset_api", kind: "git" }
     ],
     workspaceSets: [
-      { workspaceSetId: "set-1", name: "pipeline", projectNames: ["demo-project", "asset_api"] }
+      {
+        workspaceSetId: "set-1", name: "pipeline", projectNames: ["demo-project", "asset_api"],
+        members: [
+          { projectId: "p-demo", name: "demo-project", displayPath: "C:\\hitl\\demo-project", readOnly: false },
+          { projectId: "p-asset", name: "asset_api", displayPath: "C:\\hitl\\asset_api", readOnly: false }
+        ]
+      }
     ],
     accessRequests: [
       { accessRequestId: "ar-rw", sessionId: "s-live", displayPath: "D:\\builds\\maya2026", mode: "read-write", reason: "verify compiled plugin load", status: "pending", requestedAt: iso(4) },
@@ -108,11 +118,22 @@
     ]
   };
 
+  // Session-view rows (the working frame; accept removes rows here and in turn).
   const diffChanges = [
     { baselineId: "b-1", rootName: "asset_api", path: "publish_hooks.py", changeKind: "modify", addedLines: 12, removedLines: 3, revertSupported: true },
     { baselineId: "b-1", rootName: "asset_api", path: "exporters/alembic.py", changeKind: "add", addedLines: 40, removedLines: 0, revertSupported: true },
     { baselineId: "b-1", rootName: "asset_api", path: "legacy/exporter_v1.py", changeKind: "delete", addedLines: 0, removedLines: 55, revertSupported: false, reason: "file exceeded the blob cap" }
   ];
+  // This Turn: only the most recent edit happened since the last send.
+  const diffChangesTurn = [
+    { baselineId: "b-turn", rootName: "asset_api", path: "exporters/alembic.py", changeKind: "add", addedLines: 40, removedLines: 0, revertSupported: true }
+  ];
+  // Full Session: everything since session start, including an already-accepted row.
+  const diffChangesFull = [
+    ...diffChanges.map((change) => ({ ...change, baselineId: "b-start" })),
+    { baselineId: "b-start", rootName: "asset_api", path: "config/defaults.toml", changeKind: "modify", addedLines: 2, removedLines: 2, revertSupported: true, accepted: true }
+  ];
+  const diffListFor = (view) => view === "turn" ? diffChangesTurn : view === "full-session" ? diffChangesFull : diffChanges;
 
   // Clone-mode sync state: one repo, two changed files, one conflicted.
   // Mutated in place by the clone.pull/push/discard mock handlers below.
@@ -136,13 +157,50 @@
     { columnId: "col-finished", name: "Finished", category: "done", sortOrder: 5 }
   ];
 
+  /** Landing drawer rows (ADR 0014): one disjoint, one overlapping pair member, one path-less legacy capture. */
+  const harnessLanding = [
+    { taskId: "t-1", taskTitle: "Alembic publish support", subtaskId: "st-3", subtaskTitle: "Review sweep", sessionId: "s-clone", repos: [{ repoName: "asset_api", fileCount: 4 }], capturedAt: iso(30), overlapsWith: [] },
+    { taskId: "t-3", taskTitle: "Task board rollout", subtaskId: "st-6", subtaskTitle: "Spike column persistence", sessionId: "s-ended", repos: [{ repoName: "asset_api", fileCount: 2 }, { repoName: "tools", fileCount: 1 }], capturedAt: iso(2980), overlapsWith: ["st-9"] },
+    { taskId: "t-2", taskTitle: "Py3 farm audit", subtaskId: "st-9", subtaskTitle: "Legacy capture", sessionId: "s-failed", repos: [{ repoName: "asset_api", fileCount: 3 }], capturedAt: iso(4000), overlapsWith: ["st-6"], overlapUnknown: true }
+  ];
+
+  /** Task FAQ entries (ADR 0007) — t-1's fixture count matches its faqCount. */
+  const harnessFaqs = [
+    { faqId: "faq-1", taskId: "t-1", pattern: "which branch", answer: "Work on feature/alembic-publish; never touch main directly.", createdAt: iso(100) },
+    { faqId: "faq-2", taskId: "t-1", pattern: "test framework", answer: "pytest with the studio fixtures package.", createdAt: iso(90) }
+  ];
+
+  /** Task recipes (ADRs 0007/0002): one seeded, one repo overlay (with a model profile). */
+  const harnessRecipes = [
+    {
+      recipeId: "recipe-implement-verify", name: "Implement + verify",
+      description: "One implementer, then a verifier that builds on its output.",
+      source: "seeded", archived: false, createdAt: iso(9000), updatedAt: iso(9000),
+      subtasks: [
+        { key: "implement", title: "Implement", prompt: "Implement \"{title}\".", autoStart: false, dependsOnKeys: [] },
+        { key: "verify", title: "Verify", prompt: "Verify \"{title}\".", autoStart: true, seedMode: "upstream", dependsOnKeys: ["implement"] }
+      ]
+    },
+    {
+      recipeId: "overlay:vfx-shot-pipeline", name: "VFX shot pipeline",
+      description: "Research the shot setup, implement, then run the render test.",
+      source: "overlay", archived: false, createdAt: iso(9000), updatedAt: iso(9000),
+      subtasks: [
+        { key: "research", title: "Research", prompt: "Research \"{title}\".", autoStart: false, dependsOnKeys: [] },
+        { key: "implement", title: "Implement", prompt: "Implement \"{title}\".", autoStart: true, seedMode: "upstream", dependsOnKeys: ["research"], model: { providerId: "claude", model: "claude-fable-5" } },
+        { key: "render-test", title: "Render test", prompt: "Run the render test for \"{title}\".", autoStart: true, seedMode: "upstream", dependsOnKeys: ["implement"] }
+      ]
+    }
+  ];
+
   const tasks = [
     {
-      taskId: "t-1", title: "Alembic publish support", description: "4 repos: db, api, maya, houdini", state: "in-progress", columnId: "col-in-progress", linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: ["s-live", "s-clone"], createdAt: iso(200), updatedAt: iso(5), lastWorkedAt: iso(2), openReviewCommentCount: 1,
+      taskId: "t-1", title: "Alembic publish support", description: "4 repos: db, api, maya, houdini", state: "in-progress", columnId: "col-in-progress", linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: ["s-live", "s-clone"], createdAt: iso(200), updatedAt: iso(5), lastWorkedAt: iso(2), openReviewCommentCount: 1, faqCount: 2, autoAnswerFaq: true,
+      clonePolicy: { workspaceSetId: "set-1", projectIds: ["p-asset"], dirtyHandling: "carry", workspaceSetProjectCount: 2 },
       subtasks: [
-        { subtaskId: "st-1", taskId: "t-1", title: "Patch alembic exporter", description: "exporters/alembic.py", prompt: "Patch exporters/alembic.py to support alembic caches.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(190), updatedAt: iso(5), isBlocked: false, dependsOn: [], isRunning: true, linkedSessionIds: ["s-live"] },
-        { subtaskId: "st-2", taskId: "t-1", title: "Update allowlist config", description: "", prompt: "", autoStart: true, origin: "manual", columnId: "col-todo", sortOrder: 1, createdAt: iso(188), updatedAt: iso(188), isBlocked: true, dependsOn: ["st-1"], isRunning: false, linkedSessionIds: [] },
-        { subtaskId: "st-3", taskId: "t-1", title: "Review sweep", description: "", origin: "review", autoStart: false, columnId: "col-review", sortOrder: 2, createdAt: iso(100), updatedAt: iso(20), doneAt: iso(20), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [] }
+        { subtaskId: "st-1", taskId: "t-1", title: "Patch alembic exporter", description: "exporters/alembic.py", prompt: "Patch exporters/alembic.py to support alembic caches.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(190), updatedAt: iso(5), isBlocked: false, dependsOn: [], isRunning: true, linkedSessionIds: ["s-live"], model: { providerId: "claude", model: "claude-fable-5" } },
+        { subtaskId: "st-2", taskId: "t-1", title: "Update allowlist config", description: "", prompt: "", autoStart: true, origin: "manual", columnId: "col-todo", sortOrder: 1, createdAt: iso(188), updatedAt: iso(188), isBlocked: true, dependsOn: ["st-1"], isRunning: false, linkedSessionIds: [], seedMode: "upstream" },
+        { subtaskId: "st-3", taskId: "t-1", title: "Review sweep", description: "", origin: "review", autoStart: false, columnId: "col-review", sortOrder: 2, createdAt: iso(100), updatedAt: iso(20), doneAt: iso(20), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [], verifyUnmet: true }
       ]
     },
     {
@@ -157,12 +215,14 @@
     // hides behind the per-column "1 hidden · Show" counter by default).
     {
       taskId: "t-3", title: "Task board rollout", state: "review", columnId: "col-review", doneAt: iso(45), linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: [], createdAt: iso(3200), updatedAt: iso(45),
+      clonePolicy: { workspaceSetId: "set-1", projectIds: ["p-demo", "p-asset"], dirtyHandling: "fresh", workspaceSetProjectCount: 2 },
       subtasks: [
         // st-5 depends on the already-finished st-6 (an edge to a done sibling
         // is allowed — instantly satisfied) and wears a failed chip from a
         // cancelled earlier run; drives the board's edge + failed visuals.
-        { subtaskId: "st-5", taskId: "t-3", title: "Draft board announcement", description: "", prompt: "Write the internal rollout note for the task board.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(3100), updatedAt: iso(60), isBlocked: false, dependsOn: ["st-6"], isRunning: false, lastFailureAt: iso(55), linkedSessionIds: [] },
-        { subtaskId: "st-6", taskId: "t-3", title: "Spike column persistence", description: "", prompt: "", autoStart: false, origin: "manual", columnId: "col-finished", sortOrder: 1, createdAt: iso(3100), updatedAt: iso(2980), doneAt: iso(2980), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [] }
+        { subtaskId: "st-5", taskId: "t-3", title: "Draft board announcement", description: "", prompt: "Write the internal rollout note for the task board.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(3100), updatedAt: iso(60), isBlocked: false, dependsOn: ["st-6"], isRunning: false, lastFailureAt: iso(55), isParked: true, linkedSessionIds: [] },
+        { subtaskId: "st-7", taskId: "t-3", title: "Cross-post to wiki", description: "", prompt: "Mirror the rollout note onto the wiki.", autoStart: true, origin: "manual", columnId: "col-todo", sortOrder: 2, createdAt: iso(3100), updatedAt: iso(30), isBlocked: false, dependsOn: [], isRunning: false, isQueued: true, linkedSessionIds: [] },
+        { subtaskId: "st-6", taskId: "t-3", title: "Spike column persistence", description: "", prompt: "", autoStart: false, origin: "manual", columnId: "col-finished", sortOrder: 1, createdAt: iso(3100), updatedAt: iso(2980), doneAt: iso(2980), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [], hasUnlandedChangeset: true }
       ]
     }
   ];
@@ -184,12 +244,6 @@
     { taskId: "t-1", taskTitle: "Alembic publish support", sessionId: "s-live", sessionTitle: "Add alembic support to asset_api", lastActivityAt: iso(2), turnCount: 7 },
     { sessionId: "s-ended", sessionTitle: "Investigate USD 24 upgrade", lastActivityAt: iso(1900), turnCount: 3 }
   ];
-
-  const planDocs = {
-    "s-ended": [
-      { name: "usd-upgrade.md", format: "markdown", revision: 2, collectedAt: iso(1900), content: "# USD 24 upgrade\n\nScope and risks.\n\n```mermaid\nflowchart TD; usd_core-->houdini\n```" }
-    ]
-  };
 
   const runtimes = [
     { runtimeId: "r-1", externalName: "drydock-slive-gen1-worker", status: "running", startedAt: iso(60) }
@@ -324,6 +378,30 @@
         window.__harnessClipboard = payload.text;
         return respond(requestId, { type, accepted: true });
       case "session.list": return respond(requestId, { type, sessions });
+      case "session.summarize": {
+        const session = sessions.find((candidate) => candidate.sessionId === payload.sessionId);
+        if (!session) return respondError(requestId, "unknown session");
+        if (payload.mode === "log") {
+          // The real host builds the log from durable events and writes the
+          // clipboard itself; the harness records a stand-in the same way.
+          window.__harnessClipboard = `# ${session.title}\n\n(harness chat log)\n`;
+          harnessLog(`session.summarize log ${String(payload.sessionId)}`);
+          return respond(requestId, { type, sessionId: payload.sessionId, mode: "log", accepted: true });
+        }
+        respond(requestId, { type, sessionId: payload.sessionId, mode: "ai", accepted: true });
+        // Simulate the out-of-band model turn finishing a beat later. Seed
+        // window.__harnessSummarizeFail = true to exercise the failure push.
+        setTimeout(() => {
+          if (window.__harnessSummarizeFail) {
+            push({ type: "session.summaryReady", sessionId: payload.sessionId, ok: false, error: "harness: simulated summary failure" });
+          } else {
+            window.__harnessClipboard = `## Overview\n(harness AI summary for ${session.title})\n`;
+            push({ type: "session.summaryReady", sessionId: payload.sessionId, ok: true });
+          }
+          harnessLog(`session.summaryReady ${String(payload.sessionId)}`);
+        }, 1200);
+        return;
+      }
       case "session.timeline": {
         const lines = (timelines[payload.sessionId] ?? []).filter((line) => line.sequence >= (payload.fromSequence ?? 0));
         return respond(requestId, { type, sessionId: payload.sessionId, lines });
@@ -374,7 +452,9 @@
         session.providerId = payload.model.providerId; session.model = payload.model.model;
         return respond(requestId, { type, session, providerCatalogs: catalogs });
       }
-      case "chat.cancelTurn": return respond(requestId, { type, accepted: true });
+      case "chat.cancelTurn":
+        harnessLog(`chat.cancelTurn ${String(payload.sessionId)}`);
+        return respond(requestId, { type, accepted: true });
       case "chat.spawnRole": {
         const parent = sessions.find((candidate) => candidate.sessionId === payload.sessionId);
         if (!parent) return respondError(requestId, "unknown session");
@@ -433,16 +513,24 @@
         if (payload.editedHostPath) access.displayPath = payload.editedHostPath;
         return respond(requestId, { type, accessRequest: access });
       }
-      case "diff.status": return respond(requestId, { type, changes: payload.sessionId === "s-live" || payload.sessionId === undefined ? diffChanges : [] });
+      case "diff.status": return respond(requestId, { type, changes: payload.sessionId === "s-live" || payload.sessionId === undefined ? diffListFor(payload.view) : [] });
       case "diff.acceptFile": {
-        const index = diffChanges.findIndex((candidate) => candidate.path === payload.path);
-        if (index >= 0) diffChanges.splice(index, 1);
-        return respond(requestId, { type, changes: diffChanges });
+        // Mirror the host: accept clears the row from the session AND turn
+        // frames and flips the full-session row to accepted history.
+        for (const list of [diffChanges, diffChangesTurn]) {
+          const index = list.findIndex((candidate) => candidate.path === payload.path);
+          if (index >= 0) list.splice(index, 1);
+        }
+        const fullRow = diffChangesFull.find((candidate) => candidate.path === payload.path);
+        if (fullRow) fullRow.accepted = true;
+        return respond(requestId, { type, changes: diffListFor(payload.view) });
       }
       case "diff.revertFile": {
-        const index = diffChanges.findIndex((candidate) => candidate.path === payload.path);
-        if (index >= 0) diffChanges.splice(index, 1);
-        return respond(requestId, { type, changes: diffChanges });
+        for (const list of [diffChanges, diffChangesTurn, diffChangesFull]) {
+          const index = list.findIndex((candidate) => candidate.path === payload.path);
+          if (index >= 0) list.splice(index, 1);
+        }
+        return respond(requestId, { type, changes: diffListFor(payload.view) });
       }
       case "diff.openFile":
         // Log the send so the task-review visual check (V27) can assert it.
@@ -501,6 +589,10 @@
         if (payload.title !== undefined) task.title = payload.title;
         if (payload.state !== undefined) task.state = payload.state;
         if (payload.description !== undefined) { if (payload.description === "") delete task.description; else task.description = payload.description; }
+        if (payload.autoAnswerFaq !== undefined) {
+          task.autoAnswerFaq = payload.autoAnswerFaq;
+          harnessLog(`task.update ${String(payload.taskId)} autoAnswerFaq=${String(payload.autoAnswerFaq)}`);
+        }
         task.updatedAt = new Date().toISOString();
         push({ type: "task.updated", task });
         return respond(requestId, { type, task });
@@ -592,6 +684,82 @@
         harnessLog(`board.columns.update columns=${String(payload.columns.length)} deleted=${String((payload.deletedColumnIds ?? []).length)}`);
         return respond(requestId, { type, board: { columns: boardColumns, tasks } });
       }
+      case "recipes.list": {
+        harnessLog("recipes.list");
+        return respond(requestId, { type, recipes: harnessRecipes });
+      }
+      case "task.faq.list": {
+        harnessLog(`task.faq.list ${String(payload.taskId)}`);
+        return respond(requestId, { type, faqs: harnessFaqs.filter((faq) => faq.taskId === payload.taskId) });
+      }
+      case "task.faq.add": {
+        harnessLog(`task.faq.add ${String(payload.taskId)} pattern=${String(payload.pattern)}`);
+        harnessFaqs.push({ faqId: `faq-${String(harnessFaqs.length + 1)}`, taskId: payload.taskId, pattern: payload.pattern, answer: payload.answer, createdAt: new Date().toISOString() });
+        const owner = tasks.find((candidate) => candidate.taskId === payload.taskId);
+        if (owner) owner.faqCount = harnessFaqs.filter((faq) => faq.taskId === payload.taskId).length;
+        return respond(requestId, { type, faqs: harnessFaqs.filter((faq) => faq.taskId === payload.taskId) });
+      }
+      case "task.faq.remove": {
+        harnessLog(`task.faq.remove ${String(payload.taskId)} ${String(payload.faqId)}`);
+        const index = harnessFaqs.findIndex((faq) => faq.taskId === payload.taskId && faq.faqId === payload.faqId);
+        if (index >= 0) harnessFaqs.splice(index, 1);
+        const owner = tasks.find((candidate) => candidate.taskId === payload.taskId);
+        if (owner) owner.faqCount = harnessFaqs.filter((faq) => faq.taskId === payload.taskId).length;
+        return respond(requestId, { type, faqs: harnessFaqs.filter((faq) => faq.taskId === payload.taskId) });
+      }
+      case "task.createFromRecipe": {
+        const recipe = harnessRecipes.find((candidate) => candidate.recipeId === payload.recipeId);
+        if (!recipe) return respondError(requestId, "unknown recipe");
+        harnessLog(`task.createFromRecipe ${String(payload.recipeId)} title=${String(payload.title)}`);
+        const stamp = new Date().toISOString();
+        const taskId = `t-recipe-${String(tasks.length + 1)}`;
+        const idByKey = new Map();
+        const subtasks = recipe.subtasks.map((step, index) => {
+          const subtaskId = `${taskId}-st-${String(index + 1)}`;
+          idByKey.set(step.key, subtaskId);
+          return {
+            subtaskId,
+            taskId,
+            title: step.title,
+            ...(step.prompt ? { prompt: step.prompt.replaceAll("{title}", payload.title) } : {}),
+            autoStart: step.autoStart === true,
+            origin: "manual",
+            columnId: boardColumns.find((c) => c.category === "backlog")?.columnId ?? "col-backlog",
+            sortOrder: index,
+            createdAt: stamp,
+            updatedAt: stamp,
+            isBlocked: false,
+            dependsOn: [],
+            isRunning: false,
+            linkedSessionIds: [],
+            ...(step.seedMode ? { seedMode: step.seedMode } : {}),
+            ...(step.model ? { model: step.model } : {})
+          };
+        });
+        for (const step of recipe.subtasks) {
+          const to = subtasks.find((s) => s.subtaskId === idByKey.get(step.key));
+          for (const fromKey of step.dependsOnKeys ?? []) {
+            const fromId = idByKey.get(fromKey);
+            if (to && fromId) to.dependsOn.push(fromId);
+          }
+        }
+        const task = {
+          taskId,
+          title: payload.title,
+          description: `Created from recipe "${recipe.name}".`,
+          state: "todo",
+          columnId: boardColumns.find((c) => c.category === "backlog")?.columnId ?? "col-backlog",
+          linkedWorkspaceSetIds: [],
+          linkedSessionIds: [],
+          createdAt: stamp,
+          updatedAt: stamp,
+          subtasks
+        };
+        tasks.push(task);
+        recomputeBlocked(task);
+        push({ type: "board.changed" });
+        return respond(requestId, { type, task });
+      }
       case "subtask.create": {
         const task = tasks.find((candidate) => candidate.taskId === payload.taskId);
         if (!task) return respondError(requestId, "unknown task");
@@ -626,6 +794,11 @@
         if (payload.prompt !== undefined) { if (payload.prompt === "") delete subtask.prompt; else subtask.prompt = payload.prompt; }
         if (payload.autoStart !== undefined) subtask.autoStart = payload.autoStart;
         if (payload.columnId !== undefined) subtask.columnId = payload.columnId;
+        if (payload.seedMode !== undefined) subtask.seedMode = payload.seedMode; // ADR 0014
+        if (payload.verified !== undefined) { // ADR 0007
+          harnessLog(`subtask.update ${String(payload.subtaskId)} verified=${String(payload.verified)}`);
+          if (payload.verified) delete subtask.verifyUnmet; else subtask.verifyUnmet = true;
+        }
         subtask.updatedAt = new Date().toISOString();
         task.updatedAt = new Date().toISOString();
         push({ type: "task.updated", task });
@@ -676,6 +849,55 @@
         harnessLog(`subtask.dependency.remove ${String(payload.fromSubtaskId)} -> ${String(payload.toSubtaskId)}`);
         return respond(requestId, { type, task });
       }
+      case "agents.state": {
+        // Fleet snapshot (agents.html, ADR 0013): assembled from the same
+        // session/task/question/access fixtures the sidebar uses, mirroring
+        // the host's grouping — task links plus a grafted role child under
+        // s-live; every unlinked session lands in the orphan drawer.
+        const fleetLive = new Set(["s-live", "s-waiting", "s-clone"]);
+        const decorate = (session) => ({ ...session, live: fleetLive.has(session.sessionId) });
+        const roleChild = {
+          sessionId: "s-role-reviewer", title: "a11y reviewer", status: "active", providerId: "codex", model: "gpt-5.5",
+          transport: "codex-app-server", parentSessionId: "s-live", spawnedRole: "reviewer", live: true,
+          createdAt: iso(20), updatedAt: iso(1),
+          agentActivity: { running: 0, failed: 0, root: { nodeId: "root", label: "agent", status: "running", startedAt: iso(20), lastActivityAt: iso(1), lastActivity: "reading src/tour badges", lastCommand: "Read", toolUses: 12 } }
+        };
+        const bySession = new Map(sessions.map((session) => [session.sessionId, session]));
+        const grouped = new Set();
+        const groups = [];
+        for (const task of tasks) {
+          const members = task.linkedSessionIds
+            .filter((sessionId) => bySession.has(sessionId))
+            .map((sessionId) => { grouped.add(sessionId); return decorate(bySession.get(sessionId)); });
+          if (task.taskId === "t-1") members.push(roleChild);
+          if (members.length === 0) continue;
+          const column = boardColumns.find((candidate) => candidate.columnId === task.columnId);
+          groups.push({ task, ...(column ? { columnName: column.name, columnCategory: column.category } : {}), sessions: members });
+        }
+        const orphanSessions = sessions.filter((session) => !grouped.has(session.sessionId)).map(decorate);
+        return respond(requestId, { type, state: {
+          generatedAt: new Date().toISOString(),
+          groups,
+          orphanSessions,
+          questions: agentQuestions.filter((question) => question.status === "pending"),
+          accessRequests: workspacePolicy.accessRequests.filter((request_) => request_.status === "pending"),
+          agentIdleThresholdMs: 5 * 60_000,
+          ...(harnessLanding.length === 0 ? {} : { landing: harnessLanding })
+        } });
+      }
+      case "agents.landSession": {
+        harnessLog(`agents.landSession ${String(payload.sessionId)}`);
+        const index = harnessLanding.findIndex((item) => item.sessionId === payload.sessionId);
+        if (index >= 0) harnessLanding.splice(index, 1);
+        setTimeout(() => push({ type: "agents.changed" }), 150);
+        return respond(requestId, { type, message: "Pulled 4 files" });
+      }
+      case "agents.openSession":
+        harnessLog(`agents.openSession ${String(payload.sessionId)}${payload.nodeId ? ` node=${String(payload.nodeId)}` : ""}`);
+        return respond(requestId, { type, accepted: true });
+      case "agents.open":
+        harnessLog("agents.open");
+        return respond(requestId, { type, accepted: true });
       case "taskBoard.open":
         // The Task Board panel + command exist, so the relay succeeds (in the
         // browser harness there is no editor area to reveal — the log line is
@@ -694,9 +916,6 @@
         // Log the send so a visual check can assert the Memories "Open" row wiring.
         harnessLog(`memory.open ${String(payload.memoryCandidateId)}`);
         return respond(requestId, { type, accepted: true });
-      case "planDocs.state": return respond(requestId, { type, sessionId: payload.sessionId, docs: planDocs[payload.sessionId] ?? [] });
-      case "planDocs.open": return respond(requestId, { type, accepted: true });
-      case "planDocs.sendComments": return respond(requestId, { type, accepted: true, sentCount: 0 });
       case "clone.state":
         return respond(requestId, { type, sessionId: payload.sessionId, repos: cloneRepos });
       case "clone.pull": {
@@ -751,9 +970,318 @@
       case "taskReview.open":
         harnessLog(`taskReview.open ${String(payload.taskId)}`);
         return respond(requestId, { type, accepted: true });
+      case "planner.open":
+        harnessLog(`planner.open${payload.planId ? ` ${String(payload.planId)}` : ""}`);
+        return respond(requestId, { type, accepted: true });
+      case "planner.plans":
+        return respond(requestId, { type, plans: plannerPlans.map(plannerPlanSummary) });
+      case "planner.aspects.list":
+        return respond(requestId, { type, aspects: plannerAspects });
+      case "planner.state": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        if (!plan) return respondError(requestId, "harness: unknown plan");
+        const live = plan.sessionId === "s-live";
+        const session = plan.sessionId === null ? null : { ...sessions.find((s) => s.sessionId === plan.sessionId), live };
+        return respond(requestId, { type, state: plannerState(plan), session });
+      }
+      case "planner.create": {
+        const plan = {
+          planId: `pl-${String(plannerPlans.length + 1)}`,
+          title: payload.title ?? payload.brief.split("\n")[0].slice(0, 48),
+          brief: payload.brief,
+          aspectIds: payload.aspectIds,
+          contextRoots: payload.contextRoots,
+          notes: payload.notes ?? "",
+          status: "draft",
+          sessionId: null,
+          taskId: payload.taskId ?? null,
+          updatedAt: new Date().toISOString()
+        };
+        plannerPlans.unshift(plan);
+        plannerArtifacts[plan.planId] = [];
+        plannerAnnotations[plan.planId] = [];
+        harnessLog(`planner.create ${plan.planId} aspects=${String(payload.aspectIds.length)} roots=${String(payload.contextRoots.length)} task=${plan.taskId ?? "none"}`);
+        respond(requestId, { type, plan: plannerPlanSummary(plan) });
+        setTimeout(() => {
+          plan.sessionId = "s-live";
+          plan.status = "active";
+          push({ type: "planner.sessionReady", planId: plan.planId, sessionId: "s-live", ok: true });
+        }, 600);
+        return;
+      }
+      case "planner.updateIntake": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        if (!plan) return respondError(requestId, "harness: unknown plan");
+        if (payload.title !== undefined) plan.title = payload.title;
+        if (payload.brief !== undefined) plan.brief = payload.brief;
+        if (payload.aspectIds !== undefined) plan.aspectIds = payload.aspectIds;
+        if (payload.contextRoots !== undefined) plan.contextRoots = payload.contextRoots;
+        if (payload.notes !== undefined) plan.notes = payload.notes;
+        if (payload.taskId !== undefined) plan.taskId = payload.taskId === "" ? null : payload.taskId;
+        plan.updatedAt = new Date().toISOString();
+        return respond(requestId, { type, plan: plannerPlanSummary(plan) });
+      }
+      case "planner.archive": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        if (!plan) return respondError(requestId, "harness: unknown plan");
+        plan.status = payload.archived ? "archived" : (plan.sessionId === null ? "draft" : "active");
+        return respond(requestId, { type, plan: plannerPlanSummary(plan) });
+      }
+      case "planner.startSession": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        if (!plan) return respondError(requestId, "harness: unknown plan");
+        respond(requestId, { type, accepted: true });
+        setTimeout(() => {
+          plan.sessionId = "s-live";
+          plan.status = "active";
+          push({ type: "planner.sessionReady", planId: plan.planId, sessionId: "s-live", ok: true });
+        }, 600);
+        return;
+      }
+      case "planner.sendTurn": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        if (!plan) return respondError(requestId, "harness: unknown plan");
+        harnessLog(`planner.sendTurn ${plan.planId}: ${String(payload.prompt).slice(0, 60)}`);
+        respond(requestId, { type, accepted: true });
+        const sessionId = plan.sessionId ?? "s-live";
+        push({ type: "chat.turnStarted", sessionId, runId: "run-planner" });
+        window.__harness.eventSequence = (window.__harness.eventSequence ?? 10_000) + 10;
+        push({ type: "chat.event", sessionId, line: { sequence: window.__harness.eventSequence, eventType: "user.message", summary: payload.prompt, createdAt: new Date().toISOString() } });
+        setTimeout(() => {
+          const doc = (plannerArtifacts[plan.planId] ?? []).find((artifact) => artifact.kind === "document");
+          if (doc) doc.revision += 1;
+          push({ type: "chat.turnCompleted", sessionId, runId: "run-planner", status: "completed" });
+          push({ type: "planner.changed", planId: plan.planId });
+        }, 700);
+        return;
+      }
+      case "planner.annotation.add": {
+        const list = plannerAnnotations[payload.planId];
+        if (!list) return respondError(requestId, "harness: unknown plan");
+        const annotation = {
+          annotationId: `plnote-${String(now)}-${String(list.length + 1)}`,
+          artifactId: payload.artifactId,
+          anchor: payload.anchor,
+          body: payload.body,
+          status: "open",
+          delegatedRev: null,
+          createdAt: new Date().toISOString()
+        };
+        list.push(annotation);
+        harnessLog(`planner.annotation.add ${payload.anchor}`);
+        return respond(requestId, { type, annotation });
+      }
+      case "planner.annotation.setStatus": {
+        const annotation = findPlannerAnnotation(payload.annotationId);
+        if (!annotation) return respondError(requestId, "harness: unknown annotation");
+        annotation.status = payload.status;
+        if (payload.status === "open") annotation.delegatedRev = null;
+        return respond(requestId, { type, annotation });
+      }
+      case "planner.annotation.remove": {
+        for (const planId of Object.keys(plannerAnnotations)) {
+          plannerAnnotations[planId] = plannerAnnotations[planId].filter((entry) => entry.annotationId !== payload.annotationId);
+        }
+        return respond(requestId, { type, removed: true });
+      }
+      case "planner.artifact.rename": {
+        const artifact = findPlannerArtifact(payload.artifactId);
+        if (!artifact) return respondError(requestId, "harness: unknown artifact");
+        artifact.title = payload.title.trim().length === 0 ? artifact.baseTitle : payload.title.trim();
+        return respond(requestId, { type, artifact });
+      }
+      case "planner.sendInstructions": {
+        const list = plannerAnnotations[payload.planId] ?? [];
+        let sentCount = 0;
+        for (const annotation of list) {
+          if (annotation.status !== "open") continue;
+          annotation.status = "delegated";
+          annotation.delegatedRev = findPlannerArtifact(annotation.artifactId)?.revision ?? null;
+          sentCount += 1;
+        }
+        harnessLog(`planner.sendInstructions sent=${String(sentCount)}`);
+        push({ type: "planner.changed", planId: payload.planId });
+        return respond(requestId, { type, accepted: true, sentCount });
+      }
+      case "planner.subtaskCandidates": {
+        const docs = (plannerArtifacts[payload.planId] ?? []).filter((artifact) => artifact.kind === "document" && typeof artifact.content === "string");
+        const candidates = [];
+        for (const doc of docs) {
+          for (const match of doc.content.matchAll(/^\s*(?:[-*+]|\d+[.)])\s*\[[ xX]\]\s+(.+?)\s*$/gm)) {
+            if (!candidates.includes(match[1])) candidates.push(match[1]);
+          }
+        }
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        const owner = tasks.find((candidate) => candidate.taskId === plan?.taskId);
+        harnessLog(`planner.subtaskCandidates ${String(payload.planId)} n=${String(candidates.length)}`);
+        return respond(requestId, {
+          type,
+          candidates,
+          ...(owner ? { taskId: owner.taskId, taskTitle: owner.title } : {})
+        });
+      }
+      case "planner.materializeSubtasks": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        const owner = tasks.find((candidate) => candidate.taskId === plan?.taskId);
+        if (!owner) return respondError(requestId, "This plan has no owning task — pick one in the plan intake first.");
+        harnessLog(`planner.materializeSubtasks ${String(payload.planId)} n=${String(payload.titles.length)}`);
+        const stamp = new Date().toISOString();
+        for (const title of payload.titles) {
+          owner.subtasks.push({
+            subtaskId: `st-plan-${String(owner.subtasks.length + 1)}`, taskId: owner.taskId, title,
+            prompt: `From the plan: ${title}`, autoStart: false, origin: "manual",
+            columnId: "col-backlog", sortOrder: owner.subtasks.length, createdAt: stamp, updatedAt: stamp,
+            isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: []
+          });
+        }
+        push({ type: "board.changed" });
+        return respond(requestId, { type, createdCount: payload.titles.length, taskId: owner.taskId });
+      }
+      case "planner.regenerate":
+        harnessLog(`planner.regenerate ${String(payload.planId)} aspect=${String(payload.aspectId ?? "all")}`);
+        return respond(requestId, { type, accepted: true });
+      case "planner.openArtifact":
+        harnessLog(`planner.openArtifact ${String(payload.artifactId)}`);
+        return respond(requestId, { type, accepted: true });
+      case "planner.setPrototypeScripts": {
+        const artifact = findPlannerArtifact(payload.artifactId);
+        if (!artifact) return respondError(requestId, "harness: unknown artifact");
+        artifact.scriptsEnabled = payload.enabled;
+        harnessLog(`planner.setPrototypeScripts ${String(payload.enabled)}`);
+        return respond(requestId, { type, artifact });
+      }
+      case "planner.aspects.save": {
+        if (payload.aspect.aspectId !== undefined) {
+          const existing = plannerAspects.find((aspect) => aspect.aspectId === payload.aspect.aspectId);
+          if (!existing) return respondError(requestId, "harness: unknown aspect");
+          existing.label = payload.aspect.label;
+          existing.instructions = payload.aspect.instructions;
+          existing.expectedArtifacts = payload.aspect.expectedArtifacts;
+        } else {
+          const slug = payload.aspect.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "aspect";
+          plannerAspects.push({
+            aspectId: plannerAspects.some((aspect) => aspect.aspectId === slug) ? `${slug}-2` : slug,
+            label: payload.aspect.label,
+            instructions: payload.aspect.instructions,
+            expectedArtifacts: payload.aspect.expectedArtifacts,
+            sortOrder: plannerAspects.length,
+            archived: false,
+            seeded: false
+          });
+        }
+        return respond(requestId, { type, aspects: plannerAspects });
+      }
+      case "planner.aspects.archive": {
+        const aspect = plannerAspects.find((entry) => entry.aspectId === payload.aspectId);
+        if (!aspect) return respondError(requestId, "harness: unknown aspect");
+        aspect.archived = payload.archived;
+        return respond(requestId, { type, aspects: plannerAspects });
+      }
       default:
         return respondError(requestId, `harness: unhandled request ${String(type)}`);
     }
+  }
+
+  // --- planner fixtures (ADR 0012) --------------------------------------------
+  const plannerAspects = [
+    { aspectId: "requirements", label: "Requirements & scope", instructions: "State the problem, users, and success criteria.", expectedArtifacts: ["Requirements brief (document)"], sortOrder: 0, archived: false, seeded: true },
+    { aspectId: "architecture", label: "System architecture", instructions: "Describe components, boundaries, and decisions.", expectedArtifacts: ["Architecture overview (document)", "Component diagram (mermaid)"], sortOrder: 1, archived: false, seeded: true },
+    { aspectId: "ui-ux", label: "UI / UX", instructions: "Screens, flows, states; prefer showing over telling.", expectedArtifacts: ["Screen inventory (document)", "Mockups (images)", "Clickable components (HTML prototype)"], sortOrder: 4, archived: false, seeded: true },
+    { aspectId: "testing", label: "Testing & verification", instructions: "Test strategy and what observation proves it works.", expectedArtifacts: ["Test plan (document)"], sortOrder: 5, archived: false, seeded: true },
+    { aspectId: "rollout", label: "Migration & rollout", instructions: "Sequencing, flags, rollback.", expectedArtifacts: ["Rollout plan (document)"], sortOrder: 8, archived: true, seeded: true },
+    { aspectId: "brand-review", label: "Brand review", instructions: "Check the visuals against the brand book.", expectedArtifacts: ["Brand notes (document)"], sortOrder: 100, archived: false, seeded: false }
+  ];
+  const PLANNER_DOC = [
+    "# Auth Service Revamp",
+    "",
+    "Replace the legacy cookie stack with an OIDC code flow. Sessions stay server-side;",
+    "service-to-service calls move to short-lived tokens.",
+    "",
+    "## Phases",
+    "",
+    "- Phase 1 — provider spike and library choice",
+    "- Phase 2 — migrate sessions and cut over cookies",
+    "- Phase 3 — rollout with kill switch",
+    "",
+    "## Rollback",
+    "",
+    "Keep the legacy issuer warm for one release; flags gate every entry point.",
+    "",
+    "```mermaid",
+    "flowchart LR; Browser-->Gateway-->AuthAPI; AuthAPI-->SessionStore",
+    "```",
+    "",
+    "## Open questions",
+    "",
+    "Token TTLs and the service-account rotation cadence."
+  ].join("\n");
+  // A wireframe-ish SVG served through <img> (inert: no scripts execute in an
+  // image context), so the annotation surface has real geometry to hit.
+  const PLANNER_IMAGE = `data:image/svg+xml;utf8,${encodeURIComponent(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='640' height='400'>" +
+    "<rect width='640' height='400' fill='#10131a'/>" +
+    "<rect x='16' y='14' width='608' height='30' rx='4' fill='#1c212b'/>" +
+    "<rect x='16' y='56' width='140' height='328' rx='4' fill='#181d26'/>" +
+    "<rect x='172' y='56' width='220' height='150' rx='4' fill='#181d26'/>" +
+    "<rect x='404' y='56' width='220' height='150' rx='4' fill='#181d26'/>" +
+    "<rect x='172' y='222' width='452' height='162' rx='4' fill='#181d26'/>" +
+    "<path d='M188 180 l40 -40 l36 16 l48 -52 l60 30' stroke='#7d9fbe' fill='none' stroke-width='2'/>" +
+    "</svg>"
+  )}`;
+  const plannerArtifacts = {
+    "pl-1": [
+      { artifactId: "plart-doc", relPath: "architecture/overview.md", kind: "document", aspectId: "architecture", title: "Auth Service Revamp", baseTitle: "Auth Service Revamp", revision: 3, scriptsEnabled: false, collectedAt: iso(5), content: PLANNER_DOC },
+      { artifactId: "plart-diagram", relPath: "architecture/components.mmd", kind: "diagram", aspectId: "architecture", title: "Component Diagram", baseTitle: "Component Diagram", revision: 2, scriptsEnabled: false, collectedAt: iso(5), content: "flowchart LR\n  Browser-->Gateway\n  Gateway-->AuthAPI\n  AuthAPI-->SessionStore" },
+      { artifactId: "plart-image", relPath: "ui-ux/dashboard.png", kind: "image", aspectId: "ui-ux", title: "Dashboard Mockup", baseTitle: "Dashboard Mockup", revision: 1, scriptsEnabled: false, collectedAt: iso(20), imageDataUri: PLANNER_IMAGE },
+      { artifactId: "plart-proto", relPath: "ui-ux/login-prototype.html", kind: "prototype", aspectId: "ui-ux", title: "Login Prototype", baseTitle: "Login Prototype", revision: 1, scriptsEnabled: false, collectedAt: iso(20), content: "<main style=\"font-family: sans-serif; padding: 24px; max-width: 320px\">\n  <h1>Sign in</h1>\n  <p><input placeholder=\"email\" style=\"width: 100%\"></p>\n  <p><input placeholder=\"password\" type=\"password\" style=\"width: 100%\"></p>\n  <p><button onclick=\"this.textContent='Clicked!'\">Sign in</button></p>\n  <p><a href=\"#\">Forgot password?</a></p>\n</main>" },
+      { artifactId: "plart-test", relPath: "testing/test-plan.md", kind: "document", aspectId: "testing", title: "Test Plan", baseTitle: "Test Plan", revision: 1, scriptsEnabled: false, collectedAt: iso(9), content: "# Test Plan\n\n## Unit\n\n- [ ] Cover the allowlist edge cases\n- [ ] Port the session-store fixtures\n\n## Live\n\n- [x] Login flow against the spike provider" }
+    ],
+    "pl-2": []
+  };
+  const plannerAnnotations = {
+    "pl-1": [
+      { annotationId: "plnote-1", artifactId: "plart-doc", anchor: "block:4", body: "Split phase 2: session migration and cookie cutover are separate risks.", status: "open", delegatedRev: null, createdAt: iso(30) },
+      { annotationId: "plnote-2", artifactId: "plart-diagram", anchor: "node:Gateway", body: "Gateway should own rate-limiting; add a limiter box.", status: "open", delegatedRev: null, createdAt: iso(25) },
+      { annotationId: "plnote-3", artifactId: "plart-doc", anchor: "block:8", body: "Name the kill-switch flag.", status: "delegated", delegatedRev: 2, createdAt: iso(120) },
+      { annotationId: "plnote-4", artifactId: "plart-image", anchor: "region:0.05,0.14,0.25,0.8", body: "Move filters into a left rail.", status: "resolved", delegatedRev: 1, createdAt: iso(200) }
+    ],
+    "pl-2": []
+  };
+  const plannerPlans = [
+    { planId: "pl-1", title: "Auth service revamp", brief: "Replace the legacy cookie stack with OIDC; sessions stay server-side.", aspectIds: ["architecture", "ui-ux", "testing"], contextRoots: ["C:\\hitl\\asset_api\\src"], notes: "Server-side sessions only.", status: "active", sessionId: "s-live", taskId: "t-1", updatedAt: iso(5) },
+    { planId: "pl-2", title: "Docs portal spike", brief: "A static docs portal for the pipeline team.", aspectIds: ["requirements"], contextRoots: [], notes: "", status: "archived", sessionId: null, taskId: null, updatedAt: iso(4000) }
+  ];
+  function plannerPlanSummary(plan) {
+    const annotations = plannerAnnotations[plan.planId] ?? [];
+    const taskTitle = plan.taskId === null ? undefined : tasks.find((task) => task.taskId === plan.taskId)?.title;
+    return {
+      ...plan,
+      ...(taskTitle === undefined ? {} : { taskTitle }),
+      artifactCount: (plannerArtifacts[plan.planId] ?? []).length,
+      openAnnotationCount: annotations.filter((annotation) => annotation.status === "open").length
+    };
+  }
+  function plannerState(plan) {
+    return {
+      plan: plannerPlanSummary(plan),
+      artifacts: plannerArtifacts[plan.planId] ?? [],
+      annotations: plannerAnnotations[plan.planId] ?? [],
+      aspects: plannerAspects
+    };
+  }
+  function findPlannerArtifact(artifactId) {
+    for (const planId of Object.keys(plannerArtifacts)) {
+      const artifact = plannerArtifacts[planId].find((entry) => entry.artifactId === artifactId);
+      if (artifact) return artifact;
+    }
+    return undefined;
+  }
+  function findPlannerAnnotation(annotationId) {
+    for (const planId of Object.keys(plannerAnnotations)) {
+      const annotation = plannerAnnotations[planId].find((entry) => entry.annotationId === annotationId);
+      if (annotation) return annotation;
+    }
+    return undefined;
   }
 
   window.acquireVsCodeApi = function acquireVsCodeApi() {
@@ -767,7 +1295,7 @@
   };
 
   window.__harness = {
-    fixtures: { sessions, catalogs, workspacePolicy, diffChanges, cloneRepos, tasks, boardColumns, memoryCandidates, workHistory, taskReviewProjects, taskReviewSessions, taskReviewComments, comments: [
+    fixtures: { sessions, catalogs, workspacePolicy, diffChanges, cloneRepos, tasks, boardColumns, memoryCandidates, workHistory, taskReviewProjects, taskReviewSessions, taskReviewComments, planner: { plans: plannerPlans, artifacts: plannerArtifacts, annotations: plannerAnnotations, aspects: plannerAspects }, comments: [
       { commentId: "c-1", filePath: "publish_hooks.py", startLine: 12, endLine: 14, body: "Guard the allowlist behind config.", author: "user", status: "open", createdAt: iso(30) }
     ] },
     log: [],
@@ -791,6 +1319,31 @@
       attention(sessionId, reasons) {
         push({ type: "session.attention", sessionId, reasons });
       },
+      /** Agents panel: live activity tick on s-live (durations/counters move). */
+      agentsTick() {
+        push({ type: "session.agentActivity", sessionId: "s-live", activity: {
+          running: 2, failed: 0,
+          agents: [
+            { nodeId: "task-audit", label: "Audit publish hooks", status: "running", startedAt: iso(13), lastActivityAt: new Date().toISOString(), lastActivity: "grep allowlist_v2", lastCommand: "grep", toolUses: 31, tokens: 261000 },
+            { nodeId: "task-exporter", label: "Patch alembic exporter", status: "running", startedAt: iso(3), lastActivityAt: new Date().toISOString(), lastActivity: "edit exporters/alembic.py", lastCommand: "Edit", toolUses: 55, tokens: 61200 }
+          ],
+          root: { nodeId: "root", label: "agent", status: "running", startedAt: iso(14), lastActivityAt: new Date().toISOString(), lastActivity: "running exporter tests", lastCommand: "pytest", toolUses: 99, tokens: 415000 }
+        } });
+      },
+      /** Agents panel: end s-live's turn ("completed" | "failed" | "cancelled"). */
+      agentsTurnCompleted(status = "completed") {
+        push({ type: "chat.turnCompleted", sessionId: "s-live", runId: "run-x", status });
+      },
+      /** Agents panel: coarse structural invalidation (webview refetches agents.state). */
+      agentsChanged() {
+        push({ type: "agents.changed" });
+      },
+      /** Planner: bump the main doc's revision and fire the coarse changed push. */
+      plannerChanged(planId = "pl-1") {
+        const doc = (window.__harness.fixtures.planner.artifacts[planId] ?? []).find((artifact) => artifact.kind === "document");
+        if (doc) doc.revision += 1;
+        push({ type: "planner.changed", planId });
+      },
       /**
        * Subagent fan-out (V31/V32): streams a turn where the agent spawns two
        * subagents (scribe + lister), scribe nests a grandchild (counter),
@@ -808,7 +1361,13 @@
         line(2, { eventType: "agent.text", summary: "Delegating to two subagents.", final: true });
         line(3, { eventType: "agent.spawn", summary: "spawned scribe", nodeId: "t-scribe", label: "scribe", subagentType: "general-purpose", model: "gpt-5.5", nodeStatus: "running", detail: "Write a 3-line haiku about rain to haiku.txt, then spawn a counter to count its words." });
         line(4, { eventType: "agent.spawn", summary: "spawned lister", nodeId: "t-lister", label: "lister", subagentType: "general-purpose", model: "gpt-5.5", nodeStatus: "running", detail: "List the working directory and report the file count." });
-        push({ type: "session.agentActivity", sessionId, activity: { running: 2, failed: 0 } });
+        // Activity pushes mirror the real host's agentActivitySummaryOfTree:
+        // full agents rows + the root item, never bare counts (the fleet's
+        // subagent rows and pulse read them; the sidebar chip reads counts).
+        const fanRoot = (activity) => ({ nodeId: "root", label: "agent", status: "running", startedAt: at(), lastActivityAt: at(), lastActivity: activity, lastCommand: "spawn", toolUses: 2 });
+        const scribe = (status, extra) => ({ nodeId: "t-scribe", label: "scribe", status, startedAt: at(), lastActivityAt: at(), lastActivity: "writing haiku.txt", toolUses: 2, ...extra });
+        const lister = (status, extra) => ({ nodeId: "t-lister", label: "lister", status, startedAt: at(), lastActivityAt: at(), lastActivity: "ls", lastCommand: "ls", toolUses: 1, ...extra });
+        push({ type: "session.agentActivity", sessionId, activity: { running: 2, failed: 0, agents: [scribe("running"), lister("running")], root: fanRoot("delegating to two subagents") } });
         setTimeout(() => {
           line(5, { eventType: "agent.text", summary: "Writing the haiku now.", agentPath: ["t-scribe"] });
           line(6, { eventType: "agent.file_edit", summary: "add haiku.txt", filePath: "haiku.txt", fileChangeKind: "add", agentPath: ["t-scribe"] });
@@ -817,14 +1376,22 @@
         }, 300);
         setTimeout(() => {
           line(9, { eventType: "agent.spawn", summary: "spawned counter", nodeId: "t-counter", label: "counter", subagentType: "general-purpose", nodeStatus: "running", agentPath: ["t-scribe"], detail: "Count the words in haiku.txt." });
-          push({ type: "session.agentActivity", sessionId, activity: { running: 3, failed: 0 } });
+          push({ type: "session.agentActivity", sessionId, activity: { running: 3, failed: 0, agents: [
+            scribe("running"),
+            lister("running"),
+            { nodeId: "t-counter", parentNodeId: "t-scribe", label: "counter", status: "running", startedAt: at(), lastActivityAt: at(), lastActivity: "counting words", toolUses: 0 }
+          ], root: fanRoot("waiting on subagents") } });
           line(10, { eventType: "agent.text", summary: "12 words.", agentPath: ["t-scribe", "t-counter"] });
           line(11, { eventType: "agent.node_done", summary: "subagent completed: 12 words.", nodeId: "t-counter", nodeStatus: "completed", detail: "12 words.", agentPath: ["t-scribe"] });
         }, 700);
         setTimeout(() => {
           line(12, { eventType: "agent.node_done", summary: "subagent completed: haiku written", nodeId: "t-scribe", nodeStatus: "completed", detail: "haiku written", usage: { totalTokens: 28192 } });
           line(13, { eventType: "agent.node_done", summary: "subagent failed: sandbox process failed", nodeId: "t-lister", nodeStatus: "failed", detail: "lister: unable to list directory; sandbox process failed." });
-          push({ type: "session.agentActivity", sessionId, activity: { running: 0, failed: 1 } });
+          push({ type: "session.agentActivity", sessionId, activity: { running: 0, failed: 1, agents: [
+            scribe("completed", { endedAt: at(), tokens: 28192 }),
+            lister("failed", { endedAt: at() }),
+            { nodeId: "t-counter", parentNodeId: "t-scribe", label: "counter", status: "completed", startedAt: at(), endedAt: at(), lastActivity: "12 words.", toolUses: 0 }
+          ], root: fanRoot("scribe finished; lister failed") } });
           line(14, { eventType: "agent.text", summary: "Scribe finished; lister's sandbox died. DONE.", final: true });
           line(15, { eventType: "agent.done", summary: "done: completed", nodeStatus: "completed", usage: { totalTokens: 74219 } });
           push({ type: "chat.turnCompleted", sessionId, runId: "run-fan", status: "completed" });

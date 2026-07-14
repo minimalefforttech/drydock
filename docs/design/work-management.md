@@ -12,7 +12,9 @@ Product state lives in configured state stores. VS Code workspace folders are on
 - `WorkspaceSet`: a named set of projects used together for a body of work. This is product-owned and not the same thing as a VS Code `.code-workspace` file.
 - `WorkspaceProjection`: the currently active VS Code folders derived from a workspace set.
 - `Task`: work item from the internal task tracker or an external provider.
-- `MiniTask`: a scoped child work item created from review comments, repeated feedback, or a blocked verification step. Absorbed by `Subtask` (`origin: "review"`) — see `task-board-and-subtasks.md`.
+- `Subtask`: a scoped child work item. Review-origin work uses
+  `origin: "review"`; there is no separate mini-task record type. See
+  `task-board-and-subtasks.md`.
 - `TaskWorkspaceLink`: relation between a task and one or more workspace sets or projects.
 - `TaskWorkSession`: a durable record that a task was worked on in a workspace set during a time range.
 - `DayPlan`: a dated plan that schedules tasks, multi-day spans, notes, pushes, and interruptions.
@@ -132,7 +134,7 @@ Tasks are separate from workspace sets. A task can relate to one or more workspa
 
 Chats belong to tasks in the primary UI. A task can link one or more chat
 sessions, and each linked chat inherits task context such as workspace set,
-notes, changed files, questions, plan blocks, and work-session provenance.
+notes, changed files, questions, plans, and work-session provenance.
 Unlinked chats are allowed only as transitional cleanup state; they should be
 linked to a task or deleted before they become durable work records.
 
@@ -154,17 +156,18 @@ When a user works on a task:
 4. The extension applies the VS Code workspace projection.
 5. The orchestrator starts runtimes with mount policies derived from the active task, workspace set, and mode.
 6. The diff service creates or restores per-task/per-workspace baselines.
-7. Work sessions record start, stop, workspace switches, runtime generations, file changes, plan blocks, tests, notes, and last-worked timestamps.
+7. Work sessions record start, stop, workspace switches, runtime generations, file changes, plans, subtasks, tests, notes, and last-worked timestamps.
 
-Review-driven mini tasks:
+Review-driven subtasks:
 
-- Implementation note: mini tasks ship as subtasks with `origin: "review"` on
-  the task board (`task-board-and-subtasks.md`); the rules below describe the
-  review-driven creation flow, not a separate record type.
-- A mini task belongs to a parent task and links back to one or more review threads.
-- Mini tasks are used for scoped follow-up work, such as "apply this review comment across similar files" or "update docs to reflect this new expectation."
-- Mini tasks inherit the workspace set, review scope, and runtime policy of the parent work unless explicitly narrowed.
-- Resolving a mini task updates the linked review threads and parent task activity.
+- A review-origin subtask belongs to a parent task and links back to one or
+  more review threads.
+- Review-origin subtasks are used for scoped follow-up work, such as "apply
+  this review comment across similar files" or "update docs to reflect this
+  new expectation."
+- They inherit the workspace set, review scope, and runtime policy of the
+  parent work unless explicitly narrowed.
+- Resolving one updates the linked review threads and parent task activity.
 
 Task update fields:
 
@@ -191,9 +194,9 @@ interface TaskWorkSession {
   runtimeGenerationIds: RuntimeGenerationId[];
   runIds: RunId[];
   diffCheckpointIds: string[];
-  planBlockIds: PlanBlockId[];
+  planIds: PlanId[];
   reviewThreadIds: string[];
-  miniTaskIds: string[];
+  subtaskIds: SubtaskId[];
   testRunIds: string[];
   noteIds: string[];
 }
@@ -203,7 +206,8 @@ Work-session rules:
 
 - Starting, resuming, switching, pausing, or stopping task work writes a session event.
 - Agent activity updates `lastActivityAt` and the task's `lastWorkedAt`.
-- Review comments, mini-task delegation, and review-thread resolution update `lastActivityAt` and keep provenance on the work session.
+- Review comments, subtask delegation, and review-thread resolution update
+  `lastActivityAt` and keep provenance on the work session.
 - Human notes update `updatedAt`; notes attached to actual work update `lastWorkedAt` too.
 - Switching workspace sets closes or pauses the active work session and opens a new one for the same task.
 - A task can have concurrent work sessions only if each session has a distinct workspace set or clone workspace.
@@ -276,7 +280,8 @@ Stage 0 must validate:
 - Example workspace sets contain multiple projects.
 - Example tasks link to multiple workspace sets or projects.
 - Example task work sessions record `startedAt`, `lastActivityAt`, and task/workspace IDs.
-- Example task work sessions can link review thread IDs and mini-task IDs when review-driven work is represented.
+- Example task work sessions can link review thread IDs and subtask IDs when
+  review-driven work is represented.
 - Example day plans include multi-day task mapping, a pushed task, and notes for unexpected interruptions.
 - No state-store config stores raw secrets.
 - Expanded logging or metrics must be explicitly enabled and must declare retention and PII handling.

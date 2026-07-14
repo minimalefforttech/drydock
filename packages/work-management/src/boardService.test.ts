@@ -209,6 +209,12 @@ class MemoryWorkTaskStore implements WorkTaskStore {
     return Promise.resolve([...this.tasks.values()]);
   }
 
+  setClonePolicy(taskId: TaskId, policy: WorkTaskRecord["clonePolicy"]): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (task !== undefined) this.tasks.set(taskId, withClonePolicy(task, policy));
+    return Promise.resolve();
+  }
+
   deleteTask(taskId: TaskId): Promise<void> {
     this.tasks.delete(taskId);
     return Promise.resolve();
@@ -241,6 +247,11 @@ class MemoryWorkTaskStore implements WorkTaskStore {
     }
     return Promise.resolve();
   }
+}
+
+function withClonePolicy(record: WorkTaskRecord, policy: WorkTaskRecord["clonePolicy"]): WorkTaskRecord {
+  const { clonePolicy: _old, ...withoutPolicy } = record;
+  return policy === undefined ? withoutPolicy : { ...withoutPolicy, clonePolicy: policy };
 }
 
 class MemorySubtaskStore implements SubtaskStore {

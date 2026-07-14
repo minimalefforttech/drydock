@@ -9,13 +9,15 @@
  * a comment renders as a prompt line.
  */
 
-import type { ReviewCommentRecord, SessionId } from "@drydock/contracts";
+import type { ReviewCommentId, ReviewCommentRecord, SessionId } from "@drydock/contracts";
 import type { CodeReviewService } from "./codeReviewService.js";
 
 /** A composed reviewer-comment turn plus how many comments it delegated. */
 export interface ComposedCommentTurn {
   readonly prompt: string;
   readonly count: number;
+  /** Exact threads transitioned to delegated, used to roll back a refused turn safely. */
+  readonly commentIds: readonly ReviewCommentId[];
 }
 
 export interface ComposeReviewCommentTurnInput {
@@ -47,5 +49,9 @@ export async function composeReviewCommentTurn(
   for (const comment of comments) {
     await input.review.setCommentStatus(comment.commentId, "delegated");
   }
-  return { prompt, count: comments.length };
+  return {
+    prompt,
+    count: comments.length,
+    commentIds: comments.map((comment) => comment.commentId)
+  };
 }

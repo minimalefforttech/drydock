@@ -1,6 +1,6 @@
 {
   "name": "drydock-monorepo",
-  "version": "0.3.12",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Security-first VS Code extension for running coding agents in disposable isolated runtimes.",
@@ -19,6 +19,7 @@
     "prevalidate": "npm run build:prevalidate --silent && node tools/prevalidate/dist/index.js",
     "prevalidate:strict": "npm run build:prevalidate --silent && node tools/prevalidate/dist/index.js --strict",
     "package:vsix": "node tools/package-vsix.mjs",
+    "release:verify": "node tools/release-verify.mjs",
     "test": "npm run build --silent && node --test",
     "smoke": "npm run build --silent && node tools/runtime-smoke/dist/index.js"
   },

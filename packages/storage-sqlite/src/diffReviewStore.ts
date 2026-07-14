@@ -80,6 +80,15 @@ export class SqliteDiffBaselineStore implements DiffBaselineStore {
       "DELETE FROM diff_baseline_files WHERE baseline_id = ? AND path = ?"
     ).run(baselineId, path);
   }
+
+  async deleteBaseline(baselineId: BaselineId): Promise<void> {
+    this.connection.database.prepare(
+      "DELETE FROM diff_baseline_files WHERE baseline_id = ?"
+    ).run(baselineId);
+    this.connection.database.prepare(
+      "DELETE FROM diff_baselines WHERE baseline_id = ?"
+    ).run(baselineId);
+  }
 }
 
 interface BaselineRow {

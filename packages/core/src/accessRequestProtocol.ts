@@ -207,6 +207,7 @@ export function buildSessionBriefing(input: SessionBriefingInput): string {
       "Mode: CLONE. You are working on disposable git clones of the developer's repositories" +
       (repoList.length > 0 ? ` (${repoList} in your workspace)` : "") +
       " — NOT the live folders. Edit files normally; do not run git push, change git remotes, or expect network access. " +
+      "Git metadata is kept by the host, so use the product's sync controls instead of Git commands. " +
       "Your changes reach the developer only when they pull a patch from this clone, and their local edits arrive as " +
       "sync commits. If a sync leaves conflict markers (<<<<<<<) in files, resolving those markers is your job — " +
       "do it before continuing other work."

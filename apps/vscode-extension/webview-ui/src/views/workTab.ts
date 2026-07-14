@@ -247,7 +247,16 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       if (!response.ok) ctx.bridge.chat.logChat(`open task board failed: ${response.error.message}`);
     });
   });
-  tasksHeadingRow.append(tasksHeading, openBoardButton);
+  // Agents button: opens the fleet view (drydock.agents, ADR 0013) — every
+  // session across every task, for the many-tasks-in-flight moment.
+  const openAgentsButton = button("Agents", "small ghost tasks-board-button");
+  openAgentsButton.title = "Open the Agents panel (all active agents across tasks)";
+  openAgentsButton.addEventListener("click", () => {
+    void request({ type: "agents.open" }).then((response) => {
+      if (!response.ok) ctx.bridge.chat.logChat(`open agents panel failed: ${response.error.message}`);
+    });
+  });
+  tasksHeadingRow.append(tasksHeading, openBoardButton, openAgentsButton);
 
   const taskCreateForm = el("div", "task-create-form");
   const taskCreateRow = el("div", "button-row");
@@ -454,12 +463,13 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   const sessionsList = el("div", "session-cards");
   unassignedSessionsSection.body.append(sessionsList);
 
-  // --- Workspace sets (advanced) ---------------------------------------------
+  // --- AI project access ------------------------------------------------------
   // A workspace set is an editable, ordered list of registered folders, each
   // mounted read-write or read-only. The editor stages members in webview-local
   // draft state; nothing persists until Save. Editing a saved set loads it back
   // in here; saving over it calls workspace.updateSet.
-  const workspaceSets = collapsible("Workspace sets (advanced)");
+  const workspaceSets = collapsible("AI project access");
+  const securityPolicySummary = el("div", "ws-editor-hint");
 
   interface DraftMember { readonly projectId: string; readOnly: boolean; }
   let editingSetId: string | null = null;
@@ -481,25 +491,18 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   workspaceEditor.append(setNameInput, editorMembers, addRow, editorActions, editorHint);
 
   const workspaceSetSelect = select("set-select", "Workspace set mounted into new chats");
-  const modeSelect = select("mode-select", "Session mode for new chats");
-  modeSelect.append(option("plan", "plan (read-only)"), option("implementation", "implementation (read-write)"));
   const setPickRow = el("div", "button-row");
-  setPickRow.append(workspaceSetSelect, modeSelect);
+  setPickRow.append(workspaceSetSelect);
   // Explicit set rows (each a touch-history hover anchor); populated in render.
   const setsList = el("div", "sets-list");
   const projectsList = el("div", "projects-list");
-  workspaceSets.body.append(workspaceEditor, setPickRow, setsList, projectsList);
+  workspaceSets.body.append(securityPolicySummary, workspaceEditor, setPickRow, setsList, projectsList);
 
   workspaceSetSelect.addEventListener("change", () => {
     state.selectedWorkspaceSetId = workspaceSetSelect.value;
     ctx.persist();
     ctx.bridge.chat.render();
   });
-  modeSelect.addEventListener("change", () => {
-    state.selectedSessionMode = modeSelect.value;
-    ctx.persist();
-  });
-
   function projectSummaryById(projectId: string) {
     return (state.workspacePolicy?.projects ?? []).find((project) => project.projectId === projectId);
   }
@@ -1231,7 +1234,20 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     for (const setId of task.linkedWorkspaceSetIds) {
       chips.append(...workspaceSetChip(task, setId));
     }
-    if (task.linkedWorkspaceSetIds.length > 0) {
+    if (task.clonePolicy !== undefined) {
+      const clone = el("span", "task-chip task-clone-policy");
+      const body = el("span", "chip");
+      const selected = task.clonePolicy.projectIds.length;
+      const total = task.clonePolicy.workspaceSetProjectCount;
+      const scope = selected === total ? `all ${String(total)}` : `${String(selected)}/${String(total)}`;
+      body.textContent = `clone · ${scope}${task.clonePolicy.dirtyHandling === "carry" ? " · carry" : ""}`;
+      body.title = task.clonePolicy.dirtyHandling === "carry"
+        ? "Independent clones include current local tracked and untracked changes"
+        : "Independent clones use current local committed HEAD (no fetch or pull)";
+      clone.append(body);
+      chips.append(clone);
+    }
+    if (task.linkedWorkspaceSetIds.length > 0 || task.clonePolicy !== undefined) {
       c.append(chips);
     }
 
@@ -1255,6 +1271,15 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       });
       actions.append(review);
     }
+    // Plan: the task-first planning entry (plans belong to tasks). Flips the
+    // Plan tab into create mode with this task preselected.
+    const planAction = button("Plan", "small task-plan");
+    planAction.title = "Start a plan for this task in the Plan tab";
+    planAction.addEventListener("click", () => {
+      ctx.bridge.plan.startForTask(task.taskId);
+      ctx.bridge.switchTab("plan");
+    });
+    actions.append(planAction);
     const linkChat = button("Link current chat", "small");
     linkChat.disabled = state.selectedSessionId === null;
     linkChat.title = state.selectedSessionId === null
@@ -1427,7 +1452,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
    * exactly), an auto-start checkbox (commits immediately on change), a column
    * pill scoped to this subtask, and a Delete button (inline-confirm).
    */
-  function subtaskEditor(task: WorkTaskSummary, subtask: SubtaskSummary): HTMLElement {
+  function subtaskEditor(_task: WorkTaskSummary, subtask: SubtaskSummary): HTMLElement {
     const editor = el("div", "subtask-editor");
 
     const titleInput = textInput("Title");
@@ -2142,15 +2167,12 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
    */
   async function resumeSession(session: ChatSessionSummary, resumeButton: HTMLButtonElement): Promise<void> {
     resumeButton.disabled = true;
-    // Include an auto workspace only when the host has open folders (else omit so
-    // the host mounts nothing); omit model so the host defaults to the stored one.
-    const workspace = state.openFolderNames.length > 0
-      ? { auto: true as const, mode: "implementation" as const }
-      : undefined;
+    // Send no workspace override: the host restores the session's persisted
+    // roots, mode, and clone snapshot policy. Passing the current open folders
+    // could otherwise revive a clone/plan session with live implementation mounts.
     const response = await request({
       type: "chat.resumeSession",
-      sessionId: session.sessionId,
-      ...(workspace ? { workspace } : {})
+      sessionId: session.sessionId
     });
     if (!response.ok) {
       resumeButton.disabled = false;
@@ -2237,6 +2259,13 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   }
 
   function renderWorkspaceSets(): void {
+    const security = state.workspacePolicy?.security;
+    securityPolicySummary.textContent = security?.label ?? "Loading project access policy…";
+    securityPolicySummary.title = security === undefined
+      ? "Waiting for the host-enforced project access policy."
+      : security.managed
+        ? "Administrator restrictions are host-enforced and cannot be widened here."
+        : "These settings restrict what AI can access; they do not restrict your editor.";
     const previousSet = workspaceSetSelect.value || state.selectedWorkspaceSetId;
     workspaceSetSelect.replaceChildren();
     workspaceSetSelect.append(option("", "— no workspace set —"));
@@ -2247,7 +2276,6 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       workspaceSetSelect.value = previousSet;
     }
     state.selectedWorkspaceSetId = workspaceSetSelect.value;
-    modeSelect.value = state.selectedSessionMode || "implementation";
 
     // One row per set, each a touch-history hover anchor (work item 3), with
     // Edit (load into the draft editor) and a two-click Delete.

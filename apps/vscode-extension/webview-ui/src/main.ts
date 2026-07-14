@@ -23,6 +23,7 @@ import {
 import { buildTabs } from "./tabs.js";
 import type { PanelBridge, ViewContext } from "./viewContext.js";
 import { createChatTab } from "./views/chatTab.js";
+import { createPlanTab } from "./views/planTab.js";
 import { createSystemTab } from "./views/systemTab.js";
 import { createWorkTab } from "./views/workTab.js";
 
@@ -44,27 +45,32 @@ const ctx: ViewContext = { state, persist, bridge };
 startMessaging();
 
 const chatTab = createChatTab(ctx);
+const planTab = createPlanTab(ctx);
 const workTab = createWorkTab(ctx);
 const systemTab = createSystemTab(ctx);
 
 const tabs = buildTabs(state, (tab) => {
   if (tab === "work") workTab.refresh();
+  if (tab === "plan") planTab.refresh();
   if (tab === "system") systemTab.render();
 });
 
 bridge.switchTab = (tab) => tabs.select(tab);
 bridge.chat = chatTab;
+bridge.plan = planTab;
 bridge.work = workTab;
 bridge.system = systemTab;
 
 tabs.panels.chat.append(chatTab.root);
+tabs.panels.plan.append(planTab.root);
 tabs.panels.work.append(workTab.root);
 tabs.panels.system.append(systemTab.root);
 
-app.replaceChildren(tabs.bar, tabs.panels.chat, tabs.panels.work, tabs.panels.system);
+app.replaceChildren(tabs.bar, tabs.panels.work, tabs.panels.plan, tabs.panels.chat, tabs.panels.system);
 
 // Initial render from restored state, then activate the persisted tab.
 chatTab.render();
+planTab.render();
 workTab.render();
 systemTab.render();
 tabs.select(state.activeTab);
@@ -119,6 +125,8 @@ void request({ type: "workspace.state" }).then((response) => {
     state.workspacePolicy = response.payload.state;
     workTab.render();
     chatTab.render();
+    planTab.render();
+    systemTab.render();
     persist();
   }
 });
