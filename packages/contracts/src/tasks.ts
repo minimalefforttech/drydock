@@ -44,6 +44,8 @@ export interface WorkTaskRecord {
   readonly doneAt?: string;
   /** Saved clone selection reused by manual starts and dependency cascades. */
   readonly clonePolicy?: TaskClonePolicy;
+  /** ADR 0007: agent questions matching this task's FAQ auto-answer (also gated by global config). */
+  readonly autoAnswerFaq?: boolean;
 }
 
 /** A task points at the places its work happens. Exactly one target per link. */
@@ -64,7 +66,52 @@ export interface WorkTaskUpdate {
   readonly columnId?: ColumnId;
   /** null clears doneAt. */
   readonly doneAt?: string | null;
+  readonly autoAnswerFaq?: boolean;
   readonly updatedAt: string;
+}
+
+/**
+ * One task FAQ entry (ADR 0007): when the task's auto-answer toggle (and the
+ * global config) is on, an incoming agent question containing `pattern`
+ * (case-insensitive) is answered automatically with `answer` — with a
+ * transcript receipt, and never for access requests.
+ */
+export interface TaskFaqRecord {
+  readonly faqId: string;
+  readonly taskId: TaskId;
+  readonly pattern: string;
+  readonly answer: string;
+  readonly createdAt: string;
+}
+
+export interface TaskFaqStore {
+  insertFaq(record: TaskFaqRecord): Promise<void>;
+  /** Scoped by taskId so a stale webview id can never cross task boundaries. */
+  deleteFaq(taskId: TaskId, faqId: string): Promise<number>;
+  /** Insertion order. */
+  listForTask(taskId: TaskId): Promise<TaskFaqRecord[]>;
+  countByTask(): Promise<Map<string, number>>;
+}
+
+/**
+ * ADR 0015: a durable orchestrator hold. `queued` = a start waiting for a
+ * run slot; `parked` = automation gave up after two failures.
+ * One row per subtask (a park replaces a queue). Survives window reloads so
+ * intent is never silently dropped.
+ */
+export interface SubtaskHoldRecord {
+  readonly subtaskId: SubtaskId;
+  readonly kind: "queued" | "parked";
+  readonly origin: "manual" | "auto";
+  readonly force: boolean;
+  readonly heldAt: string;
+}
+
+export interface SubtaskHoldStore {
+  upsertHold(record: SubtaskHoldRecord): Promise<void>;
+  deleteHold(subtaskId: SubtaskId): Promise<number>;
+  /** Oldest hold first, so a restored queue keeps its arrival order. */
+  listHolds(): Promise<SubtaskHoldRecord[]>;
 }
 
 export const COLUMN_CATEGORIES = ["backlog", "pending", "in-progress", "done"] as const;
@@ -77,6 +124,24 @@ export interface BoardColumnRecord {
   /** Drives every behaviour rule; column names never do. */
   readonly category: ColumnCategory;
   readonly sortOrder: number;
+}
+
+/**
+ * How a dependent subtask's clone seeds at start (ADR 0014). `local` clones
+ * the developer's current local HEAD (classic behavior); `upstream`
+ * additionally applies its upstream subtasks' unlanded changesets 3-way.
+ * Unset means `local` — the user chooses, automation never invents one.
+ */
+export type SubtaskSeedMode = "local" | "upstream";
+
+/**
+ * Per-subtask model profile (ADR 0002), set by recipes at materialization.
+ * Structural twin of webviewMessages.ChatModelSelection — tasks.ts cannot
+ * import it without a cycle (webviewMessages imports tasks).
+ */
+export interface SubtaskModelSelection {
+  readonly providerId: string;
+  readonly model?: string;
 }
 
 export interface SubtaskRecord {
@@ -97,6 +162,14 @@ export interface SubtaskRecord {
   readonly doneAt?: string;
   /** 0-7 palette index overriding the parent task's stripe hue; undefined uses the task hue. */
   readonly colorOverride?: number;
+  /** Clone seeding choice (ADR 0014); unset = `local`. */
+  readonly seedMode?: SubtaskSeedMode;
+  /** Per-role model profile (ADR 0002); unset = the provider default. */
+  readonly model?: SubtaskModelSelection;
+  /** ADR 0007: human-in-the-loop verification gate. `hitl` = a person must mark it verified after Review entry. */
+  readonly verifyMode?: "hitl";
+  /** Stamped by "Mark verified"; cleared when the gate re-arms. */
+  readonly verifiedAt?: string;
 }
 
 export interface SubtaskUpdate {
@@ -112,6 +185,9 @@ export interface SubtaskUpdate {
   readonly doneAt?: string | null;
   /** null reverts to the parent task's stripe hue; a number (0-7) sets an override. */
   readonly colorOverride?: number | null;
+  readonly seedMode?: SubtaskSeedMode;
+  /** null clears the verification stamp (re-arms the gate); a string stamps it. */
+  readonly verifiedAt?: string | null;
   readonly updatedAt: string;
 }
 
@@ -176,6 +252,86 @@ export interface BoardColumnStore {
   /** Only name/category/sortOrder are mutable; columnId is the key. */
   updateColumn(columnId: ColumnId, update: { readonly name?: string; readonly category?: ColumnCategory; readonly sortOrder?: number }): Promise<void>;
   deleteColumn(columnId: ColumnId): Promise<void>;
+}
+
+/**
+ * One step of a task recipe (ADR 0007): materializes into a subtask. Keys
+ * are recipe-local names the DAG edges reference; `{title}` inside the
+ * prompt is replaced with the created task's title.
+ */
+export interface TaskRecipeSubtask {
+  readonly key: string;
+  readonly title: string;
+  readonly prompt?: string;
+  readonly autoStart: boolean;
+  readonly seedMode?: SubtaskSeedMode;
+  readonly dependsOnKeys: readonly string[];
+  readonly model?: SubtaskModelSelection;
+  /** ADR 0007: recipes can arm the human verification gate per step. */
+  readonly verify?: "hitl";
+}
+
+/**
+ * A task template (ADR 0007): one click creates the task, its subtasks,
+ * their dependency DAG, and per-role defaults — and never starts anything.
+ * `seeded` rows ship with the product; `overlay` rows merge read-only from
+ * the workspace's `.drydock/recipes.json` (the planner-aspects pattern).
+ */
+export interface TaskRecipeRecord {
+  readonly recipeId: string;
+  readonly name: string;
+  readonly description?: string;
+  readonly source: "user" | "seeded" | "overlay";
+  readonly archived: boolean;
+  readonly subtasks: readonly TaskRecipeSubtask[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface TaskRecipeStore {
+  /** Non-archived first by name; archived excluded unless includeArchived. */
+  listRecipes(includeArchived?: boolean): Promise<TaskRecipeRecord[]>;
+  getRecipe(recipeId: string): Promise<TaskRecipeRecord | null>;
+  insertRecipe(record: TaskRecipeRecord): Promise<void>;
+  setArchived(recipeId: string, archived: boolean, updatedAt: string): Promise<void>;
+}
+
+/**
+ * A durable outbound patch captured from a subtask's clone when its card
+ * enters a done-category column (Review entry, ADR 0014). One row per
+ * (subtask, repo); a fresh capture replaces the subtask's previous set.
+ * Patch bytes live in the content-addressed blob store, keyed by sha256.
+ */
+export interface TaskChangesetRecord {
+  readonly changesetId: string;
+  readonly taskId: TaskId;
+  readonly subtaskId: SubtaskId;
+  /** Session whose clone produced the patch — landing is keyed off it. */
+  readonly sessionId: SessionId;
+  /** Clone repo folder name; dependents match seeds to their clones by it. */
+  readonly repoName: string;
+  readonly patchSha256: string;
+  readonly patchBytes: number;
+  readonly fileCount: number;
+  /** Repo-relative touched paths — the landing overlap pre-check (ADR 0014). Absent on older captures. */
+  readonly paths?: readonly string[];
+  readonly capturedAt: string;
+  /** Stamped when the user pulls this session's work into the local repo. */
+  readonly landedAt?: string;
+}
+
+export interface TaskChangesetStore {
+  /** Replaces the subtask's previous capture set (latest capture wins). */
+  replaceForSubtask(subtaskId: SubtaskId, records: readonly TaskChangesetRecord[]): Promise<void>;
+  /** Every stored row for these subtasks (their latest capture sets). */
+  listForSubtasks(subtaskIds: readonly SubtaskId[]): Promise<TaskChangesetRecord[]>;
+  /** Subtask ids among the given set that hold at least one unlanded row. */
+  listUnlandedSubtaskIds(subtaskIds: readonly SubtaskId[]): Promise<SubtaskId[]>;
+  /** Every unlanded row across every subtask — the landing queue view (ADR 0014). */
+  listUnlanded(): Promise<TaskChangesetRecord[]>;
+  /** Marks rows landed for a session's pull; repoName narrows to one repo. */
+  markLandedBySession(sessionId: SessionId, landedAt: string, repoName?: string): Promise<number>;
+  deleteForSubtask(subtaskId: SubtaskId): Promise<number>;
 }
 
 export interface SubtaskStore {

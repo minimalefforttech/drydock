@@ -20,6 +20,7 @@ import {
   type DiffViewMode,
   type ProjectRecord,
   type ProjectSummary,
+  type ReviewCommentAuthor,
   type ReviewCommentRecord,
   type ReviewCommentSummary,
   type ReviewThreadStatus,
@@ -43,6 +44,7 @@ import {
 } from "@drydock/core";
 import type { ProjectCatalogService, WorkspaceSetService } from "@drydock/work-management";
 import type { ChatWorkspaceContext } from "./isolatedRunService.js";
+import type { EffectiveSecurityPolicy } from "./securityPolicy.js";
 
 export interface WorkspaceReviewAppServiceOptions {
   readonly logger: Logger;
@@ -53,6 +55,7 @@ export interface WorkspaceReviewAppServiceOptions {
   readonly review: CodeReviewService;
   readonly chatService: ChatSessionService;
   readonly bus: ProductEventBus;
+  readonly securityPolicy?: EffectiveSecurityPolicy;
 }
 
 export class WorkspaceReviewAppService {
@@ -66,18 +69,39 @@ export class WorkspaceReviewAppService {
       this.options.workspaceSets.listWorkspaceSets(),
       this.options.accessRequests.listRequests()
     ]);
-    const byId = new Map(projects.map((project) => [project.projectId, project]));
+    const visibleProjects = this.options.securityPolicy === undefined
+      ? projects
+      : projects.filter((project) => this.options.securityPolicy?.isHostPathAllowed(project.path) === true);
+    const visibleIds = new Set(visibleProjects.map((project) => project.projectId as string));
+    const visibleSets = sets.filter((set) => set.members.every((member) => visibleIds.has(member.projectId)));
+    const byId = new Map(visibleProjects.map((project) => [project.projectId, project]));
     return {
-      projects: projects.map(toProjectSummary),
-      workspaceSets: sets.map((set) => toWorkspaceSetSummary(set, byId)),
-      accessRequests: requests.map(toAccessRequestSummary)
+      projects: visibleProjects.map(toProjectSummary),
+      workspaceSets: visibleSets.map((set) => toWorkspaceSetSummary(set, byId)),
+      accessRequests: requests.map(toAccessRequestSummary),
+      ...(this.options.securityPolicy === undefined ? {} : { security: this.options.securityPolicy.summary() })
     };
   }
 
   async registerProjects(paths: readonly string[]): Promise<ProjectSummary[]> {
     const projects: ProjectSummary[] = [];
+    const blocked: string[] = [];
     for (const projectPath of paths) {
+      if (this.options.securityPolicy !== undefined) {
+        try {
+          this.options.securityPolicy.assertHostPathAllowed(projectPath);
+        } catch (error) {
+          blocked.push(error instanceof Error ? error.message : String(error));
+          continue;
+        }
+      }
       projects.push(toProjectSummary(await this.options.projectCatalog.registerProject({ path: projectPath })));
+    }
+    if (blocked.length > 0) {
+      this.options.logger.info("project registration omitted paths blocked by policy", { blocked: blocked.length });
+    }
+    if (projects.length === 0 && blocked.length > 0) {
+      throw new Error(blocked[0] ?? "No project paths were permitted by policy.");
     }
     return projects;
   }
@@ -95,14 +119,18 @@ export class WorkspaceReviewAppService {
    * revive instead of forcing the agent to re-request it every time.
    */
   async approvedAccessRoots(sessionId: string): Promise<{ readonly roots: readonly string[]; readonly readOnlyRoots: readonly string[] }> {
+    const session = await this.options.chatService.getSession(asId<"SessionId">(sessionId));
+    if (this.options.securityPolicy?.cloneOnly === true || session?.mode === "clone") {
+      return { roots: [], readOnlyRoots: [] };
+    }
     const approved = (await this.options.accessRequests.listRequests("approved"))
       .filter((request) => request.sessionId === sessionId);
     const roots: string[] = [];
     const readOnlyRoots: string[] = [];
     for (const request of approved) {
-      roots.push(request.hostPath);
+      roots.push(this.options.securityPolicy?.assertHostPathAllowed(request.hostPath) ?? request.hostPath);
       if (request.mode === "read-only") {
-        readOnlyRoots.push(request.hostPath);
+        readOnlyRoots.push(this.options.securityPolicy?.assertHostPathAllowed(request.hostPath) ?? request.hostPath);
       }
     }
     return { roots, readOnlyRoots };
@@ -116,6 +144,7 @@ export class WorkspaceReviewAppService {
 
   /** Creates a set from an explicit, ordered member list; returns fresh state. */
   async createWorkspaceSet(name: string, members: readonly WorkspaceSetMemberInput[]): Promise<WorkspacePolicyState> {
+    await this.assertWorkspaceMembersAllowed(members);
     await this.options.workspaceSets.createWorkspaceSet(name, toMembers(members));
     return this.getPolicyState();
   }
@@ -126,6 +155,7 @@ export class WorkspaceReviewAppService {
     name: string,
     members: readonly WorkspaceSetMemberInput[]
   ): Promise<WorkspacePolicyState> {
+    await this.assertWorkspaceMembersAllowed(members);
     await this.options.workspaceSets.updateWorkspaceSet(asId<"WorkspaceSetId">(workspaceSetId), name, toMembers(members));
     return this.getPolicyState();
   }
@@ -150,19 +180,23 @@ export class WorkspaceReviewAppService {
       if (openFolderRoots.length === 0) {
         throw new Error("No local folders are open in this window.");
       }
-      return { mode: selection.mode, roots: [...openFolderRoots] };
+      const roots = this.filterAutoRoots(openFolderRoots);
+      if (roots.length === 0) {
+        throw new Error("None of the open folders are permitted for AI by the effective project policy.");
+      }
+      return this.enforceWorkspace({ mode: selection.mode, roots });
     }
     const setId = asId<"WorkspaceSetId">(selection.workspaceSetId);
     const [roots, readOnlyRoots] = await Promise.all([
       this.options.workspaceSets.resolveMountRoots(setId),
       this.options.workspaceSets.resolveReadOnlyRoots(setId)
     ]);
-    return {
+    return this.enforceWorkspace({
       workspaceSetId: selection.workspaceSetId,
       mode: selection.mode,
       roots,
       ...(readOnlyRoots.length === 0 ? {} : { readOnlyRoots })
-    };
+    });
   }
 
   /** Resolve a validated task policy to only its selected project roots, in policy order. */
@@ -185,12 +219,12 @@ export class WorkspaceReviewAppService {
       }
       roots.push(project.path);
     }
-    return {
+    return this.enforceWorkspace({
       workspaceSetId: policy.workspaceSetId,
       mode: "clone",
       roots,
       dirtyHandling: policy.dirtyHandling
-    };
+    });
   }
 
   /** Ordered absolute mount roots for a workspace set (used by "open in new window"). */
@@ -204,6 +238,7 @@ export class WorkspaceReviewAppService {
     readonly mode: "read-only" | "read-write";
     readonly reason: string;
   }): Promise<AccessRequestSummary> {
+    await this.assertSessionCanWiden(input.sessionId);
     const record = await this.options.accessRequests.createRequest({
       sessionId: asId<"SessionId">(input.sessionId),
       hostPath: input.hostPath,
@@ -223,14 +258,25 @@ export class WorkspaceReviewAppService {
   async resolveAccess(accessRequestId: string, approve: boolean, editedHostPath?: string): Promise<AccessRequestSummary> {
     const id = asId<"AccessRequestId">(accessRequestId);
     if (!approve) {
-      return toAccessRequestSummary(await this.options.accessRequests.denyRequest(id, "user"));
+      const denied = await this.options.accessRequests.denyRequest(id, "user");
+      this.options.bus.publish({ kind: "access-resolved", request: denied });
+      return toAccessRequestSummary(denied);
     }
     if (editedHostPath !== undefined) {
       await this.options.accessRequests.editRequestPath(id, editedHostPath);
     }
     const { request, mount } = await this.options.accessRequests.prepareApproval(id);
+    await this.assertSessionCanWiden(request.sessionId);
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
     await this.options.chatService.expandSessionMounts(request.sessionId, [mount], "access-request-approved");
-    return toAccessRequestSummary(await this.options.accessRequests.markApproved(id, "user"));
+    const approved = await this.options.accessRequests.markApproved(id, "user");
+    this.options.bus.publish({ kind: "access-resolved", request: approved });
+    return toAccessRequestSummary(approved);
+  }
+
+  /** Pending access requests as display-safe summaries (fleet/attention hydration). */
+  async listPendingAccessRequests(): Promise<AccessRequestSummary[]> {
+    return (await this.options.accessRequests.listRequests("pending")).map(toAccessRequestSummary);
   }
 
   /**
@@ -244,6 +290,10 @@ export class WorkspaceReviewAppService {
   async detectAgentAccessRequests(sessionId: SessionId, finalText: string): Promise<AccessRequestSummary[]> {
     const parsed = extractAccessRequests(finalText);
     if (parsed.length === 0) {
+      return [];
+    }
+    if (!(await this.sessionCanWiden(sessionId))) {
+      this.options.logger.info("ignored access request from clone-only session", { sessionId });
       return [];
     }
     const pending = (await this.options.accessRequests.listRequests("pending"))
@@ -272,6 +322,61 @@ export class WorkspaceReviewAppService {
       }
     }
     return summaries;
+  }
+
+  private filterAutoRoots(openFolderRoots: readonly string[]): string[] {
+    const policy = this.options.securityPolicy;
+    if (policy === undefined) return [...openFolderRoots];
+    const allowed: string[] = [];
+    let blocked = 0;
+    for (const root of openFolderRoots) {
+      try {
+        allowed.push(policy.assertHostPathAllowed(root));
+      } catch {
+        blocked += 1;
+      }
+    }
+    if (blocked > 0) {
+      this.options.logger.info("open folders omitted by AI project policy", { blocked, allowed: allowed.length });
+    }
+    return allowed;
+  }
+
+  private enforceWorkspace(context: ChatWorkspaceContext): ChatWorkspaceContext {
+    const policy = this.options.securityPolicy;
+    if (policy === undefined) return context;
+    const roots = context.roots.map((root) => policy.assertHostPathAllowed(root));
+    const mode = policy.cloneOnly && roots.length > 0 ? "clone" : context.mode;
+    if (mode !== context.mode) {
+      this.options.logger.info("workspace mode tightened by security policy", { requested: context.mode, effective: mode });
+    }
+    return { ...context, mode, roots };
+  }
+
+  private async sessionCanWiden(sessionId: string): Promise<boolean> {
+    if (this.options.securityPolicy?.cloneOnly === true) return false;
+    const getSession = this.options.chatService.getSession;
+    if (typeof getSession !== "function") return true;
+    const session = await getSession.call(this.options.chatService, asId<"SessionId">(sessionId));
+    return session?.mode !== "clone";
+  }
+
+  private async assertSessionCanWiden(sessionId: string): Promise<void> {
+    if (!(await this.sessionCanWiden(sessionId))) {
+      throw new Error("Clone sessions cannot add live host mounts. Add the project to the approved AI project set and start a new clone session.");
+    }
+  }
+
+  private async assertWorkspaceMembersAllowed(members: readonly WorkspaceSetMemberInput[]): Promise<void> {
+    const policy = this.options.securityPolicy;
+    if (policy === undefined) return;
+    const projects = await this.options.projectCatalog.listProjects();
+    const byId = new Map(projects.map((project) => [project.projectId as string, project]));
+    for (const member of members) {
+      const project = byId.get(member.projectId);
+      if (project === undefined) throw new Error(`Project ${member.projectId} is not registered.`);
+      policy.assertHostPathAllowed(project.path);
+    }
   }
 
   // MARK: Diff baselines
@@ -474,6 +579,12 @@ export class WorkspaceReviewAppService {
     readonly startLine: number;
     readonly endLine: number;
     readonly body: string;
+    /**
+     * ADR 0004: host-side agent flows (reviewer roles) may author comments;
+     * every webview/user path omits this and stays "user". The webview never
+     * chooses authorship — it is not part of the panel contract.
+     */
+    readonly author?: ReviewCommentAuthor;
   }): Promise<ReviewCommentSummary> {
     const review = await this.ensureReview(input.sessionId);
     const comment = await this.options.review.addComment({
@@ -482,7 +593,7 @@ export class WorkspaceReviewAppService {
       startLine: input.startLine,
       endLine: input.endLine,
       body: input.body,
-      author: "user"
+      author: input.author ?? "user"
     });
     return toReviewCommentSummary(comment);
   }

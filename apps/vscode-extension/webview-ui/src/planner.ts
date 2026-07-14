@@ -20,7 +20,6 @@ import {
   type PanelPushPayload,
   type PanelRequestPayload,
   type PanelResponse,
-  type PlanAnnotationSummary,
   type PlanArtifactDetail,
   type PlanAspectSummary,
   type PlannerStateDetail,
@@ -39,6 +38,12 @@ import {
   type AgentGroup,
   type ChatMessage as RailMessage
 } from "./chat/transcriptModel.js";
+import {
+  captureModalFocus,
+  prepareModalFocus,
+  queueModalFocus,
+  type ModalFocusSnapshot
+} from "./modalFocus.js";
 import {
   DiagramProvider,
   DocumentProvider,
@@ -528,13 +533,171 @@ let activeProvider: ArtifactProvider | null = null;
 // ---------------------------------------------------------------------------
 
 function render(): void {
+  const focusSnapshot = captureMaterializeFocus();
   root.replaceChildren();
   root.append(renderNotice());
   if (currentPlanId === null || currentState === null) {
     root.append(renderLanding());
+  } else {
+    root.append(renderPlanView(currentState));
+    if (materializeDraft !== null) {
+      root.append(renderMaterializeOverlay(materializeDraft));
+    }
+  }
+  finishMaterializeRender(materializeDraft !== null && currentPlanId !== null && currentState !== null, focusSnapshot);
+}
+
+// --- Plan → board (ADR 0012) -------------------------------------------------
+
+interface MaterializeDraft {
+  readonly planId: string;
+  /** null while planner.subtaskCandidates is in flight. */
+  candidates: string[] | null;
+  selected: Set<number>;
+  taskId?: string;
+  taskTitle?: string;
+  submitting: boolean;
+  error: string | null;
+}
+
+let materializeDraft: MaterializeDraft | null = null;
+
+let materializeRenderedOpen = false;
+let materializeReturnFocus: (() => HTMLElement | null) | null = null;
+
+function captureMaterializeFocus(): ModalFocusSnapshot | null {
+  return captureModalFocus(root.querySelector<HTMLElement>(".pl-mat-modal"));
+}
+
+function finishMaterializeRender(open: boolean, snapshot: ModalFocusSnapshot | null): void {
+  const overlay = root.querySelector<HTMLElement>(".pl-mat-overlay");
+  for (const child of [...root.children]) {
+    if (child !== overlay) child.toggleAttribute("inert", open);
+  }
+
+  if (!open) {
+    const shouldRestore = materializeRenderedOpen;
+    const returnFocus = materializeReturnFocus;
+    materializeRenderedOpen = false;
+    materializeReturnFocus = null;
+    if (shouldRestore && returnFocus !== null) {
+      queueMicrotask(() => returnFocus()?.focus());
+    }
     return;
   }
-  root.append(renderPlanView(currentState));
+
+  materializeRenderedOpen = true;
+  const modal = overlay?.querySelector<HTMLElement>(".pl-mat-modal") ?? null;
+  if (modal === null) return;
+  queueModalFocus(modal, snapshot);
+}
+
+function closeMaterialize(): void {
+  if (materializeDraft?.submitting === true) return;
+  materializeDraft = null;
+  render();
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || materializeDraft === null) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeMaterialize();
+});
+
+/**
+ * The materialization dialog: the plan's checkbox items, each toggleable,
+ * created as subtasks on the owning task. Creates, NEVER starts — starting
+ * stays a board/human act (0007 discipline).
+ */
+function renderMaterializeOverlay(draft: MaterializeDraft): HTMLElement {
+  const overlay = el("div", "pl-mat-overlay");
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay && !draft.submitting) {
+      closeMaterialize();
+    }
+  });
+  const modal = el("div", "pl-mat-modal");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-labelledby", "pl-mat-title");
+  modal.setAttribute("aria-describedby", "pl-mat-hint");
+  prepareModalFocus(modal);
+
+  const title = el("h2", "pl-mat-title");
+  title.id = "pl-mat-title";
+  title.textContent = "Materialize subtasks";
+  modal.append(title);
+  const hint = el("div", "pl-mat-hint");
+  hint.id = "pl-mat-hint";
+  hint.textContent = draft.taskTitle !== undefined
+    ? `Creates the checked items as subtasks on "${draft.taskTitle}" — nothing starts until you say so.`
+    : "This plan has no owning task — pick one in the plan intake first.";
+  modal.append(hint);
+
+  if (draft.candidates === null) {
+    const scanning = el("div", "pl-mat-empty");
+    scanning.textContent = "Scanning the plan's documents…";
+    modal.append(scanning);
+  } else if (draft.candidates.length === 0) {
+    const none = el("div", "pl-mat-empty");
+    none.textContent = "No checkbox items ( - [ ] … ) found in the plan's documents.";
+    modal.append(none);
+  } else {
+    const list = el("div", "pl-mat-list");
+    draft.candidates.forEach((candidate, index) => {
+      const row = el("label", "pl-mat-row");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.dataset["modalFocus"] = `candidate:${String(index)}`;
+      box.checked = draft.selected.has(index);
+      box.addEventListener("change", () => {
+        if (box.checked) draft.selected.add(index);
+        else draft.selected.delete(index);
+        const create = modal.querySelector<HTMLButtonElement>(".pl-mat-create");
+        if (create) create.disabled = draft.submitting || draft.selected.size === 0 || draft.taskId === undefined;
+      });
+      const text = el("span", "pl-mat-row-title");
+      text.textContent = candidate;
+      row.append(box, text);
+      list.append(row);
+    });
+    modal.append(list);
+  }
+
+  const foot = el("div", "pl-mat-foot");
+  const error = el("span", "pl-mat-error");
+  if (draft.error !== null) error.textContent = draft.error;
+  const cancel = button("Cancel", "ghost small");
+  cancel.dataset["modalFocus"] = "cancel";
+  cancel.disabled = draft.submitting;
+  cancel.addEventListener("click", closeMaterialize);
+  const create = button(draft.submitting ? "Creating…" : `Create ${String(draft.selected.size)} subtask${draft.selected.size === 1 ? "" : "s"}`, "primary small pl-mat-create");
+  create.dataset["modalFocus"] = "create";
+  create.disabled = draft.submitting || draft.selected.size === 0 || draft.taskId === undefined;
+  create.addEventListener("click", () => {
+    const titles = (draft.candidates ?? []).filter((_, index) => draft.selected.has(index));
+    if (titles.length === 0) return;
+    draft.submitting = true;
+    draft.error = null;
+    render();
+    void request({ type: "planner.materializeSubtasks", planId: draft.planId, titles }).then((response) => {
+      if (response.ok && response.payload.type === "planner.materializeSubtasks") {
+        const count = response.payload.createdCount;
+        materializeDraft = null;
+        notice = { text: `Created ${String(count)} subtask${count === 1 ? "" : "s"} on the board (nothing started).`, tone: "info" };
+        render();
+        return;
+      }
+      draft.submitting = false;
+      draft.error = response.ok ? "Unexpected response." : response.error.message;
+      render();
+    });
+  });
+  foot.append(error, cancel, create);
+  modal.append(foot);
+
+  overlay.append(modal);
+  return overlay;
 }
 
 function renderNotice(): HTMLElement {
@@ -950,7 +1113,29 @@ function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
     persist();
     render();
   });
-  header.append(send, regenerate, swap);
+  // Plan → board (ADR 0012): propose the plan's checkbox items as subtasks.
+  const toBoard = button("⇪ To board…", "ghost small pl-to-board");
+  toBoard.title = "Materialize this plan's checkbox items as subtasks on its task (creates, never starts)";
+  toBoard.addEventListener("click", () => {
+    materializeReturnFocus = () => root.querySelector<HTMLElement>(".pl-to-board");
+    materializeDraft = { planId: state.plan.planId, candidates: null, selected: new Set(), submitting: false, error: null };
+    render();
+    void request({ type: "planner.subtaskCandidates", planId: state.plan.planId }).then((response) => {
+      const draft = materializeDraft;
+      if (draft === null || draft.planId !== state.plan.planId) return; // closed meanwhile
+      if (response.ok && response.payload.type === "planner.subtaskCandidates") {
+        draft.candidates = [...response.payload.candidates];
+        draft.selected = new Set(draft.candidates.map((_, index) => index));
+        if (response.payload.taskId !== undefined) draft.taskId = response.payload.taskId;
+        if (response.payload.taskTitle !== undefined) draft.taskTitle = response.payload.taskTitle;
+      } else {
+        draft.candidates = [];
+        draft.error = response.ok ? "Unexpected response." : response.error.message;
+      }
+      render();
+    });
+  });
+  header.append(send, regenerate, toBoard, swap);
   return header;
 }
 

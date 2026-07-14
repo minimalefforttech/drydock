@@ -15,9 +15,10 @@ import type {
   ColumnId,
   SubtaskDependencyRecord,
   SubtaskId,
+  SubtaskModelSelection,
   SubtaskRecord,
+  SubtaskSeedMode,
   SubtaskStore,
-  TaskId,
   WorkTaskRecord,
   WorkTaskStore
 } from "@drydock/contracts";
@@ -54,6 +55,12 @@ export interface SubtaskCreateInput {
   readonly autoStart?: boolean;
   /** Defaults to the first backlog-category column when omitted. */
   readonly columnId?: string;
+  /** Clone seeding choice (ADR 0014); recipes set it at materialization. */
+  readonly seedMode?: SubtaskSeedMode;
+  /** Per-role model profile (ADR 0002); recipes set it at materialization. */
+  readonly model?: SubtaskModelSelection;
+  /** ADR 0007: arms the human verification gate. */
+  readonly verifyMode?: "hitl";
 }
 
 export interface SubtaskUpdateInput {
@@ -65,6 +72,10 @@ export interface SubtaskUpdateInput {
   readonly autoStart?: boolean;
   /** A 0-7 palette index sets an override; null reverts to the parent task's stripe hue. */
   readonly colorOverride?: number | null;
+  /** Clone seeding choice (ADR 0014): "local" | "upstream". */
+  readonly seedMode?: SubtaskSeedMode;
+  /** ADR 0007: true stamps verifiedAt (the human's "Mark verified"); false re-arms the gate. */
+  readonly verified?: boolean;
 }
 
 /** One card reference: exactly one of taskId/subtaskId is set. */
@@ -97,7 +108,10 @@ export class SubtaskService {
       columnId,
       sortOrder: siblingCount,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      ...(input.seedMode === undefined ? {} : { seedMode: input.seedMode }),
+      ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.verifyMode === undefined ? {} : { verifyMode: input.verifyMode })
     };
     await this.options.store.insertSubtask(record);
     this.options.bus?.publish({ kind: "board-changed" });
@@ -107,7 +121,8 @@ export class SubtaskService {
   async updateSubtask(subtaskId: string, input: SubtaskUpdateInput): Promise<SubtaskRecord> {
     if (
       input.title === undefined && input.description === undefined && input.prompt === undefined
-      && input.autoStart === undefined && input.colorOverride === undefined
+      && input.autoStart === undefined && input.colorOverride === undefined && input.seedMode === undefined
+      && input.verified === undefined
     ) {
       throw new Error("Subtask update must change at least one field.");
     }
@@ -117,10 +132,24 @@ export class SubtaskService {
     if (input.colorOverride !== undefined && input.colorOverride !== null && (!Number.isInteger(input.colorOverride) || input.colorOverride < 0 || input.colorOverride > 7)) {
       throw new Error("Subtask colorOverride must be an integer between 0 and 7, or null.");
     }
+    if (input.seedMode !== undefined && input.seedMode !== "local" && input.seedMode !== "upstream") {
+      throw new Error('Subtask seedMode must be "local" or "upstream".');
+    }
     const id = asId<"SubtaskId">(subtaskId);
     const existing = await this.options.store.getSubtask(id);
     if (existing === null) {
       throw new Error(`Subtask ${subtaskId} was not found.`);
+    }
+    if (input.verified !== undefined) {
+      if (existing.verifyMode !== "hitl") {
+        throw new Error("SUBTASK_VERIFICATION_NOT_ARMED: only a HITL-gated subtask can be verified or re-armed.");
+      }
+      if (input.verified) {
+        const column = await this.options.columns.getColumn(existing.columnId);
+        if (column?.category !== "done") {
+          throw new Error("SUBTASK_VERIFICATION_NOT_READY: a HITL-gated subtask can only be verified in a done-category column.");
+        }
+      }
     }
     await this.options.store.updateSubtask(id, {
       updatedAt: this.options.clock.isoNow(),
@@ -129,7 +158,9 @@ export class SubtaskService {
       ...(input.description === undefined ? {} : { description: input.description === "" ? null : input.description }),
       ...(input.prompt === undefined ? {} : { prompt: input.prompt === "" ? null : input.prompt }),
       ...(input.autoStart === undefined ? {} : { autoStart: input.autoStart }),
-      ...(input.colorOverride === undefined ? {} : { colorOverride: input.colorOverride })
+      ...(input.colorOverride === undefined ? {} : { colorOverride: input.colorOverride }),
+      ...(input.seedMode === undefined ? {} : { seedMode: input.seedMode }),
+      ...(input.verified === undefined ? {} : { verifiedAt: input.verified ? this.options.clock.isoNow() : null })
     });
     const updated = await this.options.store.getSubtask(id);
     if (updated === null) {
@@ -242,7 +273,10 @@ export class SubtaskService {
     await this.options.store.updateSubtask(id, {
       updatedAt: this.options.clock.isoNow(),
       columnId: destination.columnId,
-      doneAt
+      doneAt,
+      // A stamp attests only to the completed result. Leaving the done
+      // category (including a move back for rework) always re-arms the gate.
+      ...(destination.category === "done" ? {} : { verifiedAt: null })
     });
     const updated = await this.options.store.getSubtask(id);
     if (updated === null) {

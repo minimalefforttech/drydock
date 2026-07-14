@@ -24,7 +24,7 @@ import type {
   WorkTaskSummary
 } from "@drydock/contracts";
 import type { Logger } from "@drydock/core";
-import type { BoardService, SubtaskService, TaskService } from "@drydock/work-management";
+import type { BoardService, SubtaskService } from "@drydock/work-management";
 import type { BackendReady } from "../compositionRoot.js";
 
 /** Display-safe projection of a board column. */
@@ -50,7 +50,8 @@ export function toSubtaskSummary(
   subtasksById: ReadonlyMap<SubtaskId, SubtaskRecord>,
   columnsById: ReadonlyMap<ColumnId, BoardColumnRecord>,
   linkedSessionIds: readonly string[],
-  runtime: { readonly isRunning: boolean; readonly lastFailureAt?: string }
+  runtime: { readonly isRunning: boolean; readonly lastFailureAt?: string; readonly isQueued?: boolean; readonly isParked?: boolean },
+  hasUnlandedChangeset = false
 ): SubtaskSummary {
   return {
     subtaskId: record.subtaskId,
@@ -71,8 +72,20 @@ export function toSubtaskSummary(
       .map((edge) => edge.fromSubtaskId as string),
     isRunning: runtime.isRunning,
     ...(runtime.lastFailureAt === undefined ? {} : { lastFailureAt: runtime.lastFailureAt }),
+    ...(runtime.isQueued === true ? { isQueued: true } : {}),
+    ...(runtime.isParked === true ? { isParked: true } : {}),
     linkedSessionIds,
-    ...(record.colorOverride === undefined ? {} : { colorOverride: record.colorOverride })
+    ...(record.colorOverride === undefined ? {} : { colorOverride: record.colorOverride }),
+    ...(record.seedMode === undefined ? {} : { seedMode: record.seedMode }),
+    ...(hasUnlandedChangeset ? { hasUnlandedChangeset: true } : {}),
+    ...(record.model === undefined ? {} : { model: record.model }),
+    // ADR 0007: an armed HITL gate is unmet once the card sits in Review
+    // (done category) without a verified stamp — waiting-on-you.
+    ...(record.verifyMode === "hitl"
+      && columnsById.get(record.columnId)?.category === "done"
+      && record.verifiedAt === undefined
+      ? { verifyUnmet: true }
+      : {})
   };
 }
 
@@ -132,6 +145,9 @@ export async function decorateTaskSummary(
     subtaskRecords.map((subtask) => backend.tasks.listSessionIdsBySubtask(subtask.subtaskId))
   );
   const linkedSessionIdsById = new Map(subtaskRecords.map((subtask, index) => [subtask.subtaskId, linkedSessionIdsBySubtask[index] ?? []]));
+  // ⎘ chip data (ADR 0014): which of this task's subtasks hold a captured
+  // changeset not yet pulled into the local repo. One batched query per task.
+  const unlandedIds = await backend.changesets.unlandedSubtaskIds(subtaskRecords.map((subtask) => subtask.subtaskId as string));
   const subtasks = subtaskRecords
     .slice()
     .sort((a, b) => a.sortOrder - b.sortOrder)
@@ -146,8 +162,11 @@ export async function decorateTaskSummary(
         linkedSessionIdsById.get(subtask.subtaskId) ?? [],
         {
           isRunning: backend.orchestrator.isRunning(subtask.subtaskId),
-          ...(failure === undefined ? {} : { lastFailureAt: failure.at })
-        }
+          ...(failure === undefined ? {} : { lastFailureAt: failure.at }),
+          ...(backend.orchestrator.isQueued(subtask.subtaskId) ? { isQueued: true } : {}),
+          ...(backend.orchestrator.isParked(subtask.subtaskId) ? { isParked: true } : {})
+        },
+        unlandedIds.has(subtask.subtaskId as string)
       );
     });
   return {

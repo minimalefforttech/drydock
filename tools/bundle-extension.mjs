@@ -93,6 +93,22 @@ await esbuild([
   `--outfile=${path.join(distRoot, "webview", "planner.css")}`
 ]);
 
+// Agents panel (ADR 0013): browser IIFE + styles. Same shape as the other
+// standalone editor-panel entries, contracts bundled in.
+await esbuild([
+  path.join(extensionRoot, "webview-ui", "src", "agents.ts"),
+  "--bundle",
+  "--platform=browser",
+  "--format=iife",
+  "--target=es2022",
+  `--outfile=${path.join(distRoot, "webview", "agents.js")}`
+]);
+await esbuild([
+  path.join(extensionRoot, "webview-ui", "src", "agents.css"),
+  "--bundle",
+  `--outfile=${path.join(distRoot, "webview", "agents.css")}`
+]);
+
 // Mermaid renderer: a separate, minified bundle the plan-docs webview injects
 // lazily (nonce via data attribute) only when a document contains a diagram —
 // keeping the ~MB parse cost out of every panel open.

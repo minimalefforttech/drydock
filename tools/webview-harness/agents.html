@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Webview harness — Agents panel</title>
+  <style>
+    /* Dark-theme values for the --vscode-* variables the real panel CSS uses.
+       A missing variable degrades to the fallback in var(), so this subset only
+       needs the load-bearing ones. */
+    :root {
+      --vscode-font-family: "Segoe UI", system-ui, sans-serif;
+      --vscode-font-size: 13px;
+      --vscode-foreground: #cccccc;
+      --vscode-descriptionForeground: #9d9d9d;
+      --vscode-errorForeground: #f48771;
+      --vscode-focusBorder: #007fd4;
+      --vscode-sideBar-background: #252526;
+      --vscode-sideBarSectionHeader-background: #2a2d2e;
+      --vscode-editor-background: #1e1e1e;
+      --vscode-editor-foreground: #d4d4d4;
+      --vscode-editor-font-family: Consolas, "Courier New", monospace;
+      --vscode-input-background: #3c3c3c;
+      --vscode-input-foreground: #cccccc;
+      --vscode-input-border: #3c3c3c;
+      --vscode-button-secondaryBackground: #3a3d41;
+      --vscode-badge-background: #4d4d4d;
+      --vscode-badge-foreground: #ffffff;
+      --vscode-list-hoverBackground: #2a2d2e;
+      --vscode-panel-border: #3c3c3c;
+      --vscode-textLink-foreground: #3794ff;
+      --vscode-charts-blue: #4a90d9;
+      --vscode-charts-yellow: #cca700;
+      --vscode-charts-green: #89d185;
+      --vscode-charts-purple: #b180d7;
+    }
+    html, body { margin: 0; height: 100%; background: #1b1b1b; }
+    body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
+    /* Editor-panel-shaped stage: the fleet is a vertical scan list, so the
+       stage is wide but scrolls vertically only. */
+    #stage {
+      width: 1240px; height: calc(100vh - 32px); background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border); overflow: auto; box-sizing: border-box;
+    }
+    #stage-note { color: #7f7f7f; font-size: 12px; max-width: 260px; }
+    #stage-note code { color: #d7ba7d; }
+  </style>
+  <link rel="stylesheet" href="/assets/agents.css" />
+</head>
+<body class="vscode-dark" data-card-detail="minimal">
+  <div id="stage">
+    <div id="app"></div>
+  </div>
+  <div id="stage-note">
+    <p><strong>Agents harness (ADR 0013).</strong> Real bundled fleet panel, mock host. Cast: <code>t-1</code> group (s-live running with 2 subagents + a grafted role child, s-clone live-idle), the orphan drawer (s-waiting idle, s-ended, s-failed, s-elsewhere view-only), 2 pending questions + 2 pending access requests on <code>s-live</code>.</p>
+    <p>Density (ADR 0013): <code>data-card-detail</code> on <code>&lt;body&gt;</code> plays the config default (minimal); the toolbar Min/Std/Full seg overrides per panel. Hover a session row for its hover card.</p>
+    <p>Drive scenarios from the console: <code>__harness.scenario.agentsTick()</code> (activity fold), <code>__harness.scenario.agentsTurnCompleted("failed")</code> (turn end → ✗), <code>__harness.scenario.agentsChanged()</code> (coarse refetch), <code>__harness.scenario.fanOut("s-live")</code> then watch the ⑂ rows.</p>
+    <p>Inspect sends: <code>__harness.log</code> (agents.openSession / chat.cancelTurn / taskBoard.open / taskReview.open lines).</p>
+  </div>
+  <script src="/harness.js"></script>
+  <script src="/assets/agents.js"></script>
+</body>
+</html>

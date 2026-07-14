@@ -62,6 +62,19 @@ test("workspace and policy payloads validate their fields", () => {
   })), null);
 });
 
+test("agents panel payloads validate their fields (ADR 0013)", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "agents.open" })));
+  assert.ok(parsePanelRequest(wrap({ type: "agents.state" })));
+  assert.ok(parsePanelRequest(wrap({ type: "agents.openSession", sessionId: "session-1" })));
+  const withNode = parsePanelRequest(wrap({ type: "agents.openSession", sessionId: "session-1", nodeId: "node-9" }));
+  assert.ok(withNode);
+  assert.equal(withNode.payload.type === "agents.openSession" ? withNode.payload.nodeId : undefined, "node-9");
+  // sessionId is required and bounded; nodeId when present must be a bounded string.
+  assert.equal(parsePanelRequest(wrap({ type: "agents.openSession" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "agents.openSession", sessionId: 5 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "agents.openSession", sessionId: "session-1", nodeId: 7 })), null);
+});
+
 test("retired planDocs payloads are rejected at the boundary (ADR 0012)", () => {
   for (const type of ["planDocs.state", "planDocs.open", "planDocs.sendComments"]) {
     assert.equal(parsePanelRequest(wrap({ type, sessionId: "session-1" })), null);
@@ -682,6 +695,38 @@ test("subtask.update requires at least one field and clears description/prompt w
   assert.ok(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", columnId: "col-todo" })));
   assert.equal(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", autoStart: "true" })), null);
   assert.equal(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "" , title: "Renamed" })), null);
+  // seedMode (ADR 0014): a closed two-value enum, valid alone as the one field.
+  const seeded = parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", seedMode: "upstream" }));
+  assert.ok(seeded);
+  assert.equal(seeded.payload.type === "subtask.update" ? seeded.payload.seedMode : undefined, "upstream");
+  assert.ok(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", seedMode: "local" })));
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", seedMode: "remote" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", seedMode: 1 })), null);
+  // verified (ADR 0007): a boolean, valid alone as the one field.
+  assert.ok(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", verified: true })));
+  assert.equal(parsePanelRequest(wrap({ type: "subtask.update", subtaskId: "subtask-1", verified: "yes" })), null);
+});
+
+test("agents.landSession and task.faq.* validate bounded ids (ADRs 0014/0007)", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "agents.landSession", sessionId: "session-1" })));
+  assert.equal(parsePanelRequest(wrap({ type: "agents.landSession" })), null);
+  assert.ok(parsePanelRequest(wrap({ type: "task.faq.list", taskId: "task-1" })));
+  assert.ok(parsePanelRequest(wrap({ type: "task.faq.add", taskId: "task-1", pattern: "branch", answer: "Use feature/x." })));
+  assert.equal(parsePanelRequest(wrap({ type: "task.faq.add", taskId: "task-1", pattern: "" , answer: "x" })), null);
+  assert.ok(parsePanelRequest(wrap({ type: "task.faq.remove", taskId: "task-1", faqId: "faq-1" })));
+  assert.equal(parsePanelRequest(wrap({ type: "task.faq.remove", taskId: "task-1" })), null);
+  // task.update accepts the auto-answer toggle alone.
+  assert.ok(parsePanelRequest(wrap({ type: "task.update", taskId: "task-1", autoAnswerFaq: true })));
+  assert.equal(parsePanelRequest(wrap({ type: "task.update", taskId: "task-1", autoAnswerFaq: "on" })), null);
+});
+
+test("recipes.list and task.createFromRecipe validate their payloads (ADR 0007)", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "recipes.list" })));
+  const created = parsePanelRequest(wrap({ type: "task.createFromRecipe", recipeId: "recipe-1", title: "Shot 042" }));
+  assert.ok(created);
+  assert.equal(created.payload.type === "task.createFromRecipe" ? created.payload.recipeId : undefined, "recipe-1");
+  assert.equal(parsePanelRequest(wrap({ type: "task.createFromRecipe", recipeId: "recipe-1" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "task.createFromRecipe", recipeId: "", title: "x" })), null);
 });
 
 test("subtask.delete validates a bounded subtaskId", () => {

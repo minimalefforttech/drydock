@@ -59,7 +59,7 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
     // Only the provided fields are written so partial updates never clobber a
     // column set by another code path.
     const assignments: string[] = ["updated_at = ?"];
-    const values: (string | null)[] = [update.updatedAt];
+    const values: (string | number | null)[] = [update.updatedAt];
     if (update.title !== undefined) {
       assignments.push("title = ?");
       values.push(update.title);
@@ -81,6 +81,10 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
       // null clears doneAt; a string stamps it.
       assignments.push("done_at = ?");
       values.push(update.doneAt);
+    }
+    if (update.autoAnswerFaq !== undefined) {
+      assignments.push("auto_answer_faq = ?");
+      values.push(update.autoAnswerFaq ? 1 : 0);
     }
     this.connection.database.prepare(`
       UPDATE work_tasks
@@ -123,15 +127,21 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
   }
 
   async deleteTask(taskId: TaskId): Promise<void> {
-    // Links first, then the task row, so no orphaned links survive.
-    this.connection.database.prepare(`
-      DELETE FROM work_task_links
-      WHERE task_id = ?
-    `).run(taskId);
-    this.connection.database.prepare(`
-      DELETE FROM work_tasks
-      WHERE task_id = ?
-    `).run(taskId);
+    const db = this.connection.database;
+    db.exec("BEGIN");
+    try {
+      // TaskService normally removes subtasks first. These task-keyed deletes
+      // are also kept here so direct store use cannot leave FAQ or Landing
+      // projections detached from their owner.
+      db.prepare("DELETE FROM task_changesets WHERE task_id = ?").run(taskId);
+      db.prepare("DELETE FROM task_faqs WHERE task_id = ?").run(taskId);
+      db.prepare("DELETE FROM work_task_links WHERE task_id = ?").run(taskId);
+      db.prepare("DELETE FROM work_tasks WHERE task_id = ?").run(taskId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   async insertLink(record: WorkTaskLinkRecord): Promise<void> {
@@ -220,6 +230,7 @@ interface WorkTaskRow {
   readonly clone_workspace_set_id: string | null;
   readonly clone_project_ids_json: string | null;
   readonly clone_dirty_handling: string | null;
+  readonly auto_answer_faq: number;
 }
 
 interface WorkTaskLinkRow {
@@ -241,7 +252,8 @@ function mapTask(row: WorkTaskRow): WorkTaskRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.done_at === null ? {} : { doneAt: row.done_at }),
-    ...(clonePolicy === undefined ? {} : { clonePolicy })
+    ...(clonePolicy === undefined ? {} : { clonePolicy }),
+    ...(row.auto_answer_faq ? { autoAnswerFaq: true } : {})
   };
 }
 

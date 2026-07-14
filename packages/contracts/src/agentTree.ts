@@ -319,6 +319,23 @@ export function reduceAgentTree(sources: Iterable<AgentTreeSource>): SessionAgen
   };
 }
 
+/**
+ * Total token count from a provider-reported usage object, or null when the
+ * shape is unrecognized. Providers report either `{totalTokens}` (codex
+ * per-thread totals) or `{total: {totalTokens}}` (turn-final usage) — ONE
+ * reader here so every surface prices a node identically.
+ */
+export function usageTokens(usage: unknown): number | null {
+  if (typeof usage !== "object" || usage === null) return null;
+  const record = usage as Record<string, unknown>;
+  if (typeof record["totalTokens"] === "number") return record["totalTokens"];
+  const total = record["total"];
+  if (typeof total === "object" && total !== null && typeof (total as Record<string, unknown>)["totalTokens"] === "number") {
+    return (total as Record<string, unknown>)["totalTokens"] as number;
+  }
+  return null;
+}
+
 function commandNameFromArgv(command: readonly string[]): string | undefined {
   const raw = commandFromShell(command) ?? command[0];
   const trimmed = raw?.trim();

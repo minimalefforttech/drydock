@@ -5,6 +5,7 @@
 export * from "./agent.js";
 export * from "./agentTree.js";
 export * from "./command.js";
+export * from "./density.js";
 export * from "./diffs.js";
 export * from "./errors.js";
 export * from "./events.js";

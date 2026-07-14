@@ -8,6 +8,7 @@
  * it is still accepted/derived for the webview until the board UI lands.
  */
 
+import { randomUUID } from "node:crypto";
 import {
   WORK_TASK_STATES,
   asId
@@ -20,6 +21,8 @@ import type {
   SubtaskId,
   SubtaskStore,
   TaskClonePolicy,
+  TaskFaqRecord,
+  TaskFaqStore,
   TaskId,
   WorkSessionRecord,
   WorkSessionStore,
@@ -32,7 +35,7 @@ import type {
   WorkspaceSetStore,
   WorkspaceSetId
 } from "@drydock/contracts";
-import type { Clock, IdGenerator } from "@drydock/core";
+import type { Clock, IdGenerator, ProductEventBus } from "@drydock/core";
 
 export interface TaskServiceOptions {
   readonly ids: IdGenerator;
@@ -45,6 +48,14 @@ export interface TaskServiceOptions {
   readonly subtasks?: SubtaskStore;
   /** Presence enables validation and display of durable clone policies. */
   readonly workspaceSets?: WorkspaceSetStore;
+  /**
+   * Optional, mirroring SubtaskService: task mutations (create/update/delete/
+   * link/unlink) announce `board-changed` so board-shaped surfaces refetch;
+   * the service works identically without a bus.
+   */
+  readonly bus?: ProductEventBus;
+  /** Presence enables the task FAQ (ADR 0007): entries + summary counts. */
+  readonly faqs?: TaskFaqStore;
 }
 
 /** One link target; exactly one field is set per call. subtaskId only applies alongside sessionId. */
@@ -63,6 +74,8 @@ export interface TaskUpdateInput {
    */
   readonly state?: WorkTaskState;
   readonly columnId?: string;
+  /** ADR 0007: the per-task FAQ auto-answer toggle. */
+  readonly autoAnswerFaq?: boolean;
 }
 
 export interface TaskClonePolicyInput {
@@ -106,11 +119,15 @@ export class TaskService {
       updatedAt: now
     };
     await this.options.store.insertTask(record);
+    this.options.bus?.publish({ kind: "board-changed" });
     return record;
   }
 
   async updateTask(taskId: string, input: TaskUpdateInput): Promise<WorkTaskRecord> {
-    if (input.title === undefined && input.description === undefined && input.state === undefined && input.columnId === undefined) {
+    if (
+      input.title === undefined && input.description === undefined && input.state === undefined
+      && input.columnId === undefined && input.autoAnswerFaq === undefined
+    ) {
       throw new Error("Task update must change at least one field.");
     }
     if (input.title !== undefined && input.title.trim() === "") {
@@ -145,12 +162,14 @@ export class TaskService {
       ...(input.title === undefined ? {} : { title: input.title.trim() }),
       // "" clears the description; the store maps null to a NULL column.
       ...(input.description === undefined ? {} : { description: input.description === "" ? null : input.description }),
+      ...(input.autoAnswerFaq === undefined ? {} : { autoAnswerFaq: input.autoAnswerFaq }),
       ...columnUpdate
     });
     const updated = await this.options.store.getTask(id);
     if (updated === null) {
       throw new Error(`Task ${taskId} vanished during update.`);
     }
+    this.options.bus?.publish({ kind: "board-changed" });
     return updated;
   }
 
@@ -170,6 +189,7 @@ export class TaskService {
     if (this.options.workSessions !== undefined) {
       await this.options.workSessions.deleteForTask(id);
     }
+    this.options.bus?.publish({ kind: "board-changed" });
   }
 
   /**
@@ -230,6 +250,7 @@ export class TaskService {
     if ("workspaceSetId" in target) {
       await this.clearPolicyIfWorkspaceSelectionChanged(id);
     }
+    this.options.bus?.publish({ kind: "board-changed" });
   }
 
   async unlink(taskId: string, target: TaskLinkTarget): Promise<void> {
@@ -238,6 +259,7 @@ export class TaskService {
     if ("workspaceSetId" in target) {
       await this.clearPolicyIfWorkspaceSelectionChanged(id);
     }
+    this.options.bus?.publish({ kind: "board-changed" });
   }
 
   /** Saves a validated, non-empty ordered project subset for the task's sole linked set. */
@@ -334,11 +356,13 @@ export class TaskService {
         }
       }
     }
+    const faqCounts = this.options.faqs === undefined ? new Map<string, number>() : await this.options.faqs.countByTask();
     return tasks.map((task) => {
       const lastWorkedAt = lastWorkedByTask.get(task.taskId);
       const category = categoryByColumnId.get(task.columnId);
       const state = category === undefined ? "todo" : CATEGORY_TO_STATE[category];
       const clonePolicy = validSummaryClonePolicy(task.clonePolicy, linkedSetIdsByTask.get(task.taskId), workspaceSetById);
+      const faqCount = faqCounts.get(task.taskId) ?? 0;
       return {
         taskId: task.taskId,
         title: task.title,
@@ -352,9 +376,62 @@ export class TaskService {
         ...(task.doneAt === undefined ? {} : { doneAt: task.doneAt }),
         ...(lastWorkedAt === undefined ? {} : { lastWorkedAt }),
         ...(clonePolicy === undefined ? {} : { clonePolicy }),
+        ...(faqCount > 0 ? { faqCount } : {}),
+        ...(task.autoAnswerFaq === true ? { autoAnswerFaq: true } : {}),
         subtasks: []
       };
     });
+  }
+
+  // --- Task FAQ (ADR 0007) ---------------------------------------------------
+
+  async listFaqs(taskId: string): Promise<TaskFaqRecord[]> {
+    const store = this.requireFaqStore();
+    return store.listForTask(asId<"TaskId">(taskId));
+  }
+
+  async addFaq(taskId: string, pattern: string, answer: string): Promise<TaskFaqRecord> {
+    const store = this.requireFaqStore();
+    const trimmedPattern = pattern.trim();
+    const trimmedAnswer = answer.trim();
+    if (trimmedPattern.length === 0) {
+      throw new Error("An FAQ pattern must not be empty.");
+    }
+    if (trimmedAnswer.length === 0) {
+      throw new Error("An FAQ answer must not be empty.");
+    }
+    // The question service caps answers at 4000 chars; refuse here so the
+    // entry can never exist in a state auto-answering would reject.
+    if (trimmedAnswer.length > 4_000) {
+      throw new Error("An FAQ answer is capped at 4000 characters.");
+    }
+    const id = asId<"TaskId">(taskId);
+    if (await this.options.store.getTask(id) === null) {
+      throw new Error(`Task ${taskId} was not found.`);
+    }
+    const record: TaskFaqRecord = {
+      faqId: `faq-${randomUUID().slice(0, 8)}`,
+      taskId: id,
+      pattern: trimmedPattern,
+      answer: trimmedAnswer,
+      createdAt: this.options.clock.isoNow()
+    };
+    await store.insertFaq(record);
+    this.options.bus?.publish({ kind: "board-changed" });
+    return record;
+  }
+
+  async removeFaq(taskId: string, faqId: string): Promise<void> {
+    const store = this.requireFaqStore();
+    await store.deleteFaq(asId<"TaskId">(taskId), faqId);
+    this.options.bus?.publish({ kind: "board-changed" });
+  }
+
+  private requireFaqStore(): TaskFaqStore {
+    if (this.options.faqs === undefined) {
+      throw new Error("Task FAQs are unavailable because no FAQ store is configured.");
+    }
+    return this.options.faqs;
   }
 
   private async validateClonePolicy(taskId: TaskId, policy: TaskClonePolicy): Promise<WorkspaceSetRecord> {

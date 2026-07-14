@@ -15,7 +15,6 @@ import { TempWorkspaceStore, type TempWorkspace } from "@drydock/artifacts";
 import {
   asId,
   MEMORY_BRIEFING_LIMIT,
-  summarizeAgentEvent,
   summarizeStoredEvent,
   type AgentModelCatalog,
   type AgentEvent,
@@ -57,12 +56,14 @@ import {
   RuntimeLifecycleService,
   IsolatedRunWorkflow,
   normalizePathKey,
+  type ClonePathOmission,
   type CloneRepoPreflight,
   type Clock,
   type IdGenerator,
   type Logger
 } from "@drydock/core";
 import type { MemoryService } from "@drydock/work-management";
+import { blocksGlobalMemoryBriefing, type EffectiveSecurityPolicy } from "./securityPolicy.js";
 
 export const ISOLATED_RUN_DEFAULT_PROMPT = "Create smoke-result.txt containing exactly DRYDOCK_SMOKE_OK, then say smoke-ok.";
 
@@ -92,9 +93,12 @@ export interface IsolatedRunServiceOptions {
   /** Approved team memory injected into the first briefing of each session. */
   readonly memoryService?: MemoryService;
   readonly deniedPaths?: readonly string[];
+  readonly securityPolicy?: EffectiveSecurityPolicy;
   /** Host sbx binary, used for inert auth-status checks and login commands. */
   readonly sbxPath?: string;
   readonly commandRunner?: CommandRunner;
+  /** Private environment inherited by Drydock-owned child processes and host probes. */
+  readonly environment?: NodeJS.ProcessEnv;
   /** Host codex binary, used for inert app-server model discovery. */
   readonly hostCodexPath?: string;
 }
@@ -110,6 +114,22 @@ export interface ChatWorkspaceContext {
   readonly readOnlyRoots?: readonly string[];
   /** Clone mode only: whether local working changes are copied into each clone. */
   readonly dirtyHandling?: "carry" | "fresh";
+  /**
+   * Clone mode only (ADR 0014): upstream changeset patches 3-way applied into
+   * each matching fresh clone before its sync base freezes. Start-time only —
+   * never persisted, so a resume re-clones without them (the same documented
+   * limitation as the rest of the process-local clone state).
+   */
+  readonly seedPatches?: readonly WorkspaceSeedPatch[];
+}
+
+/** One upstream changeset patch destined for a named clone repo (ADR 0014). */
+export interface WorkspaceSeedPatch {
+  /** Matches SessionCloneRepo.name (the clone folder basename, deduped). */
+  readonly repoName: string;
+  /** Names the source in conflict errors (e.g. "subtask-x/repo"). */
+  readonly label: string;
+  readonly patch: string;
 }
 
 /**
@@ -155,6 +175,8 @@ interface PreparedWorkspace {
   readonly isolation: IsolationSummary;
   /** Clones prepared for a clone-mode session (empty otherwise). */
   readonly clones: readonly SessionCloneRepo[];
+  /** Requested context after host policy tightened roots/mode. */
+  readonly workspaceContext?: ChatWorkspaceContext;
 }
 
 /** One repo cloned into a clone-mode session's workspace, resolved for sync ops. */
@@ -167,6 +189,7 @@ export interface SessionCloneRepo {
   readonly localRepoPath: string;
   /** Branch the clone tracks (or a commit id when the local repo was detached). */
   readonly branch: string;
+  readonly omission?: ClonePathOmission;
 }
 
 const HOST_CATALOG_TTL_MS = 5 * 60_000;
@@ -197,6 +220,7 @@ export class IsolatedRunService {
   }
 
   async preflightCloneRepo(localRepoPath: string): Promise<CloneRepoPreflight> {
+    this.assertWorkspaceRootAllowed(localRepoPath);
     const git = await this.options.cloneSync.detectGit();
     if (!git.available) {
       throw new Error("Clone mode requires git on the host PATH, but `git --version` failed. Install git (or fix PATH) and reload the window.");
@@ -413,6 +437,7 @@ export class IsolatedRunService {
     const normalizedModel = this.normalizeModelSelection(model);
     this.assertSupportedModelSelection(normalizedModel);
     const prepared = await this.prepareWorkspace("chat", workspace, normalizedModel.providerId);
+    const effectiveWorkspace = prepared.workspaceContext;
     const session = await this.options.chatService.startSession({
       template: prepared.template,
       workspacePath: prepared.workspace.workspacePath,
@@ -420,16 +445,16 @@ export class IsolatedRunService {
       title,
       model: normalizedModel,
       transport: transportForProvider(normalizedModel.providerId),
-      ...(workspace?.mode === undefined ? {} : { mode: workspace.mode }),
-      ...(workspace?.roots === undefined || workspace.roots.length === 0 ? {} : { workspaceRoots: workspace.roots }),
-      ...(workspace?.readOnlyRoots === undefined || workspace.readOnlyRoots.length === 0 ? {} : { readOnlyRoots: workspace.readOnlyRoots }),
-      ...(workspace?.mode === "clone" && workspace.dirtyHandling !== undefined
-        ? { cloneDirtyHandling: workspace.dirtyHandling }
+      ...(effectiveWorkspace?.mode === undefined ? {} : { mode: effectiveWorkspace.mode }),
+      ...(effectiveWorkspace?.roots === undefined || effectiveWorkspace.roots.length === 0 ? {} : { workspaceRoots: effectiveWorkspace.roots }),
+      ...(effectiveWorkspace?.readOnlyRoots === undefined || effectiveWorkspace.readOnlyRoots.length === 0 ? {} : { readOnlyRoots: effectiveWorkspace.readOnlyRoots }),
+      ...(effectiveWorkspace?.mode === "clone" && effectiveWorkspace.dirtyHandling !== undefined
+        ? { cloneDirtyHandling: effectiveWorkspace.dirtyHandling }
         : {}),
       disposeWorkspace: () => this.options.workspaceStore.cleanupWorkspace(prepared.workspace)
     });
     await this.refreshModelsForSession(session.sessionId);
-    this.sessionModes.set(session.sessionId, workspace?.mode ?? "implementation");
+    this.sessionModes.set(session.sessionId, effectiveWorkspace?.mode ?? "implementation");
     this.stashSessionClones(session.sessionId, prepared.clones);
     return { session, isolation: prepared.isolation, providerCatalogs: this.listChatProviderCatalogs() };
   }
@@ -445,6 +470,7 @@ export class IsolatedRunService {
    * never touches the parent or sibling roles.
    */
   async spawnRoleChatSession(parentSessionId: string, role: AgentRole, title?: string): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
     const parentId = asId<"SessionId">(parentSessionId);
     const snapshot = this.options.chatService.liveSpawnSnapshot(parentId);
     if (snapshot === null) {
@@ -494,6 +520,7 @@ export class IsolatedRunService {
 
   /** Resolves when the turn reaches a terminal status; events flow via the bus. */
   async sendChatTurn(sessionId: string, prompt: string, model?: ChatModelSelection): Promise<TurnResult> {
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
     const normalizedModel = model === undefined ? undefined : this.normalizeModelSelection(model);
     this.assertSupportedModelSelection(normalizedModel);
     const briefedPrompt = await this.applySessionBriefing(sessionId, prompt);
@@ -512,7 +539,11 @@ export class IsolatedRunService {
     if (this.briefedSessions.has(sessionId)) {
       return prompt;
     }
-    const memories = this.options.memoryService === undefined
+    // Approved memory currently has no project provenance. Under a managed or
+    // project-restricting policy, global injection could carry content from a
+    // newly forbidden project into this prompt, so keep it local to the UI
+    // until provenance-aware filtering exists.
+    const memories = this.options.memoryService === undefined || blocksGlobalMemoryBriefing(this.options.securityPolicy)
       ? []
       : await this.options.memoryService.listApprovedContents(MEMORY_BRIEFING_LIMIT);
     const mode = this.sessionModes.get(sessionId) ?? "implementation";
@@ -530,6 +561,7 @@ export class IsolatedRunService {
   }
 
   async restartChatBackend(sessionId: string, model: ChatModelSelection): Promise<{ session: ChatSessionRecord; providerCatalogs: readonly AgentModelCatalog[] }> {
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
     const normalizedModel = this.normalizeModelSelection(model);
     this.assertSupportedModelSelection(normalizedModel);
     // A provider switch needs the new provider's transport; core defaults to
@@ -587,6 +619,13 @@ export class IsolatedRunService {
     if (stored === null) {
       throw new Error(`Session ${sessionId} was not found.`);
     }
+    if (
+      this.options.securityPolicy?.cloneOnly === true
+      && stored.mode !== "clone"
+      && (stored.workspaceRoots?.length ?? 0) > 0
+    ) {
+      throw new Error("This older session used live project mounts and cannot be resumed under clone-only policy. Start a new chat; its project context will be cloned automatically.");
+    }
     // Default the model to what the session last ran under; normalize + assert
     // exactly as the start path does.
     const requestedModel = model ?? {
@@ -606,6 +645,7 @@ export class IsolatedRunService {
     // instead of losing it and re-requesting every time.
     const effectiveWorkspace = mergeWorkspaceRoots(baseWorkspace, additionalRoots, stored.mode);
     const prepared = await this.prepareWorkspace("chat", effectiveWorkspace, normalizedModel.providerId);
+    const policyWorkspace = prepared.workspaceContext;
     const session = await this.options.chatService.resumeSession({
       sessionId: asId<"SessionId">(sessionId),
       template: prepared.template,
@@ -613,13 +653,13 @@ export class IsolatedRunService {
       workspaceOwnerToken: prepared.workspace.ownerToken,
       model: normalizedModel,
       transport: transportForProvider(normalizedModel.providerId),
-      ...(effectiveWorkspace?.mode === undefined ? {} : { mode: effectiveWorkspace.mode }),
+      ...(policyWorkspace?.mode === undefined ? {} : { mode: policyWorkspace.mode }),
       ...(force ? { force: true } : {}),
       disposeWorkspace: () => this.options.workspaceStore.cleanupWorkspace(prepared.workspace)
     });
     // Resume re-clones on a fresh workspace, so the mode comes from the stored
     // record when the caller omitted a workspace (mode is immutable per session).
-    this.sessionModes.set(session.sessionId, effectiveWorkspace?.mode ?? session.mode ?? "implementation");
+    this.sessionModes.set(session.sessionId, policyWorkspace?.mode ?? session.mode ?? "implementation");
     this.stashSessionClones(session.sessionId, prepared.clones);
     // Mounts changed with the fresh runtime; the next turn must re-brief.
     this.briefedSessions.delete(session.sessionId);
@@ -672,8 +712,31 @@ export class IsolatedRunService {
     return this.options.cloneSync.inboundPatch(
       target.clonePath,
       target.localRepoPath,
-      ...(filePath === undefined ? [] : [{ path: filePath }])
+      {
+        ...(filePath === undefined ? {} : { path: filePath }),
+        ...(target.omission === undefined ? {} : { omission: target.omission })
+      }
     );
+  }
+
+  /**
+   * Durable outbound patches for every clone of a session (ADR 0014 capture).
+   * Returns null when the process-local clone state is gone (window reload,
+   * ended session) — the caller records an honest skip instead of guessing.
+   * Refuses mid-turn like every other sync op (the agent may be writing).
+   */
+  async buildOutboundPatches(sessionId: string): Promise<{ readonly repoName: string; readonly patch: string; readonly fileCount: number; readonly paths: readonly string[] }[] | null> {
+    const clones = this.sessionClones.get(sessionId);
+    if (clones === undefined || clones.length === 0) return null;
+    this.assertNoActiveTurnForSync(sessionId);
+    const patches: { repoName: string; patch: string; fileCount: number; paths: readonly string[] }[] = [];
+    for (const clone of clones) {
+      const result = await this.options.cloneSync.outboundChangesetPatch(clone.clonePath, clone.omission);
+      if (result !== null) {
+        patches.push({ repoName: clone.name, patch: result.patch, fileCount: result.fileCount, paths: result.paths });
+      }
+    }
+    return patches;
   }
 
   /** Push the developer's local edits into every clone (VM). Refuses while a turn runs. */
@@ -695,7 +758,11 @@ export class IsolatedRunService {
   private async aggregateInbound(clones: readonly SessionCloneRepo[]): Promise<CloneSyncResult> {
     const results: CloneSyncResult[] = [];
     for (const clone of clones) {
-      results.push(await this.options.cloneSync.inboundPatch(clone.clonePath, clone.localRepoPath));
+      results.push(await this.options.cloneSync.inboundPatch(
+        clone.clonePath,
+        clone.localRepoPath,
+        clone.omission === undefined ? undefined : { omission: clone.omission }
+      ));
     }
     return mergeSyncResults("Pulled", results);
   }
@@ -704,7 +771,7 @@ export class IsolatedRunService {
   private async aggregateOutbound(clones: readonly SessionCloneRepo[]): Promise<CloneSyncResult> {
     const results: CloneSyncResult[] = [];
     for (const clone of clones) {
-      results.push(await this.options.cloneSync.outboundSync(clone.clonePath, clone.localRepoPath));
+      results.push(await this.options.cloneSync.outboundSync(clone.clonePath, clone.localRepoPath, clone.omission));
     }
     return mergeSyncResults("Pushed", results);
   }
@@ -845,6 +912,9 @@ export class IsolatedRunService {
    * richer catalog fetched from a live sandbox is never overwritten.
    */
   async refreshHostProviderCatalogs(): Promise<readonly AgentModelCatalog[]> {
+    if (this.options.securityPolicy?.allowNetworkedAiOnThisMachine === false) {
+      return this.listChatProviderCatalogs();
+    }
     const now = Date.now();
     if (now - this.hostCatalogRefreshedAt >= HOST_CATALOG_TTL_MS) {
       this.hostCatalogRefreshedAt = now;
@@ -877,7 +947,7 @@ export class IsolatedRunService {
         });
       }
     }
-    return fetchOpenAiModelCatalogFromHost(this.options.logger);
+    return fetchOpenAiModelCatalogFromHost(this.options.logger, this.options.environment ?? process.env);
   }
 
   isChatSessionLive(sessionId: string): boolean {
@@ -1008,32 +1078,41 @@ export class IsolatedRunService {
   }
 
   private async prepareWorkspace(prefix: string, workspaceContext?: ChatWorkspaceContext, providerId?: string): Promise<PreparedWorkspace> {
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
+    const effectiveContext = this.enforceWorkspacePolicy(workspaceContext);
     const workspace = await this.options.workspaceStore.createWorkspace(prefix);
     try {
       await writeFile(path.join(workspace.workspacePath, "README.md"), "# Isolated run disposable workspace\n", "utf8");
       // Clone mode: each root is git-cloned INTO the workspace, and buildMountPolicy
       // yields NO project-root mounts for clone mode — so the only rw mount is the
       // workspace itself, which now contains the clones. That is the design.
-      const clones = workspaceContext?.mode === "clone"
-        ? await this.prepareClones(workspace.workspacePath, workspaceContext.roots, workspaceContext.dirtyHandling ?? "carry")
+      const clones = effectiveContext?.mode === "clone"
+        ? await this.prepareClones(
+            workspace.workspacePath,
+            effectiveContext.roots,
+            effectiveContext.dirtyHandling ?? "carry",
+            effectiveContext.seedPatches ?? [],
+            this.options.securityPolicy?.cloneOmission
+          )
         : [];
-      const template = buildIsolatedRunTemplate({
+      const template = this.withSecurityPolicyMetadata(buildIsolatedRunTemplate({
         workspacePath: workspace.workspacePath,
         ids: this.options.ids,
         approvedAt: this.options.clock.isoNow(),
         provider: providerId === CLAUDE_PROVIDER_ID ? "claude" : "codex",
-        ...(workspaceContext === undefined ? {} : {
-          projectRoots: workspaceContext.roots,
-          sessionMode: workspaceContext.mode,
-          ...(workspaceContext.readOnlyRoots === undefined ? {} : { readOnlyRoots: workspaceContext.readOnlyRoots })
+        ...(effectiveContext === undefined ? {} : {
+          projectRoots: effectiveContext.roots,
+          sessionMode: effectiveContext.mode,
+          ...(effectiveContext.readOnlyRoots === undefined ? {} : { readOnlyRoots: effectiveContext.readOnlyRoots })
         }),
         ...(this.options.deniedPaths === undefined ? {} : { deniedPaths: this.options.deniedPaths })
-      });
+      }));
       return {
         workspace,
         template,
         isolation: isolationSummaryFromTemplate(template, workspace.workspacePath),
-        clones
+        clones,
+        ...(effectiveContext === undefined ? {} : { workspaceContext: effectiveContext })
       };
     } catch (error) {
       await this.cleanupWorkspaceQuietly(workspace);
@@ -1052,7 +1131,9 @@ export class IsolatedRunService {
   private async prepareClones(
     workspacePath: string,
     roots: readonly string[],
-    dirtyHandling: "carry" | "fresh"
+    dirtyHandling: "carry" | "fresh",
+    seedPatches: readonly WorkspaceSeedPatch[] = [],
+    omission?: ClonePathOmission
   ): Promise<SessionCloneRepo[]> {
     const git = await this.options.cloneSync.detectGit();
     if (!git.available) {
@@ -1077,15 +1158,75 @@ export class IsolatedRunService {
         suffix += 1;
       }
       usedNames.add(name.toLowerCase());
+      // Upstream changeset seeds (ADR 0014) match clones by the same deduped
+      // name derivation, so an upstream capture from the same policy lands in
+      // the same-named clone here. A conflicting seed throws out of initClone
+      // (honest failed start), naming the upstream it came from.
+      const seedsForRepo = seedPatches
+        .filter((seed) => seed.repoName === name)
+        .map((seed) => ({ label: seed.label, patch: seed.patch }));
       const result = await this.options.cloneSync.initClone({
         localRepoPath: root,
         cloneParentDir,
         name,
-        dirtyHandling
+        dirtyHandling,
+        ...(omission === undefined ? {} : { omission }),
+        ...(seedsForRepo.length === 0 ? {} : { seedPatches: seedsForRepo })
       });
-      clones.push({ name, clonePath: result.clonePath, localRepoPath: root, branch: result.branch });
+      clones.push({
+        name,
+        clonePath: result.clonePath,
+        localRepoPath: root,
+        branch: result.branch,
+        ...(omission === undefined ? {} : { omission })
+      });
     }
     return clones;
+  }
+
+  private enforceWorkspacePolicy(context: ChatWorkspaceContext | undefined): ChatWorkspaceContext | undefined {
+    if (context === undefined) return undefined;
+    const roots = context.roots.map((root) => this.assertWorkspaceRootAllowed(root));
+    const readOnlyRoots = context.readOnlyRoots?.map((root) => this.assertWorkspaceRootAllowed(root));
+    const mode = this.options.securityPolicy?.cloneOnly === true && roots.length > 0 ? "clone" : context.mode;
+    if (mode !== context.mode) {
+      this.options.logger.info("workspace mode tightened by security policy", { requested: context.mode, effective: mode });
+    }
+    return {
+      ...context,
+      mode,
+      roots,
+      ...(readOnlyRoots === undefined ? {} : { readOnlyRoots })
+    };
+  }
+
+  private assertWorkspaceRootAllowed(root: string): string {
+    if (this.options.securityPolicy !== undefined) {
+      return this.options.securityPolicy.assertHostPathAllowed(root);
+    }
+    assertMountAllowed(root, this.options.deniedPaths ?? []);
+    return path.resolve(root);
+  }
+
+  /** Adds compact, content-free policy evidence to the durable runtime ledger. */
+  private withSecurityPolicyMetadata(template: RuntimeTemplate): RuntimeTemplate {
+    const policy = this.options.securityPolicy;
+    if (policy === undefined) return template;
+    const omissionsEnabled = policy.cloneOmission.sensitive || policy.cloneOmission.paths.length > 0;
+    return {
+      ...template,
+      advancedOptions: {
+        ...template.advancedOptions,
+        securityPolicy: {
+          id: policy.policyId ?? "personal",
+          managed: policy.managed,
+          cloneOnly: policy.cloneOnly,
+          omissionsEnabled,
+          networkedAiAllowed: policy.allowNetworkedAiOnThisMachine,
+          ...(policy.allowedProjectRoots === undefined ? {} : { allowedRootCount: policy.allowedProjectRoots.length })
+        }
+      }
+    };
   }
 
   /** Records a clone-mode session's prepared clones; a no-op for empty lists. */
@@ -1391,12 +1532,15 @@ const HOST_MODEL_FAMILY = /^(gpt-5|gpt-4\.1|gpt-4o|o3|o4|codex)/;
 const HOST_PING_TIMEOUT_MS = 8_000;
 
 /**
- * Inert host-side model listing. Reads OPENAI_API_KEY from the extension-host
+ * Inert host-side model listing. Reads OPENAI_API_KEY from the private runtime
  * environment; returns null (caller keeps its current catalog) when the key is
  * absent or the ping fails. Never sends prompts or workspace data.
  */
-async function fetchOpenAiModelCatalogFromHost(logger: Logger): Promise<AgentModelCatalog | null> {
-  const apiKey = process.env["OPENAI_API_KEY"];
+async function fetchOpenAiModelCatalogFromHost(
+  logger: Logger,
+  environment: NodeJS.ProcessEnv
+): Promise<AgentModelCatalog | null> {
+  const apiKey = environment["OPENAI_API_KEY"];
   if (!apiKey) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => { controller.abort(); }, HOST_PING_TIMEOUT_MS);

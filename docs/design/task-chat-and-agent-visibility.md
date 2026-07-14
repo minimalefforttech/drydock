@@ -2,8 +2,8 @@
 
 ## Purpose
 
-This document describes the current panel contract behind ADR 0006. It covers
-the task-owned chat stack, the Chat/Agents lenses, composer behavior, file
+This document describes the current panel contract behind ADRs 0006 and 0012.
+It covers the task-owned Edit stack, the Chat/Agents lenses, composer behavior, file
 reference tokens, safe transcript rendering, and the runtime context shown to
 users.
 
@@ -19,12 +19,13 @@ is running:
 
 ## Panel Structure
 
-The activity-bar panel has three top-level tabs:
+The activity-bar panel has four top-level tabs:
 
 | Tab | Responsibility |
 |---|---|
 | `Tasks` | Task list, task state, linked chats, workspace-set links, attention summary, memory, and advanced workspace-set controls. |
-| `Chat` | Selected task chat, transcript, open questions, changes, task notes, context mounts, delegated-agent visibility, and prompt composer. |
+| `Plan` | Planning chat and entry to the durable Planner workspace from ADR 0012. |
+| `Edit` | Selected implementation chat, transcript, open questions, changes, task notes, context mounts, delegated-agent visibility, and prompt composer. |
 | `System` | Diagnostics, backend/runtime/provider messages, and low-level debugging output. |
 
 Chats should normally be reached through a task. A task card owns its linked
@@ -36,9 +37,9 @@ Delete actions for tasks, chats, and notes use an inline confirmation state
 whose label is `Confirm`. The confirm state should be local to the clicked
 control and should not block unrelated interaction.
 
-## Chat Layout
+## Edit Layout
 
-The Chat tab is a full-height panel:
+The Edit tab is a full-height panel:
 
 1. Header and context controls.
 2. Scrollable chat body.
@@ -51,7 +52,7 @@ never scrolls away.
 
 Open questions render outside the transcript region and only appear when
 pending questions exist. Their heading is `Open Questions:`. Diagnostics do not
-live in the Chat tab; they belong to `System`.
+live in the Edit tab; they belong to `System`.
 
 Task notes are plain, task-scoped user notes. They can contain indented or
 code-like text, but they are not review comments and do not carry file/line
@@ -73,9 +74,10 @@ Planned auto mounts use deterministic runtime roots:
 /workspace/root-2 <- C:\path\to\second-project
 ```
 
-Plan mode maps workspace roots read-only. Develop mode maps them read-write
-when policy allows. Clone sessions show clone context and the explicit "no live
-mounts" note because changes reach the host through clone sync.
+Planner and read-only role sessions map context roots read-only. Edit sessions
+map them read-write when policy allows. Clone sessions show clone context and
+the explicit "no live mounts" note because changes reach the host through clone
+sync.
 
 The strip is informational; it does not grant access by itself.
 
@@ -85,13 +87,13 @@ The composer is a single command box inspired by modern coding assistants. It
 contains:
 
 - A multiline prompt field.
-- A `Plan | Develop` segmented control.
 - Provider, model, and thinking-effort controls.
 - Send and cancel actions.
 
-`Plan` starts or resumes the chat in plan mode. `Develop` starts or resumes the
-chat in implementation mode. `Clone` is not a composer mode; it is a session
-sync/transfer mode surfaced by clone controls.
+Edit sends always use implementation mode. Planning starts from the Plan tab
+and runs in the Planner's read-only context; clone mode is selected by the
+task/subtask start flow and then exposes sync controls in the session. The
+retired `Plan | Develop` switch is not part of the composer.
 
 Changing model within the selected provider only updates the picker and affects
 future sends. Changing provider sends `chat.restartBackend` so the host can
@@ -99,9 +101,8 @@ checkpoint/restart the runtime with the new provider while preserving the
 session, task link, and transcript.
 
 The composer must not overflow at sidebar widths. At narrow widths it may use a
-two-row footer: mode and send controls on the command row, provider/model/
-thinking controls on a settings row. At wider widths it may collapse to one
-row.
+two-row footer: prompt/send controls on the command row and provider/model/
+thinking controls on a settings row. At wider widths it may collapse to one row.
 
 ## File Reference Tokens
 

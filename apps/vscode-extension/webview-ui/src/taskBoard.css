@@ -905,7 +905,325 @@ body {
   color: var(--vscode-errorForeground, #f48771);
 }
 
+/* Policy rails (ADR 0015): held by the run-slot budget / parked by the
+   retry-then-park failure policy. */
+.tb-queued-chip {
+  font-size: 0.68em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px dashed var(--dd-cat-pending);
+  color: var(--dd-cat-pending);
+}
+
+.tb-parked-chip {
+  font-size: 0.68em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px dashed var(--vscode-errorForeground, #f48771);
+  color: var(--vscode-errorForeground, #f48771);
+  opacity: 0.85;
+}
+
+/* HITL verify gate (ADR 0007): waiting-on-you — warn accent, never hidden. */
+.tb-verify-chip {
+  flex: none;
+  font-size: 0.68em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-editorWarning-foreground, #cca700);
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  font-weight: 600;
+}
+
+.tb-verify-action {
+  font-size: 0.78em;
+  padding: 1px 6px;
+  color: var(--vscode-charts-green, #89d185);
+  border-color: var(--vscode-charts-green, #89d185);
+}
+
+/* Task FAQ modal (ADR 0007). */
+.tb-faq-toggle-row {
+  display: flex;
+}
+
+.tb-faq-toggle.active {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border-color: var(--vscode-button-background);
+}
+
+.tb-faq-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.tb-faq-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 4px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.15));
+}
+
+.tb-faq-pattern {
+  font-weight: 600;
+  flex: 0 0 32%;
+  word-break: break-word;
+}
+
+.tb-faq-answer {
+  flex: 1;
+  opacity: 0.85;
+  word-break: break-word;
+}
+
+.tb-faq-add {
+  display: flex;
+  gap: 6px;
+}
+
+.tb-faq-pattern-input {
+  flex: 0 0 32%;
+}
+
+.tb-faq-answer-input {
+  flex: 1;
+}
+
+/* Recipes (ADR 0007): the ＋ Recipe… modal + per-role model chip. */
+.tb-model-chip {
+  flex: none;
+  font-size: 0.66em;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-charts-purple, #b180d7);
+  color: var(--vscode-charts-purple, #b180d7);
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tb-recipe-modal {
+  width: min(560px, calc(100vw - 48px));
+}
+
+.tb-recipe-title {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.tb-recipe-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tb-recipe-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  padding: 6px 8px;
+}
+
+.tb-recipe-row.selected {
+  border-color: var(--vscode-focusBorder, #007fd4);
+  background: var(--vscode-list-activeSelectionBackground, rgba(9, 71, 113, 0.5));
+}
+
+.tb-recipe-name {
+  font-weight: 600;
+}
+
+.tb-recipe-meta {
+  font-size: 0.78em;
+  opacity: 0.7;
+}
+
+.tb-recipe-loading {
+  font-size: 0.85em;
+  opacity: 0.7;
+  padding: 8px 2px;
+}
+
+.tb-recipe-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px;
+  border: 1px dashed var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+}
+
+.tb-recipe-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.85em;
+}
+
+.tb-recipe-step-title {
+  font-weight: 600;
+}
+
+.tb-recipe-step-deps {
+  opacity: 0.65;
+  font-size: 0.9em;
+}
+
+.tb-recipe-step-marks {
+  margin-left: auto;
+  opacity: 0.75;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+/* Chain changesets (ADR 0014): quiet unlanded marker + full-detail seed toggle. */
+.tb-changeset-chip {
+  flex: none;
+  font-size: 0.75em;
+  opacity: 0.7;
+  color: var(--vscode-charts-blue, #4a90d9);
+}
+
+.tb-seed-row {
+  display: flex;
+  align-items: center;
+}
+
+.tb-seed-chip {
+  font-size: 0.72em;
+  padding: 0 6px;
+  opacity: 0.8;
+}
+
+.tb-seed-chip.upstream {
+  color: var(--vscode-charts-blue, #4a90d9);
+  border-color: var(--vscode-charts-blue, #4a90d9);
+}
+
+/* --------------------------------------------------------------------------
+   Density (ADR 0013). At minimal detail, cards keep dot/title/one chip and
+   hide their action affordances until the card is hovered or focused; the
+   add-subtask row hides until its column is hovered. Everything a level hides
+   lives in the ONE per-card hover card below.
+   -------------------------------------------------------------------------- */
+
+.detail-minimal .tb-card-actions,
+.detail-minimal .tb-color-picker,
+.detail-minimal .tb-ghost-move,
+.detail-minimal .tb-task-start,
+.detail-minimal .tb-menu-button {
+  display: none;
+}
+
+.detail-minimal .tb-card:hover .tb-card-actions,
+.detail-minimal .tb-card:focus-within .tb-card-actions {
+  display: flex;
+}
+
+.detail-minimal .tb-card:hover .tb-color-picker,
+.detail-minimal .tb-card:focus-within .tb-color-picker {
+  display: block;
+}
+
+.detail-minimal .tb-card:hover .tb-ghost-move,
+.detail-minimal .tb-card:focus-within .tb-ghost-move,
+.detail-minimal .tb-card:hover .tb-task-start,
+.detail-minimal .tb-card:focus-within .tb-task-start,
+.detail-minimal .tb-card:hover .tb-menu-button,
+.detail-minimal .tb-card:focus-within .tb-menu-button {
+  display: inline-block;
+}
+
+.detail-minimal .tb-add-subtask {
+  display: none;
+}
+
+.detail-minimal .tb-col:hover .tb-add-subtask,
+.detail-minimal .tb-col:focus-within .tb-add-subtask {
+  display: flex;
+}
+
+/* Full detail: quiet inline dates line (minimal/standard keep it in the
+   hover card instead). */
+.tb-card-dates {
+  font-size: 0.68em;
+  opacity: 0.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The consolidated hover card: one popover per card, revealed by CSS with a
+   tooltip-ish delay on the way in and instantly gone on the way out. It takes
+   no pointer events, so it can overlap the next card without stealing its
+   clicks. Hidden while any drag gesture is live. */
+.tb-hovercard {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 6px;
+  z-index: 30;
+  min-width: 190px;
+  max-width: 250px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.4));
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+}
+
+.tb-card:hover .tb-hovercard,
+.tb-card:focus-within .tb-hovercard {
+  visibility: visible;
+  opacity: 1;
+  transition: opacity 0.12s ease 0.5s, visibility 0s linear 0.5s;
+}
+
+.tb-card.tb-dragging .tb-hovercard,
+.tb-linking .tb-hovercard {
+  visibility: hidden !important;
+  opacity: 0 !important;
+}
+
+.tb-hover-row {
+  display: flex;
+  gap: 8px;
+  font-size: 0.78em;
+  line-height: 1.35;
+}
+
+.tb-hover-label {
+  flex: none;
+  min-width: 72px;
+  opacity: 0.6;
+}
+
+.tb-hover-value {
+  word-break: break-word;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .tb-card.tb-shake { animation: none; }
   .tb-running-chip::before { animation: none; }
+  .tb-card:hover .tb-hovercard,
+  .tb-card:focus-within .tb-hovercard { transition: none; }
 }

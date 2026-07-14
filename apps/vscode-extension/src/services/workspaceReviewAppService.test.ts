@@ -23,6 +23,7 @@ import {
   WorkspaceReviewAppService,
   type WorkspaceReviewAppServiceOptions
 } from "./workspaceReviewAppService.js";
+import { EffectiveSecurityPolicy } from "./securityPolicy.js";
 
 function approvedRecord(id: string, hostPath: string): AccessRequestRecord {
   return {
@@ -46,10 +47,11 @@ interface HarnessState {
   readonly expandCalls: MountPolicy[][];
   readonly events: string[];
   expandError: Error | null;
+  sessionMode: "implementation" | "clone";
 }
 
 function harness(): { readonly service: WorkspaceReviewAppService; readonly state: HarnessState } {
-  const state: HarnessState = { expandCalls: [], events: [], expandError: null };
+  const state: HarnessState = { expandCalls: [], events: [], expandError: null, sessionMode: "implementation" };
   const accessRequests = {
     prepareApproval: (id: string) => {
       state.events.push(`prepare:${id}`);
@@ -66,6 +68,7 @@ function harness(): { readonly service: WorkspaceReviewAppService; readonly stat
     editRequestPath: (id: string) => Promise.resolve(approvedRecord(id, `C:\\grant\\${id}`))
   };
   const chatService = {
+    getSession: () => Promise.resolve({ mode: state.sessionMode } as ChatSessionRecord),
     expandSessionMounts: (_id: SessionId, mounts: readonly MountPolicy[]) => {
       state.events.push("expand:session-1");
       if (state.expandError !== null) {
@@ -111,6 +114,48 @@ test("a denial resolves without applying a mount", async () => {
   assert.equal(summary.status, "denied");
   assert.equal(state.expandCalls.length, 0);
   assert.deepEqual(state.events, ["deny:ar-1"]);
+});
+
+test("a clone session cannot be widened into a live host mount", async () => {
+  const { service, state } = harness();
+  state.sessionMode = "clone";
+
+  await assert.rejects(service.resolveAccess("ar-1", true), /Clone sessions cannot add live host mounts/);
+
+  assert.equal(state.expandCalls.length, 0);
+  assert.deepEqual(state.events, ["prepare:ar-1"]);
+});
+
+test("effective policy filters auto roots and silently tightens the mode to clone", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-review-policy-"));
+  try {
+    const allowed = path.join(root, "allowed");
+    const blocked = path.join(root, "blocked");
+    await Promise.all([mkdir(allowed, { recursive: true }), mkdir(blocked, { recursive: true })]);
+    const securityPolicy = new EffectiveSecurityPolicy({
+      managed: true,
+      policyId: "test",
+      allowedProjectRoots: [allowed],
+      deniedPaths: [],
+      cloneOnly: true,
+      allowNetworkedAiOnThisMachine: true,
+      cloneOmission: { sensitive: false, paths: [] }
+    });
+    const service = new WorkspaceReviewAppService({
+      logger: new MemoryLogger(),
+      securityPolicy
+    } as unknown as WorkspaceReviewAppServiceOptions);
+
+    const workspace = await service.resolveWorkspaceSelection(
+      { auto: true, mode: "implementation" },
+      [allowed, blocked]
+    );
+
+    assert.equal(workspace.mode, "clone");
+    assert.deepEqual(workspace.roots, [allowed]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // MARK: Diff views (session / turn / full-session)

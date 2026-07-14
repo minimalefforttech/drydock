@@ -13,7 +13,6 @@ import type {
   BoardColumnRecord,
   BoardColumnStore,
   ColumnCategory,
-  ColumnId,
   SubtaskStore,
   WorkTaskStore
 } from "@drydock/contracts";

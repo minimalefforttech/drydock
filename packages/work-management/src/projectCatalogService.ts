@@ -15,6 +15,8 @@ export interface ProjectCatalogServiceOptions {
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly store: ProjectCatalogStore;
+  /** Final host policy gate; may canonicalize symlinks/junctions. */
+  readonly validateProjectPath?: (absolutePath: string) => string;
 }
 
 export class ProjectCatalogService {
@@ -25,7 +27,8 @@ export class ProjectCatalogService {
    * normalized path returns the existing record.
    */
   async registerProject(input: { readonly path: string; readonly name?: string }): Promise<ProjectRecord> {
-    const absolute = path.resolve(input.path);
+    const requested = path.resolve(input.path);
+    const absolute = this.options.validateProjectPath?.(requested) ?? requested;
     if (!existsSync(absolute) || !statSync(absolute).isDirectory()) {
       throw new Error(`Project path is not an existing directory: ${absolute}`);
     }
@@ -57,7 +60,8 @@ export class ProjectCatalogService {
     if (existing === null) {
       throw new Error(`Project ${projectId} is not in the catalog.`);
     }
-    const absolute = path.resolve(newPath);
+    const requested = path.resolve(newPath);
+    const absolute = this.options.validateProjectPath?.(requested) ?? requested;
     if (!existsSync(absolute) || !statSync(absolute).isDirectory()) {
       throw new Error(`Project path is not an existing directory: ${absolute}`);
     }

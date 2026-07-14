@@ -47,7 +47,8 @@ import {
   type PlanStore,
   type PlanSummary,
   type ChatSessionRecord,
-  type SessionId
+  type SessionId,
+  type TurnTerminalStatus
 } from "@drydock/contracts";
 import type { Clock, IdGenerator, Logger, ProductEventBus } from "@drydock/core";
 import type { ChatWorkspaceContext } from "./isolatedRunService.js";
@@ -61,7 +62,7 @@ export interface PlannerSessionsPort {
   ): Promise<{ readonly session: { readonly sessionId: SessionId } }>;
   /** claimOwnership + force resume: revives ended, failed, and orphaned-active sessions alike. */
   reclaimChatSession(sessionId: string, model?: ChatModelSelection): Promise<unknown>;
-  sendChatTurn(sessionId: string, prompt: string): Promise<unknown>;
+  sendChatTurn(sessionId: string, prompt: string): Promise<{ readonly status: TurnTerminalStatus }>;
   isChatSessionLive(sessionId: string): boolean;
   hasActiveChatTurn(sessionId: string): boolean;
 }
@@ -276,9 +277,10 @@ export class PlannerAppService {
   }
 
   /**
-   * Composes one revision turn from every open annotation, flips them to
-   * delegated (stamped with the artifact revision they were written against),
-   * and fires the turn detached. Zero open annotations is an accepted no-op.
+   * Composes one revision turn from every open annotation and sends it before
+   * flipping them to delegated (stamped with the artifact revision they were
+   * written against). A refused turn leaves every annotation open so the user
+   * can retry it. Zero open annotations is an accepted no-op.
    */
   async sendInstructions(planId: string): Promise<{ readonly sentCount: number }> {
     const id = asId<"PlanId">(planId);
@@ -302,6 +304,10 @@ export class PlannerAppService {
     ].join("\n");
 
     const sessionId = await this.ensureLiveSession(plan);
+    const turn = await this.options.sessions.sendChatTurn(sessionId, prompt);
+    if (turn.status !== "completed") {
+      throw new Error(`Planner instruction turn ${turn.status}; annotations remain open for retry.`);
+    }
     const now = this.options.clock.isoNow();
     for (const annotation of open) {
       const artifact = byId.get(annotation.artifactId);
@@ -312,7 +318,6 @@ export class PlannerAppService {
       });
     }
     this.publishChanged(id);
-    this.sendDetached(id, sessionId, prompt);
     return { sentCount: open.length };
   }
 

@@ -418,6 +418,91 @@ export function applyMigrations(connection: SqliteConnection): void {
   // stripe palette); NULL means "use the parent task's stripe hue" (the
   // pre-existing default behaviour), so this column is purely additive.
   ensureColumn(connection, "subtasks", "color_override", "INTEGER NULL");
+  // Chain changesets (ADR 0014): the user's per-subtask clone seeding choice
+  // ("local" | "upstream"); NULL means local (the pre-existing behaviour).
+  ensureColumn(connection, "subtasks", "seed_mode", "TEXT NULL");
+  // Per-role model profile (ADR 0002), set by recipe materialization; NULL
+  // means the provider default (JSON: { providerId, model? }).
+  ensureColumn(connection, "subtasks", "model_json", "TEXT NULL");
+  // Task FAQ auto-answer toggle (ADR 0007); 0 = off (the safe default —
+  // the global config is a second gate).
+  ensureColumn(connection, "work_tasks", "auto_answer_faq", "INTEGER NOT NULL DEFAULT 0");
+  // HITL verify gate (ADR 0007): "hitl" arms it (NULL = no gate);
+  // verified_at is the human's stamp, cleared when the gate re-arms.
+  ensureColumn(connection, "subtasks", "verify_mode", "TEXT NULL");
+  ensureColumn(connection, "subtasks", "verified_at", "TEXT NULL");
+
+  // Orchestrator holds (ADR 0015): queued/parked starts survive a window
+  // reload. One row per subtask; a park replaces a queue entry.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS subtask_holds (
+      subtask_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      origin TEXT NOT NULL,
+      force INTEGER NOT NULL DEFAULT 0,
+      held_at TEXT NOT NULL
+    );
+  `);
+
+  // Task FAQ entries (ADR 0007): pattern → answer pairs auto-answering
+  // matching agent questions when the task's toggle (and global config) is on.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS task_faqs (
+      faq_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      pattern TEXT NOT NULL,
+      answer TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_faqs_task
+      ON task_faqs(task_id);
+  `);
+
+  // Task recipes (ADR 0007): templates that materialize a task + subtask DAG
+  // with per-role defaults. Steps ride as JSON (the planner_aspects
+  // expected_artifacts_json pattern); seeded rows insert once when empty.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS task_recipes (
+      recipe_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NULL,
+      source TEXT NOT NULL,
+      archived INTEGER NOT NULL DEFAULT 0,
+      subtasks_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  seedTaskRecipes(connection);
+
+  // Chain changesets (ADR 0014): durable outbound patches captured from a
+  // subtask's clone at Review entry. One row per (subtask, repo); a fresh
+  // capture replaces the subtask's prior set. Patch bytes live in the
+  // content-addressed blob store (patch_sha256), mirroring planner_artifacts.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS task_changesets (
+      changeset_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      subtask_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      patch_sha256 TEXT NOT NULL,
+      patch_bytes INTEGER NOT NULL,
+      file_count INTEGER NOT NULL,
+      captured_at TEXT NOT NULL,
+      landed_at TEXT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_changesets_subtask
+      ON task_changesets(subtask_id);
+
+    CREATE INDEX IF NOT EXISTS idx_task_changesets_session
+      ON task_changesets(session_id);
+  `);
+  // Landing overlap pre-check (ADR 0014): the patch's touched paths as JSON.
+  // NULL on older captures — overlap is then unknown, not assumed absent.
+  ensureColumn(connection, "task_changesets", "paths_json", "TEXT NULL");
   // work_tasks.state is replaced by column_id (+ optional done_at); state is
   // kept transitionally (see WorkTaskRecord doc comment) until the board UI
   // lands and the webview stops reading it.
@@ -512,6 +597,47 @@ function seedPlannerAspects(connection: SqliteConnection): void {
   `);
   for (const aspect of SEEDED_PLAN_ASPECTS) {
     insert.run(aspect.aspectId, aspect.label, aspect.instructions, JSON.stringify(aspect.expectedArtifacts), aspect.sortOrder);
+  }
+}
+
+/**
+ * Seeds the recipe registry once (empty table only), so user edits to seeded
+ * rows — including archiving them — are never overwritten on a later run
+ * (the planner-aspects rule). Prompts use `{title}` for the task title.
+ */
+function seedTaskRecipes(connection: SqliteConnection): void {
+  const count = connection.database.prepare(`SELECT COUNT(*) AS count FROM task_recipes`).get() as { readonly count: number };
+  if (count.count > 0) {
+    return;
+  }
+  const now = "2026-01-01T00:00:00.000Z";
+  const insert = connection.database.prepare(`
+    INSERT INTO task_recipes (recipe_id, name, description, source, archived, subtasks_json, created_at, updated_at)
+    VALUES (?, ?, ?, 'seeded', 0, ?, ?, ?)
+  `);
+  const seeded = [
+    {
+      recipeId: "recipe-implement-verify",
+      name: "Implement + verify",
+      description: "One implementer, then a verifier that builds on its output.",
+      subtasks: [
+        { key: "implement", title: "Implement", prompt: "Implement the work described by the task \"{title}\". Keep changes focused; note anything you deliberately left out.", autoStart: false, dependsOnKeys: [] },
+        { key: "verify", title: "Verify", prompt: "Review and verify the implementation produced for \"{title}\": run the relevant tests, probe edge cases, and report gaps as concrete findings.", autoStart: true, seedMode: "upstream", dependsOnKeys: ["implement"] }
+      ]
+    },
+    {
+      recipeId: "recipe-research-implement-test",
+      name: "Research → implement → test",
+      description: "A researcher scopes the change, an implementer builds on it, a tester chains off both.",
+      subtasks: [
+        { key: "research", title: "Research", prompt: "Research how to approach the task \"{title}\": map the code involved, constraints, and a recommended plan. Write findings to notes files.", autoStart: false, dependsOnKeys: [] },
+        { key: "implement", title: "Implement", prompt: "Following the researcher's notes in this clone, implement \"{title}\".", autoStart: true, seedMode: "upstream", dependsOnKeys: ["research"] },
+        { key: "test", title: "Test", prompt: "Write and run tests covering the implementation of \"{title}\"; report failures as findings rather than silently fixing unrelated code.", autoStart: true, seedMode: "upstream", dependsOnKeys: ["implement"] }
+      ]
+    }
+  ];
+  for (const recipe of seeded) {
+    insert.run(recipe.recipeId, recipe.name, recipe.description, JSON.stringify(recipe.subtasks), now, now);
   }
 }
 

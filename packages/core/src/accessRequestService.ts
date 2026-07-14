@@ -25,6 +25,8 @@ export interface AccessRequestServiceOptions {
   readonly clock: Clock;
   readonly store: AccessRequestStore;
   readonly deniedPaths: readonly string[];
+  /** Final host policy gate; may canonicalize symlinks/junctions. */
+  readonly validateHostPath?: (absolutePath: string) => string;
 }
 
 export class AccessRequestService {
@@ -39,10 +41,11 @@ export class AccessRequestService {
     if (!path.isAbsolute(input.hostPath)) {
       throw new Error(`Access request path must be absolute: ${input.hostPath}`);
     }
+    const hostPath = this.validateHostPath(input.hostPath);
     const record: AccessRequestRecord = {
       accessRequestId: this.options.ids.accessRequestId(),
       sessionId: input.sessionId,
-      hostPath: path.resolve(input.hostPath),
+      hostPath,
       mode: input.mode,
       reason: input.reason,
       status: "pending",
@@ -63,7 +66,7 @@ export class AccessRequestService {
     if (!path.isAbsolute(hostPath)) {
       throw new Error(`Access request path must be absolute: ${hostPath}`);
     }
-    const resolved = path.resolve(hostPath);
+    const resolved = this.validateHostPath(hostPath);
     await this.options.store.updateRequestPath(accessRequestId, resolved);
     return { ...request, hostPath: resolved };
   }
@@ -74,7 +77,12 @@ export class AccessRequestService {
    * runtime restart leaves it retryable.
    */
   async prepareApproval(accessRequestId: AccessRequestId): Promise<{ readonly request: AccessRequestRecord; readonly mount: MountPolicy }> {
-    const request = await this.requiredPending(accessRequestId);
+    let request = await this.requiredPending(accessRequestId);
+    const canonical = this.validateHostPath(request.hostPath);
+    if (canonical !== request.hostPath) {
+      await this.options.store.updateRequestPath(accessRequestId, canonical);
+      request = { ...request, hostPath: canonical };
+    }
     assertMountAllowed(request.hostPath, this.options.deniedPaths);
     const approvedAt = this.options.clock.isoNow();
     const mount: MountPolicy = {
@@ -117,5 +125,10 @@ export class AccessRequestService {
       throw new Error(`Access request ${accessRequestId} is already ${request.status}.`);
     }
     return request;
+  }
+
+  private validateHostPath(hostPath: string): string {
+    const absolute = path.resolve(hostPath);
+    return this.options.validateHostPath?.(absolute) ?? absolute;
   }
 }

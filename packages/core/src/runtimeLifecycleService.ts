@@ -85,6 +85,7 @@ function makeStartingRecord(
   adapter: RuntimeInventoryRecord["adapter"],
   startedAt: string
 ): RuntimeInventoryRecord {
+  const securityPolicy = request.template.advancedOptions["securityPolicy"];
   const base = {
     runtimeId: request.runtimeId,
     runtimeGenerationId: request.generationId,
@@ -99,7 +100,8 @@ function makeStartingRecord(
     cleanupFailureCount: 0,
     metadata: {
       workspacePath: request.workspacePath,
-      mounts: request.template.mounts.length
+      mounts: request.template.mounts.length,
+      ...(isJsonObject(securityPolicy) ? { securityPolicy } : {})
     }
   };
   return {
@@ -107,6 +109,10 @@ function makeStartingRecord(
     ...(request.agentId === undefined ? {} : { agentId: request.agentId }),
     ...(request.workspaceOwnerToken === undefined ? {} : { workspaceOwnerToken: request.workspaceOwnerToken })
   };
+}
+
+function isJsonObject(value: unknown): value is import("@drydock/contracts").JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function handleFromRecord(record: RuntimeInventoryRecord): RuntimeHandle {

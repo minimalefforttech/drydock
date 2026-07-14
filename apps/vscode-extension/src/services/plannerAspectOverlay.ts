@@ -24,12 +24,17 @@ const OVERLAY_SORT_BASE = 100;
  * Builds the overlay reader PlannerAppService consumes. `roots` is re-read on
  * every call so workspace-folder changes take effect without a reload.
  */
-export function createAspectOverlayReader(roots: () => readonly string[]): () => Promise<readonly PlanAspectRecord[]> {
+export function createAspectOverlayReader(
+  roots: () => readonly string[],
+  resolveFile: (root: string, filePath: string) => string | undefined = (_root, filePath) => filePath
+): () => Promise<readonly PlanAspectRecord[]> {
   return async () => {
     const merged: PlanAspectRecord[] = [];
     const seen = new Set<string>();
     for (const root of roots()) {
-      for (const aspect of await readOverlayFile(path.join(root, ...OVERLAY_RELATIVE_PATH))) {
+      const filePath = resolveFile(root, path.join(root, ...OVERLAY_RELATIVE_PATH));
+      if (filePath === undefined) continue;
+      for (const aspect of await readOverlayFile(filePath)) {
         if (!seen.has(aspect.aspectId)) {
           seen.add(aspect.aspectId);
           merged.push(aspect);

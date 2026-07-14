@@ -85,7 +85,7 @@ persist as UI-local webview state.
   per-artifact toggle — with Preview (page gets the pointer) and Annotate
   (overlay captures it) modes.
 - **Chat rail** (right by default): the plan session's transcript, folded and
-  rendered by the same shared chat components as the Chat tab
+  rendered by the same shared chat components as the Edit tab's Chat lens
   (`webview-ui/src/chat/transcriptModel.ts` + `messageRow.ts`), with live
   streaming via forwarded bus events, `session.timeline` backfill, a composer,
   and Stop.
@@ -103,10 +103,27 @@ artifact's revision, the delegated card asks "addressed in rev N?" — resolve
 or reopen, never auto-closed. Regenerate re-sends the briefing for the whole
 plan or one aspect's subdirectory.
 
+## Materializing plan work on the board
+
+`To board…` closes the mechanical gap between a reviewed plan and execution
+without asking a model to invent a DAG. The host scans document artifacts for
+literal Markdown checkbox items (`- [ ]`, `* [x]`, and numbered checkbox
+forms), keeps titles between 3 and 160 characters, deduplicates them
+case-insensitively, and caps the preview at 40. Checked and unchecked source
+items are both candidates because the checkbox syntax marks work, not current
+completion.
+
+The preview starts with every candidate selected and names the plan's owning
+task. The user may remove items before confirming. An orphan plan cannot
+materialize until it is assigned to a task. Confirmation creates backlog
+subtasks with plan-sourced prompts, `autoStart` off, and no invented dependency
+edges; recipes remain the pre-wired creation path. Re-running can propose an
+item already materialized, so the preview is currently the duplicate guard.
+
 ## The Plan tab (sidebar companion)
 
 The control panel's tab strip reads Tasks | **Plan** | **Edit** | System: the
-old Chat tab is renamed Edit (its sessions always run implementation mode),
+former Chat tab is now Edit (its sessions always run implementation mode),
 and the Plan tab IS the planning chat. With no plan underway, the first
 message typed becomes a new plan's brief — the host creates the plan, boots
 its session, and the Planner panel auto-opens on that plan while the
@@ -133,25 +150,27 @@ and neither agent adapter changes at all — read-only is container-enforced
 (ADR 0001), exactly like role spawns, which remain the mode's other producer.
 Slow host work (create, session boot) acks immediately and completes via the
 `planner.sessionReady` push (ADR 0011's lesson: sandbox boots outlive the
-webview request timeout). The session also appears in the Chat tab; either
-surface may drive it.
+webview request timeout). Planning conversation stays on the Plan tab; Edit
+remains the implementation surface.
 
 ## Retired
 
-The composer mode switch, its persisted `composerMode`, the Work tab's unused
+The composer mode switch, its persisted `composerMode`, the retired Work tab's unused
 session-mode select, the plan-docs pill, panel, service, store, and the
 `planDocs.*` message family are gone; retired `planDocs.*` requests now fail
 the parse boundary. The `plan_docs` table is orphaned-legacy (kept per the
-additive migration policy). Chat sessions always run implementation mode.
+additive migration policy). Edit sessions always run implementation mode.
 
 ## Verification
 
 Unit: contract parse accept/reject per message, anchor grammar round-trips,
 store reopen durability, collector bounds/revisions/titles/aspects, hydrate →
 collect round-trips, briefing and instruction-turn composition, aspect
-registry rules. Harness (`tools/webview-harness/planner.html`, rows V52–V56):
+registry rules, and literal-checklist materialization. Harness
+(`tools/webview-harness/planner.html`, rows V52–V56 and the materialization
+scenario):
 landing/intake, tree + splitter + outline, all four providers, layout system,
-and the chat rail on the shared components — plus the Chat tab's own rows,
+and the chat rail on the shared components — plus the Edit tab's own rows,
 which must not regress. Live checks that need a real window: the crash drill
 (kill the sandbox mid-turn; reopen collects everything written), `vscode.open`
 artifact jumps, and prototype frames under the real webview CSP.

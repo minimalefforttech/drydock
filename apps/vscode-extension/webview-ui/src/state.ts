@@ -22,7 +22,6 @@ import type {
   ChatSessionSummary,
   ColumnCategory,
   IsolationSummary,
-  JsonObject,
   MemoryCandidateSummary,
   PanelInitState,
   RuntimeSummary,

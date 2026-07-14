@@ -20,6 +20,7 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import {
+  cardDetailLevel,
   parsePanelRequest,
   WEBVIEW_PROTOCOL_VERSION,
   type HostToWebviewMessage,
@@ -30,6 +31,7 @@ import {
 import type { Logger } from "@drydock/core";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import { buildBoardState, reconcileColumns, requireTaskSummary } from "./boardShared.js";
+import { promptAndSaveSubtaskSeedMode } from "./subtaskSeedPrompt.js";
 import { promptAndSaveTaskClonePolicy } from "./taskClonePolicyPrompt.js";
 
 export class TaskBoardPanelProvider {
@@ -169,14 +171,17 @@ export class TaskBoardPanelProvider {
           throw new Error(`Subtask ${payload.subtaskId} was not found.`);
         }
         const hasFieldUpdate = payload.title !== undefined || payload.description !== undefined
-          || payload.prompt !== undefined || payload.autoStart !== undefined || payload.colorOverride !== undefined;
+          || payload.prompt !== undefined || payload.autoStart !== undefined || payload.colorOverride !== undefined
+          || payload.seedMode !== undefined || payload.verified !== undefined;
         if (hasFieldUpdate) {
           await backend.subtasks.updateSubtask(payload.subtaskId, {
             ...(payload.title === undefined ? {} : { title: payload.title }),
             ...(payload.description === undefined ? {} : { description: payload.description }),
             ...(payload.prompt === undefined ? {} : { prompt: payload.prompt }),
             ...(payload.autoStart === undefined ? {} : { autoStart: payload.autoStart }),
-            ...(payload.colorOverride === undefined ? {} : { colorOverride: payload.colorOverride })
+            ...(payload.colorOverride === undefined ? {} : { colorOverride: payload.colorOverride }),
+            ...(payload.seedMode === undefined ? {} : { seedMode: payload.seedMode }),
+            ...(payload.verified === undefined ? {} : { verified: payload.verified })
           });
         }
         if (payload.columnId !== undefined) {
@@ -226,6 +231,12 @@ export class TaskBoardPanelProvider {
           this.respond(request.requestId, { type: "subtask.start", accepted: false });
           return;
         }
+        // Seed choice (ADR 0014): prompts only when upstreams exist and no
+        // seedMode is stored yet; the pick persists on the subtask.
+        if (!(await promptAndSaveSubtaskSeedMode(backend, payload.subtaskId))) {
+          this.respond(request.requestId, { type: "subtask.start", accepted: false });
+          return;
+        }
         await backend.orchestrator.startSubtask(payload.subtaskId, { force: payload.force === true });
         this.respond(request.requestId, { type: "subtask.start", accepted: true });
         return;
@@ -237,6 +248,47 @@ export class TaskBoardPanelProvider {
         }
         await backend.orchestrator.startTask(payload.taskId);
         this.respond(request.requestId, { type: "task.start", accepted: true });
+        return;
+      }
+      case "recipes.list": {
+        const recipes = await backend.recipes.listRecipes();
+        this.respond(request.requestId, { type: "recipes.list", recipes });
+        return;
+      }
+      case "task.faq.list": {
+        const faqs = await backend.tasks.listFaqs(payload.taskId);
+        this.respond(request.requestId, { type: "task.faq.list", faqs });
+        return;
+      }
+      case "task.faq.add": {
+        await backend.tasks.addFaq(payload.taskId, payload.pattern, payload.answer);
+        this.respond(request.requestId, { type: "task.faq.add", faqs: await backend.tasks.listFaqs(payload.taskId) });
+        return;
+      }
+      case "task.faq.remove": {
+        await backend.tasks.removeFaq(payload.taskId, payload.faqId);
+        this.respond(request.requestId, { type: "task.faq.remove", faqs: await backend.tasks.listFaqs(payload.taskId) });
+        return;
+      }
+      case "task.update": {
+        // The board panel accepts the FAQ toggle only (title/description edits
+        // stay on the sidebar); anything else falls through to the service's
+        // own validation.
+        await backend.tasks.updateTask(payload.taskId, {
+          ...(payload.title === undefined ? {} : { title: payload.title }),
+          ...(payload.description === undefined ? {} : { description: payload.description }),
+          ...(payload.state === undefined ? {} : { state: payload.state }),
+          ...(payload.autoAnswerFaq === undefined ? {} : { autoAnswerFaq: payload.autoAnswerFaq })
+        });
+        const summary = await requireTaskSummary(backend, payload.taskId);
+        this.respond(request.requestId, { type: "task.update", task: summary });
+        return;
+      }
+      case "task.createFromRecipe": {
+        // Materializes task + subtasks + DAG with per-role defaults; never starts.
+        const created = await backend.recipes.materializeTask(payload.recipeId, payload.title);
+        const summary = await requireTaskSummary(backend, created.taskId);
+        this.respond(request.requestId, { type: "task.createFromRecipe", task: summary });
         return;
       }
       default:
@@ -266,6 +318,9 @@ export class TaskBoardPanelProvider {
     const nonce = randomBytes(16).toString("hex");
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "taskBoard.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "taskBoard.css"));
+    // The density default (ADR 0013) rides in as a body data attribute —
+    // sanitized to the closed enum, so no free-form setting text reaches HTML.
+    const cardDetail = cardDetailLevel(vscode.workspace.getConfiguration("drydock").get("ui.cardDetail"));
     // Strict CSP, matching the task-review panel exactly: no remote content,
     // scripts only with this nonce, styles only from the extension, no
     // 'unsafe-inline' anywhere. All dynamic text renders via textContent in
@@ -279,7 +334,7 @@ export class TaskBoardPanelProvider {
   <link rel="stylesheet" href="${styleUri.toString()}">
   <title>Task Board</title>
 </head>
-<body>
+<body data-card-detail="${cardDetail}">
   <div id="app"></div>
   <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
 </body>

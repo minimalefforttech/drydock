@@ -13,7 +13,7 @@ import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ClaudeAdapter, CodexAdapter, CodexAppServerTransport } from "@drydock/agent-adapters";
-import type { AgentAdapter } from "@drydock/contracts";
+import { asId, type AgentAdapter } from "@drydock/contracts";
 import { ContentAddressedBlobStore, TempWorkspaceStore } from "@drydock/artifacts";
 import type { ChatSessionStore, EventStore, RuntimeInventoryStore } from "@drydock/contracts";
 import {
@@ -58,16 +58,22 @@ import {
   SqliteProjectCatalogStore,
   SqliteReviewStore,
   SqliteRuntimeInventoryStore,
+  SqliteSubtaskHoldStore,
   SqliteSubtaskStore,
+  SqliteTaskChangesetStore,
+  SqliteTaskFaqStore,
+  SqliteTaskRecipeStore,
   SqliteWorkSessionStore,
   SqliteWorkspaceSetStore,
   SqliteWorkTaskStore
 } from "@drydock/storage-sqlite";
-import { BoardService, MemoryService, ProjectCatalogService, SubtaskOrchestrator, SubtaskService, TaskService, WorkspaceSetService } from "@drydock/work-management";
+import { BoardService, ChangesetService, MemoryService, ProjectCatalogService, RecipeService, SubtaskOrchestrator, SubtaskService, TaskService, WorkspaceSetService } from "@drydock/work-management";
 import { PlannerAppService } from "./services/plannerAppService.js";
 import { IsolatedRunService } from "./services/isolatedRunService.js";
 import { createSubtaskRunBridge } from "./services/subtaskRunBridge.js";
+import type { EffectiveSecurityPolicy } from "./services/securityPolicy.js";
 import { TaskReviewAppService } from "./services/taskReviewAppService.js";
+import { TaskFaqAutoAnswerCoordinator } from "./services/taskFaqAutoAnswer.js";
 import { WorkInsightsAppService } from "./services/workInsightsAppService.js";
 import { WorkspaceReviewAppService } from "./services/workspaceReviewAppService.js";
 
@@ -81,6 +87,10 @@ export interface BackendReady {
   readonly board: BoardService;
   readonly subtasks: SubtaskService;
   readonly orchestrator: SubtaskOrchestrator;
+  /** Chain changesets (ADR 0014): capture/query/land bookkeeping. */
+  readonly changesets: ChangesetService;
+  /** Task recipes (ADR 0007): templates that materialize task + subtask DAGs. */
+  readonly recipes: RecipeService;
   readonly questions: AgentQuestionService;
   readonly memory: MemoryService;
   readonly workInsights: WorkInsightsAppService;
@@ -106,12 +116,24 @@ export type Backend = BackendReady | BackendUnavailable;
 export interface CreateBackendOptions {
   readonly stateRootPath: string;
   readonly logger: Logger;
+  /** Private environment inherited only by Drydock-owned child processes. */
+  readonly runtimeEnvironment?: NodeJS.ProcessEnv;
   /** Paths excluded from mounts, snapshots, and diffs (drydock.deniedPaths). */
   readonly deniedPaths?: readonly string[];
+  /** One immutable activation-time snapshot of Studio + personal restrictions. */
+  readonly securityPolicy?: EffectiveSecurityPolicy;
+  /** Invalid managed policy fails closed while keeping the extension UI alive. */
+  readonly startupBlockReason?: string;
   /** Codex app-server stall watchdog window in ms (drydock.runtime.appServerInactivityTimeoutMs). */
   readonly appServerInactivityTimeoutMs?: number;
   /** Repo aspect packs merged read-only into the planner registry (ADR 0012). */
   readonly plannerAspectOverlays?: () => Promise<readonly import("@drydock/contracts").PlanAspectRecord[]>;
+  /** Repo recipe packs merged read-only into the recipe registry (ADR 0007). */
+  readonly recipeOverlays?: () => Promise<readonly import("@drydock/contracts").TaskRecipeRecord[]>;
+  /** ADR 0015: live run-slot budget (drydock.orchestrator.maxConcurrentRuns; host derives the auto default). */
+  readonly maxConcurrentRuns?: () => number;
+  /** ADR 0007: the global gate for task-FAQ question auto-answering. */
+  readonly autoAnswerQuestionsEnabled?: () => boolean;
 }
 
 /**
@@ -125,17 +147,17 @@ export interface CreateBackendOptions {
  * sbx binary's own dir plus the known Docker Desktop bin locations; each is
  * added only if it exists and is not already present.
  */
-function ensureRuntimeToolsOnPath(sbxPath: string, logger: Logger): void {
-  const programFiles = process.env["ProgramFiles"] ?? "C:\\Program Files";
+function ensureRuntimeToolsOnPath(sbxPath: string, environment: NodeJS.ProcessEnv, logger: Logger): void {
+  const programFiles = environment["ProgramFiles"] ?? "C:\\Program Files";
   const candidates = [
     path.dirname(sbxPath),
     path.join(os.homedir(), "AppData", "Local", "DockerSandboxes", "bin"),
     path.join(programFiles, "Docker", "Docker", "resources", "bin")
   ];
-  const existing = (process.env["PATH"] ?? "").split(path.delimiter);
+  const existing = (environment["PATH"] ?? "").split(path.delimiter);
   const additions = candidates.filter((dir) => dir.length > 0 && existsSync(dir) && !existing.includes(dir));
   if (additions.length > 0) {
-    process.env["PATH"] = [...additions, ...existing].join(path.delimiter);
+    environment["PATH"] = [...additions, ...existing].join(path.delimiter);
     logger.info("augmented PATH for runtime tools", { added: additions });
   }
 }
@@ -143,7 +165,16 @@ function ensureRuntimeToolsOnPath(sbxPath: string, logger: Logger): void {
 export async function createBackend(options: CreateBackendOptions): Promise<Backend> {
   const { stateRootPath, logger } = options;
   const deniedPaths = options.deniedPaths ?? [];
-  const sbxPath = discoverDockerSandboxCommand();
+  if (options.startupBlockReason !== undefined) {
+    return {
+      available: false,
+      reason: options.startupBlockReason,
+      stateRootPath,
+      dispose: () => { /* policy prevented composition */ }
+    };
+  }
+  const runtimeEnvironment = options.runtimeEnvironment ?? { ...process.env };
+  const sbxPath = discoverDockerSandboxCommand(runtimeEnvironment);
   if (!sbxPath) {
     return {
       available: false,
@@ -152,7 +183,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       dispose: () => { /* nothing composed */ }
     };
   }
-  ensureRuntimeToolsOnPath(sbxPath, logger);
+  ensureRuntimeToolsOnPath(sbxPath, runtimeEnvironment, logger);
 
   const stateDir = path.join(stateRootPath, "state");
   const tmpDir = path.join(stateRootPath, "tmp");
@@ -161,7 +192,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
 
   const ids = new RandomIdGenerator();
   const clock = new SystemClock();
-  const commandRunner = new SpawnCommandRunner();
+  const commandRunner = new SpawnCommandRunner(runtimeEnvironment);
   const connection = new SqliteConnection(path.join(stateDir, "state.sqlite"));
   applyMigrations(connection);
   const inventory: RuntimeInventoryStore = new SqliteRuntimeInventoryStore(connection);
@@ -181,7 +212,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   });
   const lifecycle = new RuntimeLifecycleService({ clock, inventory, runtimeAdapter, logger });
   const cleanup = new RuntimeCleanupService({ clock, inventory, runtimeAdapter, logger });
-  const hostCodexPath = discoverStandaloneCodexCommand();
+  const hostCodexPath = discoverStandaloneCodexCommand(runtimeEnvironment);
   // Debug-only capture of the current turn's raw agent stream, read on demand by
   // the chat tab's raw view. Bounded + last-turn-only, so it scales to many sessions.
   const rawStreamStore = new SessionRawStreamStore(clock);
@@ -247,14 +278,23 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     hostInstanceId,
     memoryService: memory,
     deniedPaths,
+    ...(options.securityPolicy === undefined ? {} : { securityPolicy: options.securityPolicy }),
     sbxPath,
     commandRunner,
+    environment: runtimeEnvironment,
     ...(hostCodexPath === null ? {} : { hostCodexPath })
   });
 
   // Workspace policy and diff review.
   const projectCatalogStore = new SqliteProjectCatalogStore(connection);
-  const projectCatalog = new ProjectCatalogService({ ids, clock, store: projectCatalogStore });
+  const projectCatalog = new ProjectCatalogService({
+    ids,
+    clock,
+    store: projectCatalogStore,
+    ...(options.securityPolicy === undefined
+      ? {}
+      : { validateProjectPath: (candidate: string) => options.securityPolicy?.assertHostPathAllowed(candidate) ?? candidate })
+  });
   const workspaceSetStore = new SqliteWorkspaceSetStore(connection);
   const workspaceSets = new WorkspaceSetService({
     ids,
@@ -262,9 +302,18 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     catalog: projectCatalogStore,
     store: workspaceSetStore
   });
-  const accessRequests = new AccessRequestService({ ids, clock, store: new SqliteAccessRequestStore(connection), deniedPaths });
+  const accessRequests = new AccessRequestService({
+    ids,
+    clock,
+    store: new SqliteAccessRequestStore(connection),
+    deniedPaths,
+    ...(options.securityPolicy === undefined
+      ? {}
+      : { validateHostPath: (candidate: string) => options.securityPolicy?.assertHostPathAllowed(candidate) ?? candidate })
+  });
   // Agent questions (attention stack): same protocol family as access requests.
-  const questions = new AgentQuestionService({ ids, clock, store: new SqliteAgentQuestionStore(connection) });
+  // The bus announces resolutions so cross-surface pending sets stay live.
+  const questions = new AgentQuestionService({ ids, clock, store: new SqliteAgentQuestionStore(connection), bus });
   // Task board and subtasks: board columns are global, seeded with six
   // defaults by the migration; subtasks are child work items of exactly one
   // task. Both share the same connection as every other store.
@@ -280,6 +329,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   // reference live workspace-set and session rows. The work-session store
   // powers touch history and each task's lastWorkedAt; the subtask store
   // powers cascading subtask deletion when a task is deleted.
+  const taskFaqStore = new SqliteTaskFaqStore(connection);
   const tasks = new TaskService({
     ids,
     clock,
@@ -287,7 +337,9 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     columns: boardColumnStore,
     workSessions: workSessionStore,
     subtasks: subtaskStore,
-    workspaceSets: workspaceSetStore
+    workspaceSets: workspaceSetStore,
+    bus,
+    faqs: taskFaqStore
   });
   const workInsights = new WorkInsightsAppService({ workSessions: workSessionStore, tasks, chatService, workspaceSets });
   const diff = new SessionDiffService({
@@ -307,20 +359,57 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     diff,
     review,
     chatService,
-    bus
+    bus,
+    ...(options.securityPolicy === undefined ? {} : { securityPolicy: options.securityPolicy })
   });
   // Cross-project task review: a VIEW over the task's linked sessions —
   // aggregates their changed files (baseline diffs + clone sync state) and
   // routes the reviewer's comments back as revision turns. It reads only
   // projections and satisfies its ports structurally from the concrete services.
   const taskReview = new TaskReviewAppService({ logger, tasks, sessions: appService, diffs: workspaceReview, review });
+  // Chain changesets (ADR 0014): a subtask card entering Review captures its
+  // clone's outbound patch durably (blob store + task_changesets rows), and a
+  // dependent whose stored seedMode is "upstream" seeds its fresh clone from
+  // those patches at start. Patch text rides through the same blob store as
+  // diff baselines / planner artifacts.
+  const changesetBlobs = new ContentAddressedBlobStore(path.join(stateRootPath, "artifacts", "blobs"));
+  const changesets = new ChangesetService({
+    store: new SqliteTaskChangesetStore(connection),
+    blobs: {
+      putText: async (text) => {
+        const stored = await changesetBlobs.putText(text);
+        return { sha256: stored.sha256, bytes: stored.size };
+      },
+      readText: async (sha256) => {
+        const blob = await changesetBlobs.readBlob(sha256);
+        return blob === null ? null : Buffer.from(blob).toString("utf8");
+      }
+    },
+    clock,
+    logger,
+    bus
+  });
+
+  // Task recipes (ADR 0007): stored templates (seeded once by migration)
+  // plus a read-only overlay from the workspace's .drydock/recipes.json,
+  // supplied by extension.ts exactly like the planner aspect overlays.
+  const recipes = new RecipeService({
+    store: new SqliteTaskRecipeStore(connection),
+    tasks,
+    subtasks,
+    logger,
+    ...(options.recipeOverlays === undefined ? {} : { overlays: options.recipeOverlays })
+  });
+
   // Subtask auto-start orchestration (task board, Orchestration phase): the
   // bridge starts an isolated chat session exactly like the panel's chat.start
   // flow (session + baselines + detached first turn); the orchestrator
   // subscribes to the bus, moves cards on completion, and cascades to
   // autoStart dependents. Its link port pairs TaskService.link (records the
   // session->subtask link) with the store's listLinks (resolves a completed
-  // session back to its subtask).
+  // session back to its subtask). The card-entered-done hook captures the
+  // finishing subtask's changeset BEFORE dependents evaluate, so an
+  // auto-started dependent with upstream seeding reads a fresh store.
   const orchestrator = new SubtaskOrchestrator({
     subtasks,
     board,
@@ -329,8 +418,24 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       listLinks: () => workTaskStore.listLinks()
     },
     bus,
-    startRun: createSubtaskRunBridge({ logger, sessions: appService, workspaces: workspaceReview, tasks }),
-    logger
+    startRun: createSubtaskRunBridge({ logger, sessions: appService, workspaces: workspaceReview, tasks, changesets }),
+    logger,
+    ...(options.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: options.maxConcurrentRuns }),
+    isSessionLive: (sessionId) => appService.isChatSessionLive(sessionId),
+    holds: new SqliteSubtaskHoldStore(connection),
+    onCardEnteredDone: async ({ taskId, subtaskId }) => {
+      const sessionIds = await workTaskStore.listSessionIdsBySubtask(asId<"SubtaskId">(subtaskId));
+      const sessionId = sessionIds[sessionIds.length - 1];
+      if (sessionId === undefined) return; // never ran — nothing to capture
+      const patches = await appService.buildOutboundPatches(sessionId);
+      if (patches === null) {
+        // Window reload or ended session: the clone is gone. Reject so the
+        // orchestrator cannot auto-start dependents from an absent or stale
+        // capture set. A later done-entry event can retry the capture.
+        throw new Error(`Changeset capture unavailable for subtask ${subtaskId}: clone state for session ${sessionId} is no longer available.`);
+      }
+      await changesets.captureForSubtask({ taskId, subtaskId, sessionId, patches });
+    }
   });
 
   // Agent final-text detection: a session's final agent text may carry fenced
@@ -380,6 +485,16 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
         });
       });
     }
+  });
+
+  const faqAutoAnswer = new TaskFaqAutoAnswerCoordinator({
+    bus,
+    tasks: workTaskStore,
+    faqs: taskFaqStore,
+    questions,
+    sessions: appService,
+    logger,
+    enabled: options.autoAnswerQuestionsEnabled ?? (() => false)
   });
 
   // Work-session touch history: every completed turn touches the work
@@ -486,6 +601,16 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       });
     }
     bus.publish({ kind: "inventory-changed" });
+    // Continuity (ADR 0015): queued/parked holds reload AFTER sessions and
+    // runtimes reconcile, so restored queue entries start against a settled
+    // world. Failures log; a broken hold never blocks activation.
+    try {
+      await orchestrator.restore();
+    } catch (error) {
+      logger.warn("orchestrator hold restore failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   };
   // Heartbeat keeps this window's live sessions marked "running here" for
   // sibling windows; its disposer stops the timer on backend teardown.
@@ -502,6 +627,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     board,
     subtasks,
     orchestrator,
+    changesets,
+    recipes,
     memory,
     workInsights,
     bus,
@@ -513,6 +640,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       // Drop the orchestrator's bus subscription and stop the heartbeat before
       // closing the DB so no handler or tick writes to a closed connection
       // during window teardown.
+      faqAutoAnswer.dispose();
       orchestrator.dispose();
       stopHeartbeats();
       try {

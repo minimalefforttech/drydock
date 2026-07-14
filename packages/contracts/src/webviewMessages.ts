@@ -13,6 +13,7 @@
  */
 
 import type { AgentModelCatalog } from "./agent.js";
+import { usageTokens, type SessionAgentTree } from "./agentTree.js";
 import type { DiffChangeKind, DiffViewMode, ReviewThreadStatus } from "./diffs.js";
 import type { TranscriptLine } from "./events.js";
 import type { AgentRole } from "./ids.js";
@@ -27,7 +28,7 @@ import {
   type PlannerStateDetail,
   type PlanSummary
 } from "./planner.js";
-import { COLUMN_CATEGORIES, WORK_TASK_STATES, type ColumnCategory, type TaskClonePolicy, type WorkTaskState } from "./tasks.js";
+import { COLUMN_CATEGORIES, WORK_TASK_STATES, type ColumnCategory, type SubtaskModelSelection, type SubtaskSeedMode, type TaskClonePolicy, type TaskFaqRecord, type TaskRecipeRecord, type WorkTaskState } from "./tasks.js";
 import type { AccessRequestStatus } from "./workspaces.js";
 
 export const WEBVIEW_PROTOCOL_VERSION = 1;
@@ -106,7 +107,7 @@ export type PanelRequestPayload =
   | { readonly type: "session.summarize"; readonly sessionId: string; readonly mode: ChatSummarizeMode }
   | { readonly type: "task.list" }
   | { readonly type: "task.create"; readonly title: string; readonly description?: string }
-  | { readonly type: "task.update"; readonly taskId: string; readonly title?: string; readonly description?: string; readonly state?: WorkTaskState }
+  | { readonly type: "task.update"; readonly taskId: string; readonly title?: string; readonly description?: string; readonly state?: WorkTaskState; readonly autoAnswerFaq?: boolean }
   | { readonly type: "task.delete"; readonly taskId: string }
   | { readonly type: "task.link"; readonly taskId: string; readonly workspaceSetId?: string; readonly sessionId?: string }
   | { readonly type: "task.unlink"; readonly taskId: string; readonly workspaceSetId?: string; readonly sessionId?: string }
@@ -144,13 +145,26 @@ export type PanelRequestPayload =
   | { readonly type: "board.moveCard"; readonly cardKind: "task" | "subtask"; readonly id: string; readonly columnId: string }
   | { readonly type: "board.columns.update"; readonly columns: readonly BoardColumnUpdateInput[]; readonly deletedColumnIds?: readonly string[] }
   | { readonly type: "subtask.create"; readonly taskId: string; readonly title: string; readonly description?: string; readonly prompt?: string; readonly autoStart?: boolean }
-  | { readonly type: "subtask.update"; readonly subtaskId: string; readonly title?: string; readonly description?: string; readonly prompt?: string; readonly autoStart?: boolean; readonly columnId?: string; readonly colorOverride?: number | null }
+  | { readonly type: "subtask.update"; readonly subtaskId: string; readonly title?: string; readonly description?: string; readonly prompt?: string; readonly autoStart?: boolean; readonly columnId?: string; readonly colorOverride?: number | null; readonly seedMode?: SubtaskSeedMode; readonly verified?: boolean }
   | { readonly type: "subtask.delete"; readonly subtaskId: string }
   | { readonly type: "subtask.dependency.add"; readonly taskId: string; readonly fromSubtaskId: string; readonly toSubtaskId: string }
   | { readonly type: "subtask.dependency.remove"; readonly taskId: string; readonly fromSubtaskId: string; readonly toSubtaskId: string }
   | { readonly type: "subtask.start"; readonly subtaskId: string; readonly force?: boolean }
   | { readonly type: "task.start"; readonly taskId: string }
+  /** Task recipes (ADR 0007): list templates; materialize one (creates, never starts). */
+  | { readonly type: "recipes.list" }
+  | { readonly type: "task.createFromRecipe"; readonly recipeId: string; readonly title: string }
+  /** Task FAQ (ADR 0007): the auto-answer knowledge the task carries. */
+  | { readonly type: "task.faq.list"; readonly taskId: string }
+  | { readonly type: "task.faq.add"; readonly taskId: string; readonly pattern: string; readonly answer: string }
+  | { readonly type: "task.faq.remove"; readonly taskId: string; readonly faqId: string }
   | { readonly type: "taskBoard.open" }
+  | { readonly type: "agents.open" }
+  | { readonly type: "agents.state" }
+  /** Navigate the sidebar to a session (nodeId lands on the Agents lens). */
+  | { readonly type: "agents.openSession"; readonly sessionId: string; readonly nodeId?: string }
+  /** Landing drawer (ADR 0014): full-pull a session's clone work into the local repo and mark its changesets landed. */
+  | { readonly type: "agents.landSession"; readonly sessionId: string }
   | { readonly type: "planner.open"; readonly planId?: string }
   | { readonly type: "planner.plans" }
   | { readonly type: "planner.state"; readonly planId: string }
@@ -165,6 +179,9 @@ export type PanelRequestPayload =
   | { readonly type: "planner.annotation.remove"; readonly annotationId: string }
   | { readonly type: "planner.artifact.rename"; readonly artifactId: string; readonly title: string }
   | { readonly type: "planner.sendInstructions"; readonly planId: string }
+  /** Plan → board (ADR 0012): checkbox items proposed as subtasks; apply creates, never starts. */
+  | { readonly type: "planner.subtaskCandidates"; readonly planId: string }
+  | { readonly type: "planner.materializeSubtasks"; readonly planId: string; readonly titles: readonly string[] }
   | { readonly type: "planner.regenerate"; readonly planId: string; readonly aspectId?: string }
   | { readonly type: "planner.openArtifact"; readonly artifactId: string }
   | { readonly type: "planner.setPrototypeScripts"; readonly artifactId: string; readonly enabled: boolean }
@@ -317,6 +334,97 @@ export interface AgentActivitySummary {
   readonly running: number;
   readonly failed: number;
   readonly agents?: readonly AgentActivityItem[];
+  /**
+   * The session's root agent this turn (nodeId "root"): status "running"
+   * while the turn is live, plus the last activity/command line. Fleet rows
+   * key their pulse and activity text off this; the ⑂ chip ignores it (its
+   * running/failed counts stay native-children-only).
+   */
+  readonly root?: AgentActivityItem;
+}
+
+/**
+ * ONE projection from the reduced agent tree to the compact per-agent rows
+ * (the sidebar ⑂ chips and the Agents panel's subagent rows both read this,
+ * so the two surfaces cannot disagree). Native nodes only — the root agent
+ * is the session row itself.
+ */
+export function agentActivitySummaryOfTree(tree: SessionAgentTree): AgentActivitySummary {
+  const toItem = (node: SessionAgentTree["nodes"][number]): AgentActivityItem => {
+    const tokens = usageTokens(node.usage);
+    return {
+      nodeId: node.nodeId,
+      ...(node.parentId === undefined ? {} : { parentNodeId: node.parentId }),
+      label: node.label,
+      status: node.status,
+      ...(node.startedAt === undefined ? {} : { startedAt: node.startedAt }),
+      ...(node.endedAt === undefined ? {} : { endedAt: node.endedAt }),
+      ...(node.lastActivityAt === undefined ? {} : { lastActivityAt: node.lastActivityAt }),
+      ...(node.lastActivity === undefined ? {} : { lastActivity: node.lastActivity }),
+      ...(node.lastCommand === undefined ? {} : { lastCommand: node.lastCommand }),
+      toolUses: node.counts.toolCalls + node.counts.commands + node.counts.fileEdits,
+      ...(tokens === null ? {} : { tokens })
+    };
+  };
+  const agents = tree.nodes.filter((node) => node.kind === "native").map(toItem);
+  const rootNode = tree.nodes.find((node) => node.kind === "root");
+  const root = rootNode === undefined ? undefined : toItem(rootNode);
+  const running = agents.filter((agent) => agent.status === "running").length;
+  const failed = agents.filter((agent) => agent.status === "failed").length;
+  return {
+    running,
+    failed,
+    ...(agents.length === 0 ? {} : { agents }),
+    ...(root === undefined ? {} : { root })
+  };
+}
+
+/** One task's slice of the fleet: the task, its board column chip, its sessions. */
+export interface AgentsTaskGroup {
+  readonly task: WorkTaskSummary;
+  /** Board column display name/category; absent when the column row is gone. */
+  readonly columnName?: string;
+  readonly columnCategory?: ColumnCategory;
+  /**
+   * The task's sessions (link-derived, plus unlinked role children grafted
+   * under their linked ancestor). Root sessions first-seen order; the webview
+   * nests children via parentSessionId.
+   */
+  readonly sessions: readonly ChatSessionSummary[];
+}
+
+/**
+ * One Landing-drawer row (ADR 0014): a subtask with unlanded changesets,
+ * ready to pull. `overlapsWith` names sibling landing subtasks touching at
+ * least one same path (disjoint-first ordering; pull overlapping ones with
+ * care). Rows without stored paths report no overlap data — unknown, not
+ * safe.
+ */
+export interface LandingItem {
+  readonly taskId: string;
+  readonly taskTitle: string;
+  readonly subtaskId: string;
+  readonly subtaskTitle: string;
+  readonly sessionId: string;
+  readonly repos: readonly { readonly repoName: string; readonly fileCount: number }[];
+  readonly capturedAt: string;
+  readonly overlapsWith: readonly string[];
+  /** True when any repo row predates path capture — overlap cannot be checked. */
+  readonly overlapUnknown?: boolean;
+}
+
+/** Fleet snapshot for the Agents panel (ADR 0013) — projection only. */
+export interface AgentsOverviewState {
+  readonly generatedAt: string;
+  readonly groups: readonly AgentsTaskGroup[];
+  /** Sessions linked to no task (and with no linked ancestor): the trailing drawer. */
+  readonly orphanSessions: readonly ChatSessionSummary[];
+  /** Pending only — the "waiting on you" chips across every group. */
+  readonly questions: readonly AgentQuestionSummary[];
+  readonly accessRequests: readonly AccessRequestSummary[];
+  readonly agentIdleThresholdMs: number;
+  /** Landing drawer (ADR 0014): subtasks with unlanded changesets, disjoint-first. */
+  readonly landing?: readonly LandingItem[];
 }
 
 /** One agent-changed file in a clone, relative to the sync base. */
@@ -505,9 +613,21 @@ export interface SubtaskSummary {
   readonly isRunning: boolean;
   /** Timestamp of the most recent failed/cancelled run, if any (in-memory; resets on host restart). */
   readonly lastFailureAt?: string;
+  /** ADR 0015: start held back by the run-slot budget. */
+  readonly isQueued?: boolean;
+  /** ADR 0015: auto run failed twice; automation gave up until a manual ↻. */
+  readonly isParked?: boolean;
   readonly linkedSessionIds: readonly string[];
   /** 0-7 palette index overriding the parent task's stripe hue; absent uses the task hue. */
   readonly colorOverride?: number;
+  /** Clone seeding choice (ADR 0014); absent = `local`. Meaningful only with dependsOn. */
+  readonly seedMode?: SubtaskSeedMode;
+  /** A captured outbound changeset exists that has not been pulled into the local repo. */
+  readonly hasUnlandedChangeset?: boolean;
+  /** Per-role model profile (ADR 0002); absent = provider default. */
+  readonly model?: SubtaskModelSelection;
+  /** ADR 0007: an armed HITL verify gate is unmet — in Review, no verified stamp. Waiting-on-you. */
+  readonly verifyUnmet?: boolean;
 }
 
 /** Display-safe projection of an internal work task with its links. */
@@ -537,6 +657,9 @@ export interface WorkTaskSummary {
   readonly openReviewCommentCount?: number;
   /** Durable clone policy plus the set size needed for a concise all/subset chip. */
   readonly clonePolicy?: TaskClonePolicy & { readonly workspaceSetProjectCount: number };
+  /** ADR 0007: FAQ entry count (absent when zero) and the per-task auto-answer toggle. */
+  readonly faqCount?: number;
+  readonly autoAnswerFaq?: boolean;
   /** This task's subtasks, ordered by sortOrder. */
   readonly subtasks: readonly SubtaskSummary[];
 }
@@ -567,10 +690,21 @@ export interface MemoryCandidateSummary {
 }
 
 /** Everything the workspace policy panel section renders. */
+export interface WorkspaceSecuritySummary {
+  readonly managed: boolean;
+  readonly label: string;
+  readonly cloneOnly: boolean;
+  readonly allowedRootCount?: number;
+  readonly networkedAiAllowed: boolean;
+  readonly omissionsEnabled: boolean;
+}
+
 export interface WorkspacePolicyState {
   readonly projects: readonly ProjectSummary[];
   readonly workspaceSets: readonly WorkspaceSetSummary[];
   readonly accessRequests: readonly AccessRequestSummary[];
+  /** Effective host-enforced policy; absent only for legacy/test compositions. */
+  readonly security?: WorkspaceSecuritySummary;
 }
 
 /** Display-safe projection of one changed file in a diff. */
@@ -717,7 +851,16 @@ export type PanelResponsePayload =
   | { readonly type: "subtask.dependency.remove"; readonly task: WorkTaskSummary }
   | { readonly type: "subtask.start"; readonly accepted: boolean }
   | { readonly type: "task.start"; readonly accepted: boolean }
+  | { readonly type: "recipes.list"; readonly recipes: readonly TaskRecipeRecord[] }
+  | { readonly type: "task.createFromRecipe"; readonly task: WorkTaskSummary }
+  | { readonly type: "task.faq.list"; readonly faqs: readonly TaskFaqRecord[] }
+  | { readonly type: "task.faq.add"; readonly faqs: readonly TaskFaqRecord[] }
+  | { readonly type: "task.faq.remove"; readonly faqs: readonly TaskFaqRecord[] }
   | { readonly type: "taskBoard.open"; readonly accepted: true }
+  | { readonly type: "agents.open"; readonly accepted: true }
+  | { readonly type: "agents.state"; readonly state: AgentsOverviewState }
+  | { readonly type: "agents.openSession"; readonly accepted: true }
+  | { readonly type: "agents.landSession"; readonly message: string }
   | { readonly type: "planner.open"; readonly accepted: true }
   | { readonly type: "planner.plans"; readonly plans: readonly PlanSummary[] }
   | { readonly type: "planner.state"; readonly state: PlannerStateDetail; readonly session: ChatSessionSummary | null }
@@ -732,6 +875,8 @@ export type PanelResponsePayload =
   | { readonly type: "planner.annotation.remove"; readonly removed: true }
   | { readonly type: "planner.artifact.rename"; readonly artifact: PlanArtifactSummary }
   | { readonly type: "planner.sendInstructions"; readonly accepted: true; readonly sentCount: number }
+  | { readonly type: "planner.subtaskCandidates"; readonly candidates: readonly string[]; readonly taskId?: string; readonly taskTitle?: string }
+  | { readonly type: "planner.materializeSubtasks"; readonly createdCount: number; readonly taskId: string }
   | { readonly type: "planner.regenerate"; readonly accepted: true }
   | { readonly type: "planner.openArtifact"; readonly accepted: true }
   | { readonly type: "planner.setPrototypeScripts"; readonly artifact: PlanArtifactSummary }
@@ -782,6 +927,13 @@ export type PanelPushPayload =
   | { readonly type: "taskReview.updated"; readonly taskId: string }
   | { readonly type: "editor.active"; readonly editor: ActiveEditorRef | null }
   | { readonly type: "board.changed" }
+  /** Coarse fleet invalidation: the Agents panel refetches agents.state. */
+  | { readonly type: "agents.changed" }
+  /**
+   * Sidebar navigation: another surface asked the control panel to show this
+   * session's chat (the planner.showPlan pattern; nodeId → Agents lens).
+   */
+  | { readonly type: "panel.showSession"; readonly sessionId: string; readonly nodeId?: string }
   /** Coarse invalidation: the planner webview refetches planner.state. */
   | { readonly type: "planner.changed"; readonly planId: string }
   /** Panel navigation: another surface asked the panel to show this plan. */
@@ -852,19 +1004,43 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const title = payload["title"];
       const description = payload["description"];
       const state = payload["state"];
+      const autoAnswerFaq = payload["autoAnswerFaq"];
       if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
       if (title !== undefined && !isBoundedString(title, MAX_NAME_LENGTH)) return null;
       // Empty string is allowed and clears the description.
       if (description !== undefined && (typeof description !== "string" || description.length > MAX_COMMENT_LENGTH)) return null;
       if (state !== undefined && !isWorkTaskState(state)) return null;
-      if (title === undefined && description === undefined && state === undefined) return null;
+      if (autoAnswerFaq !== undefined && typeof autoAnswerFaq !== "boolean") return null;
+      if (title === undefined && description === undefined && state === undefined && autoAnswerFaq === undefined) return null;
       return {
         type: "task.update",
         taskId,
         ...(title === undefined ? {} : { title }),
         ...(description === undefined ? {} : { description }),
-        ...(state === undefined ? {} : { state })
+        ...(state === undefined ? {} : { state }),
+        ...(autoAnswerFaq === undefined ? {} : { autoAnswerFaq })
       };
+    }
+    case "task.faq.list": {
+      const taskId = payload["taskId"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      return { type: "task.faq.list", taskId };
+    }
+    case "task.faq.add": {
+      const taskId = payload["taskId"];
+      const pattern = payload["pattern"];
+      const answer = payload["answer"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(pattern, MAX_NAME_LENGTH)) return null;
+      if (!isBoundedString(answer, MAX_COMMENT_LENGTH)) return null;
+      return { type: "task.faq.add", taskId, pattern, answer };
+    }
+    case "task.faq.remove": {
+      const taskId = payload["taskId"];
+      const faqId = payload["faqId"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(faqId, MAX_ID_LENGTH)) return null;
+      return { type: "task.faq.remove", taskId, faqId };
     }
     case "task.delete": {
       const taskId = payload["taskId"];
@@ -880,7 +1056,22 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
     }
     case "board.state":
     case "taskBoard.open":
+    case "agents.open":
+    case "agents.state":
+    case "recipes.list":
       return { type: payload["type"] };
+    case "agents.landSession": {
+      const sessionId = payload["sessionId"];
+      if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      return { type: "agents.landSession", sessionId };
+    }
+    case "agents.openSession": {
+      const sessionId = payload["sessionId"];
+      if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      const nodeId = payload["nodeId"];
+      if (nodeId !== undefined && !isBoundedString(nodeId, MAX_ID_LENGTH)) return null;
+      return { type: "agents.openSession", sessionId, ...(nodeId === undefined ? {} : { nodeId }) };
+    }
     case "board.moveCard": {
       const cardKind = payload["cardKind"];
       const id = payload["id"];
@@ -931,6 +1122,8 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const autoStart = payload["autoStart"];
       const columnId = payload["columnId"];
       const colorOverride = payload["colorOverride"];
+      const seedMode = payload["seedMode"];
+      const verified = payload["verified"];
       if (!isBoundedString(subtaskId, MAX_ID_LENGTH)) return null;
       if (title !== undefined && !isBoundedString(title, MAX_NAME_LENGTH)) return null;
       // Empty string is allowed and clears description/prompt.
@@ -939,9 +1132,12 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (autoStart !== undefined && typeof autoStart !== "boolean") return null;
       if (columnId !== undefined && !isBoundedString(columnId, MAX_ID_LENGTH)) return null;
       if (colorOverride !== undefined && colorOverride !== null && !isStripeIndex(colorOverride)) return null;
+      if (seedMode !== undefined && seedMode !== "local" && seedMode !== "upstream") return null;
+      if (verified !== undefined && typeof verified !== "boolean") return null;
       if (
         title === undefined && description === undefined && prompt === undefined
         && autoStart === undefined && columnId === undefined && colorOverride === undefined
+        && seedMode === undefined && verified === undefined
       ) return null;
       return {
         type: "subtask.update",
@@ -951,7 +1147,9 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
         ...(prompt === undefined ? {} : { prompt }),
         ...(autoStart === undefined ? {} : { autoStart }),
         ...(columnId === undefined ? {} : { columnId }),
-        ...(colorOverride === undefined ? {} : { colorOverride })
+        ...(colorOverride === undefined ? {} : { colorOverride }),
+        ...(seedMode === undefined ? {} : { seedMode }),
+        ...(verified === undefined ? {} : { verified })
       };
     }
     case "subtask.delete": {
@@ -980,6 +1178,13 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const taskId = payload["taskId"];
       if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
       return { type: "task.start", taskId };
+    }
+    case "task.createFromRecipe": {
+      const recipeId = payload["recipeId"];
+      const title = payload["title"];
+      if (!isBoundedString(recipeId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(title, MAX_NAME_LENGTH)) return null;
+      return { type: "task.createFromRecipe", recipeId, title };
     }
     case "task.link":
     case "task.unlink": {
@@ -1369,10 +1574,19 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       return { type: "planner.open", ...(planId === undefined ? {} : { planId }) };
     }
     case "planner.state":
-    case "planner.sendInstructions": {
+    case "planner.sendInstructions":
+    case "planner.subtaskCandidates": {
       const planId = payload["planId"];
       if (!isBoundedString(planId, MAX_ID_LENGTH)) return null;
       return { type: payload["type"], planId };
+    }
+    case "planner.materializeSubtasks": {
+      const planId = payload["planId"];
+      const titles = payload["titles"];
+      if (!isBoundedString(planId, MAX_ID_LENGTH)) return null;
+      if (!Array.isArray(titles) || titles.length === 0 || titles.length > 40) return null;
+      if (!titles.every((title) => isBoundedString(title, MAX_NAME_LENGTH))) return null;
+      return { type: "planner.materializeSubtasks", planId, titles };
     }
     case "planner.create": {
       const brief = payload["brief"];

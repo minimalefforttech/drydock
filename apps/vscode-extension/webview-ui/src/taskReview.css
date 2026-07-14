@@ -478,6 +478,18 @@ body {
   word-break: break-word;
 }
 
+/* ADR 0004: machine-authored comments wear a visible author badge. */
+.tr-author-agent {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-charts-purple, #b180d7);
+  color: var(--vscode-charts-purple, #b180d7);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.9em;
+}
+
 .tr-dock-status {
   align-self: flex-start;
   color: var(--vscode-dropdown-foreground);

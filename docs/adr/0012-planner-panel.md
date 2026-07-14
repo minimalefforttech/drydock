@@ -3,7 +3,8 @@
 Status: Accepted - 2026-07-10
 
 Refs: `docs/design/planner.md`, 0001 (mount-enforced access), 0006 (webview
-contract), 0011 (ack-then-push for slow host work)
+contract), 0007 (subtasks create separately from starts), 0011
+(ack-then-push for slow host work)
 
 ## Context
 
@@ -42,10 +43,16 @@ Planning becomes a place, not a mode. A single editor-area Planner panel
   (`block:` / `node:` / `point:` / `region:`) feeds one annotation model:
   open → delegated (composed into a single revision turn) → resolved/reopened.
 - The panel's chat rail renders through the **same transcript components as
-  the Chat tab** (`webview-ui/src/chat/`), extracted so the two surfaces
+  the Edit tab** (`webview-ui/src/chat/`), extracted so the two surfaces
   cannot drift.
+- A task-owned plan can materialize work through **To board**. Candidates are
+  only literal Markdown checkbox items in document artifacts (`- [ ]`,
+  `* [x]`, or numbered checkbox lines), deduplicated case-insensitively and
+  shown in a preview. There is no heading inference. Confirmed items become
+  backlog subtasks with plan-sourced prompts; auto-start stays off and no DAG
+  edges are invented. Orphan plans must be assigned to a task first.
 - The composer [Plan | Develop] switch and the per-session plan-docs surface
-  are retired. Chat sessions always run implementation mode; the internal
+  are retired. Edit sessions always run implementation mode; the internal
   `plan` mode literal survives for role spawns and Planner sessions — read-only
   stays mount-enforced (0001), never agent-sandbox-enforced.
 
@@ -62,3 +69,5 @@ Planning becomes a place, not a mode. A single editor-area Planner panel
   mitigations as its predecessor; prototype frames add no CSP relaxation.
 - Departments extend the aspect registry without code; aspect ids double as
   `plan/<aspectId>/` collection directories.
+- Re-running materialization may propose items that already became subtasks;
+  the preview is the current duplicate guard.

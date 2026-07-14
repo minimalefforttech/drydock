@@ -15,10 +15,9 @@ PR still remains the proper review before release, but this surface lets a
 developer review multi-project changes before pushing. The win is cognitive:
 one review surface instead of jumping between per-session chats and windows.
 
-**Task Review NEVER commits or pushes — PR stays the release gate.** The scope
-is cross-project Task Review ONLY. The role-based flow view is deferred
-to backlog (it visualizes multi-agent roles that don't exist yet — sessions
-are a single "worker" role today), as is plan-doc export.
+**Task Review NEVER commits or pushes — PR stays the release gate.** Its scope
+is cross-project review; fleet roles and session status live in the Agents
+panel, while plan export remains separate work.
 
 ## Design: a VIEW over existing state, not new storage
 
@@ -31,8 +30,8 @@ Everything aggregates what already exists; no new tables.
 | Changed files (clone sessions) | `IsolatedRunService.cloneState(sessionId)` → `CloneRepoState` per repo |
 | Diff viewing | `diff.openFile {baselineId, path}` → `vscode.diff` baseline↔current via `baselineContentProvider` (`drydock-baseline` scheme) |
 | Comments | `CodeReviewService` via `WorkspaceReviewAppService.reviewState/addComment/setCommentStatus` — per-session `current-session` review scope, statuses open/acknowledged/delegated/resolved/wont-fix/blocked |
-| Submit → revision loop | The plan-docs comment→turn composer, generalized into core `composeReviewCommentTurn` (shared with `PlanDocsAppService`) |
-| Panel shape | Editor-area `WebviewPanel` per task, modeled on `planDocsPanelProvider.ts` (strict CSP — no mermaid here, so no `unsafe-inline` deviation) |
+| Submit → revision loop | Core `composeReviewCommentTurn`, dispatching one guarded revision turn per owning session |
+| Panel shape | Editor-area `WebviewPanel` per task with strict CSP — no Mermaid here, so no `unsafe-inline` deviation |
 
 ### Comment anchor convention
 
@@ -46,6 +45,14 @@ either the qualified or the plain form, and Submit sends every open non-`plan:`
 comment regardless of form. Known cosmetic limit: a plain-path comment in a
 multi-root session badges same-named files in each root; the comment itself is
 sent once.
+
+### Authorship
+
+Review comments preserve who produced the finding: `user`, `agent-reviewer`,
+or `guard`. Webview comment creation always yields `user`; only trusted
+host-side reviewer/guard flows may choose a machine author. The dock labels
+non-user comments with an `agent` or `guard` badge, so automated findings are
+never visually attributed to the developer.
 
 ### "Reviewed" state (v1 decision)
 
@@ -118,8 +125,8 @@ For each linked session with ≥1 open non-`plan:` comment:
 1. Compose the revision turn with `composeReviewCommentTurn` (core): open
    comments as `- <repo>:<path>:<line[-range]> — <body>` under a `[host]`
    header; composing flips them to `delegated`.
-2. Live session: guard no-active-turn, then `sendChatTurn` detached (same
-   pattern as plan-docs send).
+2. Live session: guard no-active-turn, then `sendChatTurn` detached through
+   the standard session path.
 3. Ended/failed session: resume first via the existing
    `resumeChatSession` path with an auto workspace context (open folders,
    session's stored mode), then send. Sessions running elsewhere (fresh
@@ -170,4 +177,4 @@ rendering stays textContent-only with the strict control-panel CSP.
 
 - Clone-base content provider (`refs/sync/base`) for native clone-file diffs.
 - Explicit per-file "mark reviewed" persistence.
-- Role-based flow view; plan-doc export to repo (backlog).
+- Plan-doc export to repo (backlog).

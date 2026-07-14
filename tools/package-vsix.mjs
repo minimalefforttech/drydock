@@ -43,6 +43,8 @@ const stagedFiles = [
   "dist/webview/taskBoard.css",
   "dist/webview/planner.js",
   "dist/webview/planner.css",
+  "dist/webview/agents.js",
+  "dist/webview/agents.css",
   "media/icon.svg"
 ];
 for (const relativePath of stagedFiles) {
@@ -55,6 +57,8 @@ const stagedManifest = {
   displayName: sourceManifest.displayName,
   version: sourceManifest.version,
   publisher: sourceManifest.publisher,
+  description: sourceManifest.description,
+  repository: sourceManifest.repository,
   type: sourceManifest.type,
   main: sourceManifest.main,
   engines: sourceManifest.engines,
@@ -72,6 +76,8 @@ const stagedManifest = {
     "dist/webview/taskBoard.css",
     "dist/webview/planner.js",
     "dist/webview/planner.css",
+    "dist/webview/agents.js",
+    "dist/webview/agents.css",
     "media/icon.svg"
   ]
 };
@@ -81,11 +87,7 @@ await writeFile(
   `${JSON.stringify(stagedManifest, null, 2)}\n`,
   "utf8"
 );
-await writeFile(
-  path.join(stageRoot, "README.md"),
-  "# Drydock\n\nInternal stage VSIX package.\n",
-  "utf8"
-);
+await copyFile(path.join(extensionRoot, "README.md"), path.join(stageRoot, "README.md"));
 
 const vsixPath = path.join(outRoot, `${sourceManifest.name}-${sourceManifest.version}.vsix`);
 await rm(vsixPath, { force: true });
@@ -141,6 +143,8 @@ function assertPackagedFiles(stdout) {
     "extension/dist/webview/taskBoard.css",
     "extension/dist/webview/planner.js",
     "extension/dist/webview/planner.css",
+    "extension/dist/webview/agents.js",
+    "extension/dist/webview/agents.css",
     "extension/media/icon.svg"
   ]);
   for (const entry of required) {

@@ -14,6 +14,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as vscode from "vscode";
 import {
+  agentActivitySummaryOfTree,
   asId,
   parsePanelRequest,
   reduceAgentTree,
@@ -49,6 +50,7 @@ import type { BoardService, MemoryService, SubtaskService, TaskService } from "@
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import type { PlannerAppService } from "../services/plannerAppService.js";
 import { buildBoardState, decorateTaskSummary, joinOpenCommentCounts, reconcileColumns } from "./boardShared.js";
+import { promptAndSaveSubtaskSeedMode } from "./subtaskSeedPrompt.js";
 import { promptAndSaveTaskClonePolicy } from "./taskClonePolicyPrompt.js";
 import {
   toRuntimeSummary,
@@ -79,7 +81,7 @@ export function toChatSessionSummary(record: ChatSessionRecord, runningElsewhere
 }
 
 /** Display-safe projection of an agent question (records carry no host paths). */
-function toAgentQuestionSummary(record: AgentQuestionRecord): AgentQuestionSummary {
+export function toAgentQuestionSummary(record: AgentQuestionRecord): AgentQuestionSummary {
   return {
     questionId: record.questionId,
     sessionId: record.sessionId,
@@ -178,15 +180,19 @@ function taskLinkTarget(payload: { readonly workspaceSetId?: string; readonly se
     : { sessionId: payload.sessionId as string };
 }
 
-function usageTokens(usage: unknown): number | null {
-  if (typeof usage !== "object" || usage === null) return null;
-  const record = usage as Record<string, unknown>;
-  if (typeof record["totalTokens"] === "number") return record["totalTokens"];
-  const total = record["total"];
-  if (typeof total === "object" && total !== null && typeof (total as Record<string, unknown>)["totalTokens"] === "number") {
-    return (total as Record<string, unknown>)["totalTokens"] as number;
-  }
-  return null;
+/**
+ * A session runs "elsewhere" when it is stored active/starting, is not live
+ * in this host process, carries a fresh heartbeat, and is owned by a
+ * different host instance (ADR 0008). Exported so every surface (sidebar,
+ * Agents panel) applies the identical read-only posture test.
+ */
+export function isSessionRunningElsewhere(appService: IsolatedRunService, record: ChatSessionRecord): boolean {
+  const storedActive = record.status === "active" || record.status === "starting";
+  return storedActive
+    && !appService.isChatSessionLive(record.sessionId)
+    && appService.isHeartbeatFresh(record.heartbeatAt)
+    && record.hostInstanceId !== undefined
+    && record.hostInstanceId !== appService.hostInstanceId;
 }
 
 export class ControlPanelProvider implements vscode.WebviewViewProvider {
@@ -203,12 +209,22 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   private readonly attention = new Map<string, Set<SessionAttentionReason>>();
   /** Seeded once so a reloaded webview re-derives startup pending-request attention. */
   private attentionSeeded = false;
+  /** Seeded independently when the Work tab first requests pending questions. */
+  private questionAttentionSeeded = false;
   /**
    * Live subagent summaries per session, folded from the bus agent-events this
    * host streams. Sessions running in another window stream nothing here, so
    * their chip stays empty (read-only posture).
    */
   private readonly agentActivity = new Map<string, { sources: AgentTreeSource[] }>();
+  /**
+   * A session another surface (the Agents panel) asked us to show before the
+   * webview booted. The webview always fetches session.list on boot; the
+   * pending navigation flushes as a panel.showSession push right after that
+   * response, so it can never race a not-yet-listening document (the
+   * planner's pendingShowPlanId pattern).
+   */
+  private pendingShowSession: { readonly sessionId: string; readonly nodeId?: string } | null = null;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -225,6 +241,23 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     vscode.window.onDidChangeActiveTextEditor(() => {
       this.push({ type: "editor.active", editor: this.activeEditorRef() ?? null });
     });
+  }
+
+  /**
+   * Navigation entry point for other surfaces (the Agents panel): reveal the
+   * sidebar and land the Chat tab on this session (nodeId → Agents lens).
+   * With no live webview yet, the navigation parks until the fresh view's
+   * boot session.list proves it is listening.
+   */
+  showSession(sessionId: string, nodeId?: string): void {
+    const target = { sessionId, ...(nodeId === undefined ? {} : { nodeId }) };
+    // Focus is best-effort: the push is what carries the navigation.
+    void vscode.commands.executeCommand("drydock.controlPanel.focus").then(undefined, () => undefined);
+    if (this.view === undefined) {
+      this.pendingShowSession = target;
+      return;
+    }
+    this.push({ type: "panel.showSession", ...target });
   }
 
   /** The active file-scheme editor as a display-safe ref, or undefined. */
@@ -301,6 +334,12 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // card in the panel, badge + toast via the attention path.
         this.push({ type: "question.asked", question: toAgentQuestionSummary(event.question) });
         void this.flagAttention(event.question.sessionId, "question", "asked a question");
+        return;
+      case "question-resolved":
+        // Resolutions may originate in any surface (including FAQ automation),
+        // so the bus is the single source for removing cards and attention.
+        this.push({ type: "question.resolved", question: toAgentQuestionSummary(event.question) });
+        void this.settleQuestionAttention(event.question.sessionId);
         return;
       case "memory-candidate-added":
         // A proposed memory is not urgent: forward the display-safe summary as
@@ -579,6 +618,12 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         const appService = this.requireBackend();
         const sessions = await appService.listChatSessions();
         this.respond(request.requestId, { type: "session.list", sessions: sessions.map((session) => this.decorateSessionSummary(session)) });
+        if (this.pendingShowSession !== null) {
+          // The webview is provably alive (it just asked); deliver the
+          // navigation another surface queued before the view existed.
+          this.push({ type: "panel.showSession", ...this.pendingShowSession });
+          this.pendingShowSession = null;
+        }
         return;
       }
       case "session.rename": {
@@ -746,11 +791,29 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         await tasks.updateTask(payload.taskId, {
           ...(payload.title === undefined ? {} : { title: payload.title }),
           ...(payload.description === undefined ? {} : { description: payload.description }),
-          ...(payload.state === undefined ? {} : { state: payload.state })
+          ...(payload.state === undefined ? {} : { state: payload.state }),
+          ...(payload.autoAnswerFaq === undefined ? {} : { autoAnswerFaq: payload.autoAnswerFaq })
         });
         const summary = await this.requireTaskSummary(tasks, payload.taskId);
         this.respond(request.requestId, { type: "task.update", task: summary });
         this.push({ type: "task.updated", task: summary });
+        return;
+      }
+      case "task.faq.list": {
+        const faqs = await this.requireTasks().listFaqs(payload.taskId);
+        this.respond(request.requestId, { type: "task.faq.list", faqs });
+        return;
+      }
+      case "task.faq.add": {
+        const tasks = this.requireTasks();
+        await tasks.addFaq(payload.taskId, payload.pattern, payload.answer);
+        this.respond(request.requestId, { type: "task.faq.add", faqs: await tasks.listFaqs(payload.taskId) });
+        return;
+      }
+      case "task.faq.remove": {
+        const tasks = this.requireTasks();
+        await tasks.removeFaq(payload.taskId, payload.faqId);
+        this.respond(request.requestId, { type: "task.faq.remove", faqs: await tasks.listFaqs(payload.taskId) });
         return;
       }
       case "task.delete": {
@@ -780,6 +843,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "question.list": {
         const questions = await this.requireQuestions().listQuestions("pending");
         this.respond(request.requestId, { type: "question.list", questions: questions.map(toAgentQuestionSummary) });
+        this.seedPendingQuestionAttention(questions);
         return;
       }
       case "question.answer": {
@@ -799,15 +863,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
             `[host] The developer answered your question.\nQ: ${record.question}\nA: ${record.answer ?? ""}\nContinue with this answer.`
           );
         }
-        await this.settleQuestionAttention(record.sessionId);
-        this.push({ type: "question.resolved", question: toAgentQuestionSummary(record) });
         this.respond(request.requestId, { type: "question.answer", question: toAgentQuestionSummary(record), dispatched });
         return;
       }
       case "question.dismiss": {
         const record = await this.requireQuestions().dismiss(asId<"AgentQuestionId">(payload.questionId));
-        await this.settleQuestionAttention(record.sessionId);
-        this.push({ type: "question.resolved", question: toAgentQuestionSummary(record) });
         this.respond(request.requestId, { type: "question.dismiss", question: toAgentQuestionSummary(record) });
         return;
       }
@@ -974,6 +1034,18 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         const appService = this.requireCloneSession(payload.sessionId);
         // Contracts enforce the repo+path XOR rule; a full pull names neither.
         const result = await appService.clonePull(payload.sessionId, payload.repo, payload.path);
+        // Landing (ADR 0014): a full pull moved this session's captured output
+        // into local HEAD, so its changesets stop seeding dependents. Per-file
+        // pulls never land (the sync base did not advance). Bookkeeping only —
+        // a failure logs and never un-pulls.
+        if (payload.path === undefined && this.backend.available) {
+          void this.backend.changesets.markLandedBySession(payload.sessionId, payload.repo).catch((error: unknown) => {
+            this.logger.warn("changeset landing bookkeeping failed", {
+              sessionId: payload.sessionId,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
+        }
         this.respond(request.requestId, { type: "clone.pull", result });
         return;
       }
@@ -1035,14 +1107,17 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
           throw new Error(`Subtask ${payload.subtaskId} was not found.`);
         }
         const hasFieldUpdate = payload.title !== undefined || payload.description !== undefined
-          || payload.prompt !== undefined || payload.autoStart !== undefined || payload.colorOverride !== undefined;
+          || payload.prompt !== undefined || payload.autoStart !== undefined || payload.colorOverride !== undefined
+          || payload.seedMode !== undefined || payload.verified !== undefined;
         if (hasFieldUpdate) {
           await this.requireSubtasks().updateSubtask(payload.subtaskId, {
             ...(payload.title === undefined ? {} : { title: payload.title }),
             ...(payload.description === undefined ? {} : { description: payload.description }),
             ...(payload.prompt === undefined ? {} : { prompt: payload.prompt }),
             ...(payload.autoStart === undefined ? {} : { autoStart: payload.autoStart }),
-            ...(payload.colorOverride === undefined ? {} : { colorOverride: payload.colorOverride })
+            ...(payload.colorOverride === undefined ? {} : { colorOverride: payload.colorOverride }),
+            ...(payload.seedMode === undefined ? {} : { seedMode: payload.seedMode }),
+            ...(payload.verified === undefined ? {} : { verified: payload.verified })
           });
         }
         if (payload.columnId !== undefined) {
@@ -1093,6 +1168,12 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
           this.respond(request.requestId, { type: "subtask.start", accepted: false });
           return;
         }
+        // Seed choice (ADR 0014): prompts only when upstreams exist and no
+        // seedMode is stored yet; the pick persists on the subtask.
+        if (!(await promptAndSaveSubtaskSeedMode(backend, payload.subtaskId))) {
+          this.respond(request.requestId, { type: "subtask.start", accepted: false });
+          return;
+        }
         await backend.orchestrator.startSubtask(payload.subtaskId, { force: payload.force === true });
         this.respond(request.requestId, { type: "subtask.start", accepted: true });
         return;
@@ -1105,6 +1186,21 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         }
         await backend.orchestrator.startTask(payload.taskId);
         this.respond(request.requestId, { type: "task.start", accepted: true });
+        return;
+      }
+      case "recipes.list": {
+        const backend = this.requireBackendReady();
+        const recipes = await backend.recipes.listRecipes();
+        this.respond(request.requestId, { type: "recipes.list", recipes });
+        return;
+      }
+      case "task.createFromRecipe": {
+        // Materializes task + subtasks + DAG with per-role defaults; never starts.
+        const backend = this.requireBackendReady();
+        const created = await backend.recipes.materializeTask(payload.recipeId, payload.title);
+        const summary = await this.requireTaskSummary(this.requireTasks(), created.taskId);
+        this.respond(request.requestId, { type: "task.createFromRecipe", task: summary });
+        this.push({ type: "task.updated", task: summary });
         return;
       }
       case "planner.open": {
@@ -1173,6 +1269,18 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         });
         return;
       }
+      case "agents.open": {
+        this.requireBackend();
+        try {
+          await vscode.commands.executeCommand("drydock.agents.open");
+          this.respond(request.requestId, { type: "agents.open", accepted: true });
+        } catch {
+          // Defensive: the command registers during activation; surface a
+          // readable error if the relay ever beats registration.
+          this.respondError(request.requestId, "Agents panel not available yet.");
+        }
+        return;
+      }
       case "taskBoard.open": {
         this.requireBackend();
         try {
@@ -1235,30 +1343,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   private agentActivitySummary(sessionId: string): AgentActivitySummary {
     const entry = this.agentActivity.get(sessionId);
     if (entry === undefined) return { running: 0, failed: 0 };
-    const tree = reduceAgentTree(entry.sources);
-    const agents = tree.nodes
-      .filter((node) => node.kind === "native")
-      .map((node) => {
-        const tokens = usageTokens(node.usage);
-        return {
-          nodeId: node.nodeId,
-          ...(node.parentId === undefined ? {} : { parentNodeId: node.parentId }),
-          label: node.label,
-          status: node.status,
-          ...(node.startedAt === undefined ? {} : { startedAt: node.startedAt }),
-          ...(node.endedAt === undefined ? {} : { endedAt: node.endedAt }),
-          ...(node.lastActivityAt === undefined ? {} : { lastActivityAt: node.lastActivityAt }),
-          ...(node.lastActivity === undefined ? {} : { lastActivity: node.lastActivity }),
-          ...(node.lastCommand === undefined ? {} : { lastCommand: node.lastCommand }),
-          toolUses: node.counts.toolCalls + node.counts.commands + node.counts.fileEdits,
-          ...(tokens === null ? {} : { tokens })
-        };
-      });
-    const running = agents.filter((agent) => agent.status === "running").length;
-    const failed = agents.filter((agent) => agent.status === "failed").length;
-    return agents.length === 0
-      ? { running, failed }
-      : { running, failed, agents };
+    // Shared projection (contracts): the Agents panel folds the same events
+    // through the same function, so chips and fleet rows cannot disagree.
+    return agentActivitySummaryOfTree(reduceAgentTree(entry.sources));
   }
 
   /**
@@ -1286,13 +1373,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     if (!this.backend.available) {
       return false;
     }
-    const appService = this.backend.appService;
-    const storedActive = record.status === "active" || record.status === "starting";
-    return storedActive
-      && !appService.isChatSessionLive(record.sessionId)
-      && appService.isHeartbeatFresh(record.heartbeatAt)
-      && record.hostInstanceId !== undefined
-      && record.hostInstanceId !== appService.hostInstanceId;
+    return isSessionRunningElsewhere(this.backend.appService, record);
   }
 
   private async resolveWorkspace(selection: ChatWorkspaceSelection | undefined): Promise<ChatWorkspaceContext | undefined> {
@@ -1715,6 +1796,25 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     if (changed) {
       this.refreshAttentionBadge();
     }
+  }
+
+  /** Re-derives durable question attention after a panel/window reload. */
+  private seedPendingQuestionAttention(
+    questions: readonly { readonly sessionId: string; readonly status: string }[]
+  ): void {
+    if (this.questionAttentionSeeded) return;
+    this.questionAttentionSeeded = true;
+    let changed = false;
+    for (const question of questions) {
+      if (question.status !== "pending") continue;
+      const reasons = this.attention.get(question.sessionId) ?? new Set<SessionAttentionReason>();
+      if (reasons.has("question")) continue;
+      reasons.add("question");
+      this.attention.set(question.sessionId, reasons);
+      this.pushAttention(question.sessionId);
+      changed = true;
+    }
+    if (changed) this.refreshAttentionBadge();
   }
 
   /** Pushes a session's current attention reasons (empty when it was dropped). */

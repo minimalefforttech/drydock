@@ -14,6 +14,9 @@ isolation, and nothing launches until you release it.
 - **Blast-radius approvals** — agents request host paths via a strict fenced
   protocol; risk-tiered cards (typed confirm for rw/sensitive), default-denied
   credential roots, per-session grants ledger.
+- **Studio guardrails** — an OS-managed policy can cap AI project roots,
+  require clone-only work, omit sensitive repo paths, and enable networked AI
+  only on allocated workstations; personal settings may narrow it further.
 - **Work management** — tasks linking sessions + workspace sets, live
   workspace switching, multi-window awareness, memory candidates with human
   review.
@@ -59,11 +62,12 @@ node tools/webview-harness/server.mjs             # visual harness on :8971
 
 ## Reading order
 
-1. [docs/adr/](docs/adr/README.md) — the fifteen decisions that shape everything.
+1. [docs/adr/](docs/adr/README.md) — the decisions that shape the product.
 2. [docs/design/roadmap.md](docs/design/roadmap.md) — what's shipped and what's next (see the [design docs index](docs/design/README.md) for the rest).
 3. [docs/design/threat-model.md](docs/design/threat-model.md) — what we defend against and what we deliberately don't.
-4. [docs/design/workflow-scenarios.md](docs/design/workflow-scenarios.md) — day-in-the-life flows + the B4 friction rule.
+4. [docs/design/studio-security-policy.md](docs/design/studio-security-policy.md) — managed project, clone, omission, and machine-allocation controls.
+5. [docs/design/workflow-scenarios.md](docs/design/workflow-scenarios.md) — day-in-the-life flows + the B4 friction rule.
 
-Status: pre-release (0.1.0). Core capability set above is implemented and
-covered by the automated test suite; next planned work is external provider
-support and remote execution.
+Status: VSIX-only pre-release (extension 0.7.0; internal packages 0.4.0).
+The core capability set above is implemented and covered by the automated test
+suite; external provider support and remote execution remain roadmap work.

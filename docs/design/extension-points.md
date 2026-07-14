@@ -16,7 +16,8 @@ These areas need explicit planning and validation beyond code execution:
 - Product-owned workspace sets that can be switched independently of the current VS Code workspace.
 - Task work sessions that record when a task was worked on, in which workspace set, and with which runtime/diff/test artifacts.
 - A day planner for mapping tasks to days, pushing tasks, tracking multi-day work, and recording notes for unexpected interruptions.
-- Prompt history, run history, plan blocks, changed files, tests, and memory linked back to tasks.
+- Prompt history, run history, plans, changed files, tests, and memory linked
+  back to tasks.
 - Schema-bound extension points for task providers, agent providers, runtime adapters, panel providers, memory providers, and test providers.
 - Provider auth, token references, OAuth/API-token configuration, and no raw secret persistence.
 - Model profile declarations for role suitability, cost class, context budget, network needs, auth refs, and output schemas.
@@ -47,7 +48,7 @@ interface TaskRecord {
   relatedTaskIds: TaskId[];
   promptHistoryRefs: string[];
   runIds: RunId[];
-  planBlockIds: PlanBlockId[];
+  planIds: PlanId[];
   changedFileRefs: string[];
   testRunIds: string[];
   memoryRefs: string[];
@@ -93,7 +94,8 @@ interface TaskProvider {
 Provider events must normalize:
 
 - Remote task created, updated, deleted, assigned, labeled, commented, transitioned, linked, or unlinked.
-- Local task activated, deactivated, associated with a folder, linked to a run, linked to a plan block, linked to a memory item, or linked to a changed file.
+- Local task activated, deactivated, associated with a folder, linked to a run,
+  linked to a plan, linked to a memory item, or linked to a changed file.
 - Sync conflict detected, resolved locally, resolved remotely, or left blocked for user decision.
 
 ## Required Task Providers
@@ -108,7 +110,8 @@ Validation:
 
 - Create tasks with multiple project folders.
 - Activate/deactivate tasks and update workspace policy input.
-- Link prompts, plan blocks, runs, changed files, memory, automated tests, and HITL requests.
+- Link prompts, plans, runs, changed files, memory, automated tests, and HITL
+  requests.
 - Detect related tasks by shared folder and changed file refs.
 - Work without network, credentials, or external APIs.
 

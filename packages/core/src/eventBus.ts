@@ -29,7 +29,11 @@ export type ProductBusEvent =
   | { readonly kind: "session-updated"; readonly session: ChatSessionRecord }
   | { readonly kind: "session-deleted"; readonly sessionId: SessionId }
   | { readonly kind: "access-requested"; readonly request: AccessRequestRecord }
+  /** A pending access request was approved or denied (any surface). */
+  | { readonly kind: "access-resolved"; readonly request: AccessRequestRecord }
   | { readonly kind: "question-asked"; readonly question: AgentQuestionRecord }
+  /** A pending agent question was answered or dismissed (any surface). */
+  | { readonly kind: "question-resolved"; readonly question: AgentQuestionRecord }
   | { readonly kind: "memory-candidate-added"; readonly candidate: MemoryCandidateRecord }
   | { readonly kind: "inventory-changed" }
   | { readonly kind: "card-entered-done"; readonly taskId: TaskId; readonly subtaskId: SubtaskId }

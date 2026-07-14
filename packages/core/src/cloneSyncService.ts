@@ -13,7 +13,7 @@
  * applied relative to it.
  */
 
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -23,6 +23,7 @@ import type {
   CommandRunner,
   DiffChangeKind
 } from "@drydock/contracts";
+import { isPathWithin, sensitivePathMatch } from "./mountPolicy.js";
 
 /** Fixed committer identity for sync commits — never depend on host git config. */
 const SYNC_AUTHOR = ["-c", "user.name=clone-sync", "-c", "user.email=clone-sync@localhost"] as const;
@@ -51,6 +52,29 @@ export interface InitCloneInput {
   readonly name: string;
   /** carry overlays tracked/untracked working state; fresh uses current local HEAD only. */
   readonly dirtyHandling?: "carry" | "fresh";
+  /** Paths that must never be copied from the developer repo into the clone. */
+  readonly omission?: ClonePathOmission;
+  /**
+   * Upstream changeset patches to 3-way apply into the fresh clone BEFORE the
+   * sync base freezes (ADR 0014). Applying pre-base keeps the clone's own
+   * outbound delta scoped to work done IN this clone — a dependent's later
+   * changeset never re-carries its upstream's content. A conflicting seed
+   * throws (honest failed start), naming the seed's label.
+   */
+  readonly seedPatches?: readonly InitCloneSeedPatch[];
+}
+
+/** Small, deliberately non-glob clone filter: a safe preset plus exact path prefixes. */
+export interface ClonePathOmission {
+  readonly sensitive: boolean;
+  readonly paths: readonly string[];
+}
+
+/** One upstream patch seeded into a fresh clone at init (ADR 0014). */
+export interface InitCloneSeedPatch {
+  /** Names the source in conflict errors (e.g. "subtask-x/repo"). */
+  readonly label: string;
+  readonly patch: string;
 }
 
 /** Read-only facts shown before a task starts cloning a repository. */
@@ -150,6 +174,14 @@ export class CloneSyncService {
     const dirtyHandling = input.dirtyHandling ?? "carry";
     const clonePath = join(cloneParentDir, name);
 
+    // A normal clone copies every reachable object. If an omitted path was ever
+    // tracked, deleting it from the checkout would be cosmetic: the agent could
+    // recover it from .git. Refuse before copying any objects instead.
+    await this.assertOmissionSafeSource(localRepoPath, input.omission);
+    for (const seed of input.seedPatches ?? []) {
+      assertPathsNotOmitted(parseDiffPaths(seed.patch), input.omission, `upstream changeset ${seed.label}`);
+    }
+
     // The clone target's parent must exist before `git clone` runs there (the
     // command's cwd is `cloneParentDir`, and spawn requires an existing cwd).
     await mkdir(cloneParentDir, { recursive: true });
@@ -173,9 +205,17 @@ export class CloneSyncService {
     //
     // `git clone -b` only accepts a branch/tag NAME, never a raw commit id, so
     // a detached HEAD is cloned without -b and then checked out at the commit.
+    // With omissions, force Git's normal local transport. `--local` copies the
+    // source object directory and can carry unreachable/dangling secret blobs;
+    // `--no-local` transfers only objects reachable from advertised refs (all
+    // of which the history scan above checked). It still uses the local path and
+    // performs no network I/O.
+    const cloneIsolationArgs = hasCloneOmissions(input.omission)
+      ? ["--no-local"]
+      : ["--local", "--no-hardlinks"];
     const cloneArgs = detached
-      ? [...SYNC_AUTHOR, "clone", "--local", "--no-hardlinks", "--no-checkout", localRepoPath, clonePath]
-      : [...SYNC_AUTHOR, "clone", "--local", "--no-hardlinks", "-b", branch, localRepoPath, clonePath];
+      ? [...SYNC_AUTHOR, "clone", ...cloneIsolationArgs, "--no-checkout", localRepoPath, clonePath]
+      : [...SYNC_AUTHOR, "clone", ...cloneIsolationArgs, "-b", branch, localRepoPath, clonePath];
     await this.git0(cloneArgs, cloneParentDir, "clone local repo");
     if (detached) {
       await this.gitIn(clonePath, ["checkout", "--detach", branch], "checkout detached commit in clone");
@@ -199,9 +239,32 @@ export class CloneSyncService {
         "list local untracked files"
       );
       for (const rel of splitZ(untracked.stdout)) {
+        if (pathMatchesCloneOmission(rel, input.omission)) continue;
+        await assertSafeUntrackedCopy(localRepoPath, clonePath, rel);
         const src = join(localRepoPath, rel);
         const dest = join(clonePath, rel);
         await copyFileThrough(src, dest);
+      }
+    }
+
+    // Seed upstream changesets (ADR 0014): strict 3-way apply, one patch at a
+    // time so a failure names its source. Runs BEFORE the base freeze so the
+    // seeded content becomes part of refs/sync/base — the clone's own outbound
+    // delta stays scoped to work done here, never re-carrying upstream output.
+    for (const seed of input.seedPatches ?? []) {
+      if (seed.patch.length === 0) continue;
+      const dir = await mkdtemp(join(tmpdir(), "clone-seed-"));
+      const seedFile = join(dir, "seed.diff");
+      try {
+        await writeFile(seedFile, seed.patch, "utf8");
+        await this.applyPatchFile(
+          clonePath,
+          seedFile,
+          ["--binary", "--3way", "--whitespace=nowarn"],
+          `seed upstream changeset ${seed.label}`
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
       }
     }
 
@@ -275,6 +338,32 @@ export class CloneSyncService {
   }
 
   /**
+   * The clone's durable outbound patch (ADR 0014): commit agent progress,
+   * then `diff --binary refs/sync/base..HEAD` — byte-for-byte what a full
+   * pull would apply, so a captured changeset and a later manual Pull can
+   * never disagree. Returns null when there is nothing to capture. Does NOT
+   * advance the sync base (capture must not change pull semantics).
+   */
+  async outboundChangesetPatch(
+    clonePath: string,
+    omission?: ClonePathOmission
+  ): Promise<{ readonly patch: string; readonly fileCount: number; readonly paths: readonly string[] } | null> {
+    await this.commitAgentProgress(clonePath, "[sync] agent");
+    const prepared = await this.diffToFile(clonePath, ["diff", "--binary", "refs/sync/base", "HEAD"], "build changeset patch");
+    try {
+      if (prepared.bytes === 0) return null;
+      // Git binary hunks are base85 ASCII, so the whole patch file is utf8-safe.
+      const patch = await readFile(prepared.patchFile, "utf8");
+      // Paths ride along for the landing overlap pre-check (ADR 0014).
+      const paths = await this.patchPaths(clonePath, undefined);
+      assertPathsNotOmitted(paths, omission, "clone changeset");
+      return { patch, fileCount: paths.length, paths };
+    } finally {
+      await prepared.cleanup();
+    }
+  }
+
+  /**
    * Inbound — "pull the agent's work into my editor".
    *
    * Commits agent progress if the clone tree is dirty, builds
@@ -295,7 +384,7 @@ export class CloneSyncService {
   async inboundPatch(
     clonePath: string,
     localRepoPath: string,
-    opts?: { path?: string }
+    opts?: { path?: string; omission?: ClonePathOmission }
   ): Promise<CloneSyncResult> {
     await this.commitAgentProgress(clonePath, "[sync] agent");
 
@@ -311,18 +400,28 @@ export class CloneSyncService {
         return { appliedFiles: 0, conflictedFiles: [], message: "nothing to pull" };
       }
 
+      const touched = await this.patchPaths(clonePath, path);
+      assertPathsNotOmitted(touched, opts?.omission, "clone pull");
+      // Snapshot marker state BEFORE the first apply attempt. The fallback may
+      // observe markers written by that whole-patch attempt, but literal marker
+      // text that was already in the developer's file is not proof that this
+      // pull transferred anything.
+      const conflictMarkersBefore = new Map<string, boolean>();
+      for (const touchedPath of touched) {
+        conflictMarkersBefore.set(touchedPath, await this.hasConflictMarkers(localRepoPath, touchedPath));
+      }
       const applyArgs = ["--binary", "--3way", "--whitespace=nowarn", ...(path === undefined ? [] : [`--include=${path}`])];
       const apply = await this.tryApplyPatchFile(localRepoPath, patch.patchFile, applyArgs);
 
       if (apply.exitCode === 0) {
-        const touched = await this.patchPaths(clonePath, path);
         appliedFiles = touched.length;
-        conflictedFiles = await this.scanConflicts(localRepoPath, touched);
+        const markersAfter = await this.scanConflicts(localRepoPath, touched);
+        conflictedFiles = markersAfter.filter((touchedPath) => conflictMarkersBefore.get(touchedPath) !== true);
       } else {
         // A 3-way apply that hits conflicts still writes what it could (with
         // markers) but exits non-zero. It may also fail because some files were
         // already applied by a prior per-file pull. Fall back to per-file.
-        const fallback = await this.perFileInboundFallback(clonePath, localRepoPath, path);
+        const fallback = await this.perFileInboundFallback(clonePath, localRepoPath, touched, conflictMarkersBefore);
         appliedFiles = fallback.appliedFiles;
         conflictedFiles = fallback.conflictedFiles;
       }
@@ -355,8 +454,16 @@ export class CloneSyncService {
    * content). Commit `[sync] local`, advance `sync/base`. Conflicts land as
    * markers in the CLONE — the agent resolves them.
    */
-  async outboundSync(clonePath: string, localRepoPath: string): Promise<CloneSyncResult> {
+  async outboundSync(
+    clonePath: string,
+    localRepoPath: string,
+    omission?: ClonePathOmission
+  ): Promise<CloneSyncResult> {
     await this.commitAgentProgress(clonePath, "[sync] agent");
+
+    // Re-check before every local -> clone sync. This occurs before `fetch`, so
+    // newly committed forbidden objects never enter the agent's object store.
+    await this.assertOmissionSafeSource(localRepoPath, omission);
 
     const branch = await this.resolveCloneBranch(clonePath);
 
@@ -409,6 +516,8 @@ export class CloneSyncService {
     );
     let untrackedCopied = 0;
     for (const rel of splitZ(untracked.stdout)) {
+      if (pathMatchesCloneOmission(rel, omission)) continue;
+      await assertSafeUntrackedCopy(localRepoPath, clonePath, rel);
       const src = join(localRepoPath, rel);
       const dest = join(clonePath, rel);
       if (await copyIfDifferent(src, dest)) {
@@ -433,6 +542,30 @@ export class CloneSyncService {
       untrackedCopied,
       message: describeSync("Pushed", appliedFiles, conflictedFiles, undefined, untrackedCopied)
     };
+  }
+
+  /** Fails when an omitted path exists in the index or any reachable history. */
+  private async assertOmissionSafeSource(localRepoPath: string, omission?: ClonePathOmission): Promise<void> {
+    if (!hasCloneOmissions(omission)) return;
+    // Ask Git to emit ONLY matching paths. CommandRunner deliberately caps
+    // captured output, so scanning an unfiltered large repository could miss a
+    // forbidden path after the cap. A non-empty filtered result is sufficient.
+    const pathspecs = gitPathspecsForCloneOmission(omission);
+    const tracked = await this.gitIn(
+      localRepoPath,
+      ["ls-files", "-z", "--", ...pathspecs],
+      "scan tracked paths for clone omissions"
+    );
+    assertPathsNotOmitted(splitZ(tracked.stdout), omission, "tracked project content");
+    const history = await this.gitIn(
+      localRepoPath,
+      ["log", "--all", "--format=", "--name-only", "-z", "--", ...pathspecs],
+      "scan repository history for clone omissions"
+    );
+    const historicalPaths = splitZ(history.stdout)
+      .map((entry) => entry.replace(/^[\r\n]+/, ""))
+      .filter((entry) => entry.length > 0);
+    assertPathsNotOmitted(historicalPaths, omission, "repository history");
   }
 
   /**
@@ -485,9 +618,9 @@ export class CloneSyncService {
   private async perFileInboundFallback(
     clonePath: string,
     localRepoPath: string,
-    scopedPath: string | undefined
+    paths: readonly string[],
+    conflictMarkersBefore: ReadonlyMap<string, boolean>
   ): Promise<{ appliedFiles: number; conflictedFiles: readonly string[] }> {
-    const paths = await this.patchPaths(clonePath, scopedPath);
     let appliedFiles = 0;
     const conflictedFiles: string[] = [];
 
@@ -508,15 +641,23 @@ export class CloneSyncService {
           appliedFiles += 1;
           continue;
         }
-        await this.tryApplyPatchFile(
+        const apply = await this.tryApplyPatchFile(
           localRepoPath,
           filePatch.patchFile,
           ["--binary", "--3way", "--whitespace=nowarn", `--include=${path}`]
         );
+        // A non-zero 3-way apply is acceptable only when it demonstrably
+        // transferred a textual conflict into the working tree. Binary
+        // conflicts and other failures leave no markers; counting those as
+        // applied would let the full-pull caller advance refs/sync/base and
+        // silently discard the still-untransferred agent delta.
+        const hasConflictMarkers = await this.hasConflictMarkers(localRepoPath, path);
+        const introducedConflictMarkers = hasConflictMarkers && conflictMarkersBefore.get(path) !== true;
+        if (apply.exitCode !== 0 && !introducedConflictMarkers) {
+          throw gitError(`apply inbound patch for ${path}`, localRepoPath, apply);
+        }
         appliedFiles += 1;
-        // Whether apply exited 0 or not, a conflict is defined by markers left
-        // in the local file (a 3-way apply writes what it can before exiting).
-        if (await this.hasConflictMarkers(localRepoPath, path)) {
+        if (introducedConflictMarkers) {
           conflictedFiles.push(path);
         }
       } finally {
@@ -841,7 +982,10 @@ async function patchPathsFromFile(patchFile: string): Promise<string[]> {
 function parseDiffPaths(patch: string): string[] {
   const paths = new Set<string>();
   for (const line of patch.split("\n")) {
-    if (line.startsWith("+++ ")) {
+    if (line.startsWith("diff --git a/")) {
+      const match = /^diff --git a\/(.+) b\/(.+)$/.exec(line.trim());
+      if (match?.[2] !== undefined) paths.add(stripDiffPrefix(match[2]));
+    } else if (line.startsWith("+++ ")) {
       const raw = line.slice(4).trim();
       if (raw === "/dev/null") continue;
       paths.add(stripDiffPrefix(raw));
@@ -857,6 +1001,54 @@ function parseDiffPaths(patch: string): string[] {
 function stripDiffPrefix(raw: string): string {
   if (raw.startsWith("a/") || raw.startsWith("b/")) return raw.slice(2);
   return raw;
+}
+
+/** True when a repo-relative path matches the sensitive preset or an exact prefix. */
+export function pathMatchesCloneOmission(candidate: string, omission?: ClonePathOmission): boolean {
+  if (!hasCloneOmissions(omission)) return false;
+  const normalized = candidate.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+  if (omission.sensitive && sensitivePathMatch(normalized) !== null) return true;
+  const candidateKey = process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  return omission.paths.some((configured) => {
+    const normalizedConfigured = configured.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+    const configuredKey = process.platform === "win32" ? normalizedConfigured.toLowerCase() : normalizedConfigured;
+    return candidateKey === configuredKey || candidateKey.startsWith(`${configuredKey}/`);
+  });
+}
+
+function hasCloneOmissions(omission?: ClonePathOmission): omission is ClonePathOmission {
+  return omission !== undefined && (omission.sensitive || omission.paths.length > 0);
+}
+
+const SENSITIVE_GIT_GLOBS: readonly string[] = [
+  "**/.ssh", "**/.ssh/**", "**/.aws", "**/.aws/**", "**/.gnupg", "**/.gnupg/**",
+  "**/.kube", "**/.kube/**", "**/.azure", "**/.azure/**", "**/.docker", "**/.docker/**",
+  "**/secrets", "**/secrets/**",
+  "**/.env", "**/.env.*", "**/id_rsa*", "**/id_ed25519*", "**/id_ecdsa*",
+  "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx",
+  "**/credentials", "**/credentials.json", "**/.netrc", "**/.npmrc", "**/.pypirc"
+];
+
+/** Git-native filters equivalent to pathMatchesCloneOmission, avoiding unbounded output. */
+function gitPathspecsForCloneOmission(omission: ClonePathOmission): string[] {
+  return [
+    ...omission.paths.map((configured) => `:(top,literal)${configured.replace(/\\/g, "/")}`),
+    ...(omission.sensitive ? SENSITIVE_GIT_GLOBS.map((glob) => `:(top,glob,icase)${glob}`) : [])
+  ];
+}
+
+function assertPathsNotOmitted(
+  candidates: readonly string[],
+  omission: ClonePathOmission | undefined,
+  source: string
+): void {
+  const blocked = candidates.find((candidate) => pathMatchesCloneOmission(candidate, omission));
+  if (blocked !== undefined) {
+    throw new Error(
+      `Cannot safely omit "${blocked}" from ${source}: it is tracked or transferable through Git. `
+      + "Remove it from Git (including reachable history) or remove the omission before starting AI."
+    );
+  }
 }
 
 function describeSync(
@@ -895,6 +1087,56 @@ async function copyIfDifferent(src: string, dest: string): Promise<boolean> {
   await mkdir(dirnameOf(dest), { recursive: true });
   await writeFile(dest, srcBuf);
   return true;
+}
+
+/**
+ * Untracked carry is a host-side copy, so never follow a symlink/junction from
+ * either the developer repo or the agent-controlled clone. Git paths are also
+ * checked for traversal even though `git ls-files` should only emit relative
+ * repository paths. Fresh clone remains the zero-copy alternative.
+ */
+async function assertSafeUntrackedCopy(sourceRoot: string, destinationRoot: string, relativePath: string): Promise<void> {
+  const normalized = relativePath.replace(/\\/g, "/");
+  if (normalized === "" || normalized.startsWith("/") || normalized.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error(`Refusing unsafe untracked path "${relativePath}" during clone carry.`);
+  }
+  await assertNoSymlinkComponents(sourceRoot, normalized, true);
+  await assertNoSymlinkComponents(destinationRoot, normalized, false);
+  const [canonicalSourceRoot, canonicalSource] = await Promise.all([
+    realpath(sourceRoot),
+    realpath(join(sourceRoot, normalized))
+  ]);
+  if (!isPathWithin(canonicalSource, canonicalSourceRoot)) {
+    throw new Error(`Refusing to carry untracked path "${relativePath}": it resolves outside the project.`);
+  }
+}
+
+async function assertNoSymlinkComponents(root: string, relativePath: string, requireFinalFile: boolean): Promise<void> {
+  let current = root;
+  const segments = relativePath.split("/");
+  for (let index = 0; index < segments.length; index += 1) {
+    current = join(current, segments[index] ?? "");
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if (!requireFinalFile && isMissingPathError(error)) return;
+      throw error;
+    }
+    if (info.isSymbolicLink()) {
+      throw new Error(
+        `Refusing to carry untracked symbolic link "${relativePath}". Track the link deliberately or use a fresh clone.`
+      );
+    }
+    if (index === segments.length - 1 && requireFinalFile && !info.isFile()) {
+      throw new Error(`Refusing to carry non-regular untracked path "${relativePath}".`);
+    }
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error
+    && (error as { readonly code?: unknown }).code === "ENOENT";
 }
 
 function dirnameOf(p: string): string {

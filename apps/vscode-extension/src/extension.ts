@@ -15,11 +15,20 @@ import { defaultDeniedPaths, normalizePathKey } from "@drydock/core";
 import { registerIsolatedRunCommands } from "./commands/registerIsolatedRunCommands.js";
 import { createBackend } from "./compositionRoot.js";
 import { OutputChannelLogger } from "./outputChannelLogger.js";
+import { AgentsPanelProvider } from "./webview/agentsPanelProvider.js";
 import { BASELINE_SCHEME, BaselineContentProvider } from "./webview/baselineContentProvider.js";
 import { ControlPanelProvider } from "./webview/controlPanelProvider.js";
 import { MEMORY_SCHEME, MemoryContentProvider } from "./webview/memoryContentProvider.js";
 import { PlannerPanelProvider } from "./webview/plannerPanelProvider.js";
 import { createAspectOverlayReader } from "./services/plannerAspectOverlay.js";
+import { createRecipeOverlayReader } from "./services/recipeOverlay.js";
+import {
+  filterPolicyOverlayRoots,
+  loadEffectiveSecurityPolicy,
+  resolvePolicyOverlayFile,
+  type EffectiveSecurityPolicy,
+  type UserSecurityPreferences
+} from "./services/securityPolicy.js";
 import { TaskBoardPanelProvider } from "./webview/taskBoardPanelProvider.js";
 import { TaskReviewCommentsController } from "./webview/taskReviewCommentsController.js";
 import { TaskReviewPanelProvider } from "./webview/taskReviewPanelProvider.js";
@@ -29,22 +38,77 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(output);
   const logger = new OutputChannelLogger(output);
 
-  // Apply the user's runtime-environment settings BEFORE the backend spawns any
-  // `sbx`/agent process: children inherit process.env, so mutating it here is the
-  // single place that reaches every runtime command.
-  applyRuntimeEnvironment(logger);
+  // Resolve a private child-process environment before composing the backend.
+  // Never mutate the shared extension-host environment: doing so would leak
+  // Drydock-specific PATH and variable overrides into other extensions.
+  const runtimeEnvironment = resolveRuntimeEnvironment(logger);
 
   const stateRootPath = resolveStateRootPath();
-  const deniedPaths = resolveDeniedPaths();
+  const baseDeniedPaths = resolveDeniedPaths();
+  let securityPolicy: EffectiveSecurityPolicy | undefined;
+  let startupBlockReason: string | undefined;
+  try {
+    securityPolicy = loadEffectiveSecurityPolicy({
+      baseDeniedPaths,
+      user: resolveUserSecurityPreferences()
+    });
+    logger.info("effective security policy loaded", {
+      summary: securityPolicy.summary().label,
+      ...(securityPolicy.policyId === undefined ? {} : { policyId: securityPolicy.policyId })
+    });
+  } catch (error) {
+    startupBlockReason = `Security policy blocked startup: ${error instanceof Error ? error.message : String(error)}`;
+    logger.error(startupBlockReason);
+  }
   const appServerInactivityTimeoutMs = vscode.workspace
     .getConfiguration("drydock")
     .get<number>("runtime.appServerInactivityTimeoutMs", 300_000);
   // Department aspect packs: `.drydock/planner-aspects.json` in any open
   // workspace folder merges read-only into the planner's aspect registry.
+  const workspaceRoots = (): readonly string[] => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+  const policyWorkspaceRoots = (repoRelativeFile: string): (() => readonly string[]) => () =>
+    filterPolicyOverlayRoots(securityPolicy, workspaceRoots(), repoRelativeFile);
+  const policyOverlayFile = (root: string, filePath: string): string | undefined =>
+    resolvePolicyOverlayFile(securityPolicy, root, filePath);
   const plannerAspectOverlays = createAspectOverlayReader(
-    () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath)
+    policyWorkspaceRoots(".drydock/planner-aspects.json"),
+    policyOverlayFile
   );
-  const backend = await createBackend({ stateRootPath, logger, deniedPaths, appServerInactivityTimeoutMs, plannerAspectOverlays });
+  // Team recipe packs (ADR 0007): `.drydock/recipes.json` merges read-only
+  // into the recipe registry the same way.
+  const recipeOverlays = createRecipeOverlayReader(
+    policyWorkspaceRoots(".drydock/recipes.json"),
+    logger,
+    () => vscode.workspace.isTrusted,
+    policyOverlayFile
+  );
+  // Run-slot budget (ADR 0015), resolved live: an explicit setting wins;
+  // 0/absent derives "auto (N)" from machine spec — half the cores, one run
+  // per ~4 GB of RAM, clamped to 1..8.
+  const maxConcurrentRuns = (): number => {
+    const configured = vscode.workspace.getConfiguration("drydock").get<number>("orchestrator.maxConcurrentRuns", 0);
+    if (Number.isFinite(configured) && configured > 0) {
+      return Math.floor(configured);
+    }
+    const byCpu = Math.floor(os.cpus().length / 2);
+    const byRam = Math.floor(os.totalmem() / (4 * 1024 ** 3));
+    return Math.max(1, Math.min(8, byCpu, Math.max(1, byRam)));
+  };
+  const autoAnswerQuestionsEnabled = (): boolean =>
+    vscode.workspace.getConfiguration("drydock").get<boolean>("autoAnswer.questions", true);
+  const backend = await createBackend({
+    stateRootPath,
+    logger,
+    runtimeEnvironment,
+    deniedPaths: securityPolicy?.deniedPaths ?? baseDeniedPaths,
+    ...(securityPolicy === undefined ? {} : { securityPolicy }),
+    ...(startupBlockReason === undefined ? {} : { startupBlockReason }),
+    appServerInactivityTimeoutMs,
+    plannerAspectOverlays,
+    recipeOverlays,
+    maxConcurrentRuns,
+    autoAnswerQuestionsEnabled
+  });
   context.subscriptions.push(new vscode.Disposable(() => backend.dispose()));
   await writeStorePointer(context, stateRootPath);
 
@@ -131,6 +195,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     await taskBoardPanel.open();
   }));
+  // Agents (ADR 0013): single global fleet panel over every session across
+  // every task. The control panel's agents.open relay routes here; fleet row
+  // clicks navigate back to the sidebar via the provider's showSession.
+  const agentsPanel = new AgentsPanelProvider(context.extensionUri, backend, logger, (sessionId, nodeId) => {
+    panel.showSession(sessionId, nodeId);
+  });
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.agents.open", async () => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    await agentsPanel.open();
+  }));
   // Planner (ADR 0012): single global panel; landing, intake, and the
   // three-column plan view all live inside it. The control panel's
   // planner.open relay routes here.
@@ -203,26 +280,39 @@ function resolveDeniedPaths(): string[] {
   return deduped;
 }
 
+function resolveUserSecurityPreferences(): UserSecurityPreferences {
+  const config = vscode.workspace.getConfiguration("drydock");
+  return {
+    allowedProjectRoots: config.get<string[]>("security.allowedProjectRoots", []),
+    cloneOnly: config.get<boolean>("security.cloneOnly", false),
+    omitSensitiveFiles: config.get<boolean>("security.omitSensitiveFiles", false),
+    omittedRepoPaths: config.get<string[]>("security.omittedRepoPaths", []),
+    networkedAiEnabled: config.get<boolean>("security.networkedAiEnabled", true)
+  };
+}
+
 /**
- * Applies the user's `drydock.runtime.*` environment settings to process.env so
- * every runtime tool (`sbx`, agent CLIs) the backend spawns inherits them:
- * `runtime.env` sets/overrides variables, `runtime.pathAdditions` prepends PATH
+ * Resolves the environment inherited by Drydock-owned child processes. The
+ * returned object is private to the backend; the shared extension-host
+ * `process.env` is never changed. `runtime.env` sets/overrides variables,
+ * `runtime.pathAdditions` prepends PATH
  * directories, and `runtime.copyEnv` names variables that MUST be present (a
  * warning fires if one is missing, since a GUI-launched host may not carry a
  * terminal's session vars). Additive and reload-scoped.
  */
-function applyRuntimeEnvironment(logger: OutputChannelLogger): void {
+function resolveRuntimeEnvironment(logger: OutputChannelLogger): NodeJS.ProcessEnv {
   const config = vscode.workspace.getConfiguration("drydock");
+  const environment: NodeJS.ProcessEnv = { ...process.env };
 
   const extraEnv = config.get<Record<string, string>>("runtime.env", {});
   for (const [key, value] of Object.entries(extraEnv)) {
     if (typeof value === "string" && key.length > 0) {
-      process.env[key] = value;
+      environment[key] = value;
     }
   }
 
   const copyEnv = config.get<string[]>("runtime.copyEnv", []);
-  const missing = copyEnv.filter((name) => typeof name === "string" && name.length > 0 && process.env[name] === undefined);
+  const missing = copyEnv.filter((name) => typeof name === "string" && name.length > 0 && environment[name] === undefined);
   if (missing.length > 0) {
     logger.warn("drydock.runtime.copyEnv lists variables not present in the extension host environment", { missing });
   }
@@ -230,13 +320,14 @@ function applyRuntimeEnvironment(logger: OutputChannelLogger): void {
   const pathAdditions = config.get<string[]>("runtime.pathAdditions", [])
     .filter((dir) => typeof dir === "string" && dir.length > 0);
   if (pathAdditions.length > 0) {
-    const existing = (process.env["PATH"] ?? "").split(path.delimiter);
+    const existing = (environment["PATH"] ?? "").split(path.delimiter);
     const additions = pathAdditions.filter((dir) => !existing.includes(dir));
     if (additions.length > 0) {
-      process.env["PATH"] = [...additions, ...existing].join(path.delimiter);
+      environment["PATH"] = [...additions, ...existing].join(path.delimiter);
       logger.info("applied drydock.runtime.pathAdditions", { added: additions });
     }
   }
+  return environment;
 }
 
 function resolveStateRootPath(): string {

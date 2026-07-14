@@ -2,7 +2,7 @@
   "name": "drydock",
   "displayName": "Drydock",
   "description": "Drydock \u2014 the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
-  "version": "0.4.3",
+  "version": "0.7.0",
   "publisher": "local",
   "private": true,
   "type": "module",
@@ -16,7 +16,7 @@
     "package:vsix": "node ../../tools/package-vsix.mjs"
   },
   "engines": {
-    "vscode": "^1.96.0"
+    "vscode": "^1.101.0"
   },
   "activationEvents": [
     "onCommand:drydock.isolatedRun.start",
@@ -81,6 +81,10 @@
         "title": "Drydock: Open Planner"
       },
       {
+        "command": "drydock.agents.open",
+        "title": "Drydock: Open Agents"
+      },
+      {
         "command": "drydock.taskReview.addComment",
         "title": "Task Review: Add Review Comment"
       },
@@ -110,11 +114,13 @@
       "properties": {
         "drydock.stateRoot": {
           "type": "string",
+          "scope": "machine",
           "default": "",
           "markdownDescription": "Root directory for product state (SQLite event store, disposable workspaces). Leave empty to use `~/.drydock`. Changing this requires a window reload."
         },
         "drydock.deniedPaths": {
           "type": "array",
+          "scope": "machine",
           "items": {
             "type": "string"
           },
@@ -123,11 +129,49 @@
         },
         "drydock.disableDefaultDeniedPaths": {
           "type": "boolean",
+          "scope": "machine",
           "default": false,
           "markdownDescription": "**Not recommended.** By default, sensitive home-directory config roots (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.azure`, `~/.docker`) are merged into `#drydock.deniedPaths#` so the agent can never mount them, even via an approved access request. Enabling this removes that protection \u2014 an agent could then be granted read or write access to your SSH keys, cloud credentials, and other secrets. Leave this off unless you have a specific reason and understand the risk. Changing this requires a window reload."
         },
+        "drydock.security.allowedProjectRoots": {
+          "type": "array",
+          "scope": "machine",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Optional absolute folders that AI may access. Empty means no personal allowlist. This can only narrow an administrator-managed Studio policy. Changing this requires a window reload."
+        },
+        "drydock.security.cloneOnly": {
+          "type": "boolean",
+          "scope": "machine",
+          "default": false,
+          "markdownDescription": "Always use private Git clones instead of mounting live project folders. An administrator-managed Studio policy can require this. Changing this requires a window reload."
+        },
+        "drydock.security.omitSensitiveFiles": {
+          "type": "boolean",
+          "scope": "machine",
+          "default": false,
+          "markdownDescription": "Keep common environment/credential paths (`.env*`, `secrets/`, key files, cloud config folders) out of AI clones. If one was ever tracked in reachable Git history, Drydock blocks the clone rather than pretending deletion is secure. Implies clone-only mode."
+        },
+        "drydock.security.omittedRepoPaths": {
+          "type": "array",
+          "scope": "machine",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Exact repo-relative files or folders to keep out of AI clones (for example `config/local`); descendants are included and globs are intentionally unsupported. `.git` cannot be omitted. Tracked/history content blocks the clone. Implies clone-only mode."
+        },
+        "drydock.security.networkedAiEnabled": {
+          "type": "boolean",
+          "scope": "machine",
+          "default": true,
+          "markdownDescription": "Allow networked AI on this machine. Turning this off blocks all current agent runtimes. When a Studio policy exists, it must also explicitly set `allowNetworkedAiOnThisMachine: true`; omission fails closed."
+        },
         "drydock.runtime.pathAdditions": {
           "type": "array",
+          "scope": "machine",
           "items": {
             "type": "string"
           },
@@ -136,14 +180,16 @@
         },
         "drydock.runtime.env": {
           "type": "object",
+          "scope": "machine",
           "additionalProperties": {
             "type": "string"
           },
           "default": {},
-          "markdownDescription": "Additional environment variables to set for Drydock's runtime tools (`sbx`, agent CLIs), as name\u2192value pairs. Overrides inherited values. Useful for injecting things the extension host is missing, e.g. `DOCKER_CONFIG` or a `DOCKER_HOST`. Changing this requires a window reload."
+          "markdownDescription": "Additional **non-secret** environment variables to set for Drydock's runtime tools (`sbx`, agent CLIs), as name\u2192value pairs. Overrides inherited values. VS Code stores these values as ordinary settings, so use the provider/Docker secret flow for credentials. Useful for injecting things the extension host is missing, e.g. `DOCKER_CONFIG` or `DOCKER_HOST`. Changing this requires a window reload."
         },
         "drydock.runtime.copyEnv": {
           "type": "array",
+          "scope": "machine",
           "items": {
             "type": "string"
           },
@@ -152,6 +198,7 @@
         },
         "drydock.runtime.appServerInactivityTimeoutMs": {
           "type": "number",
+          "scope": "machine",
           "default": 300000,
           "minimum": 0,
           "markdownDescription": "Quiet-turn detector for Codex app-server turns: if the app-server sends no activity for this many milliseconds, Drydock logs a stall diagnostic (the turn is **not** auto-failed). The chat also offers a \"Give it a poke?\" nudge after ~30s of silence to try to break a standoff gracefully. Raise this if your turns legitimately run long silent operations (big builds/test suites); set to `0` to disable the diagnostic. Changing this requires a window reload."
@@ -167,6 +214,26 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Wrap long lines inside chat transcript code blocks. Disable to keep horizontal scrolling."
+        },
+        "drydock.ui.cardDetail": {
+          "type": "string",
+          "enum": ["minimal", "standard", "full"],
+          "default": "minimal",
+          "markdownDescription": "Default detail level for cards on the Task Board and Agents panels. `minimal` shows one state chip per card and moves the rest into the hover card; each panel's toolbar **Detail** control overrides this per panel. Applies when a panel opens."
+        },
+        "drydock.orchestrator.maxConcurrentRuns": {
+          "type": "number",
+          "scope": "machine",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 64,
+          "markdownDescription": "Maximum agent runs in flight at once. Further starts wait in a visible queue (manual starts jump to the front). `0` = **auto** — derived from this machine's cores and RAM (clamped 1–8)."
+        },
+        "drydock.autoAnswer.questions": {
+          "type": "boolean",
+          "scope": "machine",
+          "default": true,
+          "markdownDescription": "Master switch for task-FAQ auto-answering of agent questions. Each task ALSO has its own toggle (off by default), so nothing auto-answers until a task opts in. Every auto-answer lands in the transcript as a `[host]` receipt. Access requests are never auto-answered."
         }
       }
     }

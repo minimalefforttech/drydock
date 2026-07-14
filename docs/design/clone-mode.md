@@ -7,7 +7,7 @@ Related: roadmap, `architecture-implementation-plan.md`, threat model.
 | Mode | What the VM sees | Where changes land |
 |---|---|---|
 | Standard (implementation) | live work folders mounted rw | directly on disk |
-| Plan | live folders mounted ro | plan documents only |
+| Planning session | live folders mounted ro | durable Planner artifacts only |
 | **Clone** | a git clone of each repo, inside its disposable workspace — **no live mounts** | a patch the developer pulls into the editor |
 | Remote (future, specced below) | a clone on a separate networked machine | the same patch protocol over a transport |
 
@@ -97,8 +97,9 @@ same click-to-open-diff against the sync base). Only the verbs change:
 - ✕ per-file → **Discard in clone** (`checkout sync/base -- <path>`, confirm)
 - Header: **Pull all into editor** / **Push local → VM** / conflict rows
   flagged until resolved.
-The composer mode control becomes **[Chat | Plan | Clone]**; the mounts
-expandable shows `clone: <repo>@<branch> · no live mounts`; the session
+An Edit session started in clone mode exposes the sync verbs instead of live
+mount edits; the mounts expandable shows
+`clone: <repo>@<branch> · no live mounts`; the session
 briefing tells the agent it is on a disposable clone whose changes reach the
 developer only through sync.
 
@@ -107,6 +108,26 @@ git-not-found on host → clone mode unavailable with an actionable error;
 a failed 3-way apply never half-applies (git apply is atomic per invocation;
 per-file pulls are one file per invocation); sync ops are disabled while a
 turn is running (the agent may be mid-write).
+
+### Chain changesets and landing (ADR 0014)
+Dependent subtasks can seed from their upstreams' output without the user
+pulling first: Review entry captures each clone's `sync/base..HEAD` patch
+durably (blob store + `task_changesets` row, latest capture wins) together
+with its repo-relative touched paths, and a
+subtask whose stored `seedMode` is `upstream` 3-way applies its upstreams'
+unlanded changesets into the fresh clone BEFORE `refs/sync/base` freezes —
+so each subtask's own changeset stays scoped to its own work. A full Pull
+marks the session's changesets landed (they stop seeding). Conflicting
+seeds fail the start loudly; the user chooses the mode (start QuickPick or
+the card's ⎘ toggle), automation never invents one.
+
+The Agents panel folds unlanded rows into a Landing drawer. It compares
+repo-namespaced path sets to order known-disjoint work before unknown and
+overlapping work; this is an advisory overlap signal, not a Git dry run.
+Two-click Pull calls the same full clone Pull as the session Changes tray,
+and lost-clone or mid-turn refusals stay visible. The durable patch cannot yet
+rehydrate a lost clone, so landing still requires that live process-local clone
+state.
 
 ## Remote mode (future) — specification only
 

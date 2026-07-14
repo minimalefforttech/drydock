@@ -22,6 +22,7 @@ import {
   type DiffFileSummary,
   type ReviewCommentSummary,
   type SessionMode,
+  type TurnResult,
   type WorkTaskRecord,
   type WorkTaskSummary
 } from "@drydock/contracts";
@@ -30,6 +31,7 @@ import { applyMigrations, SqliteConnection, SqliteReviewStore } from "@drydock/s
 import type { ChatWorkspaceContext } from "./isolatedRunService.js";
 import {
   TaskReviewAppService,
+  type TaskReviewDispatchFailure,
   type TaskReviewDiffPort,
   type TaskReviewSessionPort,
   type TaskReviewTaskPort
@@ -49,6 +51,7 @@ class SessionPortStub implements TaskReviewSessionPort {
   hostInstanceId = HOST_INSTANCE_ID;
   freshHeartbeat = true;
   readonly sentTurns: { sessionId: string; prompt: string }[] = [];
+  readonly sendOutcomes: Array<TurnResult["status"] | Error> = [];
   readonly resumed: { sessionId: string; workspace?: ChatWorkspaceContext }[] = [];
   resumeThrows = false;
 
@@ -73,9 +76,17 @@ class SessionPortStub implements TaskReviewSessionPort {
   isHeartbeatFresh(): boolean {
     return this.freshHeartbeat;
   }
-  sendChatTurn(sessionId: string, prompt: string): Promise<unknown> {
+  sendChatTurn(sessionId: string, prompt: string): Promise<TurnResult> {
     this.sentTurns.push({ sessionId, prompt });
-    return Promise.resolve(undefined);
+    const outcome = this.sendOutcomes.shift() ?? "completed";
+    if (outcome instanceof Error) {
+      return Promise.reject(outcome);
+    }
+    return Promise.resolve({
+      runId: asId<"RunId">(`run-${String(this.sentTurns.length)}`),
+      status: outcome,
+      eventCount: 1
+    });
   }
   resumeChatSession(sessionId: string, _model?: ChatModelSelection, workspace?: ChatWorkspaceContext): Promise<unknown> {
     this.resumed.push({ sessionId, ...(workspace === undefined ? {} : { workspace }) });
@@ -363,6 +374,61 @@ test("submitReview sends a revision turn to a live idle session and skips a comm
     await harness.cleanup();
   }
 });
+
+for (const scenario of [
+  { label: "a refused send", outcome: new Error("adapter unavailable"), reason: /was refused: adapter unavailable/ },
+  { label: "a terminally failed turn", outcome: "failed" as const, reason: /failed before it completed/ },
+  { label: "a cancelled turn", outcome: "cancelled" as const, reason: /cancelled before it completed/ }
+]) {
+  test(`submitReview reopens comments after ${scenario.label} and permits a successful retry`, async () => {
+    const harness = await makeHarness();
+    try {
+      seedTask(harness, "task-retry", "Retry review", ["session-retry"]);
+      seedSession(harness, "session-retry", "Retry session", { status: "active" });
+      harness.sessions.liveSessions.add("session-retry");
+      const commentId = await addOpenComment(
+        harness.review,
+        "session-retry",
+        "repo:src/retry.ts",
+        7,
+        "Please retry this revision."
+      );
+      harness.sessions.sendOutcomes.push(scenario.outcome);
+
+      let reportFailure: ((failure: TaskReviewDispatchFailure) => void) | undefined;
+      const failureReported = new Promise<TaskReviewDispatchFailure>((resolve) => {
+        reportFailure = resolve;
+      });
+      const first = await harness.service.submitReview("task-retry", {
+        onDispatchFailed: (failure) => {
+          reportFailure?.(failure);
+        }
+      });
+
+      // Dispatch remains detached: the accepted response records the attempted
+      // revision while terminal recovery completes independently.
+      assert.equal(first.dispatched, 1);
+      assert.equal(first.sessions, 1);
+      assert.deepEqual(first.errors, []);
+      const failure = await failureReported;
+      assert.match(failure.reason, scenario.reason);
+      assert.equal(failure.commentCount, 1);
+      assert.equal(failure.reopenedCount, 1);
+      assert.equal(await statusOf(harness.review, "session-retry", commentId), "open");
+
+      // The reopened thread is composed again on retry. The default stub
+      // outcome is completed, so it remains delegated after the second send.
+      const retried = await harness.service.submitReview("task-retry");
+      assert.equal(retried.dispatched, 1);
+      assert.equal(retried.sessions, 1);
+      assert.equal(harness.sessions.sentTurns.length, 2);
+      assert.equal(await statusOf(harness.review, "session-retry", commentId), "delegated");
+    } finally {
+      harness.close();
+      await harness.cleanup();
+    }
+  });
+}
 
 test("submitReview leaves comments open for mid-turn and unresumable sessions, and resumes a dead one", async () => {
   const harness = await makeHarness();

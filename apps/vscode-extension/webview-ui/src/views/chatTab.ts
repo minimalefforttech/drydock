@@ -70,7 +70,6 @@ import {
 } from "../state.js";
 import { nextMessageId, TranscriptFolder } from "../chat/transcriptModel.js";
 import {
-  appendInline as sharedAppendInline,
   assistantBlock as sharedAssistantBlock,
   chatMessageRow as sharedChatMessageRow,
   codeBlockFigure as sharedCodeBlockFigure,
@@ -772,6 +771,14 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     state.activeEditor = payload.editor;
     renderAttachments();
   });
+  onPush("panel.showSession", (payload) => {
+    // Another surface (the Agents panel, ADR 0013) navigated here. Selection
+    // is the sidebar's own flow; a nodeId lands on the Agents lens so the
+    // clicked delegated agent is in view.
+    ctx.bridge.switchTab("chat");
+    selectSession(payload.sessionId);
+    setTranscriptView(payload.nodeId === undefined ? "log" : "agents");
+  });
   onPush("session.summaryReady", (payload) => {
     // Match the summary's own session, not the current selection — the user
     // may have switched chats while the model was writing.
@@ -868,7 +875,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     refreshControls();
     // Chat sends are always implementation mode; plan-mode sessions belong to
     // the Planner panel (ADR 0012).
-    const workspace = currentWorkspaceSelection("implementation");
+    const workspace = currentWorkspaceSelection(state.workspacePolicy?.security?.cloneOnly === true ? "clone" : "implementation");
     const workspaceNote = workspace
       ? "workspaceSetId" in workspace
         ? ` · set (${workspace.mode})`
@@ -2839,15 +2846,6 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (!copied) throw new Error("copy failed");
   }
 
-  /**
-   * Inline markdown → DOM: links (clickable — file refs open in the editor,
-   * http(s) in the browser), inline code, bold, italic. Everything else stays a
-   * plain text node (CSP-safe: no innerHTML). Code fences are handled separately.
-   */
-  function appendInline(parent: HTMLElement, text: string): void {
-    sharedAppendInline(parent, text, messageRowContext.openLink);
-  }
-
   /** Builds one structural markdown block as DOM (inline markdown + textContent leaves). */
   function assistantBlock(block: DocBlock): HTMLElement {
     return sharedAssistantBlock(block, messageRowContext);
@@ -3980,4 +3978,3 @@ function wireInlineConfirmIcon(
   });
   node.addEventListener("blur", disarm);
 }
-

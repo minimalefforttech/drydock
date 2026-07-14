@@ -32,17 +32,28 @@
  */
 
 import {
+  CARD_DETAIL_LEVELS,
+  cardDetailLevel,
   WEBVIEW_PROTOCOL_VERSION,
   type BoardColumnSummary,
   type BoardState,
+  type CardDetailLevel,
   type ColumnCategory,
   type HostToWebviewMessage,
   type PanelPushPayload,
   type PanelRequestPayload,
   type PanelResponse,
   type SubtaskSummary,
+  type TaskFaqRecord,
+  type TaskRecipeRecord,
   type WorkTaskSummary
 } from "@drydock/contracts";
+import {
+  captureModalFocus,
+  prepareModalFocus,
+  queueModalFocus,
+  type ModalFocusSnapshot
+} from "./modalFocus.js";
 
 interface VsCodeApi {
   postMessage(message: unknown): void;
@@ -63,6 +74,8 @@ interface PersistedState {
   readonly connectionsMode?: ConnectionsMode;
   /** "Lanes" toolbar toggle: stack columns into per-category lanes instead of one rail. */
   readonly lanesEnabled?: boolean;
+  /** Explicit toolbar Detail choice (ADR 0013); absent = follow the config default. */
+  readonly cardDetail?: CardDetailLevel;
 }
 
 const vscodeApi = acquireVsCodeApi();
@@ -160,6 +173,35 @@ let newTaskOpen = false;
 let addSubtaskKey: string | null = null;
 /** Column-settings modal draft, or null when the modal is closed. */
 let settingsDraft: SettingsDraft | null = null;
+/** ＋ Recipe… modal draft (ADR 0007), or null when closed. */
+let recipeDraft: RecipeDraft | null = null;
+
+/** Focus state survives the panel's replaceChildren-based modal re-renders. */
+let modalRenderedOpen = false;
+let modalReturnFocus: (() => HTMLElement | null) | null = null;
+
+interface RecipeDraft {
+  /** null while recipes.list is in flight. */
+  recipes: TaskRecipeRecord[] | null;
+  selectedId: string | null;
+  title: string;
+  error: string | null;
+  submitting: boolean;
+}
+
+/** Task FAQ modal draft (ADR 0007), or null when closed. */
+let faqDraft: FaqDraft | null = null;
+
+interface FaqDraft {
+  readonly taskId: string;
+  readonly taskTitle: string;
+  autoAnswer: boolean;
+  /** null while task.faq.list is in flight. */
+  faqs: TaskFaqRecord[] | null;
+  pattern: string;
+  answer: string;
+  error: string | null;
+}
 /** "Lanes" toolbar toggle: ON groups columns into stacked per-category lanes. */
 let lanesEnabled = false;
 /** Subtask id whose colour-override swatch picker is open (at most one at a time). */
@@ -176,6 +218,17 @@ const CONNECTIONS_LABEL: Record<ConnectionsMode, string> = {
   "off": "Connections: hidden"
 };
 let connectionsMode: ConnectionsMode = "hover";
+/**
+ * Card density (ADR 0013). `cardDetailChoice` is the user's explicit toolbar
+ * pick (persisted per panel); null falls through to the config default the
+ * provider injected as `<body data-card-detail="…">`. minimal = one state
+ * chip per card, actions on hover, everything else in the hover card.
+ */
+let cardDetailChoice: CardDetailLevel | null = null;
+
+function detailLevel(): CardDetailLevel {
+  return cardDetailChoice ?? cardDetailLevel(document.body.dataset["cardDetail"]);
+}
 /** Subtask id whose Force-start confirm is armed (two-click, like chip deletes). */
 let armedForceId: string | null = null;
 /** Task id whose "Start ready" confirm is armed. */
@@ -256,6 +309,18 @@ document.addEventListener("keydown", (event) => {
     cancelLinkDrag();
     return;
   }
+  // A modal owns Escape while it is open. Async submissions deliberately
+  // remain non-dismissible, matching their disabled Cancel buttons.
+  if (settingsDraft !== null || recipeDraft !== null || faqDraft !== null) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (settingsDraft?.submitting === true || recipeDraft?.submitting === true) return;
+    settingsDraft = null;
+    recipeDraft = null;
+    faqDraft = null;
+    render();
+    return;
+  }
   let dirty = false;
   if (openMenuKey !== null) {
     openMenuKey = null;
@@ -286,6 +351,37 @@ document.addEventListener("click", (event) => {
   selectedEdge = null;
   scheduleEdgeRender();
 });
+
+// ---------------------------------------------------------------------------
+// Modal accessibility
+// ---------------------------------------------------------------------------
+
+function beginModal(returnFocus: () => HTMLElement | null): void {
+  modalReturnFocus = returnFocus;
+}
+
+/** Applies background inertness and restores focus after modal replacement/close. */
+function finishModalRender(open: boolean, snapshot: ModalFocusSnapshot | null): void {
+  for (const background of [toolbar, statusLine, loadingState, emptyState, railWrap]) {
+    background.toggleAttribute("inert", open);
+  }
+
+  if (!open) {
+    const shouldRestore = modalRenderedOpen;
+    const returnFocus = modalReturnFocus;
+    modalRenderedOpen = false;
+    modalReturnFocus = null;
+    if (shouldRestore && returnFocus !== null) {
+      queueMicrotask(() => returnFocus()?.focus());
+    }
+    return;
+  }
+
+  modalRenderedOpen = true;
+  const modal = modalRoot.querySelector<HTMLElement>(".tb-modal");
+  if (modal === null) return;
+  queueModalFocus(modal, snapshot);
+}
 
 // ---------------------------------------------------------------------------
 // Selectors / helpers
@@ -358,6 +454,17 @@ function clonePolicyChipText(task: WorkTaskSummary): string | null {
   return `clone · ${scope}${policy.dirtyHandling === "carry" ? " · carry" : ""}`;
 }
 
+/** Compact static age text for card metadata ("3d", "2h", "5m", "now"). */
+function agoText(iso: string): string {
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 60_000) return "now";
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${String(minutes)}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${String(hours)}h`;
+  return `${String(Math.floor(hours / 24))}d`;
+}
+
 /** True when a done-category card's doneAt is older than the age filter. */
 function isAgedOut(columnId: string, doneAt: string | undefined): boolean {
   if (!isDoneColumn(columnId)) return false;
@@ -418,7 +525,13 @@ function clearStatus(): void {
 }
 
 function persist(): void {
-  vscodeApi.setState({ ageDays, taskFilter, connectionsMode, lanesEnabled });
+  vscodeApi.setState({
+    ageDays,
+    taskFilter,
+    connectionsMode,
+    lanesEnabled,
+    ...(cardDetailChoice === null ? {} : { cardDetail: cardDetailChoice })
+  });
 }
 
 /** Subtasks a "Start ready" on the task card would start right now. */
@@ -436,6 +549,12 @@ function readySubtasks(task: WorkTaskSummary): SubtaskSummary[] {
 // ---------------------------------------------------------------------------
 
 function render(): void {
+  // Density gates: CSS keys action-affordance visibility off these classes;
+  // chip-level gating happens in the card builders.
+  const level = detailLevel();
+  document.body.classList.toggle("detail-minimal", level === "minimal");
+  document.body.classList.toggle("detail-standard", level === "standard");
+  document.body.classList.toggle("detail-full", level === "full");
   renderToolbar();
   const hasBoard = board !== null;
   loadingState.classList.toggle("hidden", hasBoard);
@@ -462,6 +581,17 @@ function renderToolbar(): void {
     });
     toolbar.append(newTask);
   }
+
+  // ＋ Recipe… (ADR 0007): materialize a task + subtask DAG from a template.
+  const fromRecipe = button("＋ Recipe…", "small tb-from-recipe");
+  fromRecipe.title = "Create a task with its subtasks, dependencies, and per-role defaults from a recipe (creates, never starts)";
+  fromRecipe.addEventListener("click", () => {
+    beginModal(() => toolbar.querySelector<HTMLElement>(".tb-from-recipe"));
+    recipeDraft = { recipes: null, selectedId: null, title: "", error: null, submitting: false };
+    render();
+    void loadRecipes();
+  });
+  toolbar.append(fromRecipe);
 
   // Task focus filter.
   const taskSelect = document.createElement("select");
@@ -527,6 +657,26 @@ function renderToolbar(): void {
     scheduleEdgeRender();
   });
   toolbar.append(connSelect);
+
+  // Card detail level (ADR 0013): minimal folds chips into the hover card and
+  // reveals actions on card hover; standard is the classic chip set; full adds
+  // passive metadata (dates) inline.
+  const detailSelect = document.createElement("select");
+  detailSelect.className = "tb-select tb-detail";
+  detailSelect.title = "Card detail — minimal keeps one state chip per card; hover a card for the rest";
+  for (const level of CARD_DETAIL_LEVELS) {
+    const option = document.createElement("option");
+    option.value = level;
+    option.textContent = `Detail: ${level}`;
+    detailSelect.append(option);
+  }
+  detailSelect.value = detailLevel();
+  detailSelect.addEventListener("change", () => {
+    cardDetailChoice = cardDetailLevel(detailSelect.value);
+    persist();
+    render();
+  });
+  toolbar.append(detailSelect);
 
   // Lanes toggle: groups columns into stacked per-category lanes instead of
   // one horizontal rail. Webview-local persisted state, same as the filters above.
@@ -751,6 +901,9 @@ function wireCard(
   currentColumn: BoardColumnSummary,
   ghostTarget: BoardColumnSummary | undefined
 ): void {
+  // Focusable so keyboard users can reveal the minimal-detail hover card and
+  // action affordances via :focus-within (ADR 0013).
+  card.tabIndex = 0;
   card.draggable = true;
   card.addEventListener("dragstart", (event) => {
     if (!event.dataTransfer) return;
@@ -800,7 +953,311 @@ function buildMoveMenu(cardKind: "task" | "subtask", id: string, currentColumn: 
     });
     menu.append(item);
   }
+  // Task cards also own their FAQ (ADR 0007).
+  if (cardKind === "task") {
+    const task = board?.tasks.find((candidate) => candidate.taskId === id);
+    const faqItem = button("FAQ & auto-answer…", "ghost small tb-card-menu-item");
+    faqItem.setAttribute("role", "menuitem");
+    faqItem.addEventListener("click", () => {
+      openMenuKey = null;
+      beginModal(() => {
+        const taskCard = [...rail.querySelectorAll<HTMLElement>(".tb-task-card")]
+          .find((card) => card.dataset["taskId"] === id);
+        // The menu button is hover/focus-revealed at minimal detail, so the
+        // stable card itself is the reliable keyboard return target.
+        return taskCard ?? null;
+      });
+      faqDraft = {
+        taskId: id,
+        taskTitle: task?.title ?? id,
+        autoAnswer: task?.autoAnswerFaq === true,
+        faqs: null,
+        pattern: "",
+        answer: "",
+        error: null
+      };
+      render();
+      void loadFaqs();
+    });
+    menu.append(faqItem);
+  }
   return menu;
+}
+
+async function loadFaqs(): Promise<void> {
+  const draft = faqDraft;
+  if (draft === null) return;
+  const response = await request({ type: "task.faq.list", taskId: draft.taskId });
+  if (faqDraft !== draft) return; // closed/reopened while loading
+  if (response.ok && response.payload.type === "task.faq.list") {
+    draft.faqs = [...response.payload.faqs];
+  } else {
+    draft.error = response.ok ? "Unexpected response." : response.error.message;
+    draft.faqs = [];
+  }
+  render();
+}
+
+/** The task FAQ modal (ADR 0007): pattern → answer entries + the auto-answer toggle. */
+function renderFaqModal(draft: FaqDraft): void {
+  const overlay = el("div", "tb-modal-overlay");
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      faqDraft = null;
+      render();
+    }
+  });
+  const modal = el("div", "tb-modal tb-faq-modal");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-labelledby", "tb-faq-title");
+  modal.setAttribute("aria-describedby", "tb-faq-hint");
+
+  const head = el("div", "tb-modal-head");
+  const title = el("h2", "tb-modal-title");
+  title.id = "tb-faq-title";
+  title.textContent = `FAQ — ${draft.taskTitle}`;
+  const hint = el("div", "tb-modal-hint");
+  hint.id = "tb-faq-hint";
+  hint.textContent = "When auto-answer is on (and the global setting allows it), an agent question containing a pattern is answered automatically — with a [host] receipt in the transcript. Access requests are never auto-answered.";
+  head.append(title, hint);
+  modal.append(head);
+
+  const toggleRow = el("div", "tb-faq-toggle-row");
+  const toggle = button(draft.autoAnswer ? "Auto-answer: on" : "Auto-answer: off", `small tb-faq-toggle${draft.autoAnswer ? " active" : ""}`);
+  toggle.dataset["modalFocus"] = "auto-answer";
+  toggle.setAttribute("aria-pressed", String(draft.autoAnswer));
+  toggle.addEventListener("click", () => {
+    const next = !draft.autoAnswer;
+    draft.autoAnswer = next;
+    render();
+    void request({ type: "task.update", taskId: draft.taskId, autoAnswerFaq: next }).then(async (response) => {
+      if (!response.ok) {
+        draft.autoAnswer = !next;
+        draft.error = response.error.message;
+        render();
+        return;
+      }
+      await refetchBoard();
+    });
+  });
+  toggleRow.append(toggle);
+  modal.append(toggleRow);
+
+  const list = el("div", "tb-faq-list");
+  if (draft.faqs === null) {
+    const loading = el("div", "tb-recipe-loading");
+    loading.textContent = "Loading FAQ…";
+    list.append(loading);
+  } else if (draft.faqs.length === 0) {
+    const empty = el("div", "tb-recipe-loading");
+    empty.textContent = "No entries yet.";
+    list.append(empty);
+  } else {
+    for (const faq of draft.faqs) {
+      const row = el("div", "tb-faq-row");
+      const pattern = el("span", "tb-faq-pattern");
+      pattern.textContent = faq.pattern;
+      const answer = el("span", "tb-faq-answer");
+      answer.textContent = faq.answer;
+      const remove = iconButton("✕", "Remove this FAQ entry", "tb-faq-remove");
+      remove.dataset["modalFocus"] = `remove:${faq.faqId}`;
+      remove.addEventListener("click", () => {
+        void request({ type: "task.faq.remove", taskId: draft.taskId, faqId: faq.faqId }).then((response) => {
+          if (response.ok && response.payload.type === "task.faq.remove") {
+            draft.faqs = [...response.payload.faqs];
+            render();
+          }
+        });
+      });
+      row.append(pattern, answer, remove);
+      list.append(row);
+    }
+  }
+  modal.append(list);
+
+  const addRow = el("div", "tb-faq-add");
+  const patternInput = document.createElement("input");
+  patternInput.type = "text";
+  patternInput.className = "tb-input tb-faq-pattern-input";
+  patternInput.placeholder = "Question contains…";
+  patternInput.setAttribute("aria-label", "Question pattern");
+  patternInput.dataset["modalFocus"] = "pattern";
+  patternInput.value = draft.pattern;
+  patternInput.addEventListener("input", () => {
+    draft.pattern = patternInput.value;
+  });
+  const answerInput = document.createElement("input");
+  answerInput.type = "text";
+  answerInput.className = "tb-input tb-faq-answer-input";
+  answerInput.placeholder = "Answer…";
+  answerInput.setAttribute("aria-label", "FAQ answer");
+  answerInput.dataset["modalFocus"] = "answer";
+  answerInput.value = draft.answer;
+  answerInput.addEventListener("input", () => {
+    draft.answer = answerInput.value;
+  });
+  const add = button("Add", "primary small");
+  add.dataset["modalFocus"] = "add";
+  add.addEventListener("click", () => {
+    const pattern = draft.pattern.trim();
+    const answer = draft.answer.trim();
+    if (pattern.length === 0 || answer.length === 0) return;
+    void request({ type: "task.faq.add", taskId: draft.taskId, pattern, answer }).then((response) => {
+      if (response.ok && response.payload.type === "task.faq.add") {
+        draft.faqs = [...response.payload.faqs];
+        draft.pattern = "";
+        draft.answer = "";
+        draft.error = null;
+      } else if (!response.ok) {
+        draft.error = response.error.message;
+      }
+      render();
+    });
+  });
+  addRow.append(patternInput, answerInput, add);
+  modal.append(addRow);
+
+  const foot = el("div", "tb-modal-foot");
+  const error = el("span", "tb-modal-error");
+  if (draft.error !== null) error.textContent = draft.error;
+  const footSpacer = el("span", "tb-toolbar-spacer");
+  const close = button("Close", "ghost small");
+  close.dataset["modalFocus"] = "close";
+  close.addEventListener("click", () => {
+    faqDraft = null;
+    render();
+  });
+  foot.append(error, footSpacer, close);
+  modal.append(foot);
+
+  prepareModalFocus(modal, toggle);
+  overlay.append(modal);
+  modalRoot.append(overlay);
+}
+
+// --- Density helpers (ADR 0013) ---------------------------------------------
+
+/**
+ * The ONE state chip a subtask card keeps at minimal detail, by priority:
+ * a live run beats history, a failure beats a dependency wait. null = quiet
+ * card (no state worth a chip).
+ */
+function verifyChip(): HTMLElement {
+  const chip = el("span", "tb-verify-chip");
+  chip.textContent = "verify";
+  chip.title = "Human verification required (HITL gate) — check the output, then Mark verified";
+  return chip;
+}
+
+function subtaskStateChip(subtask: SubtaskSummary): HTMLElement | null {
+  // Waiting-on-you outranks everything (ADR 0013 priority order).
+  if (subtask.verifyUnmet === true) {
+    return verifyChip();
+  }
+  if (subtask.isRunning) {
+    const running = el("span", "tb-running-chip");
+    running.textContent = "running";
+    running.title = "A chat is in flight for this subtask";
+    return running;
+  }
+  if (subtask.isParked === true) {
+    const parked = el("span", "tb-parked-chip");
+    parked.textContent = "parked";
+    parked.title = "Failed twice under automation — ↻ Retry (a manual start) resumes it";
+    return parked;
+  }
+  if (subtask.lastFailureAt !== undefined) {
+    const failed = el("span", "tb-failed-chip");
+    failed.textContent = "failed";
+    failed.title = `The last run failed or was cancelled (${new Date(subtask.lastFailureAt).toLocaleString()})`;
+    return failed;
+  }
+  if (subtask.isQueued === true) {
+    const queued = el("span", "tb-queued-chip");
+    queued.textContent = "queued";
+    queued.title = "Waiting for a run slot (drydock.orchestrator.maxConcurrentRuns)";
+    return queued;
+  }
+  if (subtask.isBlocked) {
+    const lock = el("span", "tb-lock-chip");
+    lock.textContent = "🔒";
+    lock.title = "Blocked — an upstream dependency is not done yet";
+    lock.setAttribute("aria-label", "blocked");
+    return lock;
+  }
+  return null;
+}
+
+/** Quiet inline dates line, rendered only at full detail. */
+function buildDatesLine(createdAt: string, updatedAt: string, doneAt: string | undefined): HTMLElement {
+  const line = el("div", "tb-card-dates");
+  const parts = [`created ${agoText(createdAt)}`, `updated ${agoText(updatedAt)}`];
+  if (doneAt !== undefined) parts.push(`done ${agoText(doneAt)}`);
+  line.textContent = parts.join(" · ");
+  return line;
+}
+
+function hoverRow(label: string, value: string): HTMLElement {
+  const row = el("div", "tb-hover-row");
+  const labelEl = el("span", "tb-hover-label");
+  labelEl.textContent = label;
+  const valueEl = el("span", "tb-hover-value");
+  valueEl.textContent = value;
+  row.append(labelEl, valueEl);
+  return row;
+}
+
+/**
+ * The consolidated hover card (ADR 0013): ONE popover per card carrying
+ * everything the current detail level hides — never per-chip tooltips. Pure
+ * CSS reveal on card :hover/:focus-within; pointer-events stay off so it
+ * never steals clicks from cards beneath it.
+ */
+function buildTaskHoverCard(task: WorkTaskSummary): HTMLElement {
+  const hover = el("div", "tb-hovercard");
+  const ws = workspaceChipText(task);
+  if (ws !== null) hover.append(hoverRow("workspace", ws));
+  const clone = clonePolicyChipText(task);
+  if (clone !== null) hover.append(hoverRow("clone", clone));
+  const total = task.subtasks.length;
+  if (total > 0) {
+    const doneCount = task.subtasks.filter((subtask) => isDoneColumn(subtask.columnId)).length;
+    hover.append(hoverRow("progress", `${String(doneCount)}/${String(total)} done`));
+  }
+  if (task.faqCount !== undefined || task.autoAnswerFaq === true) {
+    hover.append(hoverRow("FAQ", `${String(task.faqCount ?? 0)} · auto-answer ${task.autoAnswerFaq === true ? "on" : "off"}`));
+  }
+  hover.append(hoverRow("created", agoText(task.createdAt)), hoverRow("updated", agoText(task.updatedAt)));
+  if (task.doneAt !== undefined) hover.append(hoverRow("done", agoText(task.doneAt)));
+  return hover;
+}
+
+function buildSubtaskHoverCard(subtask: SubtaskSummary): HTMLElement {
+  const hover = el("div", "tb-hovercard");
+  const state = subtask.isRunning
+    ? "running"
+    : subtask.isParked === true
+      ? "parked (failed twice under automation)"
+      : subtask.lastFailureAt !== undefined
+        ? `failed ${agoText(subtask.lastFailureAt)}`
+        : subtask.isQueued === true
+          ? "queued for a run slot"
+          : subtask.isBlocked
+            ? "blocked"
+            : "quiet";
+  hover.append(hoverRow("state", state));
+  hover.append(hoverRow("prompt", subtask.prompt !== undefined && subtask.prompt.length > 0 ? "⚡ startable" : "none"));
+  if (subtask.autoStart) hover.append(hoverRow("auto-start", "on dependency finish"));
+  if (subtask.linkedSessionIds.length > 0) hover.append(hoverRow("chats", String(subtask.linkedSessionIds.length)));
+  if (subtask.dependsOn.length > 0) {
+    hover.append(hoverRow("depends on", `${String(subtask.dependsOn.length)} subtask${subtask.dependsOn.length === 1 ? "" : "s"}`));
+    hover.append(hoverRow("seed", subtask.seedMode === "upstream" ? "local + upstream changesets" : "local HEAD"));
+  }
+  if (subtask.hasUnlandedChangeset === true) hover.append(hoverRow("changeset", "⎘ captured · not landed"));
+  if (subtask.verifyUnmet === true) hover.append(hoverRow("verify", "human check required · unmet"));
+  if (subtask.model !== undefined) hover.append(hoverRow("model", `${subtask.model.providerId}${subtask.model.model === undefined ? "" : ` · ${subtask.model.model}`}`));
+  hover.append(hoverRow("created", agoText(subtask.createdAt)), hoverRow("updated", agoText(subtask.updatedAt)));
+  return hover;
 }
 
 function buildTaskCard(
@@ -819,23 +1276,28 @@ function buildTaskCard(
   head.append(tag, title);
   card.append(head);
 
+  const level = detailLevel();
   const meta = el("div", "tb-card-meta");
-  const chipText = workspaceChipText(task);
-  if (chipText !== null) {
-    const chip = el("span", "tb-ws-chip");
-    chip.textContent = chipText;
-    chip.title = "Linked workspace sets";
-    meta.append(chip);
+  // Workspace/clone chips are passive metadata: hover-card-only at minimal.
+  if (level !== "minimal") {
+    const chipText = workspaceChipText(task);
+    if (chipText !== null) {
+      const chip = el("span", "tb-ws-chip");
+      chip.textContent = chipText;
+      chip.title = "Linked workspace sets";
+      meta.append(chip);
+    }
+    const cloneText = clonePolicyChipText(task);
+    if (cloneText !== null) {
+      const cloneChip = el("span", "tb-ws-chip tb-clone-chip");
+      cloneChip.textContent = cloneText;
+      cloneChip.title = task.clonePolicy?.dirtyHandling === "carry"
+        ? "Independent clones include current local tracked and untracked changes"
+        : "Independent clones use current local committed HEAD (no fetch or pull)";
+      meta.append(cloneChip);
+    }
   }
-  const cloneText = clonePolicyChipText(task);
-  if (cloneText !== null) {
-    const cloneChip = el("span", "tb-ws-chip tb-clone-chip");
-    cloneChip.textContent = cloneText;
-    cloneChip.title = task.clonePolicy?.dirtyHandling === "carry"
-      ? "Independent clones include current local tracked and untracked changes"
-      : "Independent clones use current local committed HEAD (no fetch or pull)";
-    meta.append(cloneChip);
-  }
+  // Progress is the task card's ONE state chip — it survives every level.
   const total = task.subtasks.length;
   if (total > 0) {
     const doneCount = task.subtasks.filter((subtask) => isDoneColumn(subtask.columnId)).length;
@@ -844,6 +1306,7 @@ function buildTaskCard(
     meta.append(progress);
   }
   if (meta.childNodes.length > 0) card.append(meta);
+  if (level === "full") card.append(buildDatesLine(task.createdAt, task.updatedAt, task.doneAt));
 
   // ▶ Start ready (N): two-click confirm, then task.start — the host starts
   // every ready subtask (prompt, unblocked, not backlog/done/running).
@@ -867,6 +1330,7 @@ function buildTaskCard(
     card.append(start);
   }
 
+  if (level !== "full") card.append(buildTaskHoverCard(task));
   wireCard(card, "task", task.taskId, column, ghostTarget);
   return card;
 }
@@ -885,31 +1349,74 @@ function buildSubtaskCard(
   parentLine.textContent = parent.title;
   card.append(parentLine);
 
+  const level = detailLevel();
   const head = el("div", "tb-card-head");
   const title = el("span", "tb-subtask-title");
   title.textContent = subtask.title;
   head.append(title);
-  if (subtask.prompt !== undefined && subtask.prompt.length > 0) {
-    const promptGlyph = el("span", "tb-prompt-glyph");
-    promptGlyph.textContent = "⚡";
-    promptGlyph.title = "Has a prompt — startable";
-    promptGlyph.setAttribute("aria-label", "has prompt");
-    head.append(promptGlyph);
+  if (level === "minimal") {
+    // One-chip rule (ADR 0013): the single highest-priority state, in the
+    // head so it survives the hover-reveal of the actions row.
+    const state = subtaskStateChip(subtask);
+    if (state !== null) head.append(state);
+  } else {
+    if (subtask.prompt !== undefined && subtask.prompt.length > 0) {
+      const promptGlyph = el("span", "tb-prompt-glyph");
+      promptGlyph.textContent = "⚡";
+      promptGlyph.title = "Has a prompt — startable";
+      promptGlyph.setAttribute("aria-label", "has prompt");
+      head.append(promptGlyph);
+    }
+    if (subtask.autoStart) {
+      const auto = el("span", "tb-auto-chip");
+      auto.textContent = "auto";
+      auto.title = "Auto-starts when its dependencies finish";
+      head.append(auto);
+    }
+    if (subtask.isBlocked) {
+      const lock = el("span", "tb-lock-chip");
+      lock.textContent = "🔒";
+      lock.title = "Blocked — an upstream dependency is not done yet";
+      lock.setAttribute("aria-label", "blocked");
+      head.append(lock);
+    }
   }
-  if (subtask.autoStart) {
-    const auto = el("span", "tb-auto-chip");
-    auto.textContent = "auto";
-    auto.title = "Auto-starts when its dependencies finish";
-    head.append(auto);
+  if (level !== "minimal" && subtask.hasUnlandedChangeset === true) {
+    // Quiet passive marker (ADR 0014): output captured, not yet pulled local.
+    const unlanded = el("span", "tb-changeset-chip");
+    unlanded.textContent = "⎘";
+    unlanded.title = "Changeset captured from this subtask's run — not yet pulled into your working copy";
+    unlanded.setAttribute("aria-label", "unlanded changeset");
+    head.append(unlanded);
   }
-  if (subtask.isBlocked) {
-    const lock = el("span", "tb-lock-chip");
-    lock.textContent = "🔒";
-    lock.title = "Blocked — an upstream dependency is not done yet";
-    lock.setAttribute("aria-label", "blocked");
-    head.append(lock);
+  if (level === "full" && subtask.model !== undefined) {
+    // Per-role model profile (ADR 0002): passive metadata, full detail only.
+    const model = el("span", "tb-model-chip");
+    model.textContent = subtask.model.model ?? subtask.model.providerId;
+    model.title = `Runs on ${subtask.model.providerId}${subtask.model.model === undefined ? "" : ` · ${subtask.model.model}`} (recipe model profile)`;
+    head.append(model);
   }
+  // Waiting-on-you never hides (ADRs 0013/0007): at minimal it IS the one
+  // chip (subtaskStateChip); at standard/full it rides beside the others.
+  if (level !== "minimal" && subtask.verifyUnmet === true) head.append(verifyChip());
   card.append(head);
+  if (level === "full") card.append(buildDatesLine(subtask.createdAt, subtask.updatedAt, subtask.doneAt));
+  // Seed toggle (ADR 0014): full detail only — passive config stays quiet at
+  // minimal/standard (hover card carries it); the stored value drives starts.
+  if (level === "full" && subtask.dependsOn.length > 0) {
+    const seedRow = el("div", "tb-seed-row");
+    const upstream = subtask.seedMode === "upstream";
+    const toggle = button(`⎘ seed: ${upstream ? "upstream" : "local"}`, `ghost small tb-seed-chip${upstream ? " upstream" : ""}`);
+    toggle.title = upstream
+      ? "Next start clones local HEAD + applies unlanded upstream changesets — click for local HEAD only"
+      : "Next start clones local HEAD only — click to also apply unlanded upstream changesets";
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void updateSeedMode(subtask.subtaskId, upstream ? "local" : "upstream");
+    });
+    seedRow.append(toggle);
+    card.append(seedRow);
+  }
 
   if (shakeSubtaskId === subtask.subtaskId) card.classList.add("tb-shake");
   card.addEventListener("mouseenter", () => {
@@ -921,10 +1428,11 @@ function buildSubtaskCard(
     scheduleEdgeRender();
   });
 
-  const actions = buildSubtaskActions(subtask, column);
+  const actions = buildSubtaskActions(subtask, column, level);
   if (actions.childNodes.length > 0) card.append(actions);
 
   card.append(buildColorPicker(subtask, parent));
+  if (level !== "full") card.append(buildSubtaskHoverCard(subtask));
 
   // Dependency dots. The input dot is the drop cue; a drop is accepted
   // anywhere on a valid sibling card (friendlier target than a 9px dot).
@@ -944,32 +1452,67 @@ function buildSubtaskCard(
 }
 
 /** Run-state chips + start affordances for one subtask card. */
-function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary): HTMLElement {
+function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary, level: CardDetailLevel): HTMLElement {
   const actions = el("div", "tb-card-actions");
   const startable = subtask.prompt !== undefined && subtask.prompt.length > 0;
   const isDone = column.category === "done";
   // Subtasks aren't just pre-prompts — chats run against them and stay grouped
   // under the task. This chip surfaces that grouping (running or finished
   // chats alike) alongside the ▶ Start affordance for starting another.
-  if (subtask.linkedSessionIds.length > 0) {
+  // At minimal the count is hover-card data only.
+  if (level !== "minimal" && subtask.linkedSessionIds.length > 0) {
     const linked = el("span", "tb-linked-chip");
     linked.textContent = `💬 ${String(subtask.linkedSessionIds.length)}`;
     linked.title = `${String(subtask.linkedSessionIds.length)} chat${subtask.linkedSessionIds.length === 1 ? "" : "s"} linked to this subtask`;
     actions.append(linked);
   }
+  if (subtask.verifyUnmet === true) {
+    // The HITL gate's one verb (ADR 0007): a human looked and says so.
+    const verified = button("Verified ✓", "ghost small tb-verify-action");
+    verified.title = "Mark this subtask verified — records the check with a timestamp";
+    verified.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void markVerified(subtask.subtaskId);
+    });
+    actions.append(verified);
+  }
   if (subtask.isRunning) {
-    const running = el("span", "tb-running-chip");
-    running.textContent = "running";
-    running.title = "A chat is in flight for this subtask";
-    actions.append(running);
+    // At minimal the head already wears the one running chip.
+    if (level !== "minimal") {
+      const running = el("span", "tb-running-chip");
+      running.textContent = "running";
+      running.title = "A chat is in flight for this subtask";
+      actions.append(running);
+    }
+    return actions;
+  }
+  if (subtask.isQueued === true) {
+    // A queued start is pending — the chip replaces the Start affordance.
+    if (level !== "minimal") {
+      const queued = el("span", "tb-queued-chip");
+      queued.textContent = "queued";
+      queued.title = "Waiting for a run slot (drydock.orchestrator.maxConcurrentRuns)";
+      actions.append(queued);
+    }
     return actions;
   }
   if (startable && !isDone) {
     if (!subtask.isBlocked) {
-      const start = button("▶ Start", "ghost small tb-start");
-      start.title = "Start a chat with this subtask's prompt";
+      // A parked card's Start doubles as the ↻ policy reset (ADR 0015): a
+      // manual start clears parked/retried before running again.
+      const parked = subtask.isParked === true;
+      const start = button(parked ? "↻ Retry" : "▶ Start", "ghost small tb-start");
+      start.title = parked
+        ? "Failed twice under automation — retry now (clears the parked state)"
+        : "Start a chat with this subtask's prompt";
       start.addEventListener("click", () => void startSubtask(subtask.subtaskId, false));
       actions.append(start);
+      if (parked && level !== "minimal") {
+        const chip = el("span", "tb-parked-chip");
+        chip.textContent = "parked";
+        chip.title = "Failed twice under automation — automation gave up on this one";
+        actions.append(chip);
+      }
     } else {
       // Blocked: Start is disabled; Force start… is the manual-only override
       // (two-click confirm). Automation never forces.
@@ -989,7 +1532,7 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
       });
       actions.append(start, force);
     }
-    if (subtask.lastFailureAt !== undefined) {
+    if (level !== "minimal" && subtask.lastFailureAt !== undefined && subtask.isParked !== true) {
       const failed = el("span", "tb-failed-chip");
       failed.textContent = "failed";
       failed.title = `The last run failed or was cancelled (${new Date(subtask.lastFailureAt).toLocaleString()})`;
@@ -1044,6 +1587,28 @@ function buildColorPicker(subtask: SubtaskSummary, parent: WorkTaskSummary): HTM
   popover.append(clear);
   wrap.append(popover);
   return wrap;
+}
+
+async function markVerified(subtaskId: string): Promise<void> {
+  const response = await request({ type: "subtask.update", subtaskId, verified: true });
+  if (!response.ok) {
+    showError(`mark verified failed: ${response.error.message}`);
+    render();
+    return;
+  }
+  clearStatus();
+  await refetchBoard();
+}
+
+async function updateSeedMode(subtaskId: string, seedMode: "local" | "upstream"): Promise<void> {
+  const response = await request({ type: "subtask.update", subtaskId, seedMode });
+  if (!response.ok) {
+    showError(`set seed failed: ${response.error.message}`);
+    render();
+    return;
+  }
+  clearStatus();
+  await refetchBoard();
 }
 
 async function updateSubtaskColor(subtaskId: string, colorOverride: number | null): Promise<void> {
@@ -1448,6 +2013,7 @@ async function addDependency(taskId: string, fromSubtaskId: string, toSubtaskId:
 
 function openSettings(): void {
   if (board === null) return;
+  beginModal(() => toolbar.querySelector<HTMLElement>(".tb-settings"));
   settingsDraft = {
     columns: sortedColumns().map((column) => ({
       columnId: column.columnId,
@@ -1466,11 +2032,177 @@ function closeSettings(): void {
   render();
 }
 
+async function loadRecipes(): Promise<void> {
+  const response = await request({ type: "recipes.list" });
+  if (recipeDraft === null) return; // closed while loading
+  if (response.ok && response.payload.type === "recipes.list") {
+    recipeDraft.recipes = [...response.payload.recipes];
+    recipeDraft.selectedId ??= recipeDraft.recipes[0]?.recipeId ?? null;
+  } else {
+    recipeDraft.error = response.ok ? "Unexpected response." : response.error.message;
+    recipeDraft.recipes = [];
+  }
+  render();
+}
+
+async function submitRecipe(): Promise<void> {
+  const draft = recipeDraft;
+  if (draft === null || draft.selectedId === null) return;
+  const title = draft.title.trim();
+  if (title.length === 0) return;
+  draft.submitting = true;
+  draft.error = null;
+  render();
+  const response = await request({ type: "task.createFromRecipe", recipeId: draft.selectedId, title });
+  if (response.ok && response.payload.type === "task.createFromRecipe") {
+    recipeDraft = null;
+    clearStatus();
+    await refetchBoard();
+    return;
+  }
+  draft.submitting = false;
+  draft.error = response.ok ? "Unexpected response." : response.error.message;
+  render();
+}
+
+/** The ＋ Recipe… modal (ADR 0007): pick a template, name the task, preview the DAG. */
+function renderRecipeModal(draft: RecipeDraft): void {
+  const overlay = el("div", "tb-modal-overlay");
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay && !draft.submitting) {
+      recipeDraft = null;
+      render();
+    }
+  });
+  const modal = el("div", "tb-modal tb-recipe-modal");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-labelledby", "tb-recipe-title");
+  modal.setAttribute("aria-describedby", "tb-recipe-hint");
+
+  const head = el("div", "tb-modal-head");
+  const title = el("h2", "tb-modal-title");
+  title.id = "tb-recipe-title";
+  title.textContent = "New task from recipe";
+  const hint = el("div", "tb-modal-hint");
+  hint.id = "tb-recipe-hint";
+  hint.textContent = "Creates the task, its subtasks, and their dependencies with per-role defaults — nothing starts until you say so.";
+  head.append(title, hint);
+  modal.append(head);
+
+  const titleInput = document.createElement("input");
+  titleInput.type = "text";
+  titleInput.className = "tb-input tb-recipe-title";
+  titleInput.placeholder = "Task title…";
+  titleInput.setAttribute("aria-label", "New task title");
+  titleInput.dataset["modalFocus"] = "title";
+  titleInput.value = draft.title;
+  titleInput.addEventListener("input", () => {
+    draft.title = titleInput.value;
+    const create = modal.querySelector<HTMLButtonElement>(".tb-recipe-create");
+    if (create) create.disabled = draft.submitting || draft.title.trim().length === 0 || draft.selectedId === null;
+  });
+  modal.append(titleInput);
+
+  if (draft.recipes === null) {
+    const loading = el("div", "tb-recipe-loading");
+    loading.textContent = "Loading recipes…";
+    modal.append(loading);
+  } else {
+    const list = el("div", "tb-recipe-list");
+    for (const recipe of draft.recipes) {
+      const row = button("", `ghost tb-recipe-row${draft.selectedId === recipe.recipeId ? " selected" : ""}`);
+      row.dataset["modalFocus"] = `recipe:${recipe.recipeId}`;
+      const name = el("span", "tb-recipe-name");
+      name.textContent = recipe.name + (recipe.source === "overlay" ? " · repo" : "");
+      const meta = el("span", "tb-recipe-meta");
+      meta.textContent = `${String(recipe.subtasks.length)} step${recipe.subtasks.length === 1 ? "" : "s"}${recipe.description === undefined ? "" : ` — ${recipe.description}`}`;
+      row.append(name, meta);
+      row.addEventListener("click", () => {
+        draft.selectedId = recipe.recipeId;
+        render();
+      });
+      list.append(row);
+    }
+    if (draft.recipes.length === 0) {
+      const empty = el("div", "tb-recipe-loading");
+      empty.textContent = "No recipes available.";
+      list.append(empty);
+    }
+    modal.append(list);
+
+    const selected = draft.recipes.find((recipe) => recipe.recipeId === draft.selectedId);
+    if (selected !== undefined) {
+      const preview = el("div", "tb-recipe-preview");
+      const titleByKey = new Map(selected.subtasks.map((step) => [step.key, step.title]));
+      for (const step of selected.subtasks) {
+        const row = el("div", "tb-recipe-step");
+        const stepTitle = el("span", "tb-recipe-step-title");
+        stepTitle.textContent = step.title;
+        row.append(stepTitle);
+        if (step.dependsOnKeys.length > 0) {
+          const deps = el("span", "tb-recipe-step-deps");
+          deps.textContent = `← ${step.dependsOnKeys.map((key) => titleByKey.get(key) ?? key).join(", ")}`;
+          row.append(deps);
+        }
+        const markers: string[] = [];
+        if (step.autoStart) markers.push("auto");
+        if (step.seedMode === "upstream") markers.push("⎘ upstream");
+        if (step.model !== undefined) markers.push(step.model.model ?? step.model.providerId);
+        if (step.prompt !== undefined) markers.push("⚡");
+        if (markers.length > 0) {
+          const marks = el("span", "tb-recipe-step-marks");
+          marks.textContent = markers.join(" · ");
+          row.append(marks);
+        }
+        preview.append(row);
+      }
+      modal.append(preview);
+    }
+  }
+
+  const foot = el("div", "tb-modal-foot");
+  const error = el("span", "tb-modal-error");
+  if (draft.error !== null) error.textContent = draft.error;
+  const footSpacer = el("span", "tb-toolbar-spacer");
+  const cancel = button("Cancel", "ghost small");
+  cancel.dataset["modalFocus"] = "cancel";
+  cancel.disabled = draft.submitting;
+  cancel.addEventListener("click", () => {
+    recipeDraft = null;
+    render();
+  });
+  const create = button(draft.submitting ? "Creating…" : "Create task", "primary small tb-recipe-create");
+  create.dataset["modalFocus"] = "create";
+  create.disabled = draft.submitting || draft.title.trim().length === 0 || draft.selectedId === null;
+  create.addEventListener("click", () => void submitRecipe());
+  foot.append(error, footSpacer, cancel, create);
+  modal.append(foot);
+
+  prepareModalFocus(modal, titleInput);
+  overlay.append(modal);
+  modalRoot.append(overlay);
+}
+
 function renderModal(): void {
+  const focusSnapshot = captureModalFocus(modalRoot.querySelector<HTMLElement>(".tb-modal"));
   const draft = settingsDraft;
-  modalRoot.classList.toggle("hidden", draft === null);
+  const open = draft !== null || recipeDraft !== null || faqDraft !== null;
+  modalRoot.classList.toggle("hidden", !open);
   modalRoot.replaceChildren();
-  if (draft === null) return;
+  if (recipeDraft !== null) {
+    renderRecipeModal(recipeDraft);
+    finishModalRender(true, focusSnapshot);
+    return;
+  }
+  if (faqDraft !== null) {
+    renderFaqModal(faqDraft);
+    finishModalRender(true, focusSnapshot);
+    return;
+  }
+  if (draft === null) {
+    finishModalRender(false, focusSnapshot);
+    return;
+  }
 
   const overlay = el("div", "tb-modal-overlay");
   overlay.addEventListener("click", (event) => {
@@ -1478,12 +2210,15 @@ function renderModal(): void {
   });
   const modal = el("div", "tb-modal");
   modal.setAttribute("role", "dialog");
-  modal.setAttribute("aria-label", "Column settings");
+  modal.setAttribute("aria-labelledby", "tb-columns-title");
+  modal.setAttribute("aria-describedby", "tb-columns-hint");
 
   const head = el("div", "tb-modal-head");
   const title = el("h2", "tb-modal-title");
+  title.id = "tb-columns-title";
   title.textContent = "Columns";
   const hint = el("div", "tb-modal-hint");
+  hint.id = "tb-columns-hint";
   hint.textContent = "Four fixed categories drive automation; columns are cosmetic groupings within them. Deleting a column moves its cards to the nearest column of the same category.";
   head.append(title, hint);
   modal.append(head);
@@ -1499,16 +2234,20 @@ function renderModal(): void {
   if (draft.error !== null) error.textContent = draft.error;
   const footSpacer = el("span", "tb-toolbar-spacer");
   const cancel = button("Cancel", "ghost small");
+  cancel.dataset["modalFocus"] = "cancel";
   cancel.disabled = draft.submitting;
   cancel.addEventListener("click", closeSettings);
   const save = button(draft.submitting ? "Saving…" : "Save columns", "primary small tb-modal-save");
+  save.dataset["modalFocus"] = "save";
   save.disabled = draft.submitting;
   save.addEventListener("click", () => void submitSettings());
   foot.append(error, footSpacer, cancel, save);
   modal.append(foot);
 
+  prepareModalFocus(modal, lanes.querySelector<HTMLElement>("input") ?? cancel);
   overlay.append(modal);
   modalRoot.append(overlay);
+  finishModalRender(true, focusSnapshot);
 }
 
 function buildCategoryLane(draft: SettingsDraft, category: ColumnCategory): HTMLElement {
@@ -1531,7 +2270,9 @@ function buildCategoryLane(draft: SettingsDraft, category: ColumnCategory): HTML
   input.className = "tb-input tb-lane-add-input";
   input.placeholder = "＋ Add column…";
   input.setAttribute("aria-label", `New ${CATEGORY_LABEL[category]} column name`);
+  input.dataset["modalFocus"] = `add-column:${category}`;
   const add = button("Add", "ghost small");
+  add.dataset["modalFocus"] = `add-column-button:${category}`;
   const submit = (): void => {
     const name = input.value.trim();
     if (name.length === 0) return;
@@ -1552,6 +2293,7 @@ function buildCategoryLane(draft: SettingsDraft, category: ColumnCategory): HTML
 function buildColumnChip(draft: SettingsDraft, chip: DraftColumn, siblings: DraftColumn[]): HTMLElement {
   const row = el("div", "tb-chip");
   if (chip.columnId !== undefined) row.dataset["columnId"] = chip.columnId;
+  const focusKey = chip.columnId ?? `new:${chip.category}:${String(draft.columns.indexOf(chip))}`;
 
   // Rename: the chip's name is a live inline input.
   const input = document.createElement("input");
@@ -1559,6 +2301,7 @@ function buildColumnChip(draft: SettingsDraft, chip: DraftColumn, siblings: Draf
   input.className = "tb-input tb-chip-name";
   input.value = chip.name;
   input.setAttribute("aria-label", "Column name");
+  input.dataset["modalFocus"] = `column-name:${focusKey}`;
   input.addEventListener("input", () => {
     chip.name = input.value;
   });
@@ -1566,11 +2309,13 @@ function buildColumnChip(draft: SettingsDraft, chip: DraftColumn, siblings: Draf
 
   const index = siblings.indexOf(chip);
   const up = iconButton("↑", "Move up within this category", "tb-chip-up");
+  up.dataset["modalFocus"] = `column-up:${focusKey}`;
   up.disabled = index <= 0;
   up.addEventListener("click", () => {
     swapDraftColumns(draft, chip, siblings[index - 1]);
   });
   const down = iconButton("↓", "Move down within this category", "tb-chip-down");
+  down.dataset["modalFocus"] = `column-down:${focusKey}`;
   down.disabled = index >= siblings.length - 1;
   down.addEventListener("click", () => {
     swapDraftColumns(draft, chip, siblings[index + 1]);
@@ -1580,6 +2325,7 @@ function buildColumnChip(draft: SettingsDraft, chip: DraftColumn, siblings: Draf
   // Delete: two-click inline confirm. The last chip of a category refuses
   // client-side (the service enforces the same invariant).
   const remove = button(chip.armedDelete === true ? "Confirm?" : "✕", `ghost small tb-chip-delete${chip.armedDelete === true ? " armed" : ""}`);
+  remove.dataset["modalFocus"] = `column-remove:${focusKey}`;
   remove.title = "Delete this column (cards move to the nearest column of the same category)";
   remove.addEventListener("click", () => {
     if (chip.armedDelete !== true) {
@@ -1714,6 +2460,9 @@ if (saved) {
   }
   if (typeof saved.lanesEnabled === "boolean") {
     lanesEnabled = saved.lanesEnabled;
+  }
+  if (saved.cardDetail !== undefined) {
+    cardDetailChoice = cardDetailLevel(saved.cardDetail);
   }
 }
 void Promise.all([loadWorkspaceSetNames(), loadBoard()]).then(() => render());

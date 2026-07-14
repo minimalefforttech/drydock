@@ -11,8 +11,7 @@ import { asId } from "@drydock/contracts";
 import type {
   MemoryCandidateRecord,
   MemoryCandidateStatus,
-  MemoryCandidateStore,
-  SessionId
+  MemoryCandidateStore
 } from "@drydock/contracts";
 import type { Clock, IdGenerator } from "@drydock/core";
 

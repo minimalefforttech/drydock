@@ -31,10 +31,10 @@ test("subtask runs resolve the durable task policy into a clone workspace", asyn
     }
   });
 
-  const result = await startRun({ taskId: "task-1", subtaskId: "sub-1", prompt: "Implement it", title: "Worker" });
-  await Promise.resolve();
+  const result = await startRun({ taskId: "task-1", subtaskId: "sub-1", prompt: "Implement it", title: "Worker", dependsOn: [] });
 
   assert.equal(result.sessionId, "session-1");
+  assert.deepEqual(sent, [], "preparing the session must not dispatch its first turn");
   assert.deepEqual(resolvedPolicy, policy);
   assert.deepEqual(startedWorkspace, {
     workspaceSetId: "set-1",
@@ -42,6 +42,8 @@ test("subtask runs resolve the durable task policy into a clone workspace", asyn
     roots: ["/work/project-b"],
     dirtyHandling: "carry"
   });
+  result.dispatchFirstTurn();
+  await Promise.resolve();
   assert.deepEqual(sent, ["Implement it"]);
 });
 
@@ -67,7 +69,7 @@ test("subtask runs fail actionably instead of falling back to an empty workspace
   });
 
   await assert.rejects(
-    () => startRun({ taskId: "task-1", subtaskId: "sub-1", prompt: "Implement it", title: "Worker" }),
+    () => startRun({ taskId: "task-1", subtaskId: "sub-1", prompt: "Implement it", title: "Worker", dependsOn: [] }),
     /must link exactly one workspace set/
   );
   assert.equal(starts, 0);

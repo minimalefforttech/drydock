@@ -247,7 +247,16 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       if (!response.ok) ctx.bridge.chat.logChat(`open task board failed: ${response.error.message}`);
     });
   });
-  tasksHeadingRow.append(tasksHeading, openBoardButton);
+  // Agents button: opens the fleet view (drydock.agents, ADR 0013) — every
+  // session across every task, for the many-tasks-in-flight moment.
+  const openAgentsButton = button("Agents", "small ghost tasks-board-button");
+  openAgentsButton.title = "Open the Agents panel (all active agents across tasks)";
+  openAgentsButton.addEventListener("click", () => {
+    void request({ type: "agents.open" }).then((response) => {
+      if (!response.ok) ctx.bridge.chat.logChat(`open agents panel failed: ${response.error.message}`);
+    });
+  });
+  tasksHeadingRow.append(tasksHeading, openBoardButton, openAgentsButton);
 
   const taskCreateForm = el("div", "task-create-form");
   const taskCreateRow = el("div", "button-row");
@@ -454,12 +463,13 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   const sessionsList = el("div", "session-cards");
   unassignedSessionsSection.body.append(sessionsList);
 
-  // --- Workspace sets (advanced) ---------------------------------------------
+  // --- AI project access ------------------------------------------------------
   // A workspace set is an editable, ordered list of registered folders, each
   // mounted read-write or read-only. The editor stages members in webview-local
   // draft state; nothing persists until Save. Editing a saved set loads it back
   // in here; saving over it calls workspace.updateSet.
-  const workspaceSets = collapsible("Workspace sets (advanced)");
+  const workspaceSets = collapsible("AI project access");
+  const securityPolicySummary = el("div", "ws-editor-hint");
 
   interface DraftMember { readonly projectId: string; readOnly: boolean; }
   let editingSetId: string | null = null;
@@ -486,7 +496,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // Explicit set rows (each a touch-history hover anchor); populated in render.
   const setsList = el("div", "sets-list");
   const projectsList = el("div", "projects-list");
-  workspaceSets.body.append(workspaceEditor, setPickRow, setsList, projectsList);
+  workspaceSets.body.append(securityPolicySummary, workspaceEditor, setPickRow, setsList, projectsList);
 
   workspaceSetSelect.addEventListener("change", () => {
     state.selectedWorkspaceSetId = workspaceSetSelect.value;
@@ -1442,7 +1452,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
    * exactly), an auto-start checkbox (commits immediately on change), a column
    * pill scoped to this subtask, and a Delete button (inline-confirm).
    */
-  function subtaskEditor(task: WorkTaskSummary, subtask: SubtaskSummary): HTMLElement {
+  function subtaskEditor(_task: WorkTaskSummary, subtask: SubtaskSummary): HTMLElement {
     const editor = el("div", "subtask-editor");
 
     const titleInput = textInput("Title");
@@ -2249,6 +2259,10 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   }
 
   function renderWorkspaceSets(): void {
+    securityPolicySummary.textContent = state.workspacePolicy?.security?.label ?? "Personal project access";
+    securityPolicySummary.title = state.workspacePolicy?.security?.managed === true
+      ? "Studio restrictions are host-enforced and cannot be widened here."
+      : "These settings restrict what AI can access; they do not restrict your editor.";
     const previousSet = workspaceSetSelect.value || state.selectedWorkspaceSetId;
     workspaceSetSelect.replaceChildren();
     workspaceSetSelect.append(option("", "— no workspace set —"));

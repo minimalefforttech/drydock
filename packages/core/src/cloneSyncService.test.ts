@@ -8,7 +8,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -122,6 +122,112 @@ test("initClone snapshots dirty tracked change + untracked file into sync base",
     assert.equal(showA, "alpha modified\n");
     const showUntracked = await git(clonePath, "show", "refs/sync/base:untracked.txt");
     assert.equal(showUntracked, "loose\n");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("clone omissions skip matching untracked environment and local-config files", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "app.txt": "safe\n" });
+  try {
+    await writeAll(join(localRepoPath, ".env"), "TOKEN=secret\n");
+    await writeAll(join(localRepoPath, "config", "local", "settings.json"), "{\"secret\":true}\n");
+    const omission = { sensitive: true, paths: ["config/local"] } as const;
+    const { clonePath } = await service().initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj",
+      omission
+    });
+
+    assert.equal(await fileExists(join(clonePath, ".env")), false);
+    assert.equal(await fileExists(join(clonePath, "config", "local", "settings.json")), false);
+    assert.equal(await read(join(clonePath, "app.txt")), "safe\n");
+
+    await writeAll(join(localRepoPath, "config", "local", "later.json"), "{}\n");
+    await service().outboundSync(clonePath, localRepoPath, omission);
+    assert.equal(await fileExists(join(clonePath, "config", "local", "later.json")), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("clone carry refuses an untracked symlink instead of copying its target bytes", async (t) => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "app.txt": "safe\n" });
+  try {
+    const outside = join(root, "outside.env");
+    const link = join(localRepoPath, "linked.txt");
+    await writeFile(outside, "TOKEN=outside\n", "utf8");
+    try {
+      await symlink(outside, link, "file");
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error
+        && ((error as { readonly code?: unknown }).code === "EPERM" || (error as { readonly code?: unknown }).code === "EACCES")) {
+        t.skip("This Windows account cannot create symbolic links.");
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      service().initClone({ localRepoPath, cloneParentDir: join(root, "repos"), name: "proj" }),
+      /Refusing to carry untracked symbolic link/
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("clone omissions refuse currently tracked sensitive content", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ ".env": "TOKEN=secret\n" });
+  try {
+    await assert.rejects(
+      service().initClone({
+        localRepoPath,
+        cloneParentDir: join(root, "repos"),
+        name: "proj",
+        omission: { sensitive: true, paths: [] }
+      }),
+      /Cannot safely omit .*\.env.*tracked project content/
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("clone omissions refuse tracked descendants of an exact omitted folder", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({
+    "config/local/settings.json": "{\"secret\":true}\n",
+    "app.txt": "safe\n"
+  });
+  try {
+    await assert.rejects(
+      service().initClone({
+        localRepoPath,
+        cloneParentDir: join(root, "repos"),
+        name: "proj",
+        omission: { sensitive: false, paths: ["config/local"] }
+      }),
+      /config\/local\/settings\.json.*tracked project content/
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("clone omissions refuse sensitive content retained only in Git history", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ ".env": "TOKEN=secret\n", "app.txt": "safe\n" });
+  try {
+    await git(localRepoPath, "rm", ".env");
+    await git(localRepoPath, "commit", "-m", "remove env");
+    await assert.rejects(
+      service().initClone({
+        localRepoPath,
+        cloneParentDir: join(root, "repos"),
+        name: "proj",
+        omission: { sensitive: true, paths: [] }
+      }),
+      /Cannot safely omit .*\.env.*repository history/
+    );
   } finally {
     await cleanup();
   }
@@ -315,6 +421,77 @@ test("inbound conflict: local edit to the same line surfaces markers, is reporte
     // Base advances despite the conflict (content was transferred with markers).
     const baseDelta = await git(clonePath, "diff", "--name-only", "refs/sync/base", "HEAD");
     assert.equal(baseDelta.trim(), "");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("binary inbound conflict fails without advancing the sync base", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({
+    "asset.bin": "base\0payload"
+  });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+    const baseBefore = (await git(clonePath, "rev-parse", "refs/sync/base")).trim();
+
+    // Both sides replace the same binary blob after the shared base. Git's
+    // 3-way apply reports a conflict but cannot leave textual markers. The
+    // fallback must therefore fail honestly instead of counting the file and
+    // advancing away the agent's still-untransferred delta.
+    await writeFile(join(localRepoPath, "asset.bin"), Buffer.from("local\0version"));
+    await git(localRepoPath, "add", "asset.bin");
+    await git(localRepoPath, "commit", "-m", "local binary divergence");
+    await writeFile(join(clonePath, "asset.bin"), Buffer.from("agent\0version"));
+
+    await assert.rejects(
+      svc.inboundPatch(clonePath, localRepoPath),
+      /apply inbound patch for asset\.bin/
+    );
+
+    const baseAfter = (await git(clonePath, "rev-parse", "refs/sync/base")).trim();
+    assert.equal(baseAfter, baseBefore, "failed full pull must preserve refs/sync/base");
+    const remaining = await git(clonePath, "diff", "--name-only", "refs/sync/base", "HEAD");
+    assert.equal(remaining.trim(), "asset.bin", "agent binary delta must remain available for retry");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("pre-existing marker text does not prove a failed binary pull transferred", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({
+    "asset.bin": "base\0payload"
+  });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+    const baseBefore = (await git(clonePath, "rev-parse", "refs/sync/base")).trim();
+
+    // This binary starts with marker-like text before the pull. A failed apply
+    // must not mistake that pre-existing content for a newly transferred text
+    // conflict and advance the clone's base.
+    await writeFile(join(localRepoPath, "asset.bin"), Buffer.from("<<<<<<< literal\0local"));
+    await git(localRepoPath, "add", "asset.bin");
+    await git(localRepoPath, "commit", "-m", "local binary with literal marker");
+    await writeFile(join(clonePath, "asset.bin"), Buffer.from("agent\0version"));
+
+    await assert.rejects(
+      svc.inboundPatch(clonePath, localRepoPath),
+      /apply inbound patch for asset\.bin/
+    );
+    assert.equal(
+      (await git(clonePath, "rev-parse", "refs/sync/base")).trim(),
+      baseBefore,
+      "pre-existing marker text must not permit a failed full pull to advance the base"
+    );
   } finally {
     await cleanup();
   }
@@ -515,6 +692,105 @@ test("patches larger than the 50 MB cap are refused with a clear message", async
     const big = "x".repeat(51 * 1024 * 1024) + "\n";
     await writeFile(join(clonePath, "big.txt"), big, "utf8");
     await assert.rejects(svc.inboundPatch(clonePath, localRepoPath), /exceeds the .*clone-sync cap/);
+  } finally {
+    await cleanup();
+  }
+});
+
+// --- Chain changesets (ADR 0014) ---------------------------------------------
+
+test("outboundChangesetPatch captures agent work as the exact pull delta, null when clean", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+
+    // A pristine clone has no outbound delta.
+    assert.equal(await svc.outboundChangesetPatch(clonePath), null);
+
+    // Agent work: one tracked edit (uncommitted) + one new file.
+    await writeFile(join(clonePath, "a.txt"), "alpha agent\n", "utf8");
+    await writeAll(join(clonePath, "new.txt"), "fresh\n");
+
+    const captured = await svc.outboundChangesetPatch(clonePath);
+    assert.ok(captured);
+    assert.equal(captured.fileCount, 2);
+    assert.match(captured.patch, /a\.txt/);
+    assert.match(captured.patch, /new\.txt/);
+
+    // Idempotent: capturing again returns the same delta (base did not move).
+    const again = await svc.outboundChangesetPatch(clonePath);
+    assert.equal(again?.fileCount, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("initClone seedPatches land upstream output inside the sync base", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    // Upstream run: clone, agent writes output, capture its changeset.
+    const upstream = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos-up"),
+      name: "proj"
+    });
+    await writeAll(join(upstream.clonePath, "generated.txt"), "upstream output\n");
+    const captured = await svc.outboundChangesetPatch(upstream.clonePath);
+    assert.ok(captured);
+
+    // Dependent run: fresh clone seeded with the upstream changeset.
+    const dependent = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos-dep"),
+      name: "proj",
+      seedPatches: [{ label: "sub-up/proj", patch: captured.patch }]
+    });
+
+    // The upstream output is present…
+    assert.equal(await read(join(dependent.clonePath, "generated.txt")), "upstream output\n");
+    // …and sits INSIDE refs/sync/base: the dependent's own outbound delta is
+    // empty, so its later changeset never re-carries upstream content.
+    assert.deepEqual(await svc.agentChanges(dependent.clonePath), []);
+    assert.equal(await svc.outboundChangesetPatch(dependent.clonePath), null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a conflicting seed patch fails clone init loudly, naming its source", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "f.txt": "base line\n" });
+  try {
+    const svc = service();
+    // Upstream changes f.txt from the original base…
+    const upstream = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos-up"),
+      name: "proj"
+    });
+    await writeFile(join(upstream.clonePath, "f.txt"), "upstream version\n", "utf8");
+    const captured = await svc.outboundChangesetPatch(upstream.clonePath);
+    assert.ok(captured);
+
+    // …and the developer's local repo then diverges on the same line.
+    await writeFile(join(localRepoPath, "f.txt"), "local divergent\n", "utf8");
+    await git(localRepoPath, "add", "-A");
+    await git(localRepoPath, "commit", "-m", "local divergence");
+
+    await assert.rejects(
+      svc.initClone({
+        localRepoPath,
+        cloneParentDir: join(root, "repos-dep"),
+        name: "proj",
+        seedPatches: [{ label: "sub-up/proj", patch: captured.patch }]
+      }),
+      /seed upstream changeset sub-up\/proj/
+    );
   } finally {
     await cleanup();
   }

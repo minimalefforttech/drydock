@@ -22,12 +22,14 @@ import type {
   ChatSessionRecord,
   CloneRepoState,
   DiffFileSummary,
+  ReviewCommentId,
   ReviewCommentSummary,
   SessionMode,
   TaskReviewFile,
   TaskReviewProject,
   TaskReviewSessionRef,
   TaskReviewState,
+  TurnResult,
   WorkTaskRecord,
   WorkTaskSummary
 } from "@drydock/contracts";
@@ -48,7 +50,8 @@ export interface TaskReviewSessionPort {
   hasActiveChatTurn(sessionId: string): boolean;
   isHeartbeatFresh(heartbeatAt: string | undefined): boolean;
   readonly hostInstanceId: string;
-  sendChatTurn(sessionId: string, prompt: string): Promise<unknown>;
+  /** Resolves only when the dispatched turn reaches a terminal state. */
+  sendChatTurn(sessionId: string, prompt: string): Promise<TurnResult>;
   resumeChatSession(sessionId: string, model?: ChatModelSelection, workspace?: ChatWorkspaceContext): Promise<unknown>;
   getSessionMode(sessionId: string): SessionMode;
 }
@@ -84,6 +87,16 @@ export interface TaskReviewSubmitResult {
 export interface TaskReviewSubmitHooks {
   /** vscode-side auto workspace resolution for resuming a dead session; undefined result = cannot resume. */
   readonly resolveResumeWorkspace?: (mode: SessionMode) => Promise<ChatWorkspaceContext | undefined>;
+  /** Detached terminal failure notification; comments have been reopened before this runs. */
+  readonly onDispatchFailed?: (failure: TaskReviewDispatchFailure) => void | Promise<void>;
+}
+
+export interface TaskReviewDispatchFailure {
+  readonly sessionId: string;
+  readonly sessionTitle: string;
+  readonly reason: string;
+  readonly commentCount: number;
+  readonly reopenedCount: number;
 }
 
 export class TaskReviewAppService {
@@ -182,6 +195,8 @@ export class TaskReviewAppService {
    * mid-turn, running elsewhere, or unresumable here is skipped with an error
    * line (comments stay `open`); only a confirmed-sendable session has its
    * comments composed (which flips them to `delegated`) and dispatched detached.
+   * A refused, failed, or cancelled detached turn reopens only those included
+   * comments that are still delegated, leaving later user/agent state alone.
    */
   async submitReview(taskId: string, hooks?: TaskReviewSubmitHooks): Promise<TaskReviewSubmitResult> {
     const summary = (await this.options.tasks.listTaskSummaries()).find((candidate) => candidate.taskId === taskId);
@@ -242,7 +257,10 @@ export class TaskReviewAppService {
       }
 
       // 4. Session is confirmed sendable: compose (flips comments to delegated)
-      // and dispatch the revision turn detached.
+      // and dispatch the revision turn detached. sendChatTurn resolves only at
+      // terminal, so awaiting it here would serialize multi-session revisions
+      // and leave the webview request open for the whole agent turn. The
+      // detached recovery path reopens the exact included comments on failure.
       const composed = await composeReviewCommentTurn({
         review: this.options.review,
         sessionId: asId<"SessionId">(sessionId),
@@ -253,13 +271,7 @@ export class TaskReviewAppService {
       if (composed === null) {
         continue;
       }
-      void this.options.sessions.sendChatTurn(sessionId, composed.prompt).catch((error: unknown) => {
-        this.options.logger.error("task review revision turn failed to run", {
-          taskId,
-          sessionId,
-          error: error instanceof Error ? error.message : String(error)
-        });
-      });
+      this.dispatchReviewTurn(taskId, sessionId, title, composed, hooks?.onDispatchFailed);
       dispatched += composed.count;
       sessions += 1;
       // Named refs let the panel say WHICH chats now run revisions (and, next
@@ -268,6 +280,102 @@ export class TaskReviewAppService {
     }
 
     return { dispatched, sessions, sentSessions, errors };
+  }
+
+  /**
+   * Runs one already-composed revision turn without blocking sibling dispatches.
+   * A terminal completion keeps the comments delegated. Refusal/rejection and
+   * explicit failed/cancelled results roll back only comments that have not
+   * since moved out of delegated, so a later resolve/block is never overwritten.
+   */
+  private dispatchReviewTurn(
+    taskId: string,
+    sessionId: string,
+    sessionTitle: string,
+    composed: { readonly prompt: string; readonly count: number; readonly commentIds: readonly ReviewCommentId[] },
+    onDispatchFailed?: (failure: TaskReviewDispatchFailure) => void | Promise<void>
+  ): void {
+    void this.runDetachedReviewTurn(taskId, sessionId, sessionTitle, composed, onDispatchFailed);
+  }
+
+  private async runDetachedReviewTurn(
+    taskId: string,
+    sessionId: string,
+    sessionTitle: string,
+    composed: { readonly prompt: string; readonly count: number; readonly commentIds: readonly ReviewCommentId[] },
+    onDispatchFailed?: (failure: TaskReviewDispatchFailure) => void | Promise<void>
+  ): Promise<void> {
+    let reason: string;
+    try {
+      const result = await this.options.sessions.sendChatTurn(sessionId, composed.prompt);
+      if (result.status === "completed") {
+        return;
+      }
+      reason = result.status === "cancelled"
+        ? "was cancelled before it completed"
+        : "failed before it completed";
+    } catch (error) {
+      reason = `was refused: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
+    let reopenedCount = 0;
+    const recoveryErrors: string[] = [];
+    try {
+      const recovery = await this.reopenDelegatedComments(sessionId, composed.commentIds);
+      reopenedCount = recovery.reopenedCount;
+      recoveryErrors.push(...recovery.errors);
+    } catch (error) {
+      recoveryErrors.push(error instanceof Error ? error.message : String(error));
+    }
+
+    this.options.logger.error("task review revision turn did not complete", {
+      taskId,
+      sessionId,
+      reason,
+      commentCount: composed.count,
+      reopenedCount,
+      ...(recoveryErrors.length === 0 ? {} : { recoveryErrors })
+    });
+
+    if (onDispatchFailed !== undefined) {
+      try {
+        await onDispatchFailed({
+          sessionId,
+          sessionTitle,
+          reason,
+          commentCount: composed.count,
+          reopenedCount
+        });
+      } catch (error) {
+        this.options.logger.warn("task review dispatch-failure notification failed", {
+          taskId,
+          sessionId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }
+
+  /** Reopens the dispatch's exact threads, but only while they remain delegated. */
+  private async reopenDelegatedComments(
+    sessionId: string,
+    commentIds: readonly ReviewCommentId[]
+  ): Promise<{ readonly reopenedCount: number; readonly errors: readonly string[] }> {
+    const scope = await this.options.review.ensureReviewSession("current-session", asId<"SessionId">(sessionId));
+    const included = new Set<ReviewCommentId>(commentIds);
+    const delegated = (await this.options.review.listComments(scope.reviewSessionId))
+      .filter((comment) => included.has(comment.commentId) && comment.status === "delegated");
+    let reopenedCount = 0;
+    const errors: string[] = [];
+    for (const comment of delegated) {
+      try {
+        await this.options.review.setCommentStatus(comment.commentId, "open");
+        reopenedCount += 1;
+      } catch (error) {
+        errors.push(`${comment.commentId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { reopenedCount, errors };
   }
 
   /**

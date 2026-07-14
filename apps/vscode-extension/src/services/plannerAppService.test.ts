@@ -44,6 +44,8 @@ class FakeSessions implements PlannerSessionsPort {
   readonly prompts: string[] = [];
   readonly startedWorkspaces: (ChatWorkspaceContext | undefined)[] = [];
   reclaims = 0;
+  nextSendError: Error | null = null;
+  nextSendStatus: "completed" | "failed" | "cancelled" | null = null;
   private live = new Set<string>();
   private nextSession = 0;
 
@@ -65,9 +67,19 @@ class FakeSessions implements PlannerSessionsPort {
     return {};
   }
 
-  async sendChatTurn(_sessionId: string, prompt: string): Promise<unknown> {
+  async sendChatTurn(
+    _sessionId: string,
+    prompt: string
+  ): Promise<{ readonly status: "completed" | "failed" | "cancelled" }> {
+    if (this.nextSendError !== null) {
+      const error = this.nextSendError;
+      this.nextSendError = null;
+      throw error;
+    }
     this.prompts.push(prompt);
-    return {};
+    const status = this.nextSendStatus ?? "completed";
+    this.nextSendStatus = null;
+    return { status };
   }
 
   isChatSessionLive(sessionId: string): boolean {
@@ -356,6 +368,84 @@ test("sendInstructions composes one turn from open annotations and delegates the
   } finally {
     harness.connection.close();
     await rm(harness.dir, { recursive: true, force: true });
+  }
+});
+
+test("sendInstructions surfaces a refused turn and leaves annotations open for retry", async () => {
+  const harness = await makeHarness();
+  try {
+    const plan = await harness.service.createPlan({ brief: "b", aspectIds: ["architecture"], contextRoots: [] });
+    const workspace = path.join(harness.dir, "ws");
+    await mkdir(workspace, { recursive: true });
+    harness.setWorkspace(workspace);
+    await harness.service.startPlanSession(plan.planId);
+    await seedPlanFiles(workspace);
+    const collected = await harness.service.collectPlanArtifacts(plan.planId);
+    const doc = collected.find((artifact) => artifact.relPath === "architecture/overview.md");
+    assert.ok(doc);
+
+    const annotation = await harness.service.addAnnotation(plan.planId, doc.artifactId, "block:2", "Split phase two.");
+    const turnsBeforeFailure = harness.sessions.prompts.length;
+    harness.sessions.nextSendError = new Error("chat adapter unavailable");
+
+    await assert.rejects(
+      harness.service.sendInstructions(plan.planId),
+      /chat adapter unavailable/
+    );
+    assert.equal(harness.sessions.prompts.length, turnsBeforeFailure);
+
+    const afterFailure = await harness.service.getPlanState(plan.planId);
+    const stillOpen = afterFailure.annotations.find((entry) => entry.annotationId === annotation.annotationId);
+    assert.ok(stillOpen);
+    assert.equal(stillOpen.status, "open");
+    assert.equal(stillOpen.delegatedRev, null);
+
+    // The same instruction remains available and is delegated by a successful retry.
+    assert.deepEqual(await harness.service.sendInstructions(plan.planId), { sentCount: 1 });
+    const afterRetry = await harness.service.getPlanState(plan.planId);
+    const delegated = afterRetry.annotations.find((entry) => entry.annotationId === annotation.annotationId);
+    assert.ok(delegated);
+    assert.equal(delegated.status, "delegated");
+    assert.equal(delegated.delegatedRev, doc.revision);
+  } finally {
+    harness.connection.close();
+    await rm(harness.dir, { recursive: true, force: true });
+  }
+});
+
+test("sendInstructions keeps annotations open when an accepted turn fails or is cancelled", async () => {
+  for (const status of ["failed", "cancelled"] as const) {
+    const harness = await makeHarness();
+    try {
+      const plan = await harness.service.createPlan({ brief: "b", aspectIds: ["architecture"], contextRoots: [] });
+      const workspace = path.join(harness.dir, "ws");
+      await mkdir(workspace, { recursive: true });
+      harness.setWorkspace(workspace);
+      await harness.service.startPlanSession(plan.planId);
+      await seedPlanFiles(workspace);
+      const collected = await harness.service.collectPlanArtifacts(plan.planId);
+      const doc = collected.find((artifact) => artifact.relPath === "architecture/overview.md");
+      assert.ok(doc);
+
+      const annotation = await harness.service.addAnnotation(plan.planId, doc.artifactId, "block:2", "Split phase two.");
+      const turnsBeforeFailure = harness.sessions.prompts.length;
+      harness.sessions.nextSendStatus = status;
+
+      await assert.rejects(
+        harness.service.sendInstructions(plan.planId),
+        new RegExp(`turn ${status}; annotations remain open`)
+      );
+      assert.equal(harness.sessions.prompts.length, turnsBeforeFailure + 1);
+
+      const state = await harness.service.getPlanState(plan.planId);
+      const stillOpen = state.annotations.find((entry) => entry.annotationId === annotation.annotationId);
+      assert.ok(stillOpen);
+      assert.equal(stillOpen.status, "open");
+      assert.equal(stillOpen.delegatedRev, null);
+    } finally {
+      harness.connection.close();
+      await rm(harness.dir, { recursive: true, force: true });
+    }
   }
 });
 

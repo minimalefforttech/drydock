@@ -35,6 +35,7 @@ import {
 } from "@drydock/contracts";
 import type { Logger, ProductBusEvent } from "@drydock/core";
 import type { Backend, BackendReady } from "../compositionRoot.js";
+import { extractSubtaskCandidates } from "../services/planMaterialize.js";
 import { openAgentFileRef, toChatSessionSummary } from "./controlPanelProvider.js";
 
 export class PlannerPanelProvider {
@@ -290,6 +291,41 @@ export class PlannerPanelProvider {
       case "planner.sendInstructions": {
         const result = await backend.planner.sendInstructions(payload.planId);
         this.respond(request.requestId, { type: "planner.sendInstructions", accepted: true, sentCount: result.sentCount });
+        return;
+      }
+      case "planner.subtaskCandidates": {
+        // Plan → board (ADR 0012): checkbox items across the plan's document
+        // artifacts, proposed verbatim — the dialog shows exactly what the
+        // plan lists as work, nothing inferred.
+        const state = await backend.planner.getPlanState(payload.planId);
+        const candidates = extractSubtaskCandidates(state.artifacts);
+        this.respond(request.requestId, {
+          type: "planner.subtaskCandidates",
+          candidates,
+          ...(state.plan.taskId === null ? {} : { taskId: state.plan.taskId }),
+          ...(state.plan.taskTitle === undefined ? {} : { taskTitle: state.plan.taskTitle })
+        });
+        return;
+      }
+      case "planner.materializeSubtasks": {
+        // Creates, never starts (0007 discipline): each accepted title lands
+        // as a backlog subtask on the plan's owning task with a plan-sourced
+        // prompt, so it is startable later without retyping context.
+        const state = await backend.planner.getPlanState(payload.planId);
+        const taskId = state.plan.taskId;
+        if (taskId === null) {
+          this.respondError(request.requestId, "This plan has no owning task — pick one in the plan intake first.");
+          return;
+        }
+        let createdCount = 0;
+        for (const title of payload.titles) {
+          await backend.subtasks.createSubtask(taskId, {
+            title,
+            prompt: `From the plan "${state.plan.title}": ${title}\n\nFollow the plan's artifacts for context and constraints.`
+          });
+          createdCount += 1;
+        }
+        this.respond(request.requestId, { type: "planner.materializeSubtasks", createdCount, taskId });
         return;
       }
       case "planner.regenerate": {

@@ -15,6 +15,7 @@ import type {
   SessionId
 } from "@drydock/contracts";
 import type { Clock } from "./clock.js";
+import type { ProductEventBus } from "./eventBus.js";
 import type { IdGenerator } from "./ids.js";
 import type { ParsedAgentQuestion } from "./accessRequestProtocol.js";
 
@@ -24,6 +25,8 @@ export interface AgentQuestionServiceOptions {
   readonly store: AgentQuestionStore;
   readonly ids: IdGenerator;
   readonly clock: Clock;
+  /** When present, resolutions are announced as `question-resolved` so every surface's pending set stays live. */
+  readonly bus?: ProductEventBus;
 }
 
 export class AgentQuestionService {
@@ -72,14 +75,18 @@ export class AgentQuestionService {
     const pending = await this.requiredPending(questionId);
     const resolvedAt = this.options.clock.isoNow();
     await this.options.store.resolveQuestion(questionId, "answered", trimmed, resolvedAt);
-    return { ...pending, status: "answered", answer: trimmed, resolvedAt };
+    const resolved: AgentQuestionRecord = { ...pending, status: "answered", answer: trimmed, resolvedAt };
+    this.options.bus?.publish({ kind: "question-resolved", question: resolved });
+    return resolved;
   }
 
   async dismiss(questionId: AgentQuestionId): Promise<AgentQuestionRecord> {
     const pending = await this.requiredPending(questionId);
     const resolvedAt = this.options.clock.isoNow();
     await this.options.store.resolveQuestion(questionId, "dismissed", null, resolvedAt);
-    return { ...pending, status: "dismissed", resolvedAt };
+    const resolved: AgentQuestionRecord = { ...pending, status: "dismissed", resolvedAt };
+    this.options.bus?.publish({ kind: "question-resolved", question: resolved });
+    return resolved;
   }
 
   private async requiredPending(questionId: AgentQuestionId): Promise<AgentQuestionRecord> {

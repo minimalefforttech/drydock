@@ -112,6 +112,16 @@ test("deleting a task cascades its links and links dedupe on insert", async () =
       sessionId: asId<"SessionId">("session-1"),
       createdAt: "2026-07-03T00:00:03.000Z"
     });
+    connection.database.prepare(`
+      INSERT INTO task_faqs (faq_id, task_id, pattern, answer, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run("faq-1", "task-1", "question", "answer", "2026-07-03T00:00:03.000Z");
+    connection.database.prepare(`
+      INSERT INTO task_changesets (
+        changeset_id, task_id, subtask_id, session_id, repo_name,
+        patch_sha256, patch_bytes, file_count, captured_at, landed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    `).run("changeset-1", "task-1", "sub-1", "session-1", "repo", "a".repeat(64), 1, 1, "2026-07-03T00:00:03.000Z");
 
     assert.equal((await store.listLinks(asId<"TaskId">("task-1"))).length, 2);
 
@@ -129,6 +139,10 @@ test("deleting a task cascades its links and links dedupe on insert", async () =
     const reopenedStore = new SqliteWorkTaskStore(reopened);
     assert.equal((await reopenedStore.listLinks()).length, 0);
     assert.equal(await reopenedStore.getTask(asId<"TaskId">("task-1")), null);
+    const faqCount = reopened.database.prepare("SELECT COUNT(*) AS count FROM task_faqs").get() as { readonly count: number };
+    const changesetCount = reopened.database.prepare("SELECT COUNT(*) AS count FROM task_changesets").get() as { readonly count: number };
+    assert.equal(faqCount.count, 0);
+    assert.equal(changesetCount.count, 0);
     reopened.close();
   } finally {
     await rm(dir, { recursive: true, force: true });

@@ -88,7 +88,7 @@ export class DocumentProvider implements ArtifactProvider {
 
   private renderBlock(
     block: DocBlock,
-    artifact: PlanArtifactDetail,
+    _artifact: PlanArtifactDetail,
     annotations: readonly PlanAnnotationSummary[],
     events: ProviderEvents
   ): HTMLElement {

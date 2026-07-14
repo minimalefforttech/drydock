@@ -1,5 +1,9 @@
 # Security-First VS Code Agent Extension Plan
 
+> Historical founding plan. It preserves the original scope and stage gates;
+> it is not the current product contract. Use the ADR index, roadmap, threat
+> model, and focused design documents for current behavior.
+
 ## Summary
 
 Stage 0 is an entry gate, not VS Code implementation. No extension scaffolding begins until the repo contains:

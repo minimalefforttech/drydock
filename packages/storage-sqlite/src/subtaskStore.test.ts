@@ -145,6 +145,23 @@ test("dependency add/remove and cascade delete of edges when a subtask is delete
 
     assert.equal((await store.listDependenciesForTask(asId<"TaskId">("task-1"))).length, 2);
 
+    connection.database.prepare(`
+      INSERT INTO subtask_holds (subtask_id, kind, origin, force, held_at)
+      VALUES (?, 'queued', 'manual', 0, ?)
+    `).run("sub-3", "2026-07-03T00:00:03.000Z");
+    connection.database.prepare(`
+      INSERT INTO task_changesets (
+        changeset_id, task_id, subtask_id, session_id, repo_name,
+        patch_sha256, patch_bytes, file_count, captured_at, landed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    `).run("changeset-1", "task-1", "sub-3", "session-1", "repo", "a".repeat(64), 1, 1, "2026-07-03T00:00:03.000Z");
+    await taskStore.insertLink({
+      taskId: asId<"TaskId">("task-1"),
+      sessionId: asId<"SessionId">("session-1"),
+      subtaskId: asId<"SubtaskId">("sub-3"),
+      createdAt: "2026-07-03T00:00:03.000Z"
+    });
+
     await store.removeDependency(asId<"SubtaskId">("sub-1"), asId<"SubtaskId">("sub-2"));
     assert.equal((await store.listDependenciesForTask(asId<"TaskId">("task-1"))).length, 1);
 
@@ -152,6 +169,11 @@ test("dependency add/remove and cascade delete of edges when a subtask is delete
     await store.deleteSubtask(asId<"SubtaskId">("sub-3"));
     assert.equal((await store.listDependenciesForTask(asId<"TaskId">("task-1"))).length, 0);
     assert.equal(await store.getSubtask(asId<"SubtaskId">("sub-3")), null);
+    const holdCount = connection.database.prepare("SELECT COUNT(*) AS count FROM subtask_holds").get() as { readonly count: number };
+    const changesetCount = connection.database.prepare("SELECT COUNT(*) AS count FROM task_changesets").get() as { readonly count: number };
+    assert.equal(holdCount.count, 0);
+    assert.equal(changesetCount.count, 0);
+    assert.equal((await taskStore.listSessionIdsBySubtask(asId<"SubtaskId">("sub-3"))).length, 0);
     connection.close();
   } finally {
     await rm(dir, { recursive: true, force: true });

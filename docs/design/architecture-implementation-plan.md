@@ -1,10 +1,14 @@
 # Architecture Implementation Plan
 
+> Historical staged implementation plan. It records the path used to build the
+> product, not the current UI or service contract. Use the ADR index and the
+> focused design documents for current decisions.
+
 Inputs: `docs/design/product-plan.md`, `docs/design/threat-model.md`, `docs/design/api-reference.md`, `docs/design/extension-points.md`, `docs/design/work-management.md`, `docs/prevalidation-report.md`
 
-## Current Decisions
+## Stage 1 Decisions (historical)
 
-These decisions are accepted for Stage 1 unless later ADRs supersede them:
+These decisions were accepted for Stage 1 unless later ADRs superseded them:
 
 - State storage is configurable, with the default under a user-visible store such as `~/.drydock`.
 - Native dependencies are acceptable when they materially improve correctness and maintainability, including for SQLite.
@@ -1410,7 +1414,12 @@ Definition of done:
 - Unsupported oversized files are explicit and safe.
 - Review comments remain attached to file paths, line ranges, and diff hunks.
 
-### Stage 5: Markdown Planning
+### Stage 5: Markdown Planning (historical; superseded by ADR 0012)
+
+The original block-approval implementation below was retired. Plans are now
+durable Planner artifacts with aspect-based collect/hydrate persistence,
+annotations, revision flows, and explicit plan-to-board materialization; they
+do not gate implementation turns.
 
 Goal: plans gate implementation.
 

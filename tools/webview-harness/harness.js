@@ -32,7 +32,10 @@
         agents: [
           { nodeId: "task-audit", label: "Audit publish hooks", status: "running", startedAt: iso(13), lastActivityAt: iso(6), lastActivity: "grep allowlist", lastCommand: "grep", toolUses: 29, tokens: 257000 },
           { nodeId: "task-exporter", label: "Patch alembic exporter", status: "running", startedAt: iso(3), lastActivityAt: iso(1), lastActivity: "edit exporters/alembic.py", lastCommand: "Edit", toolUses: 52, tokens: 59900 }
-        ]
+        ],
+        // Root item (ADR 0013): the fleet keys its pulse/activity line/Stop off
+        // this; the sidebar ⑂ chip ignores it (counts stay children-only).
+        root: { nodeId: "root", label: "agent", status: "running", startedAt: iso(14), lastActivityAt: iso(1), lastActivity: "wiring exporter registry", lastCommand: "Edit", toolUses: 96, tokens: 412000 }
       },
       createdAt: iso(180),
       updatedAt: iso(2)
@@ -41,6 +44,7 @@
     { sessionId: "s-ended", title: "Investigate USD 24 upgrade", status: "ended", providerId: "codex", model: "gpt-5.4", createdAt: iso(2000), updatedAt: iso(1900) },
     { sessionId: "s-failed", title: "Docs generation spike", status: "failed", providerId: "codex", model: "gpt-5.5", createdAt: iso(500), updatedAt: iso(480) },
     { sessionId: "s-elsewhere", title: "Nightly test triage (window 2)", status: "active", providerId: "claude", model: "claude-opus-4-8", runningElsewhere: true, createdAt: iso(120), updatedAt: iso(8) },
+    { sessionId: "s-resuming", title: "Reclaimed: shader cache warmup", status: "starting", providerId: "codex", model: "gpt-5.5", createdAt: iso(300), updatedAt: iso(1) },
     { sessionId: "s-clone", title: "Clone: rewire asset_api publish", status: "active", providerId: "codex", model: "gpt-5.5", mode: "clone", createdAt: iso(90), updatedAt: iso(4) }
   ];
 
@@ -153,14 +157,50 @@
     { columnId: "col-finished", name: "Finished", category: "done", sortOrder: 5 }
   ];
 
+  /** Landing drawer rows (ADR 0014): one disjoint, one overlapping pair member, one path-less legacy capture. */
+  const harnessLanding = [
+    { taskId: "t-1", taskTitle: "Alembic publish support", subtaskId: "st-3", subtaskTitle: "Review sweep", sessionId: "s-clone", repos: [{ repoName: "asset_api", fileCount: 4 }], capturedAt: iso(30), overlapsWith: [] },
+    { taskId: "t-3", taskTitle: "Task board rollout", subtaskId: "st-6", subtaskTitle: "Spike column persistence", sessionId: "s-ended", repos: [{ repoName: "asset_api", fileCount: 2 }, { repoName: "tools", fileCount: 1 }], capturedAt: iso(2980), overlapsWith: ["st-9"] },
+    { taskId: "t-2", taskTitle: "Py3 farm audit", subtaskId: "st-9", subtaskTitle: "Legacy capture", sessionId: "s-failed", repos: [{ repoName: "asset_api", fileCount: 3 }], capturedAt: iso(4000), overlapsWith: ["st-6"], overlapUnknown: true }
+  ];
+
+  /** Task FAQ entries (ADR 0007) — t-1's fixture count matches its faqCount. */
+  const harnessFaqs = [
+    { faqId: "faq-1", taskId: "t-1", pattern: "which branch", answer: "Work on feature/alembic-publish; never touch main directly.", createdAt: iso(100) },
+    { faqId: "faq-2", taskId: "t-1", pattern: "test framework", answer: "pytest with the studio fixtures package.", createdAt: iso(90) }
+  ];
+
+  /** Task recipes (ADRs 0007/0002): one seeded, one repo overlay (with a model profile). */
+  const harnessRecipes = [
+    {
+      recipeId: "recipe-implement-verify", name: "Implement + verify",
+      description: "One implementer, then a verifier that builds on its output.",
+      source: "seeded", archived: false, createdAt: iso(9000), updatedAt: iso(9000),
+      subtasks: [
+        { key: "implement", title: "Implement", prompt: "Implement \"{title}\".", autoStart: false, dependsOnKeys: [] },
+        { key: "verify", title: "Verify", prompt: "Verify \"{title}\".", autoStart: true, seedMode: "upstream", dependsOnKeys: ["implement"] }
+      ]
+    },
+    {
+      recipeId: "overlay:vfx-shot-pipeline", name: "VFX shot pipeline",
+      description: "Research the shot setup, implement, then run the render test.",
+      source: "overlay", archived: false, createdAt: iso(9000), updatedAt: iso(9000),
+      subtasks: [
+        { key: "research", title: "Research", prompt: "Research \"{title}\".", autoStart: false, dependsOnKeys: [] },
+        { key: "implement", title: "Implement", prompt: "Implement \"{title}\".", autoStart: true, seedMode: "upstream", dependsOnKeys: ["research"], model: { providerId: "claude", model: "claude-fable-5" } },
+        { key: "render-test", title: "Render test", prompt: "Run the render test for \"{title}\".", autoStart: true, seedMode: "upstream", dependsOnKeys: ["implement"] }
+      ]
+    }
+  ];
+
   const tasks = [
     {
-      taskId: "t-1", title: "Alembic publish support", description: "4 repos: db, api, maya, houdini", state: "in-progress", columnId: "col-in-progress", linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: ["s-live", "s-clone"], createdAt: iso(200), updatedAt: iso(5), lastWorkedAt: iso(2), openReviewCommentCount: 1,
+      taskId: "t-1", title: "Alembic publish support", description: "4 repos: db, api, maya, houdini", state: "in-progress", columnId: "col-in-progress", linkedWorkspaceSetIds: ["set-1"], linkedSessionIds: ["s-live", "s-clone"], createdAt: iso(200), updatedAt: iso(5), lastWorkedAt: iso(2), openReviewCommentCount: 1, faqCount: 2, autoAnswerFaq: true,
       clonePolicy: { workspaceSetId: "set-1", projectIds: ["p-asset"], dirtyHandling: "carry", workspaceSetProjectCount: 2 },
       subtasks: [
-        { subtaskId: "st-1", taskId: "t-1", title: "Patch alembic exporter", description: "exporters/alembic.py", prompt: "Patch exporters/alembic.py to support alembic caches.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(190), updatedAt: iso(5), isBlocked: false, dependsOn: [], isRunning: true, linkedSessionIds: ["s-live"] },
-        { subtaskId: "st-2", taskId: "t-1", title: "Update allowlist config", description: "", prompt: "", autoStart: true, origin: "manual", columnId: "col-todo", sortOrder: 1, createdAt: iso(188), updatedAt: iso(188), isBlocked: true, dependsOn: ["st-1"], isRunning: false, linkedSessionIds: [] },
-        { subtaskId: "st-3", taskId: "t-1", title: "Review sweep", description: "", origin: "review", autoStart: false, columnId: "col-review", sortOrder: 2, createdAt: iso(100), updatedAt: iso(20), doneAt: iso(20), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [] }
+        { subtaskId: "st-1", taskId: "t-1", title: "Patch alembic exporter", description: "exporters/alembic.py", prompt: "Patch exporters/alembic.py to support alembic caches.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(190), updatedAt: iso(5), isBlocked: false, dependsOn: [], isRunning: true, linkedSessionIds: ["s-live"], model: { providerId: "claude", model: "claude-fable-5" } },
+        { subtaskId: "st-2", taskId: "t-1", title: "Update allowlist config", description: "", prompt: "", autoStart: true, origin: "manual", columnId: "col-todo", sortOrder: 1, createdAt: iso(188), updatedAt: iso(188), isBlocked: true, dependsOn: ["st-1"], isRunning: false, linkedSessionIds: [], seedMode: "upstream" },
+        { subtaskId: "st-3", taskId: "t-1", title: "Review sweep", description: "", origin: "review", autoStart: false, columnId: "col-review", sortOrder: 2, createdAt: iso(100), updatedAt: iso(20), doneAt: iso(20), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [], verifyUnmet: true }
       ]
     },
     {
@@ -180,8 +220,9 @@
         // st-5 depends on the already-finished st-6 (an edge to a done sibling
         // is allowed — instantly satisfied) and wears a failed chip from a
         // cancelled earlier run; drives the board's edge + failed visuals.
-        { subtaskId: "st-5", taskId: "t-3", title: "Draft board announcement", description: "", prompt: "Write the internal rollout note for the task board.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(3100), updatedAt: iso(60), isBlocked: false, dependsOn: ["st-6"], isRunning: false, lastFailureAt: iso(55), linkedSessionIds: [] },
-        { subtaskId: "st-6", taskId: "t-3", title: "Spike column persistence", description: "", prompt: "", autoStart: false, origin: "manual", columnId: "col-finished", sortOrder: 1, createdAt: iso(3100), updatedAt: iso(2980), doneAt: iso(2980), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [] }
+        { subtaskId: "st-5", taskId: "t-3", title: "Draft board announcement", description: "", prompt: "Write the internal rollout note for the task board.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(3100), updatedAt: iso(60), isBlocked: false, dependsOn: ["st-6"], isRunning: false, lastFailureAt: iso(55), isParked: true, linkedSessionIds: [] },
+        { subtaskId: "st-7", taskId: "t-3", title: "Cross-post to wiki", description: "", prompt: "Mirror the rollout note onto the wiki.", autoStart: true, origin: "manual", columnId: "col-todo", sortOrder: 2, createdAt: iso(3100), updatedAt: iso(30), isBlocked: false, dependsOn: [], isRunning: false, isQueued: true, linkedSessionIds: [] },
+        { subtaskId: "st-6", taskId: "t-3", title: "Spike column persistence", description: "", prompt: "", autoStart: false, origin: "manual", columnId: "col-finished", sortOrder: 1, createdAt: iso(3100), updatedAt: iso(2980), doneAt: iso(2980), isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: [], hasUnlandedChangeset: true }
       ]
     }
   ];
@@ -411,7 +452,9 @@
         session.providerId = payload.model.providerId; session.model = payload.model.model;
         return respond(requestId, { type, session, providerCatalogs: catalogs });
       }
-      case "chat.cancelTurn": return respond(requestId, { type, accepted: true });
+      case "chat.cancelTurn":
+        harnessLog(`chat.cancelTurn ${String(payload.sessionId)}`);
+        return respond(requestId, { type, accepted: true });
       case "chat.spawnRole": {
         const parent = sessions.find((candidate) => candidate.sessionId === payload.sessionId);
         if (!parent) return respondError(requestId, "unknown session");
@@ -546,6 +589,10 @@
         if (payload.title !== undefined) task.title = payload.title;
         if (payload.state !== undefined) task.state = payload.state;
         if (payload.description !== undefined) { if (payload.description === "") delete task.description; else task.description = payload.description; }
+        if (payload.autoAnswerFaq !== undefined) {
+          task.autoAnswerFaq = payload.autoAnswerFaq;
+          harnessLog(`task.update ${String(payload.taskId)} autoAnswerFaq=${String(payload.autoAnswerFaq)}`);
+        }
         task.updatedAt = new Date().toISOString();
         push({ type: "task.updated", task });
         return respond(requestId, { type, task });
@@ -637,6 +684,82 @@
         harnessLog(`board.columns.update columns=${String(payload.columns.length)} deleted=${String((payload.deletedColumnIds ?? []).length)}`);
         return respond(requestId, { type, board: { columns: boardColumns, tasks } });
       }
+      case "recipes.list": {
+        harnessLog("recipes.list");
+        return respond(requestId, { type, recipes: harnessRecipes });
+      }
+      case "task.faq.list": {
+        harnessLog(`task.faq.list ${String(payload.taskId)}`);
+        return respond(requestId, { type, faqs: harnessFaqs.filter((faq) => faq.taskId === payload.taskId) });
+      }
+      case "task.faq.add": {
+        harnessLog(`task.faq.add ${String(payload.taskId)} pattern=${String(payload.pattern)}`);
+        harnessFaqs.push({ faqId: `faq-${String(harnessFaqs.length + 1)}`, taskId: payload.taskId, pattern: payload.pattern, answer: payload.answer, createdAt: new Date().toISOString() });
+        const owner = tasks.find((candidate) => candidate.taskId === payload.taskId);
+        if (owner) owner.faqCount = harnessFaqs.filter((faq) => faq.taskId === payload.taskId).length;
+        return respond(requestId, { type, faqs: harnessFaqs.filter((faq) => faq.taskId === payload.taskId) });
+      }
+      case "task.faq.remove": {
+        harnessLog(`task.faq.remove ${String(payload.taskId)} ${String(payload.faqId)}`);
+        const index = harnessFaqs.findIndex((faq) => faq.taskId === payload.taskId && faq.faqId === payload.faqId);
+        if (index >= 0) harnessFaqs.splice(index, 1);
+        const owner = tasks.find((candidate) => candidate.taskId === payload.taskId);
+        if (owner) owner.faqCount = harnessFaqs.filter((faq) => faq.taskId === payload.taskId).length;
+        return respond(requestId, { type, faqs: harnessFaqs.filter((faq) => faq.taskId === payload.taskId) });
+      }
+      case "task.createFromRecipe": {
+        const recipe = harnessRecipes.find((candidate) => candidate.recipeId === payload.recipeId);
+        if (!recipe) return respondError(requestId, "unknown recipe");
+        harnessLog(`task.createFromRecipe ${String(payload.recipeId)} title=${String(payload.title)}`);
+        const stamp = new Date().toISOString();
+        const taskId = `t-recipe-${String(tasks.length + 1)}`;
+        const idByKey = new Map();
+        const subtasks = recipe.subtasks.map((step, index) => {
+          const subtaskId = `${taskId}-st-${String(index + 1)}`;
+          idByKey.set(step.key, subtaskId);
+          return {
+            subtaskId,
+            taskId,
+            title: step.title,
+            ...(step.prompt ? { prompt: step.prompt.replaceAll("{title}", payload.title) } : {}),
+            autoStart: step.autoStart === true,
+            origin: "manual",
+            columnId: boardColumns.find((c) => c.category === "backlog")?.columnId ?? "col-backlog",
+            sortOrder: index,
+            createdAt: stamp,
+            updatedAt: stamp,
+            isBlocked: false,
+            dependsOn: [],
+            isRunning: false,
+            linkedSessionIds: [],
+            ...(step.seedMode ? { seedMode: step.seedMode } : {}),
+            ...(step.model ? { model: step.model } : {})
+          };
+        });
+        for (const step of recipe.subtasks) {
+          const to = subtasks.find((s) => s.subtaskId === idByKey.get(step.key));
+          for (const fromKey of step.dependsOnKeys ?? []) {
+            const fromId = idByKey.get(fromKey);
+            if (to && fromId) to.dependsOn.push(fromId);
+          }
+        }
+        const task = {
+          taskId,
+          title: payload.title,
+          description: `Created from recipe "${recipe.name}".`,
+          state: "todo",
+          columnId: boardColumns.find((c) => c.category === "backlog")?.columnId ?? "col-backlog",
+          linkedWorkspaceSetIds: [],
+          linkedSessionIds: [],
+          createdAt: stamp,
+          updatedAt: stamp,
+          subtasks
+        };
+        tasks.push(task);
+        recomputeBlocked(task);
+        push({ type: "board.changed" });
+        return respond(requestId, { type, task });
+      }
       case "subtask.create": {
         const task = tasks.find((candidate) => candidate.taskId === payload.taskId);
         if (!task) return respondError(requestId, "unknown task");
@@ -671,6 +794,11 @@
         if (payload.prompt !== undefined) { if (payload.prompt === "") delete subtask.prompt; else subtask.prompt = payload.prompt; }
         if (payload.autoStart !== undefined) subtask.autoStart = payload.autoStart;
         if (payload.columnId !== undefined) subtask.columnId = payload.columnId;
+        if (payload.seedMode !== undefined) subtask.seedMode = payload.seedMode; // ADR 0014
+        if (payload.verified !== undefined) { // ADR 0007
+          harnessLog(`subtask.update ${String(payload.subtaskId)} verified=${String(payload.verified)}`);
+          if (payload.verified) delete subtask.verifyUnmet; else subtask.verifyUnmet = true;
+        }
         subtask.updatedAt = new Date().toISOString();
         task.updatedAt = new Date().toISOString();
         push({ type: "task.updated", task });
@@ -721,6 +849,55 @@
         harnessLog(`subtask.dependency.remove ${String(payload.fromSubtaskId)} -> ${String(payload.toSubtaskId)}`);
         return respond(requestId, { type, task });
       }
+      case "agents.state": {
+        // Fleet snapshot (agents.html, ADR 0013): assembled from the same
+        // session/task/question/access fixtures the sidebar uses, mirroring
+        // the host's grouping — task links plus a grafted role child under
+        // s-live; every unlinked session lands in the orphan drawer.
+        const fleetLive = new Set(["s-live", "s-waiting", "s-clone"]);
+        const decorate = (session) => ({ ...session, live: fleetLive.has(session.sessionId) });
+        const roleChild = {
+          sessionId: "s-role-reviewer", title: "a11y reviewer", status: "active", providerId: "codex", model: "gpt-5.5",
+          transport: "codex-app-server", parentSessionId: "s-live", spawnedRole: "reviewer", live: true,
+          createdAt: iso(20), updatedAt: iso(1),
+          agentActivity: { running: 0, failed: 0, root: { nodeId: "root", label: "agent", status: "running", startedAt: iso(20), lastActivityAt: iso(1), lastActivity: "reading src/tour badges", lastCommand: "Read", toolUses: 12 } }
+        };
+        const bySession = new Map(sessions.map((session) => [session.sessionId, session]));
+        const grouped = new Set();
+        const groups = [];
+        for (const task of tasks) {
+          const members = task.linkedSessionIds
+            .filter((sessionId) => bySession.has(sessionId))
+            .map((sessionId) => { grouped.add(sessionId); return decorate(bySession.get(sessionId)); });
+          if (task.taskId === "t-1") members.push(roleChild);
+          if (members.length === 0) continue;
+          const column = boardColumns.find((candidate) => candidate.columnId === task.columnId);
+          groups.push({ task, ...(column ? { columnName: column.name, columnCategory: column.category } : {}), sessions: members });
+        }
+        const orphanSessions = sessions.filter((session) => !grouped.has(session.sessionId)).map(decorate);
+        return respond(requestId, { type, state: {
+          generatedAt: new Date().toISOString(),
+          groups,
+          orphanSessions,
+          questions: agentQuestions.filter((question) => question.status === "pending"),
+          accessRequests: workspacePolicy.accessRequests.filter((request_) => request_.status === "pending"),
+          agentIdleThresholdMs: 5 * 60_000,
+          ...(harnessLanding.length === 0 ? {} : { landing: harnessLanding })
+        } });
+      }
+      case "agents.landSession": {
+        harnessLog(`agents.landSession ${String(payload.sessionId)}`);
+        const index = harnessLanding.findIndex((item) => item.sessionId === payload.sessionId);
+        if (index >= 0) harnessLanding.splice(index, 1);
+        setTimeout(() => push({ type: "agents.changed" }), 150);
+        return respond(requestId, { type, message: "Pulled 4 files" });
+      }
+      case "agents.openSession":
+        harnessLog(`agents.openSession ${String(payload.sessionId)}${payload.nodeId ? ` node=${String(payload.nodeId)}` : ""}`);
+        return respond(requestId, { type, accepted: true });
+      case "agents.open":
+        harnessLog("agents.open");
+        return respond(requestId, { type, accepted: true });
       case "taskBoard.open":
         // The Task Board panel + command exist, so the relay succeeds (in the
         // browser harness there is no editor area to reveal — the log line is
@@ -926,6 +1103,40 @@
         push({ type: "planner.changed", planId: payload.planId });
         return respond(requestId, { type, accepted: true, sentCount });
       }
+      case "planner.subtaskCandidates": {
+        const docs = (plannerArtifacts[payload.planId] ?? []).filter((artifact) => artifact.kind === "document" && typeof artifact.content === "string");
+        const candidates = [];
+        for (const doc of docs) {
+          for (const match of doc.content.matchAll(/^\s*(?:[-*+]|\d+[.)])\s*\[[ xX]\]\s+(.+?)\s*$/gm)) {
+            if (!candidates.includes(match[1])) candidates.push(match[1]);
+          }
+        }
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        const owner = tasks.find((candidate) => candidate.taskId === plan?.taskId);
+        harnessLog(`planner.subtaskCandidates ${String(payload.planId)} n=${String(candidates.length)}`);
+        return respond(requestId, {
+          type,
+          candidates,
+          ...(owner ? { taskId: owner.taskId, taskTitle: owner.title } : {})
+        });
+      }
+      case "planner.materializeSubtasks": {
+        const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
+        const owner = tasks.find((candidate) => candidate.taskId === plan?.taskId);
+        if (!owner) return respondError(requestId, "This plan has no owning task — pick one in the plan intake first.");
+        harnessLog(`planner.materializeSubtasks ${String(payload.planId)} n=${String(payload.titles.length)}`);
+        const stamp = new Date().toISOString();
+        for (const title of payload.titles) {
+          owner.subtasks.push({
+            subtaskId: `st-plan-${String(owner.subtasks.length + 1)}`, taskId: owner.taskId, title,
+            prompt: `From the plan: ${title}`, autoStart: false, origin: "manual",
+            columnId: "col-backlog", sortOrder: owner.subtasks.length, createdAt: stamp, updatedAt: stamp,
+            isBlocked: false, dependsOn: [], isRunning: false, linkedSessionIds: []
+          });
+        }
+        push({ type: "board.changed" });
+        return respond(requestId, { type, createdCount: payload.titles.length, taskId: owner.taskId });
+      }
       case "planner.regenerate":
         harnessLog(`planner.regenerate ${String(payload.planId)} aspect=${String(payload.aspectId ?? "all")}`);
         return respond(requestId, { type, accepted: true });
@@ -1023,7 +1234,7 @@
       { artifactId: "plart-diagram", relPath: "architecture/components.mmd", kind: "diagram", aspectId: "architecture", title: "Component Diagram", baseTitle: "Component Diagram", revision: 2, scriptsEnabled: false, collectedAt: iso(5), content: "flowchart LR\n  Browser-->Gateway\n  Gateway-->AuthAPI\n  AuthAPI-->SessionStore" },
       { artifactId: "plart-image", relPath: "ui-ux/dashboard.png", kind: "image", aspectId: "ui-ux", title: "Dashboard Mockup", baseTitle: "Dashboard Mockup", revision: 1, scriptsEnabled: false, collectedAt: iso(20), imageDataUri: PLANNER_IMAGE },
       { artifactId: "plart-proto", relPath: "ui-ux/login-prototype.html", kind: "prototype", aspectId: "ui-ux", title: "Login Prototype", baseTitle: "Login Prototype", revision: 1, scriptsEnabled: false, collectedAt: iso(20), content: "<main style=\"font-family: sans-serif; padding: 24px; max-width: 320px\">\n  <h1>Sign in</h1>\n  <p><input placeholder=\"email\" style=\"width: 100%\"></p>\n  <p><input placeholder=\"password\" type=\"password\" style=\"width: 100%\"></p>\n  <p><button onclick=\"this.textContent='Clicked!'\">Sign in</button></p>\n  <p><a href=\"#\">Forgot password?</a></p>\n</main>" },
-      { artifactId: "plart-test", relPath: "testing/test-plan.md", kind: "document", aspectId: "testing", title: "Test Plan", baseTitle: "Test Plan", revision: 1, scriptsEnabled: false, collectedAt: iso(9), content: "# Test Plan\n\n## Unit\n\n- allowlist coverage\n\n## Live\n\n- login flow against the spike provider" }
+      { artifactId: "plart-test", relPath: "testing/test-plan.md", kind: "document", aspectId: "testing", title: "Test Plan", baseTitle: "Test Plan", revision: 1, scriptsEnabled: false, collectedAt: iso(9), content: "# Test Plan\n\n## Unit\n\n- [ ] Cover the allowlist edge cases\n- [ ] Port the session-store fixtures\n\n## Live\n\n- [x] Login flow against the spike provider" }
     ],
     "pl-2": []
   };
@@ -1108,6 +1319,25 @@
       attention(sessionId, reasons) {
         push({ type: "session.attention", sessionId, reasons });
       },
+      /** Agents panel: live activity tick on s-live (durations/counters move). */
+      agentsTick() {
+        push({ type: "session.agentActivity", sessionId: "s-live", activity: {
+          running: 2, failed: 0,
+          agents: [
+            { nodeId: "task-audit", label: "Audit publish hooks", status: "running", startedAt: iso(13), lastActivityAt: new Date().toISOString(), lastActivity: "grep allowlist_v2", lastCommand: "grep", toolUses: 31, tokens: 261000 },
+            { nodeId: "task-exporter", label: "Patch alembic exporter", status: "running", startedAt: iso(3), lastActivityAt: new Date().toISOString(), lastActivity: "edit exporters/alembic.py", lastCommand: "Edit", toolUses: 55, tokens: 61200 }
+          ],
+          root: { nodeId: "root", label: "agent", status: "running", startedAt: iso(14), lastActivityAt: new Date().toISOString(), lastActivity: "running exporter tests", lastCommand: "pytest", toolUses: 99, tokens: 415000 }
+        } });
+      },
+      /** Agents panel: end s-live's turn ("completed" | "failed" | "cancelled"). */
+      agentsTurnCompleted(status = "completed") {
+        push({ type: "chat.turnCompleted", sessionId: "s-live", runId: "run-x", status });
+      },
+      /** Agents panel: coarse structural invalidation (webview refetches agents.state). */
+      agentsChanged() {
+        push({ type: "agents.changed" });
+      },
       /** Planner: bump the main doc's revision and fire the coarse changed push. */
       plannerChanged(planId = "pl-1") {
         const doc = (window.__harness.fixtures.planner.artifacts[planId] ?? []).find((artifact) => artifact.kind === "document");
@@ -1131,7 +1361,13 @@
         line(2, { eventType: "agent.text", summary: "Delegating to two subagents.", final: true });
         line(3, { eventType: "agent.spawn", summary: "spawned scribe", nodeId: "t-scribe", label: "scribe", subagentType: "general-purpose", model: "gpt-5.5", nodeStatus: "running", detail: "Write a 3-line haiku about rain to haiku.txt, then spawn a counter to count its words." });
         line(4, { eventType: "agent.spawn", summary: "spawned lister", nodeId: "t-lister", label: "lister", subagentType: "general-purpose", model: "gpt-5.5", nodeStatus: "running", detail: "List the working directory and report the file count." });
-        push({ type: "session.agentActivity", sessionId, activity: { running: 2, failed: 0 } });
+        // Activity pushes mirror the real host's agentActivitySummaryOfTree:
+        // full agents rows + the root item, never bare counts (the fleet's
+        // subagent rows and pulse read them; the sidebar chip reads counts).
+        const fanRoot = (activity) => ({ nodeId: "root", label: "agent", status: "running", startedAt: at(), lastActivityAt: at(), lastActivity: activity, lastCommand: "spawn", toolUses: 2 });
+        const scribe = (status, extra) => ({ nodeId: "t-scribe", label: "scribe", status, startedAt: at(), lastActivityAt: at(), lastActivity: "writing haiku.txt", toolUses: 2, ...extra });
+        const lister = (status, extra) => ({ nodeId: "t-lister", label: "lister", status, startedAt: at(), lastActivityAt: at(), lastActivity: "ls", lastCommand: "ls", toolUses: 1, ...extra });
+        push({ type: "session.agentActivity", sessionId, activity: { running: 2, failed: 0, agents: [scribe("running"), lister("running")], root: fanRoot("delegating to two subagents") } });
         setTimeout(() => {
           line(5, { eventType: "agent.text", summary: "Writing the haiku now.", agentPath: ["t-scribe"] });
           line(6, { eventType: "agent.file_edit", summary: "add haiku.txt", filePath: "haiku.txt", fileChangeKind: "add", agentPath: ["t-scribe"] });
@@ -1140,14 +1376,22 @@
         }, 300);
         setTimeout(() => {
           line(9, { eventType: "agent.spawn", summary: "spawned counter", nodeId: "t-counter", label: "counter", subagentType: "general-purpose", nodeStatus: "running", agentPath: ["t-scribe"], detail: "Count the words in haiku.txt." });
-          push({ type: "session.agentActivity", sessionId, activity: { running: 3, failed: 0 } });
+          push({ type: "session.agentActivity", sessionId, activity: { running: 3, failed: 0, agents: [
+            scribe("running"),
+            lister("running"),
+            { nodeId: "t-counter", parentNodeId: "t-scribe", label: "counter", status: "running", startedAt: at(), lastActivityAt: at(), lastActivity: "counting words", toolUses: 0 }
+          ], root: fanRoot("waiting on subagents") } });
           line(10, { eventType: "agent.text", summary: "12 words.", agentPath: ["t-scribe", "t-counter"] });
           line(11, { eventType: "agent.node_done", summary: "subagent completed: 12 words.", nodeId: "t-counter", nodeStatus: "completed", detail: "12 words.", agentPath: ["t-scribe"] });
         }, 700);
         setTimeout(() => {
           line(12, { eventType: "agent.node_done", summary: "subagent completed: haiku written", nodeId: "t-scribe", nodeStatus: "completed", detail: "haiku written", usage: { totalTokens: 28192 } });
           line(13, { eventType: "agent.node_done", summary: "subagent failed: sandbox process failed", nodeId: "t-lister", nodeStatus: "failed", detail: "lister: unable to list directory; sandbox process failed." });
-          push({ type: "session.agentActivity", sessionId, activity: { running: 0, failed: 1 } });
+          push({ type: "session.agentActivity", sessionId, activity: { running: 0, failed: 1, agents: [
+            scribe("completed", { endedAt: at(), tokens: 28192 }),
+            lister("failed", { endedAt: at() }),
+            { nodeId: "t-counter", parentNodeId: "t-scribe", label: "counter", status: "completed", startedAt: at(), endedAt: at(), lastActivity: "12 words.", toolUses: 0 }
+          ], root: fanRoot("scribe finished; lister failed") } });
           line(14, { eventType: "agent.text", summary: "Scribe finished; lister's sandbox died. DONE.", final: true });
           line(15, { eventType: "agent.done", summary: "done: completed", nodeStatus: "completed", usage: { totalTokens: 74219 } });
           push({ type: "chat.turnCompleted", sessionId, runId: "run-fan", status: "completed" });
