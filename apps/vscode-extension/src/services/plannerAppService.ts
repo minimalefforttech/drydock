@@ -14,7 +14,7 @@
  * ports satisfied by IsolatedRunService/ChatSessionService.
  */
 
-import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, opendir, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   asId,
@@ -62,6 +62,7 @@ export interface PlannerSessionsPort {
   ): Promise<{ readonly session: { readonly sessionId: SessionId } }>;
   /** claimOwnership + force resume: revives ended, failed, and orphaned-active sessions alike. */
   reclaimChatSession(sessionId: string, model?: ChatModelSelection): Promise<unknown>;
+  endChatSession(sessionId: string, reason: string): Promise<unknown>;
   sendChatTurn(sessionId: string, prompt: string): Promise<{ readonly status: TurnTerminalStatus }>;
   isChatSessionLive(sessionId: string): boolean;
   hasActiveChatTurn(sessionId: string): boolean;
@@ -126,8 +127,11 @@ export interface UpdatePlanIntakeInput {
 
 const PLAN_TITLE_MAX = 64;
 const MANIFEST_NAME = "manifest.json";
+const PLANNER_MAX_VISITED_ENTRIES = PLANNER_MAX_FILES * 10;
 
 export class PlannerAppService {
+  private readonly hydrationRequired = new Set<string>();
+
   constructor(private readonly options: PlannerAppServiceOptions) {}
 
   // -------------------------------------------------------------------------
@@ -350,11 +354,17 @@ export class PlannerAppService {
    */
   private async ensureLiveSession(plan: PlanRecord, model?: ChatModelSelection): Promise<SessionId> {
     if (plan.sessionId !== null && this.options.sessions.isChatSessionLive(plan.sessionId)) {
-      return plan.sessionId;
+      if (!this.hydrationRequired.has(plan.sessionId)) {
+        return plan.sessionId;
+      }
+      // A prior hydration failure must never turn a retry into a successful
+      // live-session fast path. End that incomplete revival before trying again.
+      await this.options.sessions.endChatSession(plan.sessionId, "planner-hydration-retry");
     }
     if (plan.sessionId !== null) {
+      this.hydrationRequired.add(plan.sessionId);
       await this.options.sessions.reclaimChatSession(plan.sessionId, model);
-      await this.hydrateWorkspace(plan.planId, plan.sessionId);
+      await this.hydrateRequiredWorkspace(plan.planId, plan.sessionId);
       await this.linkPlanTask(plan.taskId, plan.sessionId);
       this.options.bus.publish({ kind: "planner-session-started", planId: plan.planId, sessionId: plan.sessionId });
       return plan.sessionId;
@@ -365,16 +375,35 @@ export class PlannerAppService {
     };
     const started = await this.options.sessions.startChatSession(model, `Plan — ${plan.title}`, workspace);
     const sessionId = started.session.sessionId;
+    this.hydrationRequired.add(sessionId);
     await this.options.plans.updatePlan(plan.planId, {
       sessionId,
       status: "active",
       updatedAt: this.options.clock.isoNow()
     });
-    await this.hydrateWorkspace(plan.planId, sessionId);
+    await this.hydrateRequiredWorkspace(plan.planId, sessionId);
     await this.linkPlanTask(plan.taskId, sessionId);
     this.publishChanged(plan.planId);
     this.options.bus.publish({ kind: "planner-session-started", planId: plan.planId, sessionId });
     return sessionId;
+  }
+
+  private async hydrateRequiredWorkspace(planId: PlanId, sessionId: SessionId): Promise<void> {
+    try {
+      await this.hydrateWorkspace(planId, sessionId);
+      this.hydrationRequired.delete(sessionId);
+    } catch (error) {
+      try {
+        await this.options.sessions.endChatSession(sessionId, "planner-hydration-failed");
+      } catch (cleanupError) {
+        this.options.logger.error("planner hydration cleanup failed", {
+          planId,
+          sessionId,
+          error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        });
+      }
+      throw error;
+    }
   }
 
   /**
@@ -447,7 +476,7 @@ export class PlannerAppService {
       return this.options.artifacts.listArtifacts(id);
     }
     const files = await this.readPlanFiles(id, planRoot);
-    const manifest = await readManifestTitles(planRoot);
+    const manifest = await readManifestTitles(planRoot, this.options.logger, id);
     const knownAspects = new Set((await this.listAspects(true)).map((aspect) => aspect.aspectId));
 
     let changed = false;
@@ -457,7 +486,15 @@ export class PlannerAppService {
       const title = manifest.get(file.relPath) ?? file.fallbackTitle;
 
       if (file.kind === "image") {
-        const put = await this.options.blobs.putFile(await checkedPlanFile(planRoot, file.relPath));
+        const put = await putBoundedPlanImage(this.options.blobs, planRoot, file.relPath);
+        if (put === null) {
+          this.options.logger.warn("planner collection skipped an oversized file", {
+            planId: id,
+            relPath: file.relPath,
+            limit: PLANNER_MAX_IMAGE_BYTES
+          });
+          continue;
+        }
         if (existing !== null && existing.blobSha256 === put.sha256 && existing.title === title && existing.aspectId === aspectId) {
           continue;
         }
@@ -481,7 +518,10 @@ export class PlannerAppService {
         continue;
       }
 
-      const content = await readFile(await checkedPlanFile(planRoot, file.relPath), "utf8");
+      const content = file.content;
+      if (content === null) {
+        throw new Error(`Planner text artifact was not snapshotted: ${file.relPath}`);
+      }
       if (existing !== null && existing.content === content && existing.title === title && existing.aspectId === aspectId) {
         continue;
       }
@@ -519,7 +559,7 @@ export class PlannerAppService {
   async hydrateWorkspace(planId: PlanId, sessionId: SessionId): Promise<void> {
     const workspacePath = this.options.chat.getSessionWorkspacePath(sessionId);
     if (workspacePath === null) {
-      return;
+      throw new Error("Planner hydration cannot continue because the session workspace is unavailable.");
     }
     const workspaceRoot = await canonicalDirectory(workspacePath, "Planner workspace");
     const artifacts = await this.options.artifacts.listArtifacts(planId);
@@ -547,17 +587,21 @@ export class PlannerAppService {
   private async readPlanFiles(
     planId: PlanId,
     planRoot: PlanFilesystemRoot
-  ): Promise<{ relPath: string; kind: Exclude<PlanArtifactRecord["kind"], never>; fallbackTitle: string }[]> {
+  ): Promise<{ relPath: string; kind: Exclude<PlanArtifactRecord["kind"], never>; fallbackTitle: string; content: string | null }[]> {
     let candidates: string[];
     try {
-      const entries = await readdir(await checkedPlanRoot(planRoot), { recursive: true, withFileTypes: true });
-      if (entries.some((entry) => entry.isSymbolicLink())) {
-        throw new Error("Planner collection refused a symbolic link or junction under plan/.");
+      candidates = [];
+      const scan = { visited: 0, exhausted: false };
+      for await (const relPath of walkPlanCandidates(planRoot, "", scan)) {
+        candidates.push(relPath);
       }
-      candidates = entries
-        .filter((entry) => entry.isFile() && plannerKindForFile(entry.name) !== null)
-        .map((entry) => path.relative(planRoot.canonicalPlan, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"))
-        .filter((relPath) => relPath !== MANIFEST_NAME && isSafeRelPath(relPath));
+      if (scan.exhausted) {
+        this.options.logger.warn("planner collection stopped at the directory entry scan cap", {
+          planId,
+          limit: PLANNER_MAX_VISITED_ENTRIES,
+          visited: scan.visited
+        });
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         return [];
@@ -574,26 +618,35 @@ export class PlannerAppService {
       candidates = candidates.slice(0, PLANNER_MAX_FILES);
     }
 
-    const accepted: { relPath: string; kind: PlanArtifactRecord["kind"]; fallbackTitle: string }[] = [];
+    const accepted: { relPath: string; kind: PlanArtifactRecord["kind"]; fallbackTitle: string; content: string | null }[] = [];
     for (const relPath of candidates) {
       const kind = plannerKindForFile(relPath);
       if (kind === null) {
         continue;
       }
-      const size = (await stat(await checkedPlanFile(planRoot, relPath))).size;
-      const limit = kind === "image" ? PLANNER_MAX_IMAGE_BYTES : PLANNER_MAX_TEXT_BYTES;
-      if (size > limit) {
-        this.options.logger.warn("planner collection skipped an oversized file", { planId, relPath, size, limit });
+      let fallbackTitle = humanizeFileName(relPath);
+      if (kind === "image") {
+        accepted.push({ relPath, kind, fallbackTitle, content: null });
         continue;
       }
-      let fallbackTitle = humanizeFileName(relPath);
+      const snapshot = await readBoundedPlanFile(planRoot, relPath, PLANNER_MAX_TEXT_BYTES);
+      if (snapshot.bytes === null) {
+        this.options.logger.warn("planner collection skipped an oversized file", {
+          planId,
+          relPath,
+          size: snapshot.observedSize,
+          limit: PLANNER_MAX_TEXT_BYTES
+        });
+        continue;
+      }
+      const content = snapshot.bytes.toString("utf8");
       if (kind === "document") {
-        const heading = firstMarkdownHeading(await readFile(await checkedPlanFile(planRoot, relPath), "utf8"));
+        const heading = firstMarkdownHeading(content);
         if (heading !== null) {
           fallbackTitle = heading;
         }
       }
-      accepted.push({ relPath, kind, fallbackTitle });
+      accepted.push({ relPath, kind, fallbackTitle, content });
     }
     return accepted;
   }
@@ -886,6 +939,43 @@ interface PlanFilesystemRoot {
   readonly canonicalPlan: string;
 }
 
+async function* walkPlanCandidates(
+  root: PlanFilesystemRoot,
+  relativeDirectory: string,
+  scan: { visited: number; exhausted: boolean }
+): AsyncGenerator<string> {
+  const directoryPath = relativeDirectory.length === 0
+    ? await checkedPlanRoot(root)
+    : await checkedPlanDirectory(root, relativeDirectory);
+  const directory = await opendir(directoryPath);
+  for await (const entry of directory) {
+    if (scan.visited >= PLANNER_MAX_VISITED_ENTRIES) {
+      scan.exhausted = true;
+      return;
+    }
+    scan.visited += 1;
+    const relPath = relativeDirectory.length === 0 ? entry.name : `${relativeDirectory}/${entry.name}`;
+    if (entry.isSymbolicLink()) {
+      throw new Error("Planner collection refused a symbolic link or junction under plan/.");
+    }
+    if (entry.isDirectory()) {
+      if (isSafeRelPath(relPath)) {
+        yield* walkPlanCandidates(root, relPath, scan);
+        if (scan.exhausted) return;
+      }
+      continue;
+    }
+    if (
+      entry.isFile()
+      && relPath !== MANIFEST_NAME
+      && isSafeRelPath(relPath)
+      && plannerKindForFile(relPath) !== null
+    ) {
+      yield relPath;
+    }
+  }
+}
+
 async function existingPlanRoot(workspacePath: string): Promise<PlanFilesystemRoot | null> {
   const workspace = await canonicalDirectory(workspacePath, "Planner workspace");
   const planPath = path.join(workspace, "plan");
@@ -932,6 +1022,75 @@ async function checkedPlanFile(root: PlanFilesystemRoot, relPath: string): Promi
   const canonical = await realpath(current);
   assertPathWithin(canonical, currentPlan, `Planner artifact escaped plan/: ${relPath}`);
   return canonical;
+}
+
+async function checkedPlanDirectory(root: PlanFilesystemRoot, relPath: string): Promise<string> {
+  if (!isSafeRelPath(relPath)) {
+    throw new Error(`Planner collection refused an unsafe directory: ${relPath}`);
+  }
+  const currentPlan = await checkedPlanRoot(root);
+  let current = root.planPath;
+  for (const segment of relPath.split("/")) {
+    current = path.join(current, segment);
+    const info = await lstat(current);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error(`Planner collection refused a linked or non-directory path: ${relPath}`);
+    }
+  }
+  const canonical = await realpath(current);
+  assertPathWithin(canonical, currentPlan, `Planner directory escaped plan/: ${relPath}`);
+  return canonical;
+}
+
+interface BoundedPlanRead {
+  readonly bytes: Buffer | null;
+  readonly observedSize: number;
+}
+
+/** Reads at most limit + 1 bytes from one already-open regular-file handle. */
+async function readBoundedPlanFile(
+  root: PlanFilesystemRoot,
+  relPath: string,
+  limit: number
+): Promise<BoundedPlanRead> {
+  const handle = await open(await checkedPlanFile(root, relPath), "r");
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      throw new Error(`Planner collection refused a non-file path: ${relPath}`);
+    }
+    if (info.size > limit) {
+      return { bytes: null, observedSize: info.size };
+    }
+    const buffer = Buffer.alloc(limit + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, total, buffer.length - total, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > limit) {
+      return { bytes: null, observedSize: total };
+    }
+    return { bytes: buffer.subarray(0, total), observedSize: total };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Passes only the already-bounded snapshot into durable blob storage. */
+async function putBoundedPlanImage(
+  blobs: BlobStore,
+  root: PlanFilesystemRoot,
+  relPath: string
+): Promise<{ readonly sha256: string; readonly size: number } | null> {
+  const snapshot = await readBoundedPlanFile(root, relPath, PLANNER_MAX_IMAGE_BYTES);
+  if (snapshot.bytes === null) return null;
+  const put = await blobs.putBytes(snapshot.bytes);
+  if (put.size !== snapshot.bytes.byteLength) {
+    throw new Error("Planner blob store returned an inconsistent snapshot size.");
+  }
+  return put;
 }
 
 async function checkedPlanRoot(root: PlanFilesystemRoot): Promise<string> {
@@ -1128,11 +1287,24 @@ function slugify(label: string): string {
 }
 
 /** plan/manifest.json → relPath → display title; tolerant of any malformation. */
-async function readManifestTitles(planRoot: PlanFilesystemRoot): Promise<Map<string, string>> {
+async function readManifestTitles(
+  planRoot: PlanFilesystemRoot,
+  logger: Logger,
+  planId: PlanId
+): Promise<Map<string, string>> {
   const titles = new Map<string, string>();
   let raw: string;
   try {
-    raw = await readFile(await checkedPlanFile(planRoot, MANIFEST_NAME), "utf8");
+    const snapshot = await readBoundedPlanFile(planRoot, MANIFEST_NAME, PLANNER_MAX_TEXT_BYTES);
+    if (snapshot.bytes === null) {
+      logger.warn("planner collection ignored an oversized manifest", {
+        planId,
+        size: snapshot.observedSize,
+        limit: PLANNER_MAX_TEXT_BYTES
+      });
+      return titles;
+    }
+    raw = snapshot.bytes.toString("utf8");
   } catch (error) {
     if (isMissing(error)) return titles;
     throw error;

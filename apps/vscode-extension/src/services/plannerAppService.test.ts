@@ -10,7 +10,15 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ContentAddressedBlobStore } from "@drydock/artifacts";
-import { asId, type ChatModelSelection, type JsonObject, type SessionId } from "@drydock/contracts";
+import {
+  asId,
+  PLANNER_MAX_FILES,
+  PLANNER_MAX_IMAGE_BYTES,
+  PLANNER_MAX_TEXT_BYTES,
+  type ChatModelSelection,
+  type JsonObject,
+  type SessionId
+} from "@drydock/contracts";
 import { ProductEventBus, RandomIdGenerator, type Clock, type Logger, type ProductBusEvent } from "@drydock/core";
 import {
   applyMigrations,
@@ -23,9 +31,13 @@ import {
 import type { ChatWorkspaceContext } from "./isolatedRunService.js";
 import { PlannerAppService, type PlannerSessionsPort } from "./plannerAppService.js";
 
-class NullLogger implements Logger {
+class RecordingLogger implements Logger {
+  readonly warnings: { message: string; metadata?: JsonObject }[] = [];
+
   info(_message: string, _metadata?: JsonObject): void {}
-  warn(_message: string, _metadata?: JsonObject): void {}
+  warn(message: string, metadata?: JsonObject): void {
+    this.warnings.push({ message, ...(metadata === undefined ? {} : { metadata }) });
+  }
   error(_message: string, _metadata?: JsonObject): void {}
 }
 
@@ -43,7 +55,9 @@ class TickingClock implements Clock {
 class FakeSessions implements PlannerSessionsPort {
   readonly prompts: string[] = [];
   readonly startedWorkspaces: (ChatWorkspaceContext | undefined)[] = [];
+  readonly ended: { sessionId: string; reason: string }[] = [];
   reclaims = 0;
+  nextEndError: Error | null = null;
   nextSendError: Error | null = null;
   nextSendStatus: "completed" | "failed" | "cancelled" | null = null;
   private live = new Set<string>();
@@ -64,6 +78,17 @@ class FakeSessions implements PlannerSessionsPort {
   async reclaimChatSession(sessionId: string): Promise<unknown> {
     this.reclaims += 1;
     this.live.add(sessionId);
+    return {};
+  }
+
+  async endChatSession(sessionId: string, reason: string): Promise<unknown> {
+    if (this.nextEndError !== null) {
+      const error = this.nextEndError;
+      this.nextEndError = null;
+      throw error;
+    }
+    this.live.delete(sessionId);
+    this.ended.push({ sessionId, reason });
     return {};
   }
 
@@ -98,6 +123,7 @@ class FakeSessions implements PlannerSessionsPort {
 interface Harness {
   readonly service: PlannerAppService;
   readonly sessions: FakeSessions;
+  readonly logger: RecordingLogger;
   readonly busEvents: ProductBusEvent[];
   readonly setWorkspace: (dir: string | null) => void;
   /** Every tasks-port link call, in order (plans belong to tasks). */
@@ -111,13 +137,14 @@ async function makeHarness(): Promise<Harness> {
   const connection = new SqliteConnection(path.join(dir, "state.sqlite"));
   applyMigrations(connection);
   const sessions = new FakeSessions();
+  const logger = new RecordingLogger();
   const busEvents: ProductBusEvent[] = [];
   const bus = new ProductEventBus();
   bus.subscribe((event) => busEvents.push(event));
   let workspaceDir: string | null = null;
   const taskLinks: { taskId: string; sessionId: string }[] = [];
   const service = new PlannerAppService({
-    logger: new NullLogger(),
+    logger,
     clock: new TickingClock(),
     ids: new RandomIdGenerator(),
     plans: new SqlitePlanStore(connection),
@@ -138,6 +165,7 @@ async function makeHarness(): Promise<Harness> {
   return {
     service,
     sessions,
+    logger,
     busEvents,
     setWorkspace: (value) => { workspaceDir = value; },
     taskLinks,
@@ -299,6 +327,79 @@ test("collection maps kinds, titles, aspects; bumps revisions only on change", a
   }
 });
 
+test("collection enforces file and text limits and bounds the manifest", async () => {
+  const harness = await makeHarness();
+  try {
+    const plan = await harness.service.createPlan({ brief: "b", aspectIds: [], contextRoots: [] });
+    const workspace = path.join(harness.dir, "ws-limits");
+    const planDir = path.join(workspace, "plan");
+    await mkdir(planDir, { recursive: true });
+    harness.setWorkspace(workspace);
+    await harness.service.startPlanSession(plan.planId);
+
+    for (let index = 0; index < PLANNER_MAX_FILES + 2; index += 1) {
+      await writeFile(path.join(planDir, `file-${String(index).padStart(2, "0")}.md`), `# File ${String(index)}\n`, "utf8");
+    }
+    await writeFile(path.join(planDir, "manifest.json"), Buffer.alloc(PLANNER_MAX_TEXT_BYTES + 1, 0x20));
+
+    const collected = await harness.service.collectPlanArtifacts(plan.planId);
+    assert.equal(collected.length, PLANNER_MAX_FILES);
+    assert.ok(collected.every((artifact) => artifact.title.startsWith("File ")));
+  } finally {
+    harness.connection.close();
+    await rm(harness.dir, { recursive: true, force: true });
+  }
+});
+
+test("collection caps all visited directory entries, including unsupported files and directories", async () => {
+  const harness = await makeHarness();
+  try {
+    const plan = await harness.service.createPlan({ brief: "b", aspectIds: [], contextRoots: [] });
+    const workspace = path.join(harness.dir, "ws-scan-cap");
+    const planDir = path.join(workspace, "plan");
+    await mkdir(planDir, { recursive: true });
+    harness.setWorkspace(workspace);
+    await harness.service.startPlanSession(plan.planId);
+
+    const scanCap = PLANNER_MAX_FILES * 10;
+    await Promise.all([
+      ...Array.from({ length: scanCap / 2 }, (_, index) =>
+        writeFile(path.join(planDir, `ignored-${String(index)}.txt`), "ignored", "utf8")
+      ),
+      ...Array.from({ length: scanCap / 2 + 1 }, (_, index) =>
+        mkdir(path.join(planDir, `empty-${String(index)}`))
+      )
+    ]);
+
+    assert.deepEqual(await harness.service.collectPlanArtifacts(plan.planId), []);
+    const warning = harness.logger.warnings.find((entry) => entry.message.includes("directory entry scan cap"));
+    assert.ok(warning);
+    assert.equal(warning.metadata?.["visited"], scanCap);
+  } finally {
+    harness.connection.close();
+    await rm(harness.dir, { recursive: true, force: true });
+  }
+});
+
+test("collection does not ingest oversized text or image artifacts", async () => {
+  const harness = await makeHarness();
+  try {
+    const plan = await harness.service.createPlan({ brief: "b", aspectIds: [], contextRoots: [] });
+    const workspace = path.join(harness.dir, "ws-oversized");
+    const planDir = path.join(workspace, "plan");
+    await mkdir(planDir, { recursive: true });
+    await writeFile(path.join(planDir, "oversized.md"), Buffer.alloc(PLANNER_MAX_TEXT_BYTES + 1, 0x61));
+    await writeFile(path.join(planDir, "oversized.png"), Buffer.alloc(PLANNER_MAX_IMAGE_BYTES + 1, 0x61));
+    harness.setWorkspace(workspace);
+    await harness.service.startPlanSession(plan.planId);
+
+    assert.deepEqual(await harness.service.collectPlanArtifacts(plan.planId), []);
+  } finally {
+    harness.connection.close();
+    await rm(harness.dir, { recursive: true, force: true });
+  }
+});
+
 test("collection refuses linked artifacts and manifests", async (context) => {
   const harness = await makeHarness();
   try {
@@ -336,7 +437,7 @@ test("collection refuses linked artifacts and manifests", async (context) => {
   }
 });
 
-test("hydration refuses an intermediate symlink or junction", async (context) => {
+test("failed hydration ends the revival and retries remain fail closed", async (context) => {
   const harness = await makeHarness();
   try {
     const plan = await harness.service.createPlan({ brief: "b", aspectIds: ["architecture"], contextRoots: [] });
@@ -346,6 +447,7 @@ test("hydration refuses an intermediate symlink or junction", async (context) =>
     harness.setWorkspace(source);
     const sessionId = await harness.service.startPlanSession(plan.planId);
     await harness.service.collectPlanArtifacts(plan.planId);
+    harness.sessions.kill(sessionId);
 
     const target = path.join(harness.dir, "ws-target");
     const outside = path.join(harness.dir, "outside-target");
@@ -364,8 +466,35 @@ test("hydration refuses an intermediate symlink or junction", async (context) =>
     }
     harness.setWorkspace(target);
 
-    await assert.rejects(harness.service.hydrateWorkspace(plan.planId, sessionId), /symbolic link|junction|linked/);
+    const promptsBefore = harness.sessions.prompts.length;
+    harness.sessions.nextEndError = new Error("cleanup temporarily unavailable");
+    await assert.rejects(harness.service.sendPlanTurn(plan.planId, "continue"), /symbolic link|junction|linked/);
+    assert.deepEqual(harness.sessions.ended, []);
+    assert.equal(harness.sessions.isChatSessionLive(sessionId), true);
+    assert.equal(harness.sessions.prompts.length, promptsBefore);
+
+    await assert.rejects(harness.service.sendPlanTurn(plan.planId, "continue"), /symbolic link|junction|linked/);
+    assert.equal(harness.sessions.reclaims, 2);
+    assert.deepEqual(harness.sessions.ended, [
+      { sessionId, reason: "planner-hydration-retry" },
+      { sessionId, reason: "planner-hydration-failed" }
+    ]);
+    assert.equal(harness.sessions.prompts.length, promptsBefore);
     assert.equal(await readFile(outsideFile, "utf8"), "do not replace");
+  } finally {
+    harness.connection.close();
+    await rm(harness.dir, { recursive: true, force: true });
+  }
+});
+
+test("hydration fails closed when the session workspace is unavailable", async () => {
+  const harness = await makeHarness();
+  try {
+    const plan = await harness.service.createPlan({ brief: "b", aspectIds: [], contextRoots: [] });
+    await assert.rejects(
+      harness.service.hydrateWorkspace(plan.planId, asId<"SessionId">("session-missing")),
+      /session workspace is unavailable/
+    );
   } finally {
     harness.connection.close();
     await rm(harness.dir, { recursive: true, force: true });

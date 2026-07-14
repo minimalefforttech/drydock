@@ -136,6 +136,8 @@ export interface ReviewStore {
 export interface BlobStore {
   /** Hashes and stores the file; returns its digest and size. */
   putFile(absolutePath: string): Promise<{ readonly sha256: string; readonly size: number }>;
+  /** Hashes and stores an already-bounded in-memory snapshot. */
+  putBytes(bytes: Uint8Array): Promise<{ readonly sha256: string; readonly size: number }>;
   readBlob(sha256: string): Promise<Uint8Array | null>;
   hasBlob(sha256: string): Promise<boolean>;
 }
