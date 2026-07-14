@@ -25,6 +25,7 @@ const TABS: readonly { id: TabId; label: string }[] = [
 
 export interface TabShell {
   readonly bar: HTMLElement;
+  readonly buttons: Record<TabId, HTMLButtonElement>;
   readonly panels: Record<TabId, HTMLElement>;
   select(tab: TabId): void;
 }
@@ -67,5 +68,5 @@ export function buildTabs(state: AppState, onActivate: (tab: TabId) => void): Ta
     panels[id] = panel;
   }
 
-  return { bar, panels, select };
+  return { bar, buttons, panels, select };
 }

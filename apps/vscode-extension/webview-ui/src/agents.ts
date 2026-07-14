@@ -43,6 +43,8 @@ import {
   type PanelResponse
 } from "@drydock/contracts";
 import { createHelpExperience, setHelpTooltip } from "./help.js";
+import { createDemoModeController, demoResponse, isDemoMode } from "./demoMode.js";
+import { nextWorkflowStep } from "./guideHandoffs.js";
 
 interface VsCodeApi {
   postMessage(message: unknown): void;
@@ -71,11 +73,14 @@ const vscodeApi = acquireVsCodeApi();
 const app = document.getElementById("app");
 if (!app) throw new Error("missing #app root");
 
+const demoMode = createDemoModeController(loadOverview);
+
 const help = createHelpExperience({
   id: "agents",
   title: "Agents guide",
   intro: "Inspect agent sessions across tasks, open sessions that need attention, and review clone changes before landing them.",
   showWelcome: true,
+  dataMode: demoMode.helpMode,
   pages: [
     {
       id: "reading",
@@ -122,7 +127,12 @@ const help = createHelpExperience({
     { title: "Open the responsible session", body: "Select a session row to open its chat in the sidebar. Hover the row for provider, model, capability, activity, questions, access requests, timing, and tokens.", target: () => app.querySelector<HTMLElement>(".session-row") ?? app },
     { title: "Inspect delegated work", body: "Indented session and agent rows preserve parent-child relationships. A transport note explains when per-agent activity is unavailable.", target: () => app.querySelector<HTMLElement>(".row-sub, .session-row.depth-1, .row-note.depth-1") ?? app.querySelector<HTMLElement>(".session-row") ?? app },
     { title: "Open the task board or review", body: "Use Board to manage stages and verification. Use Review to inspect changed files and send revision comments for this task.", target: () => app.querySelector<HTMLElement>(".group:not(.drawer) .gmeta") ?? app.querySelector<HTMLElement>(".group:not(.drawer)") ?? app },
-    { title: "Inspect and pull landing work", body: "The Landing drawer orders unlanded clone changes by known overlap. Inspect related work first, then confirm Pull when the changes should enter the working copy.", target: () => app.querySelector<HTMLElement>(".landing-row") ?? app.querySelector<HTMLElement>(".landing") ?? app, prepare: () => { if (!landingOpen) { landingOpen = true; render(); } } }
+    { title: "Inspect and pull landing work", body: "The Landing drawer orders unlanded clone changes by known overlap. Inspect related work first, then confirm Pull when the changes should enter the working copy.", target: () => app.querySelector<HTMLElement>(".landing-row") ?? app.querySelector<HTMLElement>(".landing") ?? app, prepare: () => { if (!landingOpen) { landingOpen = true; render(); } } },
+    nextWorkflowStep({
+      current: "agents",
+      request,
+      taskId: () => overview?.groups[0]?.task.taskId ?? "demo-task-onboarding"
+    })
   ]
 });
 
@@ -140,6 +150,8 @@ let requestCounter = 0;
 function request(payload: PanelRequestPayload): Promise<PanelResponse> {
   requestCounter += 1;
   const requestId = `agents-req-${String(requestCounter)}-${String(Date.now())}`;
+  const demo = demoResponse(payload, requestId);
+  if (demo !== null) return Promise.resolve(demo);
   return new Promise<PanelResponse>((resolve) => {
     const timer = window.setTimeout(() => {
       pending.delete(requestId);
@@ -180,7 +192,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
 
 let overview: AgentsOverviewState | null = null;
 let loadError: string | null = null;
-let pendingGuideStart = false;
+let pendingGuideStart = document.body.dataset["startGuide"] === "true";
 /** Live per-session activity overlay: fresher than the snapshot's copies. */
 const activityBySession = new Map<string, AgentActivitySummary>();
 /** Sessions with a live turn right now (boot: root status; then turn pushes). */
@@ -1081,7 +1093,7 @@ function renderLandingDrawer(items: readonly LandingItem[]): HTMLElement {
     const meta = el("span", "rmeta");
     meta.append(el("span", "rmeta-part quiet", formatAgo(item.capturedAt)));
     const armed = armedLandId === item.subtaskId;
-    meta.append(actionButton(armed ? "Confirm pull" : "Pull", "Pull this run's clone work into your working copy and mark it landed", () => {
+    const pull = actionButton(armed ? "Confirm pull" : "Pull", "Pull this run's clone work into your working copy and mark it landed", () => {
       if (armedLandId !== item.subtaskId) {
         armedLandId = item.subtaskId;
         render();
@@ -1097,7 +1109,10 @@ function renderLandingDrawer(items: readonly LandingItem[]): HTMLElement {
         scheduleRefetch();
         render();
       });
-    }, armed ? "stop armed" : ""));
+    }, armed ? "stop armed" : "");
+    pull.disabled = isDemoMode();
+    if (isDemoMode()) pull.title = "Demo data does not write to your working copy. Switch to Live data to pull this work.";
+    meta.append(pull);
     row.append(meta);
     section.append(row);
   }

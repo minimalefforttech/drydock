@@ -39,8 +39,6 @@ import type { TaskReviewCommentFile, TaskReviewCommentsController } from "./task
 export class TaskReviewPanelProvider {
   private readonly panels = new Map<string, vscode.WebviewPanel>();
   private readonly sequences = new Map<string, number>();
-  /** Task ids whose new review panel should begin its tour after taskReview.state. */
-  private readonly pendingStartGuide = new Set<string>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -154,10 +152,9 @@ export class TaskReviewPanelProvider {
       if (startGuide) this.push(taskId, { type: "help.startTour" });
       return;
     }
-    if (startGuide) this.pendingStartGuide.add(taskId);
     const panel = vscode.window.createWebviewPanel(
       "drydock.taskReview",
-      `Task review: ${taskTitle}`,
+      `Drydock: Task Review: ${taskTitle}`,
       vscode.ViewColumn.Active,
       {
         enableScripts: true,
@@ -167,14 +164,13 @@ export class TaskReviewPanelProvider {
     );
     this.panels.set(taskId, panel);
     this.sequences.set(taskId, 0);
-    panel.webview.html = this.renderHtml(panel.webview, taskId);
+    panel.webview.html = this.renderHtml(panel.webview, taskId, startGuide);
     panel.webview.onDidReceiveMessage((raw: unknown) => {
       void this.onMessage(taskId, raw);
     });
     panel.onDidDispose(() => {
       this.panels.delete(taskId);
       this.sequences.delete(taskId);
-      this.pendingStartGuide.delete(taskId);
       // Drop this task's gutter registrations and tear down its now-orphaned
       // threads (files still registered by another open panel survive).
       this.comments?.clearTask(taskId);
@@ -209,17 +205,32 @@ export class TaskReviewPanelProvider {
   }
 
   private async handleRequest(taskId: string, request: PanelRequest): Promise<void> {
+    const payload = request.payload;
+    if (payload.type === "taskBoard.open") {
+      if (payload.startGuide !== true) this.requireBackend();
+      await vscode.commands.executeCommand("drydock.taskBoard.open", { startGuide: payload.startGuide === true });
+      this.respond(taskId, request.requestId, { type: "taskBoard.open", accepted: true });
+      return;
+    }
+    if (payload.type === "agents.open") {
+      if (payload.startGuide !== true) this.requireBackend();
+      await vscode.commands.executeCommand("drydock.agents.open", { startGuide: payload.startGuide === true });
+      this.respond(taskId, request.requestId, { type: "agents.open", accepted: true });
+      return;
+    }
+    if (payload.type === "planner.open") {
+      if (payload.startGuide !== true) this.requireBackend();
+      await vscode.commands.executeCommand("drydock.planner.open", payload.planId, { startGuide: payload.startGuide === true });
+      this.respond(taskId, request.requestId, { type: "planner.open", accepted: true });
+      return;
+    }
     const backend = this.requireBackend();
     const taskReview: TaskReviewAppService = backend.taskReview;
     const workspaceReview: WorkspaceReviewAppService = backend.workspaceReview;
-    const payload = request.payload;
     switch (payload.type) {
       case "taskReview.state": {
         const state = await taskReview.computeState(payload.taskId);
         this.respond(taskId, request.requestId, { type: "taskReview.state", state });
-        if (this.pendingStartGuide.delete(taskId)) {
-          this.push(taskId, { type: "help.startTour" });
-        }
         // Register this task's baseline-backed files for gutter commenting. The
         // state response must not block on it, so it is fire-and-forget.
         if (this.comments !== undefined) {
@@ -331,7 +342,7 @@ export class TaskReviewPanelProvider {
     void this.panels.get(taskId)?.webview.postMessage(message);
   }
 
-  private renderHtml(webview: vscode.Webview, taskId: string): string {
+  private renderHtml(webview: vscode.Webview, taskId: string, startGuide: boolean): string {
     const nonce = randomBytes(16).toString("hex");
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "taskReview.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "taskReview.css"));
@@ -346,9 +357,9 @@ export class TaskReviewPanelProvider {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource};">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="${styleUri.toString()}">
-  <title>Task review</title>
+  <title>Drydock: Task Review</title>
 </head>
-<body>
+<body data-start-guide="${startGuide ? "true" : "false"}">
   <div id="app" data-task-id="${safeTaskId}"></div>
   <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
 </body>

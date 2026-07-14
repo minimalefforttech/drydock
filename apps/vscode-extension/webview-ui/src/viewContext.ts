@@ -38,6 +38,8 @@ export interface WorkTabView {
   refresh(): void;
   /** Re-renders just the "needs attention" access-request cards from state. */
   renderAttention(): void;
+  /** Opens the disclosure state required by a Tasks guided-tour step. */
+  showGuideSection(section: "attention" | "create" | "linked-chats" | "supporting" | "workspace"): void;
 }
 
 export interface PlanTabView {
@@ -76,6 +78,8 @@ export interface PanelBridge {
 
 export interface ViewContext {
   readonly state: AppState;
+  /** True while guide fixtures are replacing all host-backed data/actions. */
+  isDemo(): boolean;
   /** Persist current state (debounce-free; setState is cheap). */
   persist(): void;
   /** Lazily-resolved bridge to sibling views (set after all are built). */

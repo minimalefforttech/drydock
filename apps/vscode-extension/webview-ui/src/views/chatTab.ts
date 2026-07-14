@@ -3617,6 +3617,18 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     // A session running elsewhere is view-only here: lock the composer + Send and
     // explain why via the placeholder. Provider/model stay locked too.
     const elsewhere = selectedRunsElsewhere();
+    if (ctx.isDemo()) {
+      promptInput.disabled = true;
+      promptInput.placeholder = "Demo data — chat input is disconnected. Switch to Live data to contact an agent.";
+      sendButton.disabled = true;
+      cancelButton.classList.add("hidden");
+      providerSelect.disabled = true;
+      modelSelect.disabled = true;
+      thinkingSelect.disabled = true;
+      modelButton.disabled = true;
+      reclaimBanner.classList.add("hidden");
+      return;
+    }
     if (!hasNetworkedAiAllocation()) {
       promptInput.disabled = true;
       promptInput.placeholder = networkedAiUnavailableMessage();

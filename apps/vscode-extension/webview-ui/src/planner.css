@@ -190,102 +190,25 @@ button {
 }
 .pl-textarea { resize: vertical; }
 
-/* ---------------------------------------------------------------- landing */
-.pl-landing {
-  flex: 1;
-  display: flex;
-  gap: 16px;
-  padding: 16px;
-  overflow: auto;
-}
-.pl-plans {
-  flex: 0 0 280px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border: 1px solid var(--pl-line);
-  border-radius: 8px;
-  background: var(--pl-panel);
-  padding: 12px;
-  overflow-y: auto;
-}
-.pl-plan-card {
-  text-align: left;
-  border: 1px solid var(--pl-line);
-  border-radius: 6px;
-  padding: 10px 12px;
-  background: var(--pl-panel-2);
-}
-.pl-plan-card:hover { border-color: var(--pl-accent); }
-.pl-plan-card.archived { opacity: 0.6; }
-.pl-plan-title { font-weight: 600; margin-bottom: 4px; }
-.pl-plan-meta { font-family: var(--pl-mono); font-size: 0.75em; color: var(--pl-muted); }
-
-.pl-intake {
-  flex: 1;
-  min-width: 0;
-  border: 1px solid var(--pl-line);
-  border-radius: 8px;
-  background: var(--pl-panel);
-  padding: 18px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  overflow-y: auto;
-  max-width: 860px;
-}
-.pl-field-label { display: flex; align-items: baseline; margin-top: 8px; }
-.pl-field-row { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; }
-.pl-manage-link { margin-left: auto; }
-.pl-chip-grid { display: flex; flex-wrap: wrap; gap: 6px; }
-.pl-roots { display: flex; flex-direction: column; gap: 6px; }
-.pl-root-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid var(--pl-line);
-  border-radius: 5px;
-  padding: 4px 8px;
-  background: var(--pl-panel-2);
-}
-.pl-root-path { font-family: var(--pl-mono); font-size: 0.85em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pl-root-add { display: flex; gap: 6px; }
-.pl-intake-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border-top: 1px solid var(--pl-line);
-  padding-top: 12px;
-  margin-top: 8px;
-}
-
-.pl-aspect-manager {
-  border: 1px solid var(--pl-line);
-  border-radius: 6px;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  background: var(--pl-panel-2);
-}
-.pl-aspect-edit { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; border-bottom: 1px dashed var(--pl-line); }
-.pl-aspect-edit.archived { opacity: 0.6; }
-.pl-aspect-edit:last-child { border-bottom: none; padding-bottom: 0; }
-.pl-aspect-actions { display: flex; align-items: center; gap: 8px; }
-.pl-aspect-actions .pl-footnote { flex: 1; }
-
 /* -------------------------------------------------------------- plan view */
 .pl-plan-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .pl-header {
   flex: none;
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--pl-line);
+}
+.pl-header-main {
+  display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--pl-line);
   flex-wrap: wrap;
 }
+.pl-aspect-filter { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.pl-plan-actions { display: inline-flex; align-items: center; gap: 4px; }
 .pl-title { font-weight: 650; font-size: 1.05em; }
 /* The owning task (plans belong to tasks), pinned beside the title. */
 .pl-task-chip {
@@ -304,7 +227,7 @@ button {
 .pl-task-select { max-width: 100%; }
 .pl-session-status { display: inline-flex; align-items: center; gap: 6px; color: var(--pl-muted); font-size: 0.88em; }
 
-.pl-body { flex: 1; display: flex; min-height: 0; }
+.pl-body { flex: 1; display: flex; min-width: 0; min-height: 0; overflow: hidden; }
 .pl-rail {
   flex: 0 0 280px;
   min-width: 0;
@@ -313,6 +236,11 @@ button {
   border-right: 1px solid var(--pl-line);
   background: var(--pl-panel);
   position: relative;
+}
+.pl-rail-notes {
+  flex-basis: 310px;
+  border-right: none;
+  border-left: 1px solid var(--pl-line);
 }
 .pl-rail.collapsed {
   flex: 0 0 36px;
@@ -323,6 +251,7 @@ button {
 .pl-strip { display: flex; flex-direction: column; align-items: center; gap: 10px; flex: 1; cursor: pointer; padding-top: 8px; }
 .pl-strip-glyph { font-size: 1em; color: var(--pl-muted); }
 .pl-strip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--pl-accent); }
+.pl-strip-count { font-family: var(--pl-mono); font-size: 0.72em; color: var(--pl-muted); }
 .pl-chevron { color: var(--pl-muted); font-size: 1em; padding: 4px 6px; }
 .pl-chevron:hover { color: var(--vscode-foreground); }
 
@@ -336,6 +265,39 @@ button {
 }
 .pl-rail-head .pl-chevron { margin-left: auto; }
 .pl-rail-footer { flex: none; border-top: 1px solid var(--pl-line); padding: 8px 12px 10px; }
+
+.pl-notes-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pl-note-group { border: 1px solid var(--pl-line); border-radius: 6px; overflow: hidden; }
+.pl-note-group.selected { border-color: color-mix(in srgb, var(--pl-accent) 70%, var(--pl-line)); }
+.pl-note-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  text-align: left;
+  background: var(--pl-panel-2);
+  border-bottom: 1px solid var(--pl-line);
+}
+.pl-note-group-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.pl-note-group .pl-dock-body-host { padding: 8px; margin-top: 0; }
+.pl-notes-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--pl-line);
+}
 
 .pl-split { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .pl-tree { overflow-y: auto; padding: 4px 8px 8px; min-height: 60px; }
@@ -538,6 +500,18 @@ h2.pl-heading { font-size: 1.15em; }
   border-right: 1px solid var(--pl-line);
 }
 .pl-rail-outputs.rail-overlay { left: 0; }
+.pl-rail-notes.rail-overlay { right: 0; }
+
+/* ---------------------------------------------------------- empty workspace */
+.pl-empty-workspace { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.pl-empty-workspace-body {
+  margin: auto;
+  max-width: 520px;
+  padding: 32px;
+  text-align: center;
+}
+.pl-empty-workspace-title { margin: 8px 0; font-size: 1.25em; }
+.pl-empty-workspace-copy { margin: 0; color: var(--pl-muted); line-height: 1.5; }
 
 /* --------------------------------------------------------------------------
    Plan -> board materialization (ADR 0012)

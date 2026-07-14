@@ -17,6 +17,7 @@ import {
   type PanelResponse
 } from "@drydock/contracts";
 import { vscode } from "./state.js";
+import { demoResponse } from "./demoMode.js";
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const pending = new Map<string, { resolve: (value: PanelResponse) => void; timer: number }>();
@@ -42,6 +43,8 @@ export function onPush<T extends PushType>(type: T, handler: PushHandler<T>): ()
 export function request(payload: PanelRequestPayload): Promise<PanelResponse> {
   requestCounter += 1;
   const requestId = `req-${String(requestCounter)}-${String(Date.now())}`;
+  const demo = demoResponse(payload, requestId);
+  if (demo !== null) return Promise.resolve(demo);
   return new Promise<PanelResponse>((resolve) => {
     const timer = window.setTimeout(() => {
       pending.delete(requestId);

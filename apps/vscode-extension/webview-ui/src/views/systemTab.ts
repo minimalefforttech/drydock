@@ -194,6 +194,8 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
     head.append(status, name);
     if (runtime.status !== "removed") {
       const stop = button("Stop", "ghost small");
+      stop.disabled = ctx.isDemo();
+      if (ctx.isDemo()) stop.title = "Demo data does not control runtimes. Switch to Live data to stop this runtime.";
       stop.addEventListener("click", () => {
         stop.disabled = true;
         void request({ type: "isolatedRun.stopRuntime", runtimeId: runtime.runtimeId }).then((response) => {
@@ -341,14 +343,20 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
 
   function render(): void {
     const security = state.workspacePolicy?.security;
-    probeButton.disabled = security?.networkedAiAllowed !== true;
+    probeButton.disabled = ctx.isDemo() || security?.networkedAiAllowed !== true;
     probeButton.title = probeButton.disabled
-      ? security === undefined
+      ? ctx.isDemo()
+        ? "Demo data does not contact the app server. Switch to Live data to run this diagnostic."
+        : security === undefined
         ? "Loading the workstation security policy…"
         : security.managed
           ? "AI use is not allocated on this workstation."
           : "Enable Drydock › Security: Networked AI Enabled, then reload the window."
       : "Probe the configured app-server backend.";
+    cleanupButton.disabled = ctx.isDemo();
+    cleanupButton.title = ctx.isDemo()
+      ? "Demo data does not inspect or remove runtimes. Switch to Live data to clean up runtime records."
+      : "Reap quarantined/lost runtimes whose sandbox is already gone, and purge old removed rows";
     renderRuntimes();
     // Fetch a fresh sample the moment the tab is shown (the interval covers the rest).
     void pollStats();

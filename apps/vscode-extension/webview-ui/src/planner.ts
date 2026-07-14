@@ -1,13 +1,12 @@
 /**
  * Planner editor panel webview (ADR 0012).
  *
- * A single-page surface with two screens: the landing (recent plans + the
- * intake form + the aspect-registry editor) and the plan view — an outputs
- * tree and heading outline behind a draggable splitter, plus the provider
- * viewer. The Drydock Plan tab remains the planning conversation in the VS
- * Code sidebar. The outputs rail collapses below ~900px; layout preferences
- * persist via webview state (UI-local only — domain data is always refetched
- * from the host).
+ * A plan-document review workspace: plan files and heading outline on the
+ * left, the selected artifact viewer in the centre, and a plan-wide notes
+ * queue on the right. Plan creation, selection, aspect management, and the
+ * planning conversation stay in the Drydock Plan tab in the VS Code sidebar.
+ * Both rails collapse at narrower editor widths; layout preferences persist
+ * via webview state (UI-local only — domain data is always refetched).
  *
  * SECURITY: every dynamic string renders via textContent — NEVER innerHTML.
  * This entry is self-contained (it does not import the control-panel bundle).
@@ -23,10 +22,9 @@ import {
   type PlanArtifactDetail,
   type PlanAspectSummary,
   type PlannerStateDetail,
-  type PlanSummary,
-  type WorkTaskSummary
+  type PlanSummary
 } from "@drydock/contracts";
-import { badge, button, chip, el, option, popover, relativeTime, select, statusDot } from "./components.js";
+import { badge, button, chip, el, popover, statusDot } from "./components.js";
 import {
   captureModalFocus,
   prepareModalFocus,
@@ -42,11 +40,14 @@ import {
   type ArtifactProvider
 } from "./plannerViewer.js";
 import { createHelpExperience, setHelpTooltip } from "./help.js";
+import { createDemoModeController, demoResponse, isDemoMode } from "./demoMode.js";
+import { nextWorkflowStep } from "./guideHandoffs.js";
 
 interface PersistedState {
   readonly selectedPlanId: string | null;
   readonly selectedArtifactId: string | null;
   readonly leftCollapsed: boolean;
+  readonly rightCollapsed?: boolean;
   readonly splitRatio: number;
 }
 
@@ -63,7 +64,7 @@ const app = document.getElementById("app");
 if (!app) throw new Error("missing #app root");
 
 const REQUEST_TIMEOUT_MS = 60_000;
-const NARROW_QUERY = "(max-width: 900px)";
+const NARROW_QUERY = "(max-width: 1080px)";
 const KIND_GLYPHS: Record<PlanArtifactDetail["kind"], string> = {
   document: "▤",
   diagram: "◇",
@@ -81,6 +82,8 @@ let requestCounter = 0;
 function request(payload: PanelRequestPayload): Promise<PanelResponse> {
   requestCounter += 1;
   const requestId = `planner-req-${String(requestCounter)}-${String(Date.now())}`;
+  const demo = demoResponse(payload, requestId);
+  if (demo !== null) return Promise.resolve(demo);
   return new Promise<PanelResponse>((resolve) => {
     const timer = window.setTimeout(() => {
       pending.delete(requestId);
@@ -121,8 +124,6 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
 
 let plans: readonly PlanSummary[] = [];
 let aspects: readonly PlanAspectSummary[] = [];
-/** Task-picker options (plans belong to tasks, ADR 0006 doctrine). */
-let workTasks: readonly WorkTaskSummary[] = [];
 let currentPlanId: string | null = null;
 let currentState: PlannerStateDetail | null = null;
 let currentSession: ChatSessionSummary | null = null;
@@ -134,25 +135,27 @@ let notice: { text: string; tone: "info" | "error" } | null = null;
 /** Header aspect-chip filter for the outputs tree (transient, click to clear). */
 let aspectFilter: string | null = null;
 /** A guide handoff that arrived while planner.showPlan was still loading its selected plan. */
-let pendingGuideStart = false;
+let pendingGuideStart = document.body.dataset["startGuide"] === "true";
 /** Revision seen per artifact, for the "updated" flash on refetch. */
 const seenRevisions = new Map<string, number>();
 const flashArtifacts = new Set<string>();
 
 let leftCollapsed = false;
+let rightCollapsed = false;
 let splitRatio = 0.55;
 /**
  * Narrow windows auto-collapse both rails to strips; tapping a strip flies the
  * rail out as an overlay. This is transient presentation state — it never
  * touches the persisted collapse preferences.
  */
-let narrowOverlay: "outputs" | null = null;
+let narrowOverlay: "outputs" | "notes" | null = null;
 
 const saved = vscodeApi.getState();
 if (saved) {
   currentPlanId = saved.selectedPlanId;
   selectedArtifactId = saved.selectedArtifactId;
   leftCollapsed = saved.leftCollapsed;
+  rightCollapsed = saved.rightCollapsed ?? false;
   splitRatio = clampRatio(saved.splitRatio);
 }
 
@@ -161,6 +164,7 @@ function persist(): void {
     selectedPlanId: currentPlanId,
     selectedArtifactId,
     leftCollapsed,
+    rightCollapsed,
     splitRatio
   });
 }
@@ -242,13 +246,6 @@ async function refreshAspects(): Promise<void> {
   }
 }
 
-async function refreshTasks(): Promise<void> {
-  const response = await request({ type: "task.list" });
-  if (response.ok && response.payload.type === "task.list") {
-    workTasks = response.payload.tasks;
-  }
-}
-
 async function refreshState(): Promise<void> {
   if (currentPlanId === null) return;
   const response = await request({ type: "planner.state", planId: currentPlanId });
@@ -293,29 +290,9 @@ async function openPlan(planId: string): Promise<void> {
   await refreshState();
 }
 
-function backToLanding(): void {
-  currentPlanId = null;
-  currentState = null;
-  currentSession = null;
-  notice = null;
-  persist();
-  void refreshPlans().then(() => render());
-}
-
-async function showTourLanding(): Promise<void> {
-  if (currentPlanId !== null || currentState !== null) {
-    currentPlanId = null;
-    currentState = null;
-    currentSession = null;
-    notice = null;
-    persist();
-  }
-  if (plans.length === 0) await refreshPlans();
-  render();
-}
-
 async function showTourPlan(): Promise<void> {
   if (currentPlanId !== null && currentState !== null) {
+    narrowOverlay = null;
     render();
     return;
   }
@@ -328,6 +305,26 @@ async function showTourPlan(): Promise<void> {
   await openPlan(planId);
 }
 
+async function showTourFiles(): Promise<void> {
+  await showTourPlan();
+  if (narrowQuery.matches) narrowOverlay = "outputs";
+  else leftCollapsed = false;
+  render();
+}
+
+async function showTourViewer(): Promise<void> {
+  await showTourPlan();
+  narrowOverlay = null;
+  render();
+}
+
+async function showTourNotes(): Promise<void> {
+  await showTourPlan();
+  if (narrowQuery.matches) narrowOverlay = "notes";
+  else rightCollapsed = false;
+  render();
+}
+
 // ---------------------------------------------------------------------------
 // Structure
 // ---------------------------------------------------------------------------
@@ -335,58 +332,64 @@ async function showTourPlan(): Promise<void> {
 const root = el("div", "pl-root");
 app.append(root);
 
+const demoMode = createDemoModeController(reloadPlannerData);
+
 const help = createHelpExperience({
   id: "planner",
   title: "Planner guide",
-  intro: "Create a task-linked plan, inspect its generated artifacts, and send revisions or create board work from the result.",
+  intro: "Review a plan's files, move through its outline, and queue notes for the next revision.",
   showWelcome: true,
+  dataMode: demoMode.helpMode,
   pages: [
     {
-      id: "starting",
-      label: "Start a plan",
-      title: "Create a task-linked plan",
-      intro: "Enter a planning brief, select the owning task, choose the aspects to cover, and add any required read-only context.",
+      id: "workspace",
+      label: "Review files",
+      title: "Navigate plan files",
+      intro: "Planner is the document workspace. Create and select plans in the Drydock Plan tab, then use this panel to review the generated files.",
       sections: [
-        { title: "Write the brief", body: "Describe the problem, expected result, and required constraints. This text becomes the first planning instruction." },
-        { title: "Select the task", body: "Link the plan to a task so its session, artifacts, generated subtasks, and later review use the same owner." },
-        { title: "Select aspects", body: "Choose the areas the planner must address explicitly, such as architecture, UX, security, or rollout." },
-        { title: "Add read-only context", body: "Add source folders or files the planner should inspect. Planner context mounts cannot be modified by the session." }
+        { title: "Choose a file", body: "Plan files are grouped by aspect. Select a file to open it in the viewer; the revision and queued-note count stay visible in the file list." },
+        { title: "Use the outline", body: "For documents, select a heading to move to that section. Diagrams, images, and prototypes list their anchored notes instead." },
+        { title: "Open the collected file", body: "Use Open file when you need the artifact in a normal editor tab. Demo files stay in memory and cannot be opened on disk." },
+        { title: "Use the responsive rails", body: "At narrower editor widths, Plan files and Notes queue collapse to edge strips. Select a strip to open that rail over the viewer." }
       ]
     },
     {
-      id: "workspace",
-      label: "Plan workspace",
-      title: "Navigate plan outputs",
-      intro: "The workspace contains an outputs rail, an artifact viewer, and the planning session chat.",
+      id: "notes",
+      label: "Queue notes",
+      title: "Record and send revision notes",
+      intro: "Notes remain attached to a plan file until you send or resolve them.",
       sections: [
-        { title: "Use the outputs rail", body: "Select an artifact and use its heading outline to navigate longer documents. Resize or collapse the rail as needed." },
-        { title: "Inspect an artifact", body: "The centre viewer renders documents, diagrams, images, and prototypes using the appropriate viewer for each type." },
-        { title: "Use the Plan tab for conversation", body: "Send planning questions and follow-up instructions from the Drydock Plan tab in the VS Code sidebar. Selecting a plan here selects the same plan in that tab." },
-        { title: "Use the narrow layout", body: "On narrow editor panels, select the outputs strip to open the artifact tree as an overlay. The artifact viewer remains in the editor area." }
+        { title: "Add a file note", body: "Use Add note for a file-level request, or use the note action on a document block, diagram node, image region, or prototype region for a specific anchor." },
+        { title: "Review the queue", body: "The Notes queue groups every note by file and keeps its state visible: open, delegated, resolved, or parked." },
+        { title: "Send the open notes", body: "Send notes submits every open item as one revision request. The planning agent can then update the affected artifacts together." },
+        { title: "Follow up in Plan", body: "Use the Drydock Plan tab for planning questions and broader changes that are not tied to a specific file or section." }
       ]
     },
     {
       id: "handoff",
-      label: "Refine & hand off",
-      title: "Revise the plan or create board work",
-      intro: "Add instructions to plan content, submit them for revision, or convert checklist items into subtasks.",
+      label: "Revise & hand off",
+      title: "Request broader revisions or create board work",
+      intro: "Use the header actions for changes that apply beyond one queued note.",
       sections: [
-        { title: "Add an instruction", body: "Attach feedback to the artifact being reviewed. Open instructions remain listed until they are resolved or sent." },
-        { title: "Submit instructions", body: "Send all open instructions in one revision request so the planner can update the artifacts together." },
-        { title: "Regenerate content", body: "Regenerate one aspect for a targeted revision, or regenerate the entire plan when the brief or direction has changed." },
+        { title: "Regenerate content", body: "Regenerate one aspect for a targeted rewrite, or the whole plan when the brief or direction has changed." },
         { title: "Create subtasks", body: "Preview checklist-derived candidates before adding them to the Task Board. Creating subtasks does not start an agent." }
       ]
     }
   ],
   tour: [
-    { title: "Choose an existing plan", body: "Select a recent plan to continue its planning session and inspect its artifacts. Archived plans remain available below the active list.", target: () => root.querySelector<HTMLElement>(".pl-plans") ?? root, prepare: showTourLanding },
-    { title: "Write the planning brief", body: "Describe the problem, expected result, and important constraints. Select the owning task so later sessions, subtasks, and review stay under the same task.", target: () => root.querySelector<HTMLElement>(".pl-intake") ?? root, prepare: showTourLanding },
-    { title: "Set aspects and read-only context", body: "Select the areas the plan must address, then add only the files or folders the planner needs to inspect. Context mounts are read-only.", target: () => root.querySelector<HTMLElement>(".pl-chip-grid")?.closest<HTMLElement>(".pl-intake") ?? root.querySelector<HTMLElement>(".pl-intake") ?? root, prepare: showTourLanding },
-    { title: "Check plan and session status", body: "The header identifies the task, selected aspects, and planning-session state. Use the aspect chips to filter outputs when the plan covers several concerns.", target: () => root.querySelector<HTMLElement>(".pl-header") ?? root, prepare: showTourPlan },
-    { title: "Navigate generated outputs", body: "Select an artifact in the outputs tree, then use its outline to move through longer documents. The context footer lists read-only mounts.", target: () => root.querySelector<HTMLElement>(".pl-rail-outputs") ?? root, prepare: showTourPlan },
-    { title: "Review an artifact", body: "Inspect the selected artifact in the centre viewer. Use the rendered content's instruction action to attach a specific requested change to the relevant section.", target: () => root.querySelector<HTMLElement>(".pl-viewer") ?? root, prepare: showTourPlan },
-    { title: "Send revisions or create board work", body: "Send all open instructions together, regenerate only when broader rework is needed, or preview checklist items before creating board subtasks. None of these actions starts implementation work automatically.", target: () => root.querySelector<HTMLElement>(".pl-header") ?? root, prepare: showTourPlan },
-    { title: "Continue the planning conversation", body: "Use the Drydock Plan tab in the sidebar for follow-up questions and planning instructions. Selecting a plan here selects the same plan in that tab.", target: () => root.querySelector<HTMLElement>(".pl-header") ?? root, prepare: showTourPlan }
+    { title: "Review the selected plan", body: "Planner is where you review the selected plan's files. Create plans, choose plans, and continue the planning conversation in the Drydock Plan tab.", target: () => root.querySelector<HTMLElement>(".pl-header-main") ?? root, prepare: showTourPlan },
+    { title: "Choose a plan file", body: "Plan files are grouped by aspect. Select a file to open it; each row also shows its revision and any open notes.", target: () => root.querySelector<HTMLElement>(".pl-tree") ?? root, prepare: showTourFiles },
+    { title: "Use the file outline", body: "The outline follows the selected file. Select a document heading to move to that section, or an anchored note to locate it in a visual artifact.", target: () => root.querySelector<HTMLElement>(".pl-outline") ?? root, prepare: showTourFiles },
+    { title: "Read the selected file", body: "The viewer renders documents, diagrams, images, and prototypes. Open file moves a collected artifact into a normal editor tab when it exists on disk.", target: () => root.querySelector<HTMLElement>(".pl-viewer-head") ?? root, prepare: showTourViewer },
+    { title: "Add a revision note", body: "Add a file-level note here, or attach a note to a specific block, node, or region inside the artifact.", target: () => root.querySelector<HTMLElement>(".pl-add-note") ?? root.querySelector<HTMLElement>(".pl-viewer-head") ?? root, prepare: showTourViewer },
+    { title: "Work through the notes queue", body: "The queue groups notes by plan file and keeps open, delegated, resolved, and parked states visible while you review.", target: () => root.querySelector<HTMLElement>(".pl-notes-body") ?? root, prepare: showTourNotes },
+    { title: "Send the open notes", body: "Send notes submits all open items together for the next revision. Broader rewrites use Regenerate; checklist items can be created as board subtasks.", target: () => root.querySelector<HTMLElement>(".pl-notes-send") ?? root.querySelector<HTMLElement>(".pl-plan-actions") ?? root, prepare: showTourNotes },
+    nextWorkflowStep({
+      current: "planner",
+      request,
+      taskId: () => currentState?.plan.taskId ?? "demo-task-onboarding",
+      planId: () => currentState?.plan.planId ?? plans[0]?.planId
+    })
   ]
 });
 
@@ -409,6 +412,13 @@ function outputsRailCollapsed(): boolean {
   return leftCollapsed;
 }
 
+function notesRailCollapsed(): boolean {
+  if (narrowQuery.matches) {
+    return narrowOverlay !== "notes";
+  }
+  return rightCollapsed;
+}
+
 function expandOutputsRail(): void {
   if (narrowQuery.matches) {
     narrowOverlay = "outputs";
@@ -424,6 +434,26 @@ function collapseOutputsRail(): void {
     narrowOverlay = null;
   } else {
     leftCollapsed = true;
+    persist();
+  }
+  render();
+}
+
+function expandNotesRail(): void {
+  if (narrowQuery.matches) {
+    narrowOverlay = "notes";
+  } else {
+    rightCollapsed = false;
+    persist();
+  }
+  render();
+}
+
+function collapseNotesRail(): void {
+  if (narrowQuery.matches) {
+    narrowOverlay = null;
+  } else {
+    rightCollapsed = true;
     persist();
   }
   render();
@@ -445,6 +475,7 @@ const providers: ArtifactProvider[] = [
   new PrototypeProvider()
 ];
 let activeProvider: ArtifactProvider | null = null;
+let noteNodes = new Map<string, HTMLElement>();
 
 // ---------------------------------------------------------------------------
 // Rendering — top level
@@ -455,7 +486,7 @@ function render(): void {
   root.replaceChildren();
   root.append(renderNotice());
   if (currentPlanId === null || currentState === null) {
-    root.append(renderLanding());
+    root.append(renderEmptyPlanner());
   } else {
     root.append(renderPlanView(currentState));
     if (materializeDraft !== null) {
@@ -463,6 +494,25 @@ function render(): void {
     }
   }
   finishMaterializeRender(materializeDraft !== null && currentPlanId !== null && currentState !== null, focusSnapshot);
+}
+
+function renderEmptyPlanner(): HTMLElement {
+  const empty = el("section", "pl-empty-workspace");
+  const head = el("header", "pl-header pl-empty-header");
+  const title = el("span", "pl-title");
+  title.textContent = "Plan workspace";
+  head.append(title, el("span", "pl-spacer"), help.launcher("pl-help-launcher"));
+
+  const body = el("div", "pl-empty-workspace-body");
+  const kicker = el("div", "pl-kicker pl-kicker-accent");
+  kicker.textContent = "NO PLAN SELECTED";
+  const heading = el("h2", "pl-empty-workspace-title");
+  heading.textContent = "Choose a plan in the Drydock Plan tab";
+  const copy = el("p", "pl-empty-workspace-copy");
+  copy.textContent = "Plan creation and selection stay in the sidebar. Planner opens the selected plan's files, outline, viewer, and notes queue.";
+  body.append(kicker, heading, copy);
+  empty.append(head, body);
+  return empty;
 }
 
 // --- Plan → board (ADR 0012) -------------------------------------------------
@@ -549,7 +599,7 @@ function renderMaterializeOverlay(draft: MaterializeDraft): HTMLElement {
   hint.id = "pl-mat-hint";
   hint.textContent = draft.taskTitle !== undefined
     ? `Creates the selected items as subtasks on "${draft.taskTitle}". This action does not start an agent.`
-    : "This plan has no owning task — pick one in the plan intake first.";
+    : "This plan has no owning task — assign one from the Drydock Plan tab first.";
   modal.append(hint);
 
   if (draft.candidates === null) {
@@ -635,303 +685,6 @@ function renderNotice(): HTMLElement {
 }
 
 // ---------------------------------------------------------------------------
-// Landing: plans list + intake + aspect editor
-// ---------------------------------------------------------------------------
-
-/** Intake draft survives re-renders (not persisted — it is conversation-local). */
-const intake = {
-  brief: "",
-  notes: "",
-  /** Owning task ("" = orphan; allowed but discouraged). */
-  taskId: "",
-  selectedAspects: new Set<string>(),
-  contextRoots: [] as string[],
-  manageOpen: false
-};
-
-function renderLanding(): HTMLElement {
-  const landing = el("div", "pl-landing");
-  const plansPane = el("aside", "pl-plans");
-  const plansHead = el("div", "pl-rail-head");
-  const plansTitle = el("span", "pl-kicker");
-  plansTitle.textContent = "PLANS";
-  plansHead.append(plansTitle, el("span", "pl-spacer"), help.launcher("pl-help-launcher"));
-  plansPane.append(plansHead);
-  const active = plans.filter((plan) => plan.status !== "archived");
-  const archived = plans.filter((plan) => plan.status === "archived");
-  if (active.length === 0) {
-    const empty = el("div", "pl-empty");
-    empty.textContent = "No plans yet — describe what you're building on the right.";
-    plansPane.append(empty);
-  }
-  for (const plan of active) {
-    plansPane.append(planCard(plan));
-  }
-  if (archived.length > 0) {
-    const label = el("div", "pl-group-label");
-    label.textContent = "ARCHIVED";
-    plansPane.append(label);
-    for (const plan of archived) {
-      plansPane.append(planCard(plan));
-    }
-  }
-
-  const form = el("section", "pl-intake");
-  const kicker = el("div", "pl-kicker pl-kicker-accent");
-  kicker.textContent = "NEW PLAN";
-  form.append(kicker);
-
-  form.append(fieldLabel("What are you building?"));
-  const brief = document.createElement("textarea");
-  brief.className = "pl-textarea";
-  brief.rows = 3;
-  brief.placeholder = "The problem, the shape of the solution, anything the agent should aim at…";
-  brief.value = intake.brief;
-  brief.addEventListener("input", () => {
-    intake.brief = brief.value;
-    createButton.disabled = intake.brief.trim().length === 0;
-  });
-  form.append(brief);
-
-  // Plans belong to tasks — the picker leads with the recommendation; the
-  // orphan option stays available but names itself as the exception.
-  form.append(fieldLabel("For task", "task-based planning is recommended"));
-  const taskField = select("pl-input pl-task-select", "The task this plan belongs to");
-  setHelpTooltip(taskField, "Select the task that will own this plan, its session, its artifacts, and any generated subtasks.");
-  taskField.append(option("", "no task (orphan)"));
-  for (const task of workTasks) {
-    if (task.state === "done") continue;
-    taskField.append(option(task.taskId, task.title));
-  }
-  if (intake.taskId !== "" && !workTasks.some((task) => task.taskId === intake.taskId)) {
-    intake.taskId = "";
-  }
-  taskField.value = intake.taskId;
-  taskField.addEventListener("change", () => {
-    intake.taskId = taskField.value;
-  });
-  form.append(taskField);
-
-  const aspectHead = el("div", "pl-field-row");
-  aspectHead.append(fieldLabel("Working on"), hint("select all that apply"));
-  const manageLink = button(intake.manageOpen ? "Close manager" : "Manage aspects", "ghost small pl-manage-link");
-  manageLink.addEventListener("click", () => {
-    intake.manageOpen = !intake.manageOpen;
-    render();
-  });
-  aspectHead.append(manageLink);
-  form.append(aspectHead);
-  const chipGrid = el("div", "pl-chip-grid");
-  for (const aspect of aspects.filter((entry) => !entry.archived)) {
-    const selected = intake.selectedAspects.has(aspect.aspectId);
-    const node = chip(`${selected ? "✓ " : ""}${aspect.label}`, () => {
-      if (selected) intake.selectedAspects.delete(aspect.aspectId);
-      else intake.selectedAspects.add(aspect.aspectId);
-      render();
-    });
-    node.classList.add("pl-aspect-chip");
-    node.classList.toggle("selected", selected);
-    node.title = aspect.instructions;
-    setHelpTooltip(node, aspect.instructions);
-    chipGrid.append(node);
-  }
-  form.append(chipGrid);
-  if (intake.manageOpen) {
-    form.append(renderAspectManager());
-  }
-
-  form.append(fieldLabel("Context", "mounted read-only into the planning sandbox"));
-  const rootsList = el("div", "pl-roots");
-  for (const [index, contextRoot] of intake.contextRoots.entries()) {
-    const row = el("div", "pl-root-row");
-    const pathText = el("span", "pl-root-path");
-    pathText.textContent = contextRoot;
-    const remove = button("✕", "ghost small");
-    remove.title = "Remove this context root";
-    remove.addEventListener("click", () => {
-      intake.contextRoots.splice(index, 1);
-      render();
-    });
-    row.append(pathText, badge(":ro", "pl-ro"), remove);
-    rootsList.append(row);
-  }
-  const addRow = el("div", "pl-root-add");
-  const rootInput = document.createElement("input");
-  rootInput.type = "text";
-  rootInput.className = "pl-input";
-  rootInput.placeholder = "Absolute folder or file path, e.g. C:\\repos\\app\\src";
-  const addRoot = button("Add", "small");
-  const commitRoot = (): void => {
-    const value = rootInput.value.trim();
-    if (value.length === 0) return;
-    if (!intake.contextRoots.includes(value)) intake.contextRoots.push(value);
-    rootInput.value = "";
-    render();
-  };
-  addRoot.addEventListener("click", commitRoot);
-  rootInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") commitRoot();
-  });
-  addRow.append(rootInput, addRoot);
-  rootsList.append(addRow);
-  form.append(rootsList);
-
-  form.append(fieldLabel("Pre-information", "constraints, prior decisions, links"));
-  const notes = document.createElement("textarea");
-  notes.className = "pl-textarea";
-  notes.rows = 2;
-  notes.placeholder = "Anything the agent should know before it starts…";
-  notes.value = intake.notes;
-  notes.addEventListener("input", () => {
-    intake.notes = notes.value;
-  });
-  form.append(notes);
-
-  const footer = el("div", "pl-intake-footer");
-  const persistenceNote = el("span", "pl-footnote");
-  persistenceNote.textContent = "artifacts are collected to ~/.drydock after every turn — sandbox crashes lose nothing";
-  const createButton = button("Create plan →", "primary");
-  createButton.disabled = intake.brief.trim().length === 0;
-  createButton.addEventListener("click", () => void createPlan(createButton));
-  footer.append(persistenceNote, createButton);
-  form.append(footer);
-
-  landing.append(plansPane, form);
-  return landing;
-}
-
-function planCard(plan: PlanSummary): HTMLElement {
-  const cardNode = el("button", `pl-plan-card${plan.status === "archived" ? " archived" : ""}`);
-  const title = el("div", "pl-plan-title");
-  title.textContent = plan.title;
-  const meta = el("div", "pl-plan-meta");
-  const taskPart = plan.taskTitle === undefined ? "" : `${plan.taskTitle} · `;
-  meta.textContent = `${taskPart}${String(plan.artifactCount)} artifact${plan.artifactCount === 1 ? "" : "s"} · ${String(plan.openAnnotationCount)} open ✎ · ${relativeTime(plan.updatedAt)}`;
-  cardNode.append(title, meta);
-  cardNode.addEventListener("click", () => void openPlan(plan.planId));
-  return cardNode;
-}
-
-async function createPlan(trigger: HTMLButtonElement): Promise<void> {
-  trigger.disabled = true;
-  trigger.textContent = "Creating…";
-  const response = await request({
-    type: "planner.create",
-    brief: intake.brief.trim(),
-    aspectIds: [...intake.selectedAspects],
-    contextRoots: [...intake.contextRoots],
-    ...(intake.notes.trim().length === 0 ? {} : { notes: intake.notes.trim() }),
-    ...(intake.taskId === "" ? {} : { taskId: intake.taskId })
-  });
-  if (!response.ok) {
-    notice = { text: response.error.message, tone: "error" };
-    render();
-    return;
-  }
-  if (response.payload.type !== "planner.create") return;
-  booting = true;
-  notice = { text: "Plan created — starting the planning session…", tone: "info" };
-  intake.brief = "";
-  intake.notes = "";
-  intake.taskId = "";
-  intake.selectedAspects.clear();
-  intake.contextRoots = [];
-  await openPlan(response.payload.plan.planId);
-}
-
-function renderAspectManager(): HTMLElement {
-  const manager = el("div", "pl-aspect-manager");
-  for (const aspect of aspects) {
-    manager.append(aspectEditorRow(aspect));
-  }
-  const newHead = el("div", "pl-group-label");
-  newHead.textContent = "NEW ASPECT";
-  manager.append(newHead, aspectEditorRow(null));
-  return manager;
-}
-
-function aspectEditorRow(aspect: PlanAspectSummary | null): HTMLElement {
-  const row = el("div", `pl-aspect-edit${aspect?.archived === true ? " archived" : ""}`);
-  const labelInput = document.createElement("input");
-  labelInput.type = "text";
-  labelInput.className = "pl-input";
-  labelInput.placeholder = "Label (e.g. Brand review)";
-  labelInput.value = aspect?.label ?? "";
-  const instructionsInput = document.createElement("textarea");
-  instructionsInput.className = "pl-textarea";
-  instructionsInput.rows = 2;
-  instructionsInput.placeholder = "What this aspect asks the agent for…";
-  instructionsInput.value = aspect?.instructions ?? "";
-  const expectedInput = document.createElement("input");
-  expectedInput.type = "text";
-  expectedInput.className = "pl-input";
-  expectedInput.placeholder = "Expected artifacts, semicolon-separated";
-  expectedInput.value = (aspect?.expectedArtifacts ?? []).join("; ");
-
-  const actions = el("div", "pl-aspect-actions");
-  const idBadge = el("span", "pl-footnote");
-  idBadge.textContent = aspect === null ? "" : `plan/${aspect.aspectId}/${aspect.seeded ? " · seeded" : ""}`;
-  const save = button(aspect === null ? "Add aspect" : "Save", "small");
-  save.addEventListener("click", () => {
-    const label = labelInput.value.trim();
-    const instructions = instructionsInput.value.trim();
-    if (label.length === 0 || instructions.length === 0) {
-      notice = { text: "An aspect needs both a label and instructions.", tone: "error" };
-      render();
-      return;
-    }
-    void request({
-      type: "planner.aspects.save",
-      aspect: {
-        ...(aspect === null ? {} : { aspectId: aspect.aspectId }),
-        label,
-        instructions,
-        expectedArtifacts: expectedInput.value.split(";").map((entry) => entry.trim()).filter((entry) => entry.length > 0)
-      }
-    }).then((response) => {
-      if (response.ok && response.payload.type === "planner.aspects.save") {
-        aspects = response.payload.aspects;
-      } else if (!response.ok) {
-        notice = { text: response.error.message, tone: "error" };
-      }
-      render();
-    });
-  });
-  actions.append(idBadge, save);
-  if (aspect !== null) {
-    const archiveButton = button(aspect.archived ? "Restore" : "Archive", "ghost small");
-    archiveButton.addEventListener("click", () => {
-      void request({ type: "planner.aspects.archive", aspectId: aspect.aspectId, archived: !aspect.archived }).then((response) => {
-        if (response.ok && response.payload.type === "planner.aspects.archive") {
-          aspects = response.payload.aspects;
-        }
-        render();
-      });
-    });
-    actions.append(archiveButton);
-  }
-  row.append(labelInput, instructionsInput, expectedInput, actions);
-  return row;
-}
-
-function fieldLabel(text: string, hintText?: string): HTMLElement {
-  const wrap = el("div", "pl-field-label");
-  const label = el("span", "pl-label");
-  label.textContent = text;
-  wrap.append(label);
-  if (hintText !== undefined) {
-    wrap.append(hint(hintText));
-  }
-  return wrap;
-}
-
-function hint(text: string): HTMLElement {
-  const node = el("span", "pl-hint");
-  node.textContent = text;
-  return node;
-}
-
-// ---------------------------------------------------------------------------
 // Plan view
 // ---------------------------------------------------------------------------
 
@@ -942,27 +695,29 @@ function renderPlanView(state: PlannerStateDetail): HTMLElement {
   const body = el("div", "pl-body");
   const outputsRail = renderOutputsRail(state);
   const viewer = renderViewer(state);
-  body.append(outputsRail, viewer);
+  const notesRail = renderNotesRail(state);
+  body.append(outputsRail, viewer, notesRail);
   view.append(body);
   return view;
 }
 
 function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
   const header = el("header", "pl-header");
-  const back = button("← Plans", "ghost small");
-  back.addEventListener("click", backToLanding);
+  const main = el("div", "pl-header-main");
   const title = el("span", "pl-title");
   title.textContent = state.plan.title;
-  header.append(back, title);
+  main.append(title);
 
   if (state.plan.taskId !== null) {
     const taskChip = el("span", "pl-task-chip");
     taskChip.textContent = state.plan.taskTitle ?? "task";
     taskChip.title = `Belongs to task: ${state.plan.taskTitle ?? state.plan.taskId}`;
-    header.append(taskChip);
+    main.append(taskChip);
   }
 
   const aspectMap = new Map(aspects.map((aspect) => [aspect.aspectId, aspect]));
+  const aspectBar = el("nav", "pl-aspect-filter");
+  aspectBar.setAttribute("aria-label", "Plan aspects");
   for (const aspectId of state.plan.aspectIds) {
     const label = aspectMap.get(aspectId)?.label ?? aspectId;
     const node = chip(label, () => {
@@ -980,31 +735,22 @@ function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
     node.classList.add("pl-aspect-chip", "selected", "small");
     node.classList.toggle("filtering", aspectFilter === aspectId);
     node.title = aspectFilter === aspectId ? "Click to show every aspect" : "Click to filter the outputs to this aspect";
-    header.append(node);
+    aspectBar.append(node);
   }
 
   const spacer = el("span", "pl-spacer");
-  header.append(spacer);
+  main.append(spacer);
 
-  header.append(help.launcher("pl-help-launcher"));
+  main.append(help.launcher("pl-help-launcher"));
 
-  header.append(sessionStatus());
+  main.append(sessionStatus());
 
-  const openCount = state.annotations.filter((annotation) => annotation.status === "open").length;
-  const send = button(openCount === 0 ? "No open instructions" : `Send instructions (${String(openCount)})`, "primary small");
-  send.disabled = openCount === 0;
-  send.addEventListener("click", () => {
-    void request({ type: "planner.sendInstructions", planId: state.plan.planId }).then((response) => {
-      if (response.ok && response.payload.type === "planner.sendInstructions") {
-        notice = { text: `Sent ${String(response.payload.sentCount)} instruction${response.payload.sentCount === 1 ? "" : "s"} to the agent.`, tone: "info" };
-      } else if (!response.ok) {
-        notice = { text: response.error.message, tone: "error" };
-      }
-      void refreshState();
-    });
-  });
+  const actions = el("div", "pl-plan-actions");
   const regenerateTrigger = button("⟳ Regenerate ▾", "ghost small");
-  regenerateTrigger.title = "Ask the agent to revisit the whole plan, or one aspect";
+  regenerateTrigger.disabled = isDemoMode();
+  regenerateTrigger.title = isDemoMode()
+    ? "Demo data does not contact the planning agent. Switch to Live data to regenerate artifacts."
+    : "Ask the agent to revisit the whole plan, or one aspect";
   setHelpTooltip(regenerateTrigger, "Regenerate the entire plan or select one aspect for a targeted revision.");
   const regenerate = popover(regenerateTrigger, (content, close) => {
     const whole = button("Whole plan", "ghost small pl-regen-item");
@@ -1056,7 +802,10 @@ function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
       render();
     });
   });
-  header.append(send, regenerate, toBoard);
+  actions.append(regenerate, toBoard);
+  main.append(actions);
+  header.append(main);
+  if (aspectBar.childElementCount > 0) header.append(aspectBar);
   return header;
 }
 
@@ -1101,7 +850,7 @@ function renderOutputsRail(state: PlannerStateDetail): HTMLElement {
   }
   const head = el("div", "pl-rail-head");
   const label = el("span", "pl-kicker");
-  label.textContent = "OUTPUTS";
+  label.textContent = "PLAN FILES";
   const collapse = railChevron("Collapse the outputs rail", () => {
     collapseOutputsRail();
   });
@@ -1324,6 +1073,105 @@ function collapsedOutputsStrip(rail: HTMLElement, state: PlannerStateDetail): HT
   return rail;
 }
 
+function renderNotesRail(state: PlannerStateDetail): HTMLElement {
+  noteNodes = new Map<string, HTMLElement>();
+  const collapsed = notesRailCollapsed();
+  const overlay = narrowQuery.matches && narrowOverlay === "notes";
+  const rail = el("aside", `pl-rail pl-rail-notes${collapsed ? " collapsed" : ""}${overlay ? " rail-overlay" : ""}`);
+  if (collapsed) return collapsedNotesStrip(rail, state);
+
+  const openCount = state.annotations.filter((annotation) => annotation.status === "open").length;
+  const head = el("div", "pl-rail-head");
+  const label = el("span", "pl-kicker");
+  label.textContent = "NOTES QUEUE";
+  const count = badge(String(openCount), openCount > 0 ? "pl-notes" : "");
+  const collapse = railChevron("Collapse the notes queue", collapseNotesRail, true);
+  head.append(collapse, label, count);
+  rail.append(head);
+
+  const body = el("div", "pl-notes-body");
+  const artifactsWithNotes = state.artifacts.filter((artifact) => state.annotations.some((annotation) => annotation.artifactId === artifact.artifactId));
+  if (artifactsWithNotes.length === 0) {
+    const empty = el("div", "pl-dock-empty");
+    empty.textContent = "No notes yet. Add a file note or attach one to a block, node, or region in the viewer.";
+    body.append(empty);
+  }
+  for (const artifact of artifactsWithNotes) {
+    const section = el("section", `pl-note-group${artifact.artifactId === selectedArtifactId ? " selected" : ""}`);
+    const groupHead = el("button", "pl-note-group-head");
+    const title = el("span", "pl-note-group-title");
+    title.textContent = artifact.title;
+    const groupOpen = state.annotations.filter((annotation) => annotation.artifactId === artifact.artifactId && annotation.status === "open").length;
+    groupHead.append(title, badge(`${String(groupOpen)} open`, groupOpen > 0 ? "pl-notes" : ""));
+    groupHead.addEventListener("click", () => {
+      selectedArtifactId = artifact.artifactId;
+      narrowOverlay = null;
+      persist();
+      render();
+    });
+    const entries = el("div", "pl-dock-body-host");
+    const nodes = renderAnnotationDock(entries, artifact, state.annotations, {
+      onSetStatus: (annotationId, status) => {
+        void request({ type: "planner.annotation.setStatus", annotationId, status }).then(() => refreshState());
+      },
+      onRemove: (annotationId) => {
+        void request({ type: "planner.annotation.remove", annotationId }).then(() => refreshState());
+      },
+      onFocusAnchor: (anchor) => {
+        selectedArtifactId = artifact.artifactId;
+        narrowOverlay = null;
+        persist();
+        render();
+        queueMicrotask(() => activeProvider?.focusAnchor(anchor));
+      }
+    });
+    for (const [annotationId, node] of nodes) noteNodes.set(annotationId, node);
+    section.append(groupHead, entries);
+    body.append(section);
+  }
+  rail.append(body);
+
+  const footer = el("div", "pl-notes-footer");
+  const send = button(openCount === 0 ? "No open notes" : `Send notes (${String(openCount)})`, "primary small pl-notes-send");
+  send.disabled = isDemoMode() || openCount === 0;
+  send.title = isDemoMode()
+    ? "Demo data does not contact the planning agent. Switch to Live data to send notes."
+    : "Send every open note as one revision request";
+  send.addEventListener("click", () => {
+    void request({ type: "planner.sendInstructions", planId: state.plan.planId }).then((response) => {
+      if (response.ok && response.payload.type === "planner.sendInstructions") {
+        notice = { text: `Sent ${String(response.payload.sentCount)} note${response.payload.sentCount === 1 ? "" : "s"} for revision.`, tone: "info" };
+      } else if (!response.ok) {
+        notice = { text: response.error.message, tone: "error" };
+      }
+      void refreshState();
+    });
+  });
+  const hintText = el("span", "pl-footnote");
+  hintText.textContent = "open notes are sent together";
+  footer.append(hintText, send);
+  rail.append(footer);
+  return rail;
+}
+
+function collapsedNotesStrip(rail: HTMLElement, state: PlannerStateDetail): HTMLElement {
+  rail.classList.add("collapsed");
+  const expand = railChevron("Expand the notes queue", expandNotesRail);
+  const strip = el("div", "pl-strip pl-notes-strip");
+  const glyph = el("span", "pl-strip-glyph");
+  glyph.textContent = "✎";
+  const openCount = state.annotations.filter((annotation) => annotation.status === "open").length;
+  const count = el("span", "pl-strip-count");
+  count.textContent = String(openCount);
+  strip.append(glyph, count);
+  strip.addEventListener("click", (event) => {
+    event.stopPropagation();
+    expandNotesRail();
+  });
+  rail.append(expand, strip);
+  return rail;
+}
+
 function railChevron(label: string, onClick: () => void, expanded = false): HTMLButtonElement {
   const node = el("button", "pl-chevron") as HTMLButtonElement;
   node.textContent = expanded ? "»" : "«";
@@ -1363,6 +1211,8 @@ function renderViewer(state: PlannerStateDetail): HTMLElement {
   const pathText = el("span", "pl-footnote");
   pathText.textContent = `plan/${artifact.relPath}`;
   const openFile = button("open file ↗", "ghost small");
+  openFile.disabled = isDemoMode();
+  if (isDemoMode()) openFile.title = "Demo artifacts are stored in memory and do not have a local file.";
   openFile.addEventListener("click", () => {
     void request({ type: "planner.openArtifact", artifactId: artifact.artifactId }).then((response) => {
       if (!response.ok) {
@@ -1371,7 +1221,13 @@ function renderViewer(state: PlannerStateDetail): HTMLElement {
       }
     });
   });
-  titleRow.append(title, badge(artifact.kind, "pl-kind"), pathText, openFile);
+  const addNote = button("Add note", "ghost small pl-add-note");
+  addNote.title = "Add a file-level revision note";
+  setHelpTooltip(addNote, "Add a note for this whole plan file. Use the note action inside the content when the request belongs to a specific section or region.");
+  addNote.addEventListener("click", () => {
+    openInstructionBox(instructionHost, state.plan.planId, artifact, "whole file");
+  });
+  titleRow.append(title, badge(artifact.kind, "pl-kind"), pathText, openFile, addNote);
   head.append(kickerRow, titleRow);
   viewer.append(head);
 
@@ -1383,17 +1239,25 @@ function renderViewer(state: PlannerStateDetail): HTMLElement {
 
   const provider = providers.find((candidate) => candidate.kind === artifact.kind) ?? null;
   activeProvider = provider;
-  let dockNodes = new Map<string, HTMLElement>();
   const events = {
     onAnnotate: (anchor: string, prefill?: string) => {
       openInstructionBox(instructionHost, state.plan.planId, artifact, anchor, prefill);
     },
     onFocusDock: (annotationId: string) => {
-      const node = dockNodes.get(annotationId);
-      if (node !== undefined) {
+      const focusNote = (): void => {
+        const node = noteNodes.get(annotationId);
+        if (node === undefined) return;
         node.scrollIntoView({ block: "center", behavior: "smooth" });
         node.classList.add("pl-block-flash");
         window.setTimeout(() => node.classList.remove("pl-block-flash"), 1600);
+      };
+      if (notesRailCollapsed()) {
+        if (narrowQuery.matches) narrowOverlay = "notes";
+        else rightCollapsed = false;
+        render();
+        queueMicrotask(focusNote);
+      } else {
+        focusNote();
       }
     },
     onSetPrototypeScripts: (artifactId: string, enabled: boolean) => {
@@ -1406,23 +1270,6 @@ function renderViewer(state: PlannerStateDetail): HTMLElement {
     }
   };
   provider?.render(content, artifact, state.annotations, events);
-
-  const dock = el("div", "pl-dock");
-  const dockHead = el("div", "pl-kicker");
-  const mineCount = state.annotations.filter((annotation) => annotation.artifactId === artifact.artifactId).length;
-  dockHead.textContent = `INSTRUCTIONS · ${String(mineCount)}`;
-  const dockBody = el("div", "pl-dock-body-host");
-  dockNodes = renderAnnotationDock(dockBody, artifact, state.annotations, {
-    onSetStatus: (annotationId, status) => {
-      void request({ type: "planner.annotation.setStatus", annotationId, status }).then(() => refreshState());
-    },
-    onRemove: (annotationId) => {
-      void request({ type: "planner.annotation.remove", annotationId }).then(() => refreshState());
-    },
-    onFocusAnchor: (anchor) => activeProvider?.focusAnchor(anchor)
-  });
-  dock.append(dockHead, dockBody);
-  viewer.append(dock);
   return viewer;
 }
 
@@ -1436,14 +1283,14 @@ function openInstructionBox(
   host.replaceChildren();
   const box = el("div", "pl-instruction-box");
   const label = el("div", "pl-kicker pl-kicker-accent");
-  label.textContent = `INSTRUCTION · ${anchor.toUpperCase()}`;
+  label.textContent = `NOTE · ${anchor.toUpperCase()}`;
   const textarea = document.createElement("textarea");
   textarea.className = "pl-textarea";
   textarea.rows = 2;
   textarea.placeholder = "What should change here…";
   if (prefill !== undefined && prefill.length > 0) textarea.value = prefill;
   const actions = el("div", "pl-instruction-actions");
-  const add = button("Add instruction", "primary small");
+  const add = button("Add note", "primary small");
   const cancel = button("Cancel", "ghost small");
   cancel.addEventListener("click", () => host.replaceChildren());
   add.addEventListener("click", () => {
@@ -1469,14 +1316,23 @@ function openInstructionBox(
 // Boot
 // ---------------------------------------------------------------------------
 
-void (async () => {
-  await refreshTasks();
+async function reloadPlannerData(): Promise<void> {
   await refreshAspects();
   await refreshPlans();
-  if (currentPlanId !== null && plans.some((plan) => plan.planId === currentPlanId)) {
-    await openPlan(currentPlanId);
-  } else {
+  const nextPlanId = currentPlanId !== null && plans.some((plan) => plan.planId === currentPlanId)
+    ? currentPlanId
+    : plans.find((plan) => plan.status !== "archived")?.planId ?? plans[0]?.planId;
+  if (nextPlanId === undefined) {
     currentPlanId = null;
+    currentState = null;
     render();
+  } else {
+    await openPlan(nextPlanId);
   }
-})();
+  if (pendingGuideStart) {
+    pendingGuideStart = false;
+    window.setTimeout(() => help.startTour(), 0);
+  }
+}
+
+void reloadPlannerData();

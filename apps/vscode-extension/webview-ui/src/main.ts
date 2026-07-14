@@ -22,6 +22,7 @@ import {
 } from "./state.js";
 import { buildTabs } from "./tabs.js";
 import { createHelpExperience } from "./help.js";
+import { createDemoModeController, isDemoMode } from "./demoMode.js";
 import type { PanelBridge, ViewContext } from "./viewContext.js";
 import { createChatTab } from "./views/chatTab.js";
 import { createPlanTab } from "./views/planTab.js";
@@ -41,7 +42,7 @@ function persist(): void {
 // through it at event time, never during construction, so the deferred wiring
 // is safe.
 const bridge = {} as PanelBridge;
-const ctx: ViewContext = { state, persist, bridge };
+const ctx: ViewContext = { state, persist, bridge, isDemo: isDemoMode };
 
 async function requireAccepted(responsePromise: ReturnType<typeof request>): Promise<void> {
   const response = await responsePromise;
@@ -66,6 +67,8 @@ const planTab = createPlanTab(ctx);
 const workTab = createWorkTab(ctx);
 const systemTab = createSystemTab(ctx);
 
+const demoMode = createDemoModeController(refreshPanelData);
+
 const tabs = buildTabs(state, (tab) => {
   if (tab === "work") workTab.refresh();
   if (tab === "plan") planTab.refresh();
@@ -82,6 +85,7 @@ const help = createHelpExperience({
   title: "Drydock setup guide",
   intro: "Create a task, select its workspace, then use Plan or Edit depending on whether you need planning or implementation.",
   showWelcome: true,
+  dataMode: demoMode.helpMode,
   pages: [
     {
       id: "start",
@@ -164,22 +168,133 @@ const help = createHelpExperience({
       prepare: () => tabs.select("work")
     },
     {
-      title: "Create the task record",
-      body: "Create the task before starting work. Plans, sessions, subtasks, and review comments remain grouped under this task.",
-      target: ".tasks-heading-row",
+      title: "Tasks tab",
+      body: "The Tasks tab is where you create and organize task records, respond to attention items, and connect workspaces, chats, subtasks, and review.",
+      target: () => tabs.buttons.work,
       prepare: () => tabs.select("work")
     },
     {
-      title: "Set workspace access",
-      body: "Expand the form and select only the workspace the task needs. Use Create & start chat when the first instruction is ready; use Create task only when work will start later.",
+      title: "Review items that need a response",
+      body: "The attention summary counts access requests, questions, and failed chats. Expand it to answer or dismiss one item at a time before resuming the responsible task.",
+      target: () => document.querySelector<HTMLElement>(".attention-section.has-attention .attention-summary")
+        ?? document.querySelector<HTMLElement>(".tasks-heading-row"),
+      prepare: () => {
+        tabs.select("work");
+        workTab.showGuideSection("attention");
+      }
+    },
+    {
+      title: "Create a task and choose its workspace",
+      body: "Enter a task name and optional description, then select the workspace the task may use. Create task only records the work; Create & start chat also opens an implementation session.",
       target: ".task-create-form",
+      prepare: () => {
+        tabs.select("work");
+        workTab.showGuideSection("create");
+      }
+    },
+    {
+      title: "Read and update task state",
+      body: "The task title and note are editable. The stage pill moves the task between configured columns, and the worked timestamp shows its latest linked activity.",
+      target: () => document.querySelector<HTMLElement>(".task-card.active .task-card-top")
+        ?? document.querySelector<HTMLElement>(".task-card .task-card-top")
+        ?? document.querySelector<HTMLElement>(".task-cards"),
       prepare: () => tabs.select("work")
     },
     {
-      title: "Plan before implementation when needed",
-      body: "Select the task and enter a brief when requirements, architecture, or execution order need to be worked out. Existing plans can be reopened from the same tab.",
-      target: ".plan-tab-composer",
+      title: "Use the task's chats and subtasks",
+      body: "Expand Chats to inspect or continue linked sessions. The checklist below tracks smaller work items, blockers, prompts, and auto-start rules owned by this task.",
+      target: () => document.querySelector<HTMLElement>(".task-card.active .task-session-summary")
+        ?? document.querySelector<HTMLElement>(".task-session-summary")
+        ?? document.querySelector<HTMLElement>(".task-cards"),
+      prepare: () => {
+        tabs.select("work");
+        workTab.showGuideSection("linked-chats");
+      }
+    },
+    {
+      title: "Move the task forward",
+      body: "Use Review and Plan for this task, or link and activate its chat and workspace context. Board manages stages and dependencies; Agents shows sessions across every task.",
+      target: () => document.querySelector<HTMLElement>(".task-card.active .task-actions")
+        ?? document.querySelector<HTMLElement>(".task-card .task-actions")
+        ?? document.querySelector<HTMLElement>(".task-cards"),
+      prepare: () => tabs.select("work")
+    },
+    {
+      title: "Review advanced records and access",
+      body: "Use Orphaned Chats for unlinked sessions and Memory for reusable suggestions. AI project access defines workspace sets, read-only context, and the folders available to new chats.",
+      target: () => document.querySelector<HTMLElement>(".workspace-access-section > summary")
+        ?? document.querySelector<HTMLElement>(".orphaned-chats-section:not(.hidden) > summary")
+        ?? document.querySelector<HTMLElement>(".memory-section > summary")
+        ?? document.querySelector<HTMLElement>(".work-tab"),
+      prepare: () => {
+        tabs.select("work");
+        workTab.showGuideSection("supporting");
+        workTab.showGuideSection("workspace");
+      }
+    },
+    {
+      title: "Plan tab",
+      body: "The Plan tab is where you create and select plans, provide planning context, and continue the planning conversation.",
+      target: () => tabs.buttons.plan,
       prepare: () => tabs.select("plan")
+    },
+    {
+      title: "Select an existing plan",
+      body: "Open Plans to select active work, restore an archived plan, or open its files in Planner. The selected row also controls the planning conversation below.",
+      target: ".plan-tab-recent",
+      prepare: () => {
+        tabs.select("plan");
+        const plans = document.querySelector<HTMLDetailsElement>(".plan-tab-recent");
+        if (plans !== null) plans.open = true;
+      }
+    },
+    {
+      title: "Describe the planning result",
+      body: "For a new plan, state the problem, the result the plan should produce, and constraints that affect the approach.",
+      target: ".plan-tab-brief",
+      prepare: () => {
+        tabs.select("plan");
+        planTab.startForTask("demo-task-onboarding");
+      }
+    },
+    {
+      title: "Assign the owning task",
+      body: "Select the task that owns the plan so its planning session, generated files, implementation subtasks, and review stay together.",
+      target: ".plan-tab-task-select",
+      prepare: () => tabs.select("plan")
+    },
+    {
+      title: "Select the planning aspects",
+      body: "Choose each area the plan must address explicitly. Manage changes the reusable aspect definitions; it does not start a planning session.",
+      target: ".plan-tab-intake-aspects",
+      prepare: () => tabs.select("plan")
+    },
+    {
+      title: "Add read-only context",
+      body: "Add only the files or folders the planner needs to inspect. Planning context is mounted read-only and cannot be modified by the session.",
+      target: ".plan-tab-intake-context",
+      prepare: () => tabs.select("plan")
+    },
+    {
+      title: "Create the plan",
+      body: "Create plan records the intake and starts its planning session. In Demo data the button stays disabled because no agent or project files are connected.",
+      target: ".plan-tab-create",
+      prepare: () => tabs.select("plan")
+    },
+    {
+      title: "Continue the planning conversation",
+      body: "After the plan exists, use this composer for follow-up questions and broader revisions. Open Planner when you need to review files, outlines, or queued notes.",
+      target: ".plan-tab-composer",
+      prepare: () => {
+        tabs.select("plan");
+        planTab.selectPlan(state.planTabPlanId ?? undefined);
+      }
+    },
+    {
+      title: "Edit tab",
+      body: "The Edit tab is where you inspect one implementation session's context and transcript, then send its next instruction.",
+      target: () => tabs.buttons.chat,
+      prepare: () => tabs.select("chat")
     },
     {
       title: "Check the active session",
@@ -192,6 +307,12 @@ const help = createHelpExperience({
       body: "Use the composer to select the model, attach relevant files, and state the next concrete change or check. Send one instruction when the expected result is clear.",
       target: ".composer",
       prepare: () => tabs.select("chat")
+    },
+    {
+      title: "System tab",
+      body: "The System tab is where you check provider availability, runtime inventory, diagnostics, and cleanup controls.",
+      target: () => tabs.buttons.system,
+      prepare: () => tabs.select("system")
     },
     {
       title: "Inspect runtime status",
@@ -218,7 +339,7 @@ const help = createHelpExperience({
         },
         {
           label: "Planner guide",
-          description: "Plan intake, artifacts, revisions, and board handoff.",
+          description: "Plan files, outline navigation, notes, revisions, and board handoff.",
           run: () => requireAccepted(request({
             type: "planner.open",
             ...(state.planTabPlanId === null ? {} : { planId: state.planTabPlanId }),
@@ -259,65 +380,66 @@ tabs.select(state.activeTab);
 // ---------------------------------------------------------------------------
 // Boot loads
 // ---------------------------------------------------------------------------
-void request({ type: "panel.init" }).then((response) => {
+async function refreshPanelData(): Promise<void> {
+  const [initResponse, sessionsResponse, questionsResponse, workspaceResponse, tasksResponse] = await Promise.all([
+    request({ type: "panel.init" }),
+    request({ type: "session.list" }),
+    request({ type: "question.list" }),
+    request({ type: "workspace.state" }),
+    request({ type: "task.list" })
+  ]);
+
+  const response = initResponse;
   if (!response.ok || response.payload.type !== "panel.init") {
     systemTab.setAvailability(false, response.ok ? "Unexpected init response." : response.error.message);
-    return;
+  } else {
+    const init: PanelInitState = response.payload.state;
+    systemTab.setAvailability(init.availability.available, init.availability.reason);
+    applyInitState(state, init);
+    systemTab.setFooter(init.stateRootDisplayPath, init.availability.sbxDisplayPath);
+    systemTab.render();
+    chatTab.render();
+    persist();
   }
-  const init: PanelInitState = response.payload.state;
-  systemTab.setAvailability(init.availability.available, init.availability.reason);
-  applyInitState(state, init);
-  systemTab.setFooter(init.stateRootDisplayPath, init.availability.sbxDisplayPath);
-  systemTab.render();
-  chatTab.render();
-  persist();
-});
 
-void request({ type: "session.list" }).then((response) => {
-  if (response.ok && response.payload.type === "session.list") {
-    state.sessions = [...response.payload.sessions];
+  const sessions = sessionsResponse;
+  if (sessions.ok && sessions.payload.type === "session.list") {
+    state.sessions = [...sessions.payload.sessions];
     workTab.render();
     chatTab.render();
-    if (state.selectedSessionId && state.sessions.some((s) => s.sessionId === state.selectedSessionId)) {
-      // Reload the selected session's timeline/diff/review.
+    if (state.selectedSessionId && state.sessions.some((item) => item.sessionId === state.selectedSessionId)) {
       chatTab.selectSession(state.selectedSessionId);
     } else if (state.selectedSessionId && currentSession(state) === undefined) {
-      // Persisted selection no longer exists → fall back to a clean new chat.
       chatTab.resetToNewChat();
     }
     persist();
   }
-});
 
-// Pending agent questions hydrate the attention stack (chat + work surfaces).
-void request({ type: "question.list" }).then((response) => {
-  if (response.ok && response.payload.type === "question.list") {
-    state.questions = [...response.payload.questions];
+  const questions = questionsResponse;
+  if (questions.ok && questions.payload.type === "question.list") {
+    state.questions = [...questions.payload.questions];
     workTab.render();
     chatTab.render();
     persist();
   }
-});
 
-// Workspace state powers the Tasks tab and the Chat context strip; load once at
-// boot so the context chip reflects any selected set immediately.
-void request({ type: "workspace.state" }).then((response) => {
-  if (response.ok && response.payload.type === "workspace.state") {
-    state.workspacePolicy = response.payload.state;
+  const workspace = workspaceResponse;
+  if (workspace.ok && workspace.payload.type === "workspace.state") {
+    state.workspacePolicy = workspace.payload.state;
     workTab.render();
     chatTab.render();
     planTab.render();
     systemTab.render();
     persist();
   }
-});
-// Internal work tasks power the Tasks-tab task list and the session-card
-// task chips; load once at boot alongside the other Tasks-tab data.
-void request({ type: "task.list" }).then((response) => {
-  if (response.ok && response.payload.type === "task.list") {
-    state.tasks = [...response.payload.tasks];
+
+  const tasks = tasksResponse;
+  if (tasks.ok && tasks.payload.type === "task.list") {
+    state.tasks = [...tasks.payload.tasks];
     workTab.render();
     chatTab.render();
     persist();
   }
-});
+}
+
+void refreshPanelData();

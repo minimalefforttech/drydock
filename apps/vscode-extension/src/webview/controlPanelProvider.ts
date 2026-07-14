@@ -1043,7 +1043,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       }
       case "taskReview.open": {
         // Editor-panel open is a host action; route through the command.
-        this.requireBackend();
+        if (payload.startGuide !== true) this.requireBackend();
         await vscode.commands.executeCommand("drydock.taskReview.open", payload.taskId, {
           startGuide: payload.startGuide === true
         });
@@ -1230,7 +1230,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "planner.open": {
-        this.requireBackend();
+        if (payload.startGuide !== true) this.requireBackend();
         try {
           await vscode.commands.executeCommand("drydock.planner.open", payload.planId, {
             startGuide: payload.startGuide === true
@@ -1242,10 +1242,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "planner.create": {
-        // The Plan tab's chat-first start: the typed message IS the brief; the
-        // intake (aspects, context roots) refines later in the panel. The boot
-        // runs detached — auto-open lands the panel on this plan when the
-        // session starts, and failures surface as the sessionReady error push.
+        // The Plan tab owns the complete intake. The boot runs detached;
+        // Planner opens the resulting files while the conversation remains in
+        // the sidebar, and failures surface as the sessionReady error push.
         const planner = this.requirePlanner();
         const plan = await planner.createPlan({
           brief: payload.brief,
@@ -1278,6 +1277,31 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
+      case "planner.archive": {
+        const planner = this.requirePlanner();
+        await planner.archivePlan(payload.planId, payload.archived);
+        const summary = (await planner.listPlans()).find((candidate) => candidate.planId === payload.planId);
+        if (summary === undefined) {
+          throw new Error("The plan no longer exists.");
+        }
+        this.respond(request.requestId, { type: "planner.archive", plan: summary });
+        return;
+      }
+      case "planner.aspects.list": {
+        const aspects = (await this.requirePlanner().listAspects(true)).map((aspect) => ({ ...aspect }));
+        this.respond(request.requestId, { type: "planner.aspects.list", aspects });
+        return;
+      }
+      case "planner.aspects.save": {
+        const aspects = await this.requirePlanner().saveAspect(payload.aspect);
+        this.respond(request.requestId, { type: "planner.aspects.save", aspects });
+        return;
+      }
+      case "planner.aspects.archive": {
+        const aspects = await this.requirePlanner().archiveAspect(payload.aspectId, payload.archived);
+        this.respond(request.requestId, { type: "planner.aspects.archive", aspects });
+        return;
+      }
       case "planner.startSession": {
         // Ack-then-push: the boot outlives the request timeout. Success lands
         // as planner.sessionReady via the bus; only failure is pushed here.
@@ -1302,7 +1326,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "agents.open": {
-        this.requireBackend();
+        if (payload.startGuide !== true) this.requireBackend();
         try {
           await vscode.commands.executeCommand("drydock.agents.open", {
             startGuide: payload.startGuide === true
@@ -1316,7 +1340,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "taskBoard.open": {
-        this.requireBackend();
+        if (payload.startGuide !== true) this.requireBackend();
         try {
           await vscode.commands.executeCommand("drydock.taskBoard.open", {
             startGuide: payload.startGuide === true

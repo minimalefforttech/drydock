@@ -279,6 +279,8 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   setHelpTooltip(taskWorkspaceSelect, "Select the workspace that the new agent session can access.");
   // R10: primary (accent) — the task-first happy path (spins a runtime + chat).
   const startChatButton = button("Create & start chat", "small primary");
+  startChatButton.disabled = ctx.isDemo();
+  if (ctx.isDemo()) startChatButton.title = "Demo data does not start chats. Use Create task only, or switch to Live data.";
   const startChatRow = el("div", "button-row");
   startChatRow.append(taskWorkspaceSelect, startChatButton);
   expandable.append(taskDescInput, startChatRow);
@@ -330,7 +332,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   const setCreateButtonsDisabled = (disabled: boolean): void => {
     taskAddButton.disabled = disabled;
-    startChatButton.disabled = disabled;
+    startChatButton.disabled = disabled || ctx.isDemo();
   };
 
   /** Creates the task; returns the new task or null on failure (already logged). */
@@ -453,6 +455,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // collapsed "Memories (N)" sub-list of approved, openable entries. Memory is
   // not urgent — no toast/attention.
   const memorySection = collapsible("Memory");
+  memorySection.details.classList.add("memory-section");
   const memoryPending = el("div", "memory-pending");
   const memoryApproved = collapsible("Memories (0)");
   memoryApproved.details.classList.add("memory-approved");
@@ -464,6 +467,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // Chats are owned by a task in the main UI. This collapsed cleanup drawer is
   // only for legacy/orphan sessions that have not been linked yet.
   const unassignedSessionsSection = collapsible("Orphaned Chats");
+  unassignedSessionsSection.details.classList.add("orphaned-chats-section");
   const sessionsList = el("div", "session-cards");
   unassignedSessionsSection.body.append(sessionsList);
 
@@ -473,6 +477,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // draft state; nothing persists until Save. Editing a saved set loads it back
   // in here; saving over it calls workspace.updateSet.
   const workspaceSets = collapsible("AI project access");
+  workspaceSets.details.classList.add("workspace-access-section");
   const securityPolicySummary = el("div", "ws-editor-hint");
 
   interface DraftMember { readonly projectId: string; readOnly: boolean; }
@@ -2362,11 +2367,36 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     void loadBoardColumns();
   }
 
+  function showGuideSection(section: "attention" | "create" | "linked-chats" | "supporting" | "workspace"): void {
+    if (section === "attention") {
+      attentionExpanded = true;
+      attentionList.classList.remove("hidden");
+      attentionSummary.setAttribute("aria-expanded", "true");
+      return;
+    }
+    if (section === "create") {
+      setFormExpanded(true);
+      return;
+    }
+    if (section === "linked-chats") {
+      const active = root.querySelector<HTMLDetailsElement>(".task-card.active .task-session-dropdown");
+      const first = root.querySelector<HTMLDetailsElement>(".task-session-dropdown");
+      (active ?? first)?.setAttribute("open", "");
+      return;
+    }
+    if (section === "supporting") {
+      unassignedSessionsSection.details.open = true;
+      memorySection.details.open = true;
+      return;
+    }
+    workspaceSets.details.open = true;
+  }
+
   // Boot-load memory candidates (also re-hydrated on every tab refresh).
   void loadMemory();
   // Boot-load board columns (also re-hydrated on every tab refresh); drives the
   // column pill on task/subtask rows.
   void loadBoardColumns();
 
-  return { root, render, refresh, renderAttention };
+  return { root, render, refresh, renderAttention, showGuideSection };
 }

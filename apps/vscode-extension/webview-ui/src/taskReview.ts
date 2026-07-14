@@ -39,6 +39,8 @@ import {
   type TaskReviewState
 } from "@drydock/contracts";
 import { createHelpExperience, setHelpTooltip } from "./help.js";
+import { createDemoModeController, demoResponse, isDemoMode } from "./demoMode.js";
+import { nextWorkflowStep } from "./guideHandoffs.js";
 
 interface VsCodeApi {
   postMessage(message: unknown): void;
@@ -74,7 +76,7 @@ const pending = new Map<string, { resolve: (value: PanelResponse) => void; timer
 let requestCounter = 0;
 
 let reviewState: TaskReviewState | null = null;
-let pendingGuideStart = false;
+let pendingGuideStart = document.body.dataset["startGuide"] === "true";
 /** Per-session comment list, filtered to non-`plan:` anchors (keyed by sessionId). */
 const commentsBySession = new Map<string, readonly ReviewCommentSummary[]>();
 /** Files whose diff was opened this panel session (`repo:path@sessionId`); persisted. */
@@ -110,6 +112,8 @@ const UPDATED_STAMP_MS = 5_000;
 function request(payload: PanelRequestPayload): Promise<PanelResponse> {
   requestCounter += 1;
   const requestId = `taskreview-req-${String(requestCounter)}-${String(Date.now())}`;
+  const demo = demoResponse(payload, requestId);
+  if (demo !== null) return Promise.resolve(demo);
   return new Promise<PanelResponse>((resolve) => {
     const timer = window.setTimeout(() => {
       pending.delete(requestId);
@@ -188,11 +192,14 @@ const nav = el("nav", "tr-nav");
 const dock = el("aside", "tr-dock");
 body.append(nav, dock);
 
+const demoMode = createDemoModeController(() => refresh(false));
+
 const help = createHelpExperience({
   id: "task-review",
   title: "Task Review guide",
   intro: "Inspect a task's changed files, add comments, and submit each open comment to the session that owns the file.",
   showWelcome: true,
+  dataMode: demoMode.helpMode,
   pages: [
     {
       id: "review-flow",
@@ -239,7 +246,12 @@ const help = createHelpExperience({
     { title: "Add a revision comment", body: "Use the comment action on the file, enter the relevant line and a concrete requested change, then add it to the review dock.", target: () => nav.querySelector<HTMLElement>(".tr-file-add")?.closest<HTMLElement>(".tr-file-row") ?? nav.querySelector<HTMLElement>(".tr-file-row") ?? nav },
     { title: "Review comments by file", body: "The dock groups comments under their file anchor and identifies the responsible session. Select a file heading to reopen its diff.", target: ".tr-dock" },
     { title: "Set each comment's state", body: "Keep actionable items open. Use acknowledged, delegated, or blocked to record in-progress handling; resolved and won't fix close the item and exclude it from submission.", target: () => dock.querySelector<HTMLElement>(".tr-dock-status") ?? dock },
-    { title: "Send and recheck revisions", body: "Send review gives each affected session all of its open comments in one instruction. When revision activity finishes, reopen changed diffs and verify the result before resolving comments.", target: ".tr-submit" }
+    { title: "Send and recheck revisions", body: "Send review gives each affected session all of its open comments in one instruction. When revision activity finishes, reopen changed diffs and verify the result before resolving comments.", target: ".tr-submit" },
+    nextWorkflowStep({
+      current: "taskReview",
+      request,
+      taskId: () => reviewState?.taskId ?? taskId
+    })
   ]
 });
 
@@ -532,7 +544,12 @@ function fileRow(file: TaskReviewFile): HTMLElement {
     : `Open diff · ${file.sessionTitle}`;
   if (!isClone && file.baselineId !== undefined) {
     name.classList.add("tr-file-open");
-    name.addEventListener("click", () => openFileDiff(file));
+    if (isDemoMode()) {
+      name.title = "Demo file — no local diff is opened. Switch to Live data to inspect project files.";
+      name.setAttribute("aria-disabled", "true");
+    } else {
+      name.addEventListener("click", () => openFileDiff(file));
+    }
   }
   row.append(name);
 
@@ -927,7 +944,18 @@ const saved = vscodeApi.getState();
 if (saved && Array.isArray(saved.openedKeys)) {
   openedKeys = new Set(saved.openedKeys.filter((key): key is string => typeof key === "string"));
 }
-void refresh();
+// A guide-launched panel must enter Demo before its first state request. The
+// task id used to open the guide is intentionally a fixture id, so asking the
+// live backend for it first leaves the panel on its load-error state and the
+// tour never gets a chance to enable Demo. Existing panels still receive the
+// help.startTour push handled above; this branch is for a newly-created panel's
+// data-start-guide marker.
+if (pendingGuideStart) {
+  pendingGuideStart = false;
+  window.setTimeout(() => help.startTour(), 0);
+} else {
+  void refresh();
+}
 
 // ---------------------------------------------------------------------------
 // Local DOM helpers (kept in-module; this standalone entry does not import the

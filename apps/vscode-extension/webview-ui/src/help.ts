@@ -49,6 +49,11 @@ export interface HelpExperienceConfig {
   readonly pages: readonly HelpPage[];
   readonly tour: readonly HelpTourStep[];
   readonly showWelcome?: boolean;
+  /** Optional guide data source. Tours start in Demo; the data menu can restore Live. */
+  readonly dataMode?: {
+    isDemo(): boolean;
+    setDemo(enabled: boolean): void | Promise<void>;
+  };
 }
 
 export interface HelpExperience {
@@ -381,16 +386,28 @@ export function createHelpExperience(config: HelpExperienceConfig): HelpExperien
     setRect(leftMask, 0, top, left, Math.max(0, bottom - top));
 
     const calloutRect = callout.getBoundingClientRect();
-    const horizontal = Math.min(
-      window.innerWidth - calloutRect.width - 12,
-      Math.max(12, left + (right - left - calloutRect.width) / 2)
-    );
-    const below = bottom + 12;
-    const vertical = below + calloutRect.height <= window.innerHeight - 12
-      ? below
-      : Math.max(12, top - calloutRect.height - 12);
-    callout.style.left = `${String(Math.round(horizontal))}px`;
-    callout.style.top = `${String(Math.round(vertical))}px`;
+    const margin = 12;
+    const maxLeft = Math.max(margin, window.innerWidth - calloutRect.width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - calloutRect.height - margin);
+    const clampLeft = (value: number): number => Math.min(maxLeft, Math.max(margin, value));
+    const clampTop = (value: number): number => Math.min(maxTop, Math.max(margin, value));
+    const centreLeft = left + (right - left - calloutRect.width) / 2;
+    const centreTop = top + (bottom - top - calloutRect.height) / 2;
+    const candidates = [
+      { left: centreLeft, top: bottom + margin },
+      { left: centreLeft, top: top - calloutRect.height - margin },
+      { left: right + margin, top: centreTop },
+      { left: left - calloutRect.width - margin, top: centreTop }
+    ];
+    const missesTarget = (candidate: { readonly left: number; readonly top: number }): boolean =>
+      candidate.left + calloutRect.width <= left
+      || candidate.left >= right
+      || candidate.top + calloutRect.height <= top
+      || candidate.top >= bottom;
+    const positioned = candidates.map((candidate) => ({ left: clampLeft(candidate.left), top: clampTop(candidate.top) }));
+    const selected = positioned.find(missesTarget) ?? positioned[0];
+    callout.style.left = `${String(Math.round(selected?.left ?? margin))}px`;
+    callout.style.top = `${String(Math.round(selected?.top ?? margin))}px`;
   };
 
   const renderTourStep = (index: number): void => {
@@ -411,11 +428,37 @@ export function createHelpExperience(config: HelpExperienceConfig): HelpExperien
         callout.replaceChildren();
         callout.classList.toggle("with-actions", step.actions !== undefined && step.actions.length > 0);
         const progress = node("div", "dd-tour-progress");
-        progress.append(
-          node("span", "dd-help-eyebrow", `QUICK TOUR · ${String(index + 1)} OF ${String(config.tour.length)}`),
-          node("span", "dd-tour-dots", config.tour.map((_, dot) => dot === index ? "●" : "○").join(" "))
-        );
-        callout.append(progress, node("h2", "dd-tour-title", step.title), node("p", "dd-tour-copy", step.body));
+        progress.append(node("span", "dd-help-eyebrow", `QUICK TOUR · ${String(index + 1)} OF ${String(config.tour.length)}`));
+        if (config.dataMode !== undefined) {
+          const modeMenu = document.createElement("details");
+          modeMenu.className = "dd-tour-data-menu";
+          const modeSummary = document.createElement("summary");
+          modeSummary.textContent = `Data: ${config.dataMode.isDemo() ? "Demo" : "Live"}`;
+          modeSummary.title = "Change the guide data source";
+          const modeSwitch = node("div", "dd-tour-data-options");
+          modeSwitch.setAttribute("role", "group");
+          modeSwitch.setAttribute("aria-label", "Guide data source");
+          const demo = action("Demo", config.dataMode.isDemo() ? "mode active" : "mode");
+          const live = action("Live", config.dataMode.isDemo() ? "mode" : "mode active");
+          demo.setAttribute("aria-pressed", config.dataMode.isDemo() ? "true" : "false");
+          live.setAttribute("aria-pressed", config.dataMode.isDemo() ? "false" : "true");
+          const changeMode = (enabled: boolean, target: HTMLButtonElement): void => {
+            for (const button of modeSwitch.querySelectorAll<HTMLButtonElement>("button")) button.disabled = true;
+            void Promise.resolve(config.dataMode?.setDemo(enabled)).then(() => {
+              if (tourIndex === index) renderTourStep(index);
+            }, () => {
+              for (const button of modeSwitch.querySelectorAll<HTMLButtonElement>("button")) button.disabled = false;
+              target.focus();
+            });
+          };
+          demo.addEventListener("click", () => changeMode(true, demo));
+          live.addEventListener("click", () => changeMode(false, live));
+          modeSwitch.append(demo, live);
+          modeMenu.append(modeSummary, modeSwitch);
+          progress.append(modeMenu);
+        }
+        callout.append(progress);
+        callout.append(node("h2", "dd-tour-title", step.title), node("p", "dd-tour-copy", step.body));
         if (step.actions !== undefined && step.actions.length > 0) {
           const handoffs = node("div", "dd-tour-handoffs");
           const error = node("div", "dd-tour-action-error hidden");
@@ -498,16 +541,24 @@ export function createHelpExperience(config: HelpExperienceConfig): HelpExperien
     setBackgroundInert(false);
     document.removeEventListener("keydown", onGuideKeydown, true);
     endTour(false);
-    setBackgroundInert(true);
-    document.addEventListener("keydown", onTourKeydown, true);
-    window.addEventListener("resize", updateTourPosition);
-    window.addEventListener("scroll", updateTourPosition, true);
-    renderTourStep(0);
+    const begin = (): void => {
+      document.documentElement.classList.add("dd-tour-active");
+      setBackgroundInert(true);
+      document.addEventListener("keydown", onTourKeydown, true);
+      window.addEventListener("resize", updateTourPosition);
+      window.addEventListener("scroll", updateTourPosition, true);
+      renderTourStep(0);
+    };
+    void Promise.resolve(config.dataMode?.setDemo(true)).then(begin, begin);
   };
 
   function endTour(completed: boolean): void {
-    if (tourIndex < 0 && callout.classList.contains("hidden")) return;
+    if (tourIndex < 0 && callout.classList.contains("hidden")) {
+      document.documentElement.classList.remove("dd-tour-active");
+      return;
+    }
     tourIndex = -1;
+    document.documentElement.classList.remove("dd-tour-active");
     tourTarget?.classList.remove("dd-tour-target");
     tourTarget = null;
     for (const mask of masks) mask.classList.add("hidden");

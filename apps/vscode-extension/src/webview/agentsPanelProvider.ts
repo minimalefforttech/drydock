@@ -180,7 +180,7 @@ export class AgentsPanelProvider {
     this.pendingStartGuide = startGuide;
     const panel = vscode.window.createWebviewPanel(
       "drydock.agents",
-      "Agents",
+      "Drydock: Agents",
       vscode.ViewColumn.Active,
       {
         enableScripts: true,
@@ -190,7 +190,7 @@ export class AgentsPanelProvider {
     );
     this.panel = panel;
     this.sequence = 0;
-    panel.webview.html = this.renderHtml(panel.webview);
+    panel.webview.html = this.renderHtml(panel.webview, startGuide);
     panel.webview.onDidReceiveMessage((raw: unknown) => {
       void this.onMessage(raw);
     });
@@ -227,8 +227,31 @@ export class AgentsPanelProvider {
   }
 
   private async handleRequest(request: PanelRequest): Promise<void> {
-    const backend = this.requireBackend();
     const payload = request.payload;
+    if (payload.type === "agents.openSession") {
+      this.navigateToSession(payload.sessionId, payload.nodeId);
+      this.respond(request.requestId, { type: "agents.openSession", accepted: true });
+      return;
+    }
+    if (payload.type === "taskBoard.open") {
+      if (payload.startGuide !== true) this.requireBackend();
+      await vscode.commands.executeCommand("drydock.taskBoard.open", { startGuide: payload.startGuide === true });
+      this.respond(request.requestId, { type: "taskBoard.open", accepted: true });
+      return;
+    }
+    if (payload.type === "planner.open") {
+      if (payload.startGuide !== true) this.requireBackend();
+      await vscode.commands.executeCommand("drydock.planner.open", payload.planId, { startGuide: payload.startGuide === true });
+      this.respond(request.requestId, { type: "planner.open", accepted: true });
+      return;
+    }
+    if (payload.type === "taskReview.open") {
+      if (payload.startGuide !== true) this.requireBackend();
+      await vscode.commands.executeCommand("drydock.taskReview.open", payload.taskId, { startGuide: payload.startGuide === true });
+      this.respond(request.requestId, { type: "taskReview.open", accepted: true });
+      return;
+    }
+    const backend = this.requireBackend();
     switch (payload.type) {
       case "agents.state": {
         // listTaskSummaries() deliberately omits subtasks. Landing needs the
@@ -252,13 +275,6 @@ export class AgentsPanelProvider {
           this.pendingStartGuide = false;
           this.push({ type: "help.startTour" });
         }
-        return;
-      }
-      case "agents.openSession": {
-        // Navigation only — selection, lens, and any answering happen on the
-        // sidebar, which owns those flows.
-        this.navigateToSession(payload.sessionId, payload.nodeId);
-        this.respond(request.requestId, { type: "agents.openSession", accepted: true });
         return;
       }
       case "chat.cancelTurn": {
@@ -285,16 +301,6 @@ export class AgentsPanelProvider {
           throw new Error(`Clone work was pulled, but Landing bookkeeping failed: ${message}`);
         }
         this.respond(request.requestId, { type: "agents.landSession", message: result.message });
-        return;
-      }
-      case "taskBoard.open": {
-        await vscode.commands.executeCommand("drydock.taskBoard.open");
-        this.respond(request.requestId, { type: "taskBoard.open", accepted: true });
-        return;
-      }
-      case "taskReview.open": {
-        await vscode.commands.executeCommand("drydock.taskReview.open", payload.taskId);
-        this.respond(request.requestId, { type: "taskReview.open", accepted: true });
         return;
       }
       default:
@@ -326,7 +332,7 @@ export class AgentsPanelProvider {
     void this.panel?.webview.postMessage(message);
   }
 
-  private renderHtml(webview: vscode.Webview): string {
+  private renderHtml(webview: vscode.Webview, startGuide: boolean): string {
     const nonce = randomBytes(16).toString("hex");
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "agents.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "agents.css"));
@@ -344,9 +350,9 @@ export class AgentsPanelProvider {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource};">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="${styleUri.toString()}">
-  <title>Agents</title>
+  <title>Drydock: Agents</title>
 </head>
-<body data-card-detail="${cardDetail}">
+<body data-card-detail="${cardDetail}" data-start-guide="${startGuide ? "true" : "false"}">
   <div id="app"></div>
   <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
 </body>

@@ -1,11 +1,12 @@
 /**
  * Planner editor panel host (ADR 0012).
  *
- * A SINGLE editor-area WebviewPanel over all plans: landing/intake, the
- * outputs-and-viewer workspace, and the aspect registry editor. Planning chat
- * remains in the Drydock Plan tab in the VS Code sidebar. Same trust boundary
- * as every panel — parsePanelRequest gates every inbound message and the
- * webview only sees display-safe projections from PlannerAppService.
+ * A SINGLE editor-area WebviewPanel for the selected plan's files, outline,
+ * artifact viewer, and plan-wide notes queue. Plan creation, selection,
+ * aspects, and planning chat remain in the Drydock Plan tab in the VS Code
+ * sidebar. Same trust boundary as every panel — parsePanelRequest gates every
+ * inbound message and the webview only sees display-safe projections from
+ * PlannerAppService.
  *
  * Pushes: the coarse `planner.changed` (debounced; the webview refetches
  * planner.state), `planner.sessionReady` (terminal result of a detached
@@ -131,7 +132,7 @@ export class PlannerPanelProvider {
     this.pendingStartGuide = startGuide;
     const panel = vscode.window.createWebviewPanel(
       "drydock.planner",
-      "Planner",
+      "Drydock: Planner",
       vscode.ViewColumn.Active,
       {
         enableScripts: true,
@@ -141,7 +142,7 @@ export class PlannerPanelProvider {
     );
     this.panel = panel;
     this.sequence = 0;
-    panel.webview.html = this.renderHtml(panel.webview);
+    panel.webview.html = this.renderHtml(panel.webview, startGuide);
     panel.webview.onDidReceiveMessage((raw: unknown) => {
       void this.onMessage(raw);
     });
@@ -180,8 +181,26 @@ export class PlannerPanelProvider {
   }
 
   private async handleRequest(request: PanelRequest): Promise<void> {
-    const backend = this.requireBackend();
     const payload = request.payload;
+    if (payload.type === "taskBoard.open") {
+      if (payload.startGuide !== true) this.requireBackend();
+      await vscode.commands.executeCommand("drydock.taskBoard.open", { startGuide: payload.startGuide === true });
+      this.respond(request.requestId, { type: "taskBoard.open", accepted: true });
+      return;
+    }
+    if (payload.type === "agents.open") {
+      if (payload.startGuide !== true) this.requireBackend();
+      await vscode.commands.executeCommand("drydock.agents.open", { startGuide: payload.startGuide === true });
+      this.respond(request.requestId, { type: "agents.open", accepted: true });
+      return;
+    }
+    if (payload.type === "taskReview.open") {
+      if (payload.startGuide !== true) this.requireBackend();
+      await vscode.commands.executeCommand("drydock.taskReview.open", payload.taskId, { startGuide: payload.startGuide === true });
+      this.respond(request.requestId, { type: "taskReview.open", accepted: true });
+      return;
+    }
+    const backend = this.requireBackend();
     switch (payload.type) {
       case "planner.plans": {
         const plans = await backend.planner.listPlans();
@@ -315,7 +334,7 @@ export class PlannerPanelProvider {
         const state = await backend.planner.getPlanState(payload.planId);
         const taskId = state.plan.taskId;
         if (taskId === null) {
-          this.respondError(request.requestId, "This plan has no owning task — pick one in the plan intake first.");
+          this.respondError(request.requestId, "This plan has no owning task — assign one from the Drydock Plan tab first.");
           return;
         }
         let createdCount = 0;
@@ -438,7 +457,7 @@ export class PlannerPanelProvider {
     void this.panel?.webview.postMessage(message);
   }
 
-  private renderHtml(webview: vscode.Webview): string {
+  private renderHtml(webview: vscode.Webview, startGuide: boolean): string {
     const nonce = randomBytes(16).toString("hex");
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "planner.js"));
     const mermaidUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "planDocsMermaid.js"));
@@ -455,9 +474,9 @@ export class PlannerPanelProvider {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; frame-src data:;">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="${styleUri.toString()}">
-  <title>Planner</title>
+  <title>Drydock: Planner</title>
 </head>
-<body>
+<body data-start-guide="${startGuide ? "true" : "false"}">
   <div id="app" data-nonce="${nonce}" data-mermaid-src="${mermaidUri.toString()}"></div>
   <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
 </body>

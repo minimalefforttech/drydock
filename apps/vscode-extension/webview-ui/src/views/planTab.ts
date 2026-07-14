@@ -2,13 +2,9 @@
  * Plan tab (ADR 0012): the planning chat in the sidebar, between Tasks and
  * Edit.
  *
- * The tab IS a chat: with no plan underway, the first message you type becomes
- * a new plan's brief — the host creates the plan, boots its session, and the
- * Planner panel auto-opens on it while the conversation streams here. Above
- * the transcript, a collapsible "Recent plans" list is the history: each row
- * shows an in-progress dot while its session is live and opens that plan in
- * the Planner panel. Artifact browsing, annotations, and intake refinement all
- * live in the panel — this tab is the conversation, kept close.
+ * Plan ownership stays in this sidebar surface: the plan list, full new-plan
+ * intake, aspect registry, and planning conversation. The editor-area Planner
+ * only reviews the selected plan's files, outline, viewer, and notes queue.
  *
  * The transcript renders through the SAME shared components as the Edit tab
  * and the panel rail (chat/transcriptModel + messageRow).
@@ -16,7 +12,7 @@
  * SECURITY: every dynamic string renders via textContent — never innerHTML.
  */
 
-import type { PlanSummary } from "@drydock/contracts";
+import type { PlanAspectSummary, PlanSummary } from "@drydock/contracts";
 import {
   chatMessageRow,
   renderBriefedUserBody,
@@ -28,7 +24,7 @@ import {
   type AgentGroup,
   type ChatMessage
 } from "../chat/transcriptModel.js";
-import { button, collapsible, el, option, relativeTime, select, statusDot } from "../components.js";
+import { button, chip, collapsible, el, option, relativeTime, select, statusDot } from "../components.js";
 import { setHelpTooltip } from "../help.js";
 import { onPush, request } from "../messaging.js";
 import { upsertTasks } from "../state.js";
@@ -43,6 +39,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
   // ---------------------------------------------------------------------------
 
   let plans: PlanSummary[] = [];
+  let aspects: PlanAspectSummary[] = [];
   let railMessages: ChatMessage[] = [];
   let railGroups: Record<string, AgentGroup> = {};
   let railSessionId: string | null = null;
@@ -53,6 +50,13 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
   let composeNew = false;
   /** Task the next created plan belongs to ("" = orphan; discouraged). */
   let pendingTaskId = "";
+  const intake = {
+    brief: "",
+    notes: "",
+    selectedAspects: new Set<string>(),
+    contextRoots: [] as string[],
+    manageAspects: false
+  };
   let turnStartedAt: number | undefined;
   let lastActivityAt: number | undefined;
   let reasoningActive = false;
@@ -122,26 +126,29 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
   }
 
   // ---------------------------------------------------------------------------
-  // Structure: recent-plans collapsible / status / log / composer.
+  // Structure: plan list / active-plan header / intake or conversation.
   // ---------------------------------------------------------------------------
 
-  const recent = collapsible("Recent plans", false);
+  const recent = collapsible("Plans", false);
   recent.details.classList.add("plan-tab-recent");
 
   const headerRow = el("div", "plan-tab-header");
   const currentLabel = el("span", "plan-tab-current");
   const newPlanButton = button("＋ New plan", "ghost small");
-  newPlanButton.title = "Start a fresh planning chat (the first message becomes the plan's brief)";
-  setHelpTooltip(newPlanButton, "Create a plan. The first message becomes its planning brief.");
+  newPlanButton.title = "Open the new-plan intake";
+  setHelpTooltip(newPlanButton, "Create a plan from a brief, owning task, planning aspects, and read-only context.");
   newPlanButton.addEventListener("click", () => {
-    composeNew = true;
-    resetRail(null);
-    render();
-    promptInput.focus();
+    if (composeNew && plans.some((plan) => plan.status !== "archived")) {
+      composeNew = false;
+      render();
+      void syncRail();
+      return;
+    }
+    startNewPlan();
   });
   const openPanelButton = button("Open Planner ↗", "small plan-tab-open");
-  openPanelButton.title = "Open the full planning workspace (tree, viewers, annotations)";
-  setHelpTooltip(openPanelButton, "Open Planner to inspect artifacts, add instructions, and create subtasks from the plan.");
+  openPanelButton.title = "Open the plan files, outline, viewer, and notes queue";
+  setHelpTooltip(openPanelButton, "Open Planner to review plan files, navigate their outline, and queue revision notes.");
   openPanelButton.addEventListener("click", () => {
     const plan = activePlan();
     void request({ type: "planner.open", ...(plan === undefined ? {} : { planId: plan.planId }) });
@@ -149,22 +156,11 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
   headerRow.append(currentLabel, el("span", "composer-spacer"), newPlanButton, openPanelButton);
 
   const statusRow = el("div", "plan-tab-status");
+  const intakeSurface = el("section", "plan-tab-intake hidden");
   const log = el("div", "plan-tab-log chat-log");
   const noticeRow = el("div", "plan-tab-notice hidden");
 
   const composer = el("div", "plan-tab-composer");
-  // Create mode: plans belong to tasks (ADR 0006 doctrine) — pick the owner
-  // before the first message; orphan stays possible but reads as the exception.
-  const taskRow = el("div", "plan-tab-task-row");
-  const taskLabel = el("span", "plan-tab-footnote");
-  taskLabel.textContent = "for task";
-  const taskSelect = select("plan-tab-task-select", "The task this plan belongs to");
-  setHelpTooltip(taskSelect, "Select the task that will own the plan, its session, and its artifacts.");
-  taskSelect.addEventListener("change", () => {
-    pendingTaskId = taskSelect.value;
-    render();
-  });
-  taskRow.append(taskLabel, taskSelect);
   const promptInput = document.createElement("textarea");
   promptInput.className = "plan-tab-input";
   promptInput.rows = 3;
@@ -189,37 +185,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
     const prompt = promptInput.value.trim();
     if (prompt.length === 0) return;
     const plan = activePlan();
-    if (plan === undefined) {
-      // Chat-first start: the message IS the new plan's brief. The session
-      // boot auto-opens the Planner panel on this plan; the conversation
-      // streams right here.
-      promptInput.value = "";
-      booting = true;
-      render();
-      void request({
-        type: "planner.create",
-        brief: prompt,
-        aspectIds: [],
-        contextRoots: [],
-        ...(pendingTaskId === "" ? {} : { taskId: pendingTaskId })
-      }).then((response) => {
-        if (!response.ok) {
-          booting = false;
-          notice = response.error.message;
-          render();
-          return;
-        }
-        if (response.payload.type !== "planner.create") return;
-        composeNew = false;
-        state.planTabPlanId = response.payload.plan.planId;
-        ctx.persist();
-        void refreshPlans().then(() => {
-          render();
-          return syncRail();
-        });
-      });
-      return;
-    }
+    if (plan === undefined) return;
     promptInput.value = "";
     if (plan.sessionId === null) booting = true;
     render();
@@ -239,9 +205,9 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
     }
   });
   actions.append(mountsNote, stopButton, sendButton);
-  composer.append(taskRow, promptInput, actions);
+  composer.append(promptInput, actions);
 
-  root.append(recent.details, headerRow, statusRow, noticeRow, log, composer);
+  root.append(recent.details, headerRow, statusRow, noticeRow, intakeSurface, log, composer);
 
   // ---------------------------------------------------------------------------
   // Rendering
@@ -262,56 +228,348 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
     return statusDot("state-none", "no session yet");
   }
 
-  function renderRecent(): void {
-    recent.summaryLabel.textContent = `Recent plans (${String(plans.filter((plan) => plan.status !== "archived").length)})`;
-    recent.body.replaceChildren();
-    const open = plans.filter((plan) => plan.status !== "archived");
-    if (open.length === 0) {
-      const empty = el("div", "plan-tab-recent-empty");
-      empty.textContent = "Nothing yet — your first message below starts a plan.";
-      recent.body.append(empty);
-      return;
-    }
-    for (const plan of open) {
-      const row = el("button", "plan-tab-recent-row");
-      row.title = "Open this plan in the Planner";
-      const title = el("span", "plan-tab-recent-title");
-      title.textContent = plan.title;
-      const meta = el("span", "plan-tab-recent-meta");
-      const taskPart = plan.taskTitle === undefined ? "" : `${plan.taskTitle} · `;
-      meta.textContent = `${taskPart}${String(plan.artifactCount)} artifact${plan.artifactCount === 1 ? "" : "s"} · ${String(plan.openAnnotationCount)} ✎ · ${relativeTime(plan.updatedAt)}`;
-      row.append(planRowDot(plan), title, meta);
-      row.addEventListener("click", () => {
-        // Follow the plan here AND open it in the full workspace.
-        composeNew = false;
-        state.planTabPlanId = plan.planId;
-        ctx.persist();
-        void request({ type: "planner.open", planId: plan.planId });
-        void syncRail();
-        render();
-      });
-      recent.body.append(row);
-    }
+  function startNewPlan(taskId = ""): void {
+    composeNew = true;
+    pendingTaskId = taskId;
+    intake.brief = "";
+    intake.notes = "";
+    intake.selectedAspects.clear();
+    intake.contextRoots = [];
+    intake.manageAspects = false;
+    resetRail(null);
+    render();
+    queueMicrotask(() => intakeSurface.querySelector<HTMLTextAreaElement>(".plan-tab-brief")?.focus());
   }
 
-  function renderTaskPicker(creating: boolean): void {
-    taskRow.classList.toggle("hidden", !creating);
-    if (!creating) return;
-    taskSelect.replaceChildren();
+  function intakeLabel(text: string, detail?: string): HTMLElement {
+    const row = el("div", "plan-tab-intake-label");
+    const label = el("span", "plan-tab-intake-label-main");
+    label.textContent = text;
+    row.append(label);
+    if (detail !== undefined) {
+      const hint = el("span", "plan-tab-footnote");
+      hint.textContent = detail;
+      row.append(hint);
+    }
+    return row;
+  }
+
+  function renderIntake(): void {
+    intakeSurface.replaceChildren();
+    const heading = el("div", "plan-tab-intake-heading");
+    const headingCopy = el("div");
+    const kicker = el("div", "plan-tab-intake-kicker");
+    kicker.textContent = "NEW PLAN";
+    const title = el("h2", "plan-tab-intake-title");
+    title.textContent = "Plan the work before implementation";
+    const intro = el("p", "plan-tab-intake-copy");
+    intro.textContent = "Define the expected result, the task that owns the plan, and the context the planner may inspect.";
+    headingCopy.append(kicker, title, intro);
+    heading.append(headingCopy);
+    intakeSurface.append(heading);
+
+    const main = el("div", "plan-tab-intake-main");
+    main.append(intakeLabel("Planning brief", "problem, expected result, constraints"));
+    const brief = document.createElement("textarea");
+    brief.className = "plan-tab-intake-textarea plan-tab-brief";
+    brief.rows = 4;
+    brief.placeholder = "Describe what needs to be planned and what a usable result should contain…";
+    brief.value = intake.brief;
+    brief.addEventListener("input", () => {
+      intake.brief = brief.value;
+      create.disabled = ctx.isDemo() || intake.brief.trim().length === 0;
+    });
+    main.append(brief);
+
+    main.append(intakeLabel("Owning task", "keeps planning, implementation, and review together"));
+    const taskSelect = select("plan-tab-task-select", "The task this plan belongs to");
+    setHelpTooltip(taskSelect, "Select the task that will own the plan, its session, generated files, and later subtasks.");
     taskSelect.append(option("", "no task (orphan)"));
     for (const task of state.tasks) {
       if (task.state === "done") continue;
       taskSelect.append(option(task.taskId, task.title));
     }
-    if (pendingTaskId !== "" && !state.tasks.some((task) => task.taskId === pendingTaskId)) {
-      pendingTaskId = "";
-    }
+    if (pendingTaskId !== "" && !state.tasks.some((task) => task.taskId === pendingTaskId)) pendingTaskId = "";
     taskSelect.value = pendingTaskId;
+    taskSelect.addEventListener("change", () => {
+      pendingTaskId = taskSelect.value;
+    });
+    main.append(taskSelect);
+
+    const aspectsSection = el("section", "plan-tab-intake-aspects");
+    const aspectsHead = el("div", "plan-tab-intake-section-head");
+    aspectsHead.append(intakeLabel("Planning aspects", "select every area the plan must address"));
+    const manage = button(intake.manageAspects ? "Close manager" : "Manage", "ghost small");
+    manage.addEventListener("click", () => {
+      intake.manageAspects = !intake.manageAspects;
+      render();
+    });
+    aspectsHead.append(manage);
+    const aspectChips = el("div", "plan-tab-aspect-chips");
+    for (const aspect of aspects.filter((entry) => !entry.archived)) {
+      const selected = intake.selectedAspects.has(aspect.aspectId);
+      const node = chip(`${selected ? "✓ " : ""}${aspect.label}`, () => {
+        const nextSelected = !intake.selectedAspects.has(aspect.aspectId);
+        if (nextSelected) intake.selectedAspects.add(aspect.aspectId);
+        else intake.selectedAspects.delete(aspect.aspectId);
+        node.textContent = `${nextSelected ? "✓ " : ""}${aspect.label}`;
+        node.classList.toggle("selected", nextSelected);
+        node.setAttribute("aria-pressed", nextSelected ? "true" : "false");
+      });
+      node.classList.add("plan-tab-aspect-chip");
+      node.classList.toggle("selected", selected);
+      node.setAttribute("aria-pressed", selected ? "true" : "false");
+      setHelpTooltip(node, aspect.instructions);
+      aspectChips.append(node);
+    }
+    aspectsSection.append(aspectsHead, aspectChips);
+    if (intake.manageAspects) aspectsSection.append(renderAspectManager());
+    main.append(aspectsSection);
+
+    const contextSection = el("section", "plan-tab-intake-context");
+    contextSection.append(intakeLabel("Read-only context", "files or folders the planning session may inspect"));
+    const roots = el("div", "plan-tab-context-roots");
+    for (const [index, path] of intake.contextRoots.entries()) {
+      const row = el("div", "plan-tab-context-row");
+      const text = el("span", "plan-tab-context-path");
+      text.textContent = path;
+      const mode = el("span", "plan-tab-context-mode");
+      mode.textContent = ":ro";
+      const remove = button("Remove", "ghost small");
+      remove.addEventListener("click", () => {
+        intake.contextRoots.splice(index, 1);
+        render();
+      });
+      row.append(text, mode, remove);
+      roots.append(row);
+    }
+    const addRow = el("div", "plan-tab-context-add");
+    const pathInput = document.createElement("input");
+    pathInput.type = "text";
+    pathInput.className = "plan-tab-intake-input";
+    pathInput.placeholder = "Absolute file or folder path";
+    const add = button("Add", "small");
+    const addPath = (): void => {
+      const value = pathInput.value.trim();
+      if (value.length === 0) return;
+      if (!intake.contextRoots.includes(value)) intake.contextRoots.push(value);
+      render();
+    };
+    add.addEventListener("click", addPath);
+    pathInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        addPath();
+      }
+    });
+    addRow.append(pathInput, add);
+    roots.append(addRow);
+    contextSection.append(roots);
+    main.append(contextSection);
+
+    main.append(intakeLabel("Pre-information", "prior decisions, constraints, or links"));
+    const notes = document.createElement("textarea");
+    notes.className = "plan-tab-intake-textarea";
+    notes.rows = 3;
+    notes.placeholder = "Add background the planner should know before it starts…";
+    notes.value = intake.notes;
+    notes.addEventListener("input", () => {
+      intake.notes = notes.value;
+    });
+    main.append(notes);
+    intakeSurface.append(main);
+
+    const footer = el("footer", "plan-tab-intake-footer");
+    const persistence = el("span", "plan-tab-footnote");
+    persistence.textContent = ctx.isDemo()
+      ? "Demo data cannot start a planning session."
+      : "Context is mounted read-only; collected plan files remain available between turns.";
+    const create = button(booting ? "Creating…" : "Create plan", "primary plan-tab-create");
+    create.disabled = booting || ctx.isDemo() || intake.brief.trim().length === 0;
+    create.addEventListener("click", () => void createPlan());
+    footer.append(persistence, create);
+    intakeSurface.append(footer);
+  }
+
+  function renderAspectManager(): HTMLElement {
+    const manager = el("div", "plan-tab-aspect-manager");
+    for (const aspect of aspects) manager.append(renderAspectEditor(aspect));
+    manager.append(renderAspectEditor(null));
+    return manager;
+  }
+
+  function renderAspectEditor(aspect: PlanAspectSummary | null): HTMLElement {
+    const row = el("div", `plan-tab-aspect-editor${aspect?.archived === true ? " archived" : ""}`);
+    const label = document.createElement("input");
+    label.type = "text";
+    label.className = "plan-tab-intake-input";
+    label.placeholder = aspect === null ? "New aspect label" : "Aspect label";
+    label.value = aspect?.label ?? "";
+    const instructions = document.createElement("textarea");
+    instructions.className = "plan-tab-intake-textarea";
+    instructions.rows = 2;
+    instructions.placeholder = "What this aspect asks the planner to cover";
+    instructions.value = aspect?.instructions ?? "";
+    const expected = document.createElement("input");
+    expected.type = "text";
+    expected.className = "plan-tab-intake-input";
+    expected.placeholder = "Expected files, separated by semicolons";
+    expected.value = (aspect?.expectedArtifacts ?? []).join("; ");
+    const actions = el("div", "plan-tab-aspect-actions");
+    const save = button(aspect === null ? "Add aspect" : "Save", "small");
+    save.addEventListener("click", () => {
+      const nextLabel = label.value.trim();
+      const nextInstructions = instructions.value.trim();
+      if (nextLabel.length === 0 || nextInstructions.length === 0) {
+        notice = "An aspect needs both a label and instructions.";
+        render();
+        return;
+      }
+      void request({
+        type: "planner.aspects.save",
+        aspect: {
+          ...(aspect === null ? {} : { aspectId: aspect.aspectId }),
+          label: nextLabel,
+          instructions: nextInstructions,
+          expectedArtifacts: expected.value.split(";").map((value) => value.trim()).filter((value) => value.length > 0)
+        }
+      }).then((response) => {
+        if (response.ok && response.payload.type === "planner.aspects.save") aspects = [...response.payload.aspects];
+        else if (!response.ok) notice = response.error.message;
+        render();
+      });
+    });
+    actions.append(save);
+    if (aspect !== null) {
+      const archive = button(aspect.archived ? "Restore" : "Archive", "ghost small");
+      archive.addEventListener("click", () => {
+        void request({ type: "planner.aspects.archive", aspectId: aspect.aspectId, archived: !aspect.archived }).then((response) => {
+          if (response.ok && response.payload.type === "planner.aspects.archive") aspects = [...response.payload.aspects];
+          else if (!response.ok) notice = response.error.message;
+          render();
+        });
+      });
+      actions.append(archive);
+    }
+    row.append(label, instructions, expected, actions);
+    return row;
+  }
+
+  async function createPlan(): Promise<void> {
+    if (ctx.isDemo()) return;
+    if (state.workspacePolicy?.security?.networkedAiAllowed !== true) {
+      notice = planAllocationMessage();
+      render();
+      return;
+    }
+    const brief = intake.brief.trim();
+    if (brief.length === 0) return;
+    booting = true;
+    render();
+    const response = await request({
+      type: "planner.create",
+      brief,
+      aspectIds: [...intake.selectedAspects],
+      contextRoots: [...intake.contextRoots],
+      ...(intake.notes.trim().length === 0 ? {} : { notes: intake.notes.trim() }),
+      ...(pendingTaskId === "" ? {} : { taskId: pendingTaskId })
+    });
+    if (!response.ok) {
+      booting = false;
+      notice = response.error.message;
+      render();
+      return;
+    }
+    if (response.payload.type !== "planner.create") return;
+    composeNew = false;
+    state.planTabPlanId = response.payload.plan.planId;
+    intake.brief = "";
+    intake.notes = "";
+    intake.selectedAspects.clear();
+    intake.contextRoots = [];
+    ctx.persist();
+    await refreshPlans();
+    render();
+    await syncRail();
+  }
+
+  function renderRecent(): void {
+    const open = plans.filter((plan) => plan.status !== "archived");
+    const archived = plans.filter((plan) => plan.status === "archived");
+    recent.summaryLabel.textContent = `Plans (${String(open.length)})`;
+    recent.body.replaceChildren();
+    if (open.length === 0) {
+      const empty = el("div", "plan-tab-recent-empty");
+      empty.textContent = "No active plans. Use New plan to define one.";
+      recent.body.append(empty);
+    }
+    for (const plan of open) recent.body.append(planListRow(plan));
+    if (archived.length > 0) {
+      const label = el("div", "plan-tab-plan-group");
+      label.textContent = "ARCHIVED";
+      recent.body.append(label);
+      for (const plan of archived) recent.body.append(planListRow(plan));
+    }
+  }
+
+  function planListRow(plan: PlanSummary): HTMLElement {
+    const wrap = el("div", `plan-tab-plan-row${state.planTabPlanId === plan.planId && !composeNew ? " selected" : ""}${plan.status === "archived" ? " archived" : ""}`);
+    const row = el("button", "plan-tab-recent-row");
+    row.title = plan.status === "archived" ? "Restore and open this plan" : "Select this plan and open Planner";
+    const title = el("span", "plan-tab-recent-title");
+    title.textContent = plan.title;
+    const meta = el("span", "plan-tab-recent-meta");
+    const taskPart = plan.taskTitle === undefined ? "" : `${plan.taskTitle} · `;
+    meta.textContent = `${taskPart}${String(plan.artifactCount)} file${plan.artifactCount === 1 ? "" : "s"} · ${String(plan.openAnnotationCount)} notes · ${relativeTime(plan.updatedAt)}`;
+    row.append(planRowDot(plan), title, meta);
+    row.addEventListener("click", () => {
+      if (plan.status === "archived") {
+        void setPlanArchived(plan, false, true);
+        return;
+      }
+      selectPlanAndOpen(plan.planId);
+    });
+    const archive = button(plan.status === "archived" ? "Restore" : "Archive", "ghost small plan-tab-plan-action");
+    archive.addEventListener("click", () => void setPlanArchived(plan, plan.status !== "archived", plan.status === "archived"));
+    wrap.append(row, archive);
+    return wrap;
+  }
+
+  function selectPlanAndOpen(planId: string): void {
+    composeNew = false;
+    state.planTabPlanId = planId;
+    resetRail(null);
+    ctx.persist();
+    void request({ type: "planner.open", planId });
+    render();
+    void syncRail();
+  }
+
+  async function setPlanArchived(plan: PlanSummary, archived: boolean, openAfter: boolean): Promise<void> {
+    const response = await request({ type: "planner.archive", planId: plan.planId, archived });
+    if (!response.ok) {
+      notice = response.error.message;
+      render();
+      return;
+    }
+    await refreshPlans();
+    if (!archived && openAfter) {
+      selectPlanAndOpen(plan.planId);
+      return;
+    }
+    if (archived && state.planTabPlanId === plan.planId) {
+      state.planTabPlanId = plans.find((candidate) => candidate.status !== "archived")?.planId ?? null;
+      resetRail(null);
+      ctx.persist();
+    }
+    render();
+    await syncRail();
   }
 
   function render(): void {
     renderRecent();
     const plan = activePlan();
+    const creating = plan === undefined;
 
     currentLabel.replaceChildren();
     const titleText = el("span");
@@ -327,8 +585,13 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
         : `Belongs to task: ${plan.taskTitle ?? plan.taskId}`;
       currentLabel.append(chip);
     }
-    openPanelButton.classList.toggle("hidden", plan === undefined && plans.length === 0);
-    renderTaskPicker(plan === undefined && !booting);
+    newPlanButton.textContent = composeNew && plans.some((candidate) => candidate.status !== "archived") ? "Cancel" : "＋ New plan";
+    newPlanButton.classList.toggle("hidden", creating && !composeNew && plans.length === 0);
+    openPanelButton.classList.toggle("hidden", creating);
+    intakeSurface.classList.toggle("hidden", !creating);
+    log.classList.toggle("hidden", creating);
+    composer.classList.toggle("hidden", creating);
+    if (creating) renderIntake();
 
     statusRow.replaceChildren();
     if (plan !== undefined) {
@@ -370,21 +633,18 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
       noticeRow.append(text, dismiss);
     }
 
-    const allocated = state.workspacePolicy?.security?.networkedAiAllowed === true;
+    const demo = ctx.isDemo();
+    const allocated = state.workspacePolicy?.security?.networkedAiAllowed === true && !demo;
     promptInput.disabled = !allocated;
     sendButton.disabled = !allocated;
-    promptInput.placeholder = allocated
-      ? plan === undefined
-        ? "Describe what you're building — this starts a new plan…"
-        : "Refine the plan…"
+    promptInput.placeholder = demo
+      ? "Demo data — planning input is disconnected. Switch to Live data to contact an agent."
+      : allocated
+      ? "Ask a planning question or request a broader change…"
       : planAllocationMessage();
-    mountsNote.textContent = plan === undefined
-      ? (pendingTaskId === ""
-        ? "orphan plan — picking a task is recommended"
-        : "a new plan boots its own read-only session")
-      : "plan session · project mounts :ro";
+    mountsNote.textContent = "plan session · project mounts :ro";
     stopButton.disabled = !turnActive;
-    renderLog();
+    if (!creating) renderLog();
   }
 
   function planAllocationMessage(): string {
@@ -502,6 +762,13 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
     }
   }
 
+  async function refreshAspects(): Promise<void> {
+    const response = await request({ type: "planner.aspects.list" });
+    if (response.ok && response.payload.type === "planner.aspects.list") {
+      aspects = [...response.payload.aspects];
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Pushes (multiple subscribers per type are supported; the Edit tab keeps its own)
   // ---------------------------------------------------------------------------
@@ -565,6 +832,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
 
   function refresh(): void {
     void refreshTasks().then(() => render());
+    void refreshAspects().then(() => render());
     void refreshPlans().then(() => {
       render();
       return syncRail();
@@ -572,12 +840,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
   }
 
   function startForTask(taskId: string): void {
-    composeNew = true;
-    pendingTaskId = taskId;
-    resetRail(null);
-    void refreshTasks().then(() => render());
-    render();
-    promptInput.focus();
+    void refreshTasks().then(() => startNewPlan(taskId));
   }
 
   function selectPlan(planId?: string): void {

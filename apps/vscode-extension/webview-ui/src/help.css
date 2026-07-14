@@ -323,6 +323,8 @@
   position: fixed;
   z-index: 1200;
   width: min(360px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
   box-sizing: border-box;
   padding: 15px;
   border: 1px solid var(--vscode-focusBorder, #007fd4);
@@ -334,8 +336,6 @@
 
 .dd-tour-callout.with-actions {
   width: min(520px, calc(100vw - 24px));
-  max-height: calc(100vh - 24px);
-  overflow-y: auto;
 }
 
 .dd-tour-progress {
@@ -345,11 +345,148 @@
   gap: 12px;
 }
 
-.dd-tour-dots {
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 9px;
-  letter-spacing: 0.08em;
+.dd-tour-data-menu,
+.dd-demo-menu {
+  position: relative;
+  flex: none;
+}
+
+.dd-tour-data-menu > summary,
+.dd-demo-menu > summary {
+  list-style: none;
+  cursor: pointer;
   white-space: nowrap;
+}
+
+.dd-tour-data-menu > summary::-webkit-details-marker,
+.dd-demo-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dd-tour-data-menu > summary {
+  padding: 3px 7px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.32));
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-size: 0.8em;
+}
+
+.dd-tour-data-menu > summary:hover,
+.dd-tour-data-menu > summary:focus-visible,
+.dd-demo-menu > summary:hover,
+.dd-demo-menu > summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 1px;
+}
+
+.dd-tour-data-options,
+.dd-demo-menu-options {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  display: flex;
+  gap: 4px;
+  min-width: 126px;
+  box-sizing: border-box;
+  padding: 5px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.32));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.42);
+}
+
+.dd-tour-data-options {
+  top: calc(100% + 5px);
+}
+
+.dd-help-action.mode {
+  min-height: 24px;
+  padding: 2px 9px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-size: 0.88em;
+}
+
+.dd-help-action.mode.active {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+.dd-demo-banner {
+  position: fixed;
+  z-index: 1080;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(640px, calc(100vw - 24px));
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-focusBorder, #007fd4);
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, #252526);
+  color: var(--vscode-foreground);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.38);
+  font-size: 12px;
+}
+
+/* The callout already exposes the active data source. Hiding the separate
+   banner during a tour keeps it clear of bottom-anchored chat composers. */
+.dd-tour-active .dd-demo-banner {
+  display: none;
+}
+
+.dd-demo-copy {
+  flex: 1;
+  min-width: 140px;
+  line-height: 1.35;
+}
+
+.dd-demo-menu > summary {
+  padding: 3px 9px;
+  border: 1px solid var(--vscode-button-border, var(--vscode-panel-border, transparent));
+  border-radius: 4px;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  font-size: 12px;
+}
+
+.dd-demo-menu-options {
+  right: 0;
+  bottom: calc(100% + 6px);
+  flex-direction: column;
+  min-width: 150px;
+}
+
+.dd-demo-menu-options .dd-demo-action {
+  width: 100%;
+  text-align: left;
+}
+
+.dd-demo-action {
+  flex: none;
+  min-height: 25px;
+  padding: 3px 9px;
+  border: 1px solid var(--vscode-button-border, var(--vscode-panel-border, transparent));
+  border-radius: 4px;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  font: inherit;
+  cursor: pointer;
+}
+
+.dd-demo-action:hover,
+.dd-demo-action:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 1px;
+}
+
+.dd-demo-action.quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
 .dd-tour-title {
@@ -457,6 +594,7 @@
   .dd-help-section-grid { grid-template-columns: 1fr; }
   .dd-help-footer { padding: 10px 14px; }
   .dd-tour-handoffs { grid-template-columns: 1fr; }
+  .dd-demo-banner { align-items: center; }
 }
 
 @media (prefers-reduced-motion: reduce) {

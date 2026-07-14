@@ -593,6 +593,7 @@ h3 {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 
 .plan-tab-header {
@@ -601,6 +602,7 @@ h3 {
   align-items: center;
   gap: 6px;
   padding: 6px 2px;
+  flex-wrap: wrap;
 }
 
 .plan-tab-current {
@@ -612,6 +614,7 @@ h3 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1 1 160px;
 }
 
 /* The owning task, right where the plan is named; orphans read as the
@@ -646,6 +649,7 @@ h3 {
 
 .plan-tab-task-select {
   flex: 1;
+  width: 100%;
   min-width: 0;
   background: var(--vscode-dropdown-background);
   color: var(--vscode-dropdown-foreground);
@@ -666,7 +670,8 @@ h3 {
   display: flex;
   align-items: center;
   gap: 7px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   text-align: left;
   padding: 4px 6px;
   border-radius: 4px;
@@ -675,6 +680,31 @@ h3 {
 
 .plan-tab-recent-row:hover {
   background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.plan-tab-plan-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  border-radius: 4px;
+}
+
+.plan-tab-plan-row.selected {
+  background: var(--vscode-list-activeSelectionBackground, rgba(0, 127, 212, 0.22));
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+}
+
+.plan-tab-plan-row.archived { opacity: 0.68; }
+.plan-tab-plan-action { flex: 0 0 auto; opacity: 0; }
+.plan-tab-plan-row:hover .plan-tab-plan-action,
+.plan-tab-plan-row:focus-within .plan-tab-plan-action { opacity: 1; }
+
+.plan-tab-plan-group {
+  margin: 8px 6px 2px;
+  color: var(--vscode-descriptionForeground);
+  font: 700 9px/1.2 var(--vscode-editor-font-family, Consolas, monospace);
+  letter-spacing: 0.12em;
 }
 
 .plan-tab-recent-title {
@@ -686,7 +716,11 @@ h3 {
 
 .plan-tab-recent-meta {
   margin-left: auto;
-  flex: 0 0 auto;
+  flex: 0 1 48%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 0.78em;
   color: var(--vscode-descriptionForeground);
   opacity: 0.85;
@@ -697,6 +731,122 @@ h3 {
   font-size: 0.86em;
   color: var(--vscode-descriptionForeground);
 }
+
+/* New-plan mode replaces the transcript with a scrollable intake. The pinned
+   composer stays reserved for follow-up messages on an existing plan. */
+.plan-tab-intake {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 2px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.28));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 88%, #000000);
+}
+
+.plan-tab-intake-heading {
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.28));
+}
+
+.plan-tab-intake-kicker {
+  color: var(--vscode-textLink-foreground, #3794ff);
+  font: 700 9px/1.2 var(--vscode-editor-font-family, Consolas, monospace);
+  letter-spacing: 0.13em;
+}
+
+.plan-tab-intake-title { margin: 5px 0 3px; font-size: 1em; }
+.plan-tab-intake-copy { margin: 0; color: var(--vscode-descriptionForeground); font-size: 0.86em; line-height: 1.4; }
+
+.plan-tab-intake-main {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px 12px;
+}
+
+.plan-tab-intake-label,
+.plan-tab-intake-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.plan-tab-intake-section-head { justify-content: space-between; }
+.plan-tab-intake-section-head > .plan-tab-intake-label { min-width: 0; }
+.plan-tab-intake-label-main { flex: 0 0 auto; font-weight: 600; font-size: 0.88em; }
+
+.plan-tab-intake-input,
+.plan-tab-intake-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 7px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.34)));
+  border-radius: 4px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font: inherit;
+}
+
+.plan-tab-intake-textarea { resize: vertical; }
+.plan-tab-intake-aspects,
+.plan-tab-intake-context { display: flex; flex-direction: column; gap: 7px; }
+.plan-tab-aspect-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.plan-tab-aspect-chip {
+  border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.42));
+  background: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 88%, #000);
+  color: var(--vscode-descriptionForeground, #b8b8b8);
+}
+.plan-tab-aspect-chip:hover {
+  border-color: var(--vscode-focusBorder, #007fd4);
+  color: var(--vscode-foreground, #f2f2f2);
+  filter: none;
+}
+.plan-tab-aspect-chip.selected {
+  border-color: var(--vscode-button-background, #0e639c);
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+}
+
+.plan-tab-context-roots { display: flex; flex-direction: column; gap: 5px; }
+.plan-tab-context-row,
+.plan-tab-context-add { display: flex; align-items: center; gap: 6px; }
+.plan-tab-context-row {
+  padding: 4px 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.28));
+  border-radius: 4px;
+  background: rgba(128, 128, 128, 0.06);
+}
+.plan-tab-context-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: 0.8em; }
+.plan-tab-context-mode { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: 0.78em; }
+.plan-tab-context-add .plan-tab-intake-input { flex: 1; min-width: 0; }
+
+.plan-tab-aspect-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.28));
+  border-radius: 5px;
+  background: rgba(128, 128, 128, 0.05);
+}
+.plan-tab-aspect-editor { display: flex; flex-direction: column; gap: 5px; padding-bottom: 8px; border-bottom: 1px dashed var(--vscode-panel-border, rgba(128, 128, 128, 0.28)); }
+.plan-tab-aspect-editor:last-child { border-bottom: none; padding-bottom: 0; }
+.plan-tab-aspect-editor.archived { opacity: 0.62; }
+.plan-tab-aspect-actions { display: flex; justify-content: flex-end; gap: 5px; }
+
+.plan-tab-intake-footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.28));
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+.plan-tab-intake-footer .plan-tab-footnote { white-space: normal; }
 
 .plan-tab-status {
   flex: 0 0 auto;

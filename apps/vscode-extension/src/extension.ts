@@ -206,13 +206,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     void taskReviewComments.resolveThread(thread);
   }));
   context.subscriptions.push(vscode.commands.registerCommand("drydock.taskReview.open", async (taskId?: unknown, options?: unknown) => {
-    if (!backend.available) {
+    const startGuide = typeof options === "object" && options !== null
+      && (options as { readonly startGuide?: unknown }).startGuide === true;
+    if (!backend.available && !startGuide) {
       void vscode.window.showErrorMessage(backend.reason);
       return;
     }
-    let resolvedId = typeof taskId === "string" ? taskId : undefined;
-    const tasks = await backend.tasks.listTaskSummaries();
-    let title = "Task";
+    let resolvedId = typeof taskId === "string" ? taskId : startGuide ? "demo-task-onboarding" : undefined;
+    let title = startGuide && !backend.available ? "Demo task" : "Task";
+    const tasks = backend.available ? await backend.tasks.listTaskSummaries() : [];
     if (resolvedId === undefined) {
       const pick = await vscode.window.showQuickPick(
         tasks.map((task) => ({ label: task.title, description: task.state, taskId: task.taskId })),
@@ -224,8 +226,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     } else {
       title = tasks.find((task) => task.taskId === resolvedId)?.title ?? title;
     }
-    const startGuide = typeof options === "object" && options !== null
-      && (options as { readonly startGuide?: unknown }).startGuide === true;
     await taskReviewPanels.open(resolvedId, title, startGuide);
   }));
   // Task Board: single global panel, so the command takes no arguments — it
@@ -233,12 +233,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // relay routes here.
   const taskBoardPanel = new TaskBoardPanelProvider(context.extensionUri, backend, logger);
   context.subscriptions.push(vscode.commands.registerCommand("drydock.taskBoard.open", async (options?: unknown) => {
-    if (!backend.available) {
+    const startGuide = typeof options === "object" && options !== null
+      && (options as { readonly startGuide?: unknown }).startGuide === true;
+    if (!backend.available && !startGuide) {
       void vscode.window.showErrorMessage(backend.reason);
       return;
     }
-    const startGuide = typeof options === "object" && options !== null
-      && (options as { readonly startGuide?: unknown }).startGuide === true;
     await taskBoardPanel.open(startGuide);
   }));
   // Agents (ADR 0013): single global fleet panel over every session across
@@ -248,12 +248,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     panel.showSession(sessionId, nodeId);
   });
   context.subscriptions.push(vscode.commands.registerCommand("drydock.agents.open", async (options?: unknown) => {
-    if (!backend.available) {
+    const startGuide = typeof options === "object" && options !== null
+      && (options as { readonly startGuide?: unknown }).startGuide === true;
+    if (!backend.available && !startGuide) {
       void vscode.window.showErrorMessage(backend.reason);
       return;
     }
-    const startGuide = typeof options === "object" && options !== null
-      && (options as { readonly startGuide?: unknown }).startGuide === true;
     await agentsPanel.open(startGuide);
   }));
   // Planner (ADR 0012): the editor panel owns intake, outputs, and artifact
@@ -266,12 +266,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     (planId, reveal) => panel.showPlan(planId, reveal)
   );
   context.subscriptions.push(vscode.commands.registerCommand("drydock.planner.open", async (planId?: unknown, options?: unknown) => {
-    if (!backend.available) {
+    const startGuide = typeof options === "object" && options !== null
+      && (options as { readonly startGuide?: unknown }).startGuide === true;
+    if (!backend.available && !startGuide) {
       void vscode.window.showErrorMessage(backend.reason);
       return;
     }
-    const startGuide = typeof options === "object" && options !== null
-      && (options as { readonly startGuide?: unknown }).startGuide === true;
     await plannerPanel.open(typeof planId === "string" ? planId : undefined, startGuide);
   }));
   if (backend.available) {

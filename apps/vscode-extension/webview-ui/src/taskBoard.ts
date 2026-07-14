@@ -55,6 +55,8 @@ import {
   type ModalFocusSnapshot
 } from "./modalFocus.js";
 import { createHelpExperience, setHelpTooltip } from "./help.js";
+import { createDemoModeController, demoResponse, isDemoMode } from "./demoMode.js";
+import { nextWorkflowStep } from "./guideHandoffs.js";
 
 interface VsCodeApi {
   postMessage(message: unknown): void;
@@ -105,6 +107,8 @@ let requestCounter = 0;
 function request(payload: PanelRequestPayload): Promise<PanelResponse> {
   requestCounter += 1;
   const requestId = `taskboard-req-${String(requestCounter)}-${String(Date.now())}`;
+  const demo = demoResponse(payload, requestId);
+  if (demo !== null) return Promise.resolve(demo);
   return new Promise<PanelResponse>((resolve) => {
     const timer = window.setTimeout(() => {
       pending.delete(requestId);
@@ -168,7 +172,7 @@ function applyPush(payload: PanelPushPayload): void {
 let board: BoardState | null = null;
 /** The initial board and workspace-set name requests have both completed and rendered. */
 let initialLoadReady = false;
-let pendingGuideStart = false;
+let pendingGuideStart = document.body.dataset["startGuide"] === "true";
 /** workspaceSetId → display name, best-effort from workspace.state. */
 const workspaceSetNames = new Map<string, string>();
 /** "Hide finished older than N days" — done-category cards with older doneAt hide. */
@@ -294,11 +298,14 @@ const edgeActions = el("div", "tb-edge-actions hidden");
 railWrap.append(edgeLayer, edgeActions);
 app.append(toolbar, statusLine, loadingState, emptyState, railWrap, modalRoot);
 
+const demoMode = createDemoModeController(reloadBoardData);
+
 const help = createHelpExperience({
   id: "task-board",
   title: "Task Board guide",
   intro: "Use the board to update stages, define subtask dependencies, and start eligible agent work.",
   showWelcome: true,
+  dataMode: demoMode.helpMode,
   pages: [
     {
       id: "board-basics",
@@ -345,7 +352,12 @@ const help = createHelpExperience({
     { title: "Define execution order", body: "Drag from a subtask's output dot onto a sibling card to add a dependency. A lock means an upstream subtask is not done.", target: () => rail.querySelector<HTMLElement>(".tb-subtask-card .tb-dot-out")?.closest<HTMLElement>(".tb-subtask-card") ?? rail.querySelector<HTMLElement>(".tb-subtask-card") ?? railWrap },
     { title: "Start eligible work", body: "Start runs a prompted, unblocked subtask. Queued work waits for a run slot; Retry resumes parked work. Force start is a manual override for an unfinished dependency.", target: () => rail.querySelector<HTMLElement>(".tb-card-actions:has(.tb-start, .tb-force)") ?? rail.querySelector<HTMLElement>(".tb-subtask-card") ?? railWrap },
     { title: "Record human verification", body: "Run or inspect the required checks, then select Mark verified. This records the check; it does not run tests, move the card, or start dependent work.", target: () => rail.querySelector<HTMLElement>(".tb-verify-action")?.closest<HTMLElement>(".tb-subtask-card") ?? rail.querySelector<HTMLElement>(".tb-subtask-card") ?? railWrap },
-    { title: "Move work to its next stage", body: "Drag the card or use its move menu after the stage's exit condition is met. Tasks and subtasks move independently, so update each level deliberately.", target: () => rail.querySelector<HTMLElement>(".tb-menu-button")?.closest<HTMLElement>(".tb-card") ?? rail.querySelector<HTMLElement>(".tb-card") ?? railWrap }
+    { title: "Move work to its next stage", body: "Drag the card or use its move menu after the stage's exit condition is met. Tasks and subtasks move independently, so update each level deliberately.", target: () => rail.querySelector<HTMLElement>(".tb-menu-button")?.closest<HTMLElement>(".tb-card") ?? rail.querySelector<HTMLElement>(".tb-card") ?? railWrap },
+    nextWorkflowStep({
+      current: "taskBoard",
+      request,
+      taskId: () => board?.tasks[0]?.taskId ?? "demo-task-onboarding"
+    })
   ]
 });
 // Card positions shift under inner column scrolling and window resizes; the
@@ -1408,7 +1420,10 @@ function buildTaskCard(
       armed ? `Start ${String(ready.length)} ready?` : `▶ Start ready (${String(ready.length)})`,
       `ghost small tb-task-start${armed ? " armed" : ""}`
     );
-    start.title = "Start every subtask with a prompt, no unfinished dependencies, and not in Backlog";
+    start.disabled = isDemoMode();
+    start.title = isDemoMode()
+      ? "Demo data does not start agents. Switch to Live data to start ready work."
+      : "Start every subtask with a prompt, no unfinished dependencies, and not in Backlog";
     start.addEventListener("click", () => {
       if (!armed) {
         armedTaskStartId = task.taskId;
@@ -1596,7 +1611,10 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
       // manual start clears parked/retried before running again.
       const parked = subtask.isParked === true;
       const start = button(parked ? "↻ Retry" : "▶ Start", "ghost small tb-start");
-      start.title = parked
+      start.disabled = isDemoMode();
+      start.title = isDemoMode()
+        ? "Demo data does not start agents. Switch to Live data to run this subtask."
+        : parked
         ? "Failed twice under automation — retry now (clears the parked state)"
         : "Start a chat with this subtask's prompt";
       start.addEventListener("click", () => void startSubtask(subtask.subtaskId, false));
@@ -1615,7 +1633,10 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
       start.title = "Blocked — upstream dependencies are not finished";
       const armed = armedForceId === subtask.subtaskId;
       const force = button(armed ? "Confirm force start" : "Force start…", `ghost small tb-force${armed ? " armed" : ""}`);
-      force.title = "Manual override: start despite unfinished dependencies";
+      force.disabled = isDemoMode();
+      force.title = isDemoMode()
+        ? "Demo data does not start agents. Switch to Live data to run this subtask."
+        : "Manual override: start despite unfinished dependencies";
       force.addEventListener("click", () => {
         if (armedForceId !== subtask.subtaskId) {
           armedForceId = subtask.subtaskId;
@@ -2541,6 +2562,11 @@ async function refetchBoard(): Promise<void> {
   render();
 }
 
+async function reloadBoardData(): Promise<void> {
+  await Promise.all([loadWorkspaceSetNames(), loadBoard()]);
+  render();
+}
+
 const saved = vscodeApi.getState();
 if (saved) {
   if (typeof saved.ageDays === "number" && (AGE_OPTIONS as readonly number[]).includes(saved.ageDays)) {
@@ -2559,8 +2585,7 @@ if (saved) {
     cardDetailChoice = cardDetailLevel(saved.cardDetail);
   }
 }
-void Promise.all([loadWorkspaceSetNames(), loadBoard()]).then(() => {
-  render();
+void reloadBoardData().then(() => {
   initialLoadReady = true;
   if (pendingGuideStart) {
     pendingGuideStart = false;
