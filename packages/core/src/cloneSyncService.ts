@@ -763,7 +763,8 @@ export class CloneSyncService {
     const cloneHash = await this.gitIn(clonePath, ["rev-parse", `HEAD:${path}`], `hash clone HEAD:${path}`);
     if (cloneHash.exitCode !== 0) return false;
     // hash-object of the local working-tree file (may not be tracked there).
-    const localFile = join(localRepoPath, path);
+    const localFile = await resolveContainedRegularFile(localRepoPath, path, "local comparison path");
+    if (localFile === null) return false;
     const localHash = await this.gitIn(
       localRepoPath,
       ["hash-object", localFile],
@@ -796,7 +797,9 @@ export class CloneSyncService {
    */
   private async countLines(repoPath: string, path: string): Promise<number | null> {
     try {
-      const buf = await readFile(join(repoPath, path));
+      const file = await resolveContainedRegularFile(repoPath, path, "line-count path");
+      if (file === null) return null;
+      const buf = await readFile(file);
       if (buf.length > MARKER_SCAN_MAX_BYTES) return null;
       if (buf.includes(0)) return null;
       if (buf.length === 0) return 0;
@@ -812,7 +815,9 @@ export class CloneSyncService {
   /** Bounded scan for a leading conflict marker in a working-tree file. */
   private async hasConflictMarkers(repoPath: string, path: string): Promise<boolean> {
     try {
-      const buf = await readFile(join(repoPath, path));
+      const file = await resolveContainedRegularFile(repoPath, path, "conflict-marker path");
+      if (file === null) return false;
+      const buf = await readFile(file);
       const slice = buf.length > MARKER_SCAN_MAX_BYTES ? buf.subarray(0, MARKER_SCAN_MAX_BYTES) : buf;
       const text = slice.toString("utf8");
       return text.includes(`\n${CONFLICT_MARKER}`) || text.startsWith(CONFLICT_MARKER);
@@ -1375,6 +1380,27 @@ async function assertSafeUntrackedCopy(sourceRoot: string, destinationRoot: stri
   ]);
   if (!isPathWithin(canonicalSource, canonicalSourceRoot)) {
     throw new Error(`Refusing to carry untracked path "${relativePath}": it resolves outside the project.`);
+  }
+}
+
+/**
+ * Resolve a Git-reported path only when every existing component is a real
+ * directory/file and the final target is a regular file inside the repository.
+ * Missing, linked, redirected, and non-regular targets are deliberately
+ * treated as unreadable; callers can omit advisory stats or fall back to the
+ * normal patch path without touching the link target.
+ */
+async function resolveContainedRegularFile(root: string, relativePath: string, label: string): Promise<string | null> {
+  const normalized = assertRepoRelativePath(relativePath, label);
+  try {
+    await assertNoSymlinkComponents(root, normalized, true);
+    const [canonicalRoot, canonicalFile] = await Promise.all([
+      realpath(root),
+      realpath(join(root, normalized))
+    ]);
+    return isPathWithin(canonicalFile, canonicalRoot) ? canonicalFile : null;
+  } catch {
+    return null;
   }
 }
 

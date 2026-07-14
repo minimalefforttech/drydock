@@ -3,7 +3,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -29,8 +29,13 @@ test("project registration is idempotent per normalized path and detects git", a
 
     const catalog = new ProjectCatalogService({ ids: new RandomIdGenerator(), clock: fixedClock(), store: new MemoryProjectCatalogStore() });
     const first = await catalog.registerProject({ path: gitProject });
-    // Different casing and a trailing separator still resolve to the same project.
-    const duplicate = await catalog.registerProject({ path: `${gitProject.toUpperCase()}${path.sep}` });
+    // A trailing separator still resolves to the same project. Case identity is
+    // deliberately left to the host filesystem rather than assumed by the test.
+    const duplicate = await catalog.registerProject({ path: `${gitProject}${path.sep}` });
+    if (process.platform === "win32") {
+      const differentlyCased = await catalog.registerProject({ path: gitProject.toUpperCase() });
+      assert.equal(differentlyCased.projectId, first.projectId);
+    }
     const plain = await catalog.registerProject({ path: plainProject, name: "Plain Name" });
 
     assert.equal(first.projectId, duplicate.projectId);
@@ -41,6 +46,40 @@ test("project registration is idempotent per normalized path and detects git", a
     assert.equal((await catalog.listProjects()).length, 2);
 
     await assert.rejects(catalog.registerProject({ path: path.join(base, "missing") }), /existing directory/);
+    const foreignAbsolute = process.platform === "win32" ? "/srv/project" : "C:\\studio\\project";
+    await assert.rejects(catalog.registerProject({ path: foreignAbsolute }), /on this host/);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("project registration resolves symlink and junction aliases", async (context) => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "drydock-catalog-link-"));
+  try {
+    const projectPath = path.join(base, "project");
+    const aliasPath = path.join(base, "alias");
+    await mkdir(projectPath);
+    try {
+      await symlink(projectPath, aliasPath, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        context.skip("Creating links is not permitted on this host.");
+        return;
+      }
+      throw error;
+    }
+
+    const catalog = new ProjectCatalogService({
+      ids: new RandomIdGenerator(),
+      clock: fixedClock(),
+      store: new MemoryProjectCatalogStore()
+    });
+    const direct = await catalog.registerProject({ path: projectPath });
+    const throughAlias = await catalog.registerProject({ path: aliasPath });
+
+    assert.equal(throughAlias.projectId, direct.projectId);
+    assert.equal(throughAlias.path, await realpath(projectPath));
+    assert.equal((await catalog.listProjects()).length, 1);
   } finally {
     await rm(base, { recursive: true, force: true });
   }

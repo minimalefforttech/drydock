@@ -5,7 +5,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -293,6 +293,79 @@ test("collection maps kinds, titles, aspects; bumps revisions only on change", a
     await rm(path.join(workspace, "plan", "scratch", "notes.md"));
     const afterDelete = await harness.service.collectPlanArtifacts(plan.planId);
     assert.ok(afterDelete.some((artifact) => artifact.relPath === "scratch/notes.md"));
+  } finally {
+    harness.connection.close();
+    await rm(harness.dir, { recursive: true, force: true });
+  }
+});
+
+test("collection refuses linked artifacts and manifests", async (context) => {
+  const harness = await makeHarness();
+  try {
+    const plan = await harness.service.createPlan({ brief: "b", aspectIds: [], contextRoots: [] });
+    const workspace = path.join(harness.dir, "ws-links");
+    const planDir = path.join(workspace, "plan");
+    const outside = path.join(harness.dir, "outside");
+    await mkdir(planDir, { recursive: true });
+    await mkdir(outside);
+    harness.setWorkspace(workspace);
+    await harness.service.startPlanSession(plan.planId);
+
+    const outsideManifest = path.join(outside, "manifest.json");
+    await writeFile(outsideManifest, JSON.stringify({ "safe.md": "Outside title" }), "utf8");
+    try {
+      await symlink(outsideManifest, path.join(planDir, "manifest.json"), "file");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        context.skip("Creating file links is not permitted on this host.");
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(harness.service.collectPlanArtifacts(plan.planId), /symbolic link|junction/);
+
+    await rm(path.join(planDir, "manifest.json"));
+    const outsideArtifact = path.join(outside, "outside.md");
+    await writeFile(outsideArtifact, "# Outside\n", "utf8");
+    await symlink(outsideArtifact, path.join(planDir, "outside.md"), "file");
+    await assert.rejects(harness.service.collectPlanArtifacts(plan.planId), /symbolic link|junction/);
+    assert.deepEqual(await harness.service.getPlanState(plan.planId).then((state) => state.artifacts), []);
+  } finally {
+    harness.connection.close();
+    await rm(harness.dir, { recursive: true, force: true });
+  }
+});
+
+test("hydration refuses an intermediate symlink or junction", async (context) => {
+  const harness = await makeHarness();
+  try {
+    const plan = await harness.service.createPlan({ brief: "b", aspectIds: ["architecture"], contextRoots: [] });
+    const source = path.join(harness.dir, "ws-source");
+    await mkdir(path.join(source, "plan", "architecture"), { recursive: true });
+    await writeFile(path.join(source, "plan", "architecture", "overview.md"), "# Safe plan\n", "utf8");
+    harness.setWorkspace(source);
+    const sessionId = await harness.service.startPlanSession(plan.planId);
+    await harness.service.collectPlanArtifacts(plan.planId);
+
+    const target = path.join(harness.dir, "ws-target");
+    const outside = path.join(harness.dir, "outside-target");
+    await mkdir(path.join(target, "plan"), { recursive: true });
+    await mkdir(outside);
+    const outsideFile = path.join(outside, "overview.md");
+    await writeFile(outsideFile, "do not replace", "utf8");
+    try {
+      await symlink(outside, path.join(target, "plan", "architecture"), process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        context.skip("Creating directory links is not permitted on this host.");
+        return;
+      }
+      throw error;
+    }
+    harness.setWorkspace(target);
+
+    await assert.rejects(harness.service.hydrateWorkspace(plan.planId, sessionId), /symbolic link|junction|linked/);
+    assert.equal(await readFile(outsideFile, "utf8"), "do not replace");
   } finally {
     harness.connection.close();
     await rm(harness.dir, { recursive: true, force: true });

@@ -6,10 +6,17 @@
  * derived from paths. Persistence lives in the injected store.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { ProjectCatalogStore, ProjectId, ProjectRecord } from "@drydock/contracts";
-import { normalizePathKey, type Clock, type IdGenerator } from "@drydock/core";
+import {
+  isHostPathAbsolute,
+  isNativeHostPathAbsolute,
+  normalizeHostPath,
+  normalizePathKey,
+  type Clock,
+  type IdGenerator
+} from "@drydock/core";
 
 export interface ProjectCatalogServiceOptions {
   readonly ids: IdGenerator;
@@ -27,11 +34,7 @@ export class ProjectCatalogService {
    * normalized path returns the existing record.
    */
   async registerProject(input: { readonly path: string; readonly name?: string }): Promise<ProjectRecord> {
-    const requested = path.resolve(input.path);
-    const absolute = this.options.validateProjectPath?.(requested) ?? requested;
-    if (!existsSync(absolute) || !statSync(absolute).isDirectory()) {
-      throw new Error(`Project path is not an existing directory: ${absolute}`);
-    }
+    const absolute = this.resolveProjectDirectory(input.path);
     const pathKey = normalizePathKey(absolute);
     const existing = await this.options.store.getProjectByPathKey(pathKey);
     if (existing !== null) {
@@ -60,11 +63,7 @@ export class ProjectCatalogService {
     if (existing === null) {
       throw new Error(`Project ${projectId} is not in the catalog.`);
     }
-    const requested = path.resolve(newPath);
-    const absolute = this.options.validateProjectPath?.(requested) ?? requested;
-    if (!existsSync(absolute) || !statSync(absolute).isDirectory()) {
-      throw new Error(`Project path is not an existing directory: ${absolute}`);
-    }
+    const absolute = this.resolveProjectDirectory(newPath);
     const pathKey = normalizePathKey(absolute);
     const owner = await this.options.store.getProjectByPathKey(pathKey);
     if (owner !== null && owner.projectId !== projectId) {
@@ -88,4 +87,32 @@ export class ProjectCatalogService {
   listProjects(): Promise<ProjectRecord[]> {
     return this.options.store.listProjects();
   }
+
+  /**
+   * Resolves through the host filesystem before applying policy. This keeps
+   * path identity aligned with the current host's case semantics and prevents
+   * a symlink or junction alias from creating a second catalog entry.
+   */
+  private resolveProjectDirectory(candidate: string): string {
+    const absoluteInput = isHostPathAbsolute(candidate);
+    const requestedPath = absoluteInput ? normalizeHostPath(candidate) : path.resolve(candidate);
+    if (absoluteInput && !isNativeHostPathAbsolute(requestedPath)) {
+      throw new Error(`Project path is not an existing directory on this host: ${requestedPath}`);
+    }
+    const requested = existingDirectory(requestedPath);
+    const validated = this.options.validateProjectPath?.(requested) ?? requested;
+    return existingDirectory(validated);
+  }
+}
+
+function existingDirectory(candidate: string): string {
+  try {
+    const canonical = realpathSync.native(candidate);
+    if (statSync(canonical).isDirectory()) {
+      return canonical;
+    }
+  } catch {
+    // Present a stable catalog error for missing, inaccessible, or invalid paths.
+  }
+  throw new Error(`Project path is not an existing directory: ${candidate}`);
 }

@@ -38,7 +38,7 @@ import type { Clock } from "./clock.js";
 import type { IdGenerator } from "./ids.js";
 import type { Logger } from "./logger.js";
 import type { ProductEventBus } from "./eventBus.js";
-import { assertChildMountsWithinParent } from "./mountPolicy.js";
+import { assertChildMountsWithinParent, sandboxRuntimePath } from "./mountPolicy.js";
 import { withSandboxProvider, type SandboxProvider } from "./isolatedRunTemplate.js";
 import { stripHostBriefing } from "./accessRequestProtocol.js";
 import { RuntimeCleanupService } from "./runtimeCleanupService.js";
@@ -1515,12 +1515,7 @@ function toContainerCwd(hostPath: string): string | undefined {
   if (hostPath.length === 0) {
     return undefined;
   }
-  const normalized = hostPath.replace(/\\/g, "/");
-  const drive = /^([A-Za-z]):\/(.*)$/.exec(normalized);
-  if (drive) {
-    return `/${(drive[1] ?? "").toLowerCase()}/${drive[2] ?? ""}`;
-  }
-  return normalized;
+  return sandboxRuntimePath(hostPath);
 }
 
 /**

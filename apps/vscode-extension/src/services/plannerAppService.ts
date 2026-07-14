@@ -14,7 +14,7 @@
  * ports satisfied by IsolatedRunService/ChatSessionService.
  */
 
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   asId,
@@ -442,9 +442,12 @@ export class PlannerAppService {
     if (workspacePath === null) {
       return this.options.artifacts.listArtifacts(id);
     }
-    const planDir = path.join(workspacePath, "plan");
-    const files = await this.readPlanFiles(id, planDir);
-    const manifest = await readManifestTitles(planDir);
+    const planRoot = await existingPlanRoot(workspacePath);
+    if (planRoot === null) {
+      return this.options.artifacts.listArtifacts(id);
+    }
+    const files = await this.readPlanFiles(id, planRoot);
+    const manifest = await readManifestTitles(planRoot);
     const knownAspects = new Set((await this.listAspects(true)).map((aspect) => aspect.aspectId));
 
     let changed = false;
@@ -454,7 +457,7 @@ export class PlannerAppService {
       const title = manifest.get(file.relPath) ?? file.fallbackTitle;
 
       if (file.kind === "image") {
-        const put = await this.options.blobs.putFile(file.absolutePath);
+        const put = await this.options.blobs.putFile(await checkedPlanFile(planRoot, file.relPath));
         if (existing !== null && existing.blobSha256 === put.sha256 && existing.title === title && existing.aspectId === aspectId) {
           continue;
         }
@@ -478,7 +481,7 @@ export class PlannerAppService {
         continue;
       }
 
-      const content = await readFile(file.absolutePath, "utf8");
+      const content = await readFile(await checkedPlanFile(planRoot, file.relPath), "utf8");
       if (existing !== null && existing.content === content && existing.title === title && existing.aspectId === aspectId) {
         continue;
       }
@@ -518,16 +521,16 @@ export class PlannerAppService {
     if (workspacePath === null) {
       return;
     }
+    const workspaceRoot = await canonicalDirectory(workspacePath, "Planner workspace");
     const artifacts = await this.options.artifacts.listArtifacts(planId);
     for (const artifact of artifacts) {
       if (!isSafeRelPath(artifact.relPath)) {
         this.options.logger.warn("planner hydration skipped an unsafe path", { planId, relPath: artifact.relPath });
         continue;
       }
-      const target = path.join(workspacePath, "plan", ...artifact.relPath.split("/"));
-      await mkdir(path.dirname(target), { recursive: true });
+      await safeHydrationTarget(workspaceRoot, artifact.relPath);
       if (artifact.content !== null) {
-        await writeFile(target, artifact.content, "utf8");
+        await writeFile(await assertSafeHydrationTarget(workspaceRoot, artifact.relPath), artifact.content, "utf8");
         continue;
       }
       if (artifact.blobSha256 !== null) {
@@ -536,21 +539,24 @@ export class PlannerAppService {
           this.options.logger.warn("planner hydration missing image blob", { planId, relPath: artifact.relPath });
           continue;
         }
-        await writeFile(target, bytes);
+        await writeFile(await assertSafeHydrationTarget(workspaceRoot, artifact.relPath), bytes);
       }
     }
   }
 
   private async readPlanFiles(
     planId: PlanId,
-    planDir: string
-  ): Promise<{ relPath: string; absolutePath: string; kind: Exclude<PlanArtifactRecord["kind"], never>; fallbackTitle: string }[]> {
+    planRoot: PlanFilesystemRoot
+  ): Promise<{ relPath: string; kind: Exclude<PlanArtifactRecord["kind"], never>; fallbackTitle: string }[]> {
     let candidates: string[];
     try {
-      const entries = await readdir(planDir, { recursive: true, withFileTypes: true });
+      const entries = await readdir(await checkedPlanRoot(planRoot), { recursive: true, withFileTypes: true });
+      if (entries.some((entry) => entry.isSymbolicLink())) {
+        throw new Error("Planner collection refused a symbolic link or junction under plan/.");
+      }
       candidates = entries
         .filter((entry) => entry.isFile() && plannerKindForFile(entry.name) !== null)
-        .map((entry) => path.relative(planDir, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"))
+        .map((entry) => path.relative(planRoot.canonicalPlan, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"))
         .filter((relPath) => relPath !== MANIFEST_NAME && isSafeRelPath(relPath));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -568,14 +574,13 @@ export class PlannerAppService {
       candidates = candidates.slice(0, PLANNER_MAX_FILES);
     }
 
-    const accepted: { relPath: string; absolutePath: string; kind: PlanArtifactRecord["kind"]; fallbackTitle: string }[] = [];
+    const accepted: { relPath: string; kind: PlanArtifactRecord["kind"]; fallbackTitle: string }[] = [];
     for (const relPath of candidates) {
       const kind = plannerKindForFile(relPath);
       if (kind === null) {
         continue;
       }
-      const absolutePath = path.join(planDir, ...relPath.split("/"));
-      const size = (await stat(absolutePath)).size;
+      const size = (await stat(await checkedPlanFile(planRoot, relPath))).size;
       const limit = kind === "image" ? PLANNER_MAX_IMAGE_BYTES : PLANNER_MAX_TEXT_BYTES;
       if (size > limit) {
         this.options.logger.warn("planner collection skipped an oversized file", { planId, relPath, size, limit });
@@ -583,12 +588,12 @@ export class PlannerAppService {
       }
       let fallbackTitle = humanizeFileName(relPath);
       if (kind === "document") {
-        const heading = firstMarkdownHeading(await readFile(absolutePath, "utf8"));
+        const heading = firstMarkdownHeading(await readFile(await checkedPlanFile(planRoot, relPath), "utf8"));
         if (heading !== null) {
           fallbackTitle = heading;
         }
       }
-      accepted.push({ relPath, absolutePath, kind, fallbackTitle });
+      accepted.push({ relPath, kind, fallbackTitle });
     }
     return accepted;
   }
@@ -872,6 +877,157 @@ export class PlannerAppService {
 }
 
 // ---------------------------------------------------------------------------
+// Filesystem boundary helpers
+// ---------------------------------------------------------------------------
+
+interface PlanFilesystemRoot {
+  readonly workspace: string;
+  readonly planPath: string;
+  readonly canonicalPlan: string;
+}
+
+async function existingPlanRoot(workspacePath: string): Promise<PlanFilesystemRoot | null> {
+  const workspace = await canonicalDirectory(workspacePath, "Planner workspace");
+  const planPath = path.join(workspace, "plan");
+  let info;
+  try {
+    info = await lstat(planPath);
+  } catch (error) {
+    if (isMissing(error)) return null;
+    throw error;
+  }
+  assertDirectoryIsNotLink(info, planPath);
+  const canonicalPlan = await realpath(planPath);
+  assertPathWithin(canonicalPlan, workspace, "Planner plan directory escaped its workspace.");
+  return { workspace, planPath, canonicalPlan };
+}
+
+async function canonicalDirectory(candidate: string, label: string): Promise<string> {
+  const canonical = await realpath(candidate);
+  if (!(await stat(canonical)).isDirectory()) {
+    throw new Error(`${label} is not a directory: ${candidate}`);
+  }
+  return canonical;
+}
+
+/** Revalidates every component immediately before a collection operation. */
+async function checkedPlanFile(root: PlanFilesystemRoot, relPath: string): Promise<string> {
+  if (!isSafeRelPath(relPath)) {
+    throw new Error(`Planner collection refused an unsafe path: ${relPath}`);
+  }
+  const currentPlan = await checkedPlanRoot(root);
+  let current = root.planPath;
+  const segments = relPath.split("/");
+  for (let index = 0; index < segments.length; index += 1) {
+    current = path.join(current, segments[index] ?? "");
+    const info = await lstat(current);
+    if (info.isSymbolicLink()) {
+      throw new Error(`Planner collection refused a symbolic link or junction: ${relPath}`);
+    }
+    const isFinal = index === segments.length - 1;
+    if ((!isFinal && !info.isDirectory()) || (isFinal && !info.isFile())) {
+      throw new Error(`Planner collection refused a non-file path: ${relPath}`);
+    }
+  }
+  const canonical = await realpath(current);
+  assertPathWithin(canonical, currentPlan, `Planner artifact escaped plan/: ${relPath}`);
+  return canonical;
+}
+
+async function checkedPlanRoot(root: PlanFilesystemRoot): Promise<string> {
+  const info = await lstat(root.planPath);
+  assertDirectoryIsNotLink(info, root.planPath);
+  const current = await realpath(root.planPath);
+  assertPathWithin(current, root.workspace, "Planner plan directory escaped its workspace.");
+  if (path.relative(current, root.canonicalPlan) !== "") {
+    throw new Error("Planner plan directory changed during collection.");
+  }
+  return current;
+}
+
+async function safeHydrationTarget(workspace: string, relPath: string): Promise<void> {
+  if (!isSafeRelPath(relPath)) {
+    throw new Error(`Planner hydration refused an unsafe path: ${relPath}`);
+  }
+  const segments = relPath.split("/");
+  await ensureSafeDirectories(workspace, ["plan", ...segments.slice(0, -1)]);
+  await assertSafeHydrationTarget(workspace, relPath);
+}
+
+async function ensureSafeDirectories(workspace: string, segments: readonly string[]): Promise<void> {
+  let current = workspace;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      try {
+        await mkdir(current);
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError;
+      }
+      info = await lstat(current);
+    }
+    assertDirectoryIsNotLink(info, current);
+    assertPathWithin(await realpath(current), workspace, "Planner hydration directory escaped its workspace.");
+  }
+}
+
+/** Rechecks all parents and the final target immediately before writeFile. */
+async function assertSafeHydrationTarget(workspace: string, relPath: string): Promise<string> {
+  if (!isSafeRelPath(relPath)) {
+    throw new Error(`Planner hydration refused an unsafe path: ${relPath}`);
+  }
+  const segments = ["plan", ...relPath.split("/")];
+  let current = workspace;
+  for (let index = 0; index < segments.length; index += 1) {
+    current = path.join(current, segments[index] ?? "");
+    const isFinal = index === segments.length - 1;
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if (isFinal && isMissing(error)) {
+        assertPathWithin(
+          await realpath(path.dirname(current)),
+          workspace,
+          "Planner hydration target escaped its workspace."
+        );
+        return current;
+      }
+      throw error;
+    }
+    if (info.isSymbolicLink()) {
+      throw new Error(`Planner hydration refused a symbolic link or junction: ${relPath}`);
+    }
+    if ((!isFinal && !info.isDirectory()) || (isFinal && !info.isFile())) {
+      throw new Error(`Planner hydration refused an invalid target: ${relPath}`);
+    }
+    assertPathWithin(await realpath(current), workspace, "Planner hydration path escaped its workspace.");
+  }
+  return current;
+}
+
+function assertDirectoryIsNotLink(info: Awaited<ReturnType<typeof lstat>>, candidate: string): void {
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(`Planner refused a linked or non-directory path: ${candidate}`);
+  }
+}
+
+function assertPathWithin(candidate: string, root: string, message: string): void {
+  const relative = path.relative(root, candidate);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(message);
+  }
+}
+
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+// ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
 
@@ -972,13 +1128,14 @@ function slugify(label: string): string {
 }
 
 /** plan/manifest.json → relPath → display title; tolerant of any malformation. */
-async function readManifestTitles(planDir: string): Promise<Map<string, string>> {
+async function readManifestTitles(planRoot: PlanFilesystemRoot): Promise<Map<string, string>> {
   const titles = new Map<string, string>();
   let raw: string;
   try {
-    raw = await readFile(path.join(planDir, MANIFEST_NAME), "utf8");
-  } catch {
-    return titles;
+    raw = await readFile(await checkedPlanFile(planRoot, MANIFEST_NAME), "utf8");
+  } catch (error) {
+    if (isMissing(error)) return titles;
+    throw error;
   }
   try {
     const parsed: unknown = JSON.parse(raw);

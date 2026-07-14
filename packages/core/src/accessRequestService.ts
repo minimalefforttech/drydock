@@ -7,7 +7,6 @@
  * runtime-generation restart. This service never touches runtimes itself.
  */
 
-import path from "node:path";
 import type {
   AccessRequestId,
   AccessRequestRecord,
@@ -18,7 +17,7 @@ import type {
 } from "@drydock/contracts";
 import type { Clock } from "./clock.js";
 import type { IdGenerator } from "./ids.js";
-import { assertMountAllowed, sandboxRuntimePath } from "./mountPolicy.js";
+import { assertMountAllowed, isHostPathAbsolute, normalizeHostPath, sandboxRuntimePath } from "./mountPolicy.js";
 
 export interface AccessRequestServiceOptions {
   readonly ids: IdGenerator;
@@ -38,7 +37,7 @@ export class AccessRequestService {
     readonly mode: "read-only" | "read-write";
     readonly reason: string;
   }): Promise<AccessRequestRecord> {
-    if (!path.isAbsolute(input.hostPath)) {
+    if (!isHostPathAbsolute(input.hostPath)) {
       throw new Error(`Access request path must be absolute: ${input.hostPath}`);
     }
     const hostPath = this.validateHostPath(input.hostPath);
@@ -63,7 +62,7 @@ export class AccessRequestService {
    */
   async editRequestPath(accessRequestId: AccessRequestId, hostPath: string): Promise<AccessRequestRecord> {
     const request = await this.requiredPending(accessRequestId);
-    if (!path.isAbsolute(hostPath)) {
+    if (!isHostPathAbsolute(hostPath)) {
       throw new Error(`Access request path must be absolute: ${hostPath}`);
     }
     const resolved = this.validateHostPath(hostPath);
@@ -128,7 +127,7 @@ export class AccessRequestService {
   }
 
   private validateHostPath(hostPath: string): string {
-    const absolute = path.resolve(hostPath);
+    const absolute = normalizeHostPath(hostPath);
     return this.options.validateHostPath?.(absolute) ?? absolute;
   }
 }

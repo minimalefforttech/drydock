@@ -396,7 +396,7 @@ export class WorkspaceReviewAppService {
       (await this.options.diff.listBaselines(id)).map((baseline) => normalizePathKey(baseline.rootPath))
     );
     for (const rootPath of roots) {
-      if (existingRoots.has(normalizePathKey(path.resolve(rootPath)))) {
+      if (existingRoots.has(normalizePathKey(rootPath))) {
         continue;
       }
       const working = await this.options.diff.createBaseline({ scope: "current-session", sessionId: id, rootPath });
@@ -724,9 +724,9 @@ function toWorkspaceSetSummary(record: WorkspaceSetRecord, byId: ReadonlyMap<str
   };
 }
 
-/** Compares two host paths by resolving both, matching createRequest's storage. */
+/** Compares two host paths using their own platform syntax. */
 function samePath(a: string, b: string): boolean {
-  return path.resolve(a) === path.resolve(b);
+  return normalizePathKey(a) === normalizePathKey(b);
 }
 
 export function toAccessRequestSummary(record: AccessRequestRecord): AccessRequestSummary {

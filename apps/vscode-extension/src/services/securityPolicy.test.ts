@@ -84,6 +84,59 @@ test("Studio restrictions can only tighten clone, omission, deny, and network po
   }
 });
 
+test("configured denied paths reject relative entries and preserve foreign absolute syntax", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-denied-paths-"));
+  try {
+    const policyPath = path.join(root, "no-policy.json");
+    assert.throws(() => loadEffectiveSecurityPolicy({
+      studioPolicyPath: policyPath,
+      baseDeniedPaths: ["relative/secrets"],
+      user: unrestrictedUser
+    }), /must use absolute paths/);
+
+    if (process.platform !== "win32") {
+      const policy = loadEffectiveSecurityPolicy({
+        studioPolicyPath: policyPath,
+        baseDeniedPaths: ["C:\\Studio\\Secrets", "\\\\server\\share\\restricted"],
+        user: unrestrictedUser
+      });
+      assert.deepEqual(policy.deniedPaths, ["C:\\Studio\\Secrets", "\\\\server\\share\\restricted"]);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a missing denied leaf remains denied through a symlinked parent", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-denied-link-"));
+  try {
+    const actualHome = path.join(root, "actual-home");
+    const homeAlias = path.join(root, "home-alias");
+    await mkdir(actualHome);
+    try {
+      await symlink(actualHome, homeAlias, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        t.skip("This account cannot create symbolic links or junctions.");
+        return;
+      }
+      throw error;
+    }
+
+    const policy = loadEffectiveSecurityPolicy({
+      studioPolicyPath: path.join(root, "no-policy.json"),
+      baseDeniedPaths: [path.join(homeAlias, ".ssh")],
+      user: unrestrictedUser
+    });
+    const sensitiveDirectory = path.join(actualHome, ".ssh");
+    await mkdir(sensitiveDirectory);
+
+    assert.throws(() => policy.assertHostPathAllowed(sensitiveDirectory), /intersects a denied path/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Invalid Studio policy fails closed instead of falling back", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
   try {

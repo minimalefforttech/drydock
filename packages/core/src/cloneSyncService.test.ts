@@ -461,6 +461,104 @@ test("agentChanges reports change kinds and line stats vs sync base", async () =
   }
 });
 
+test("agentChanges does not follow an untracked symlink for stats or conflict markers", async (t) => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "app.txt": "safe\n" });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+    const outside = join(root, "outside.txt");
+    await writeFile(outside, "<<<<<<< outside\nsecret\n", "utf8");
+    try {
+      await symlink(outside, join(clonePath, "linked.txt"), "file");
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error
+        && ((error as { readonly code?: unknown }).code === "EPERM" || (error as { readonly code?: unknown }).code === "EACCES")) {
+        t.skip("This Windows account cannot create symbolic links.");
+        return;
+      }
+      throw error;
+    }
+
+    const linked = (await svc.agentChanges(clonePath)).find((change) => change.path === "linked.txt");
+    assert.equal(linked?.changeKind, "add");
+    assert.equal(linked?.addedLines, undefined);
+    assert.equal(linked?.conflicted, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("agentChanges does not follow an intermediate directory link for marker scans", async (t) => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "nested/file.txt": "base\n" });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+    const outsideDir = join(root, "outside");
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(join(outsideDir, "file.txt"), "<<<<<<< outside\nsecret\n", "utf8");
+    await rm(join(clonePath, "nested"), { recursive: true });
+    try {
+      await symlink(outsideDir, join(clonePath, "nested"), "junction");
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error
+        && ((error as { readonly code?: unknown }).code === "EPERM" || (error as { readonly code?: unknown }).code === "EACCES")) {
+        t.skip("This account cannot create directory links.");
+        return;
+      }
+      throw error;
+    }
+
+    const tracked = (await svc.agentChanges(clonePath)).find((change) => change.path === "nested/file.txt");
+    assert.notEqual(tracked, undefined);
+    assert.equal(tracked?.conflicted, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("inbound comparison refuses a local directory link even when its target matches clone HEAD", async (t) => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "nested/a.txt": "base\n" });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+    await writeFile(join(clonePath, "nested", "a.txt"), "agent\n", "utf8");
+    const baseBefore = (await git(clonePath, "rev-parse", "refs/sync/base")).trim();
+    const outsideDir = join(root, "outside");
+    const outside = join(outsideDir, "a.txt");
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(outside, "agent\n", "utf8");
+    await rm(join(localRepoPath, "nested"), { recursive: true });
+    try {
+      await symlink(outsideDir, join(localRepoPath, "nested"), "junction");
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error
+        && ((error as { readonly code?: unknown }).code === "EPERM" || (error as { readonly code?: unknown }).code === "EACCES")) {
+        t.skip("This account cannot create directory links.");
+        return;
+      }
+      throw error;
+    }
+
+    await assert.rejects(svc.inboundPatch(clonePath, localRepoPath), /apply inbound patch for nested\/a\.txt/);
+    assert.equal(await read(outside), "agent\n");
+    assert.equal((await git(clonePath, "rev-parse", "refs/sync/base")).trim(), baseBefore);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("full inbound applies to local working tree without local commits and advances base", async () => {
   const { root, localRepoPath, cleanup } = await makeLocalRepo({
     "a.txt": "alpha\n",

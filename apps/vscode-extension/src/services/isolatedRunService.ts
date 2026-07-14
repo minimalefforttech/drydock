@@ -55,6 +55,7 @@ import {
   RuntimeCleanupService,
   RuntimeLifecycleService,
   IsolatedRunWorkflow,
+  normalizeHostPath,
   normalizePathKey,
   type ClonePathOmission,
   type CloneRepoPreflight,
@@ -1199,7 +1200,7 @@ export class IsolatedRunService {
       // Two workspace-set members can legitimately share a basename (for
       // example client-a/api and client-b/api). Keep each clone addressable
       // instead of letting the second `git clone` collide with repos/api.
-      const baseName = path.basename(root) || "repo";
+      const baseName = path.basename(preflight.localRepoPath) || "repo";
       let name = baseName;
       let suffix = 2;
       while (usedNames.has(name.toLowerCase())) {
@@ -1276,7 +1277,7 @@ export class IsolatedRunService {
       return this.options.securityPolicy.assertHostPathAllowed(root);
     }
     assertMountAllowed(root, this.options.deniedPaths ?? []);
-    return path.resolve(root);
+    return normalizeHostPath(root);
   }
 
   /** Adds compact, content-free policy evidence to the durable runtime ledger. */

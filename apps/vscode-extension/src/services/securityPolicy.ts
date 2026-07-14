@@ -10,7 +10,16 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
-import { assertMountAllowed, isPathWithin, normalizePathKey, pathMatchesCloneOmission, type ClonePathOmission } from "@drydock/core";
+import {
+  assertMountAllowed,
+  isHostPathAbsolute,
+  isNativeHostPathAbsolute,
+  isPathWithin,
+  normalizeHostPath,
+  normalizePathKey,
+  pathMatchesCloneOmission,
+  type ClonePathOmission
+} from "@drydock/core";
 
 export interface UserSecurityPreferences {
   /** Empty means no personal allowlist. */
@@ -130,7 +139,10 @@ export class EffectiveSecurityPolicy {
   }
 
   private assertCanonicalHostPathAllowed(canonical: string): void {
-    assertMountAllowed(canonical, this.deniedPaths);
+    // Re-resolve deny aliases at the final boundary. A missing sensitive leaf
+    // may appear later, or an administrator-controlled link may have changed
+    // since startup; retaining lexical and canonical forms keeps both denied.
+    assertMountAllowed(canonical, expandDeniedPaths(this.deniedPaths));
     if (
       this.allowedProjectRoots !== undefined
       && !this.allowedProjectRoots.some((allowed) => isPathWithin(canonical, allowed))
@@ -187,11 +199,17 @@ export function loadEffectiveSecurityPolicy(options: LoadSecurityPolicyOptions):
   const studioAllowed = studio?.allowedProjectRoots === undefined
     ? undefined
     : normalizeAllowedRoots(studio.allowedProjectRoots, `${studioPath}: allowedProjectRoots`, true);
+  const baseDenied = options.baseDeniedPaths.map((value) => {
+    if (!isHostPathAbsolute(value)) {
+      throw new Error(`Configured denied paths must use absolute paths: ${value}`);
+    }
+    return normalizeHostPath(value);
+  });
   const studioDenied = (studio?.deniedPaths ?? []).map((value) => {
-    if (!path.isAbsolute(value)) {
+    if (!isHostPathAbsolute(value)) {
       throw new Error(`${studioPath}: deniedPaths must use absolute paths: ${value}`);
     }
-    return value;
+    return normalizeHostPath(value);
   });
   const allowedProjectRoots = intersectAllowlists(studioAllowed, userAllowed);
   const omittedRepoPaths = normalizeRepoRelativePaths([
@@ -212,8 +230,8 @@ export function loadEffectiveSecurityPolicy(options: LoadSecurityPolicyOptions):
     studioPolicyPath: studioPath,
     studioPolicyRequiredPath: requiredPath,
     ...(allowedProjectRoots === undefined ? {} : { allowedProjectRoots }),
-    deniedPaths: dedupeHostPaths([
-      ...options.baseDeniedPaths,
+    deniedPaths: expandDeniedPaths([
+      ...baseDenied,
       ...studioDenied
     ]),
     cloneOnly,
@@ -386,6 +404,21 @@ function dedupeHostPaths(values: readonly string[]): string[] {
   return result;
 }
 
+/** Keeps both configured spellings and their current canonical targets. */
+function expandDeniedPaths(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    for (const candidate of [normalizeHostPath(value), canonicalIfExisting(value)]) {
+      const key = normalizePathKey(candidate);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(candidate);
+    }
+  }
+  return result;
+}
+
 function normalizeRepoRelativePaths(values: readonly string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -406,22 +439,22 @@ function normalizeRepoRelativePaths(values: readonly string[]): string[] {
 }
 
 function canonicalExistingDirectory(value: string, source: string): string {
-  if (!path.isAbsolute(value)) {
+  if (!isHostPathAbsolute(value)) {
     throw new Error(`${source} must use absolute paths: ${value}`);
   }
-  const resolved = path.resolve(value);
-  if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
+  const resolved = normalizeHostPath(value);
+  if (!isNativeHostPathAbsolute(resolved) || !existsSync(resolved) || !statSync(resolved).isDirectory()) {
     throw new Error(`${source} is not an existing directory: ${resolved}`);
   }
   return realpathSync.native(resolved);
 }
 
 function canonicalExistingFile(value: string, source: string): string {
-  if (!path.isAbsolute(value)) {
+  if (!isHostPathAbsolute(value)) {
     throw new Error(`${source} must use an absolute path: ${value}`);
   }
-  const resolved = path.resolve(value);
-  if (!existsSync(resolved)) {
+  const resolved = normalizeHostPath(value);
+  if (!isNativeHostPathAbsolute(resolved) || !existsSync(resolved)) {
     throw new Error(`${source} does not exist: ${resolved}`);
   }
   const canonical = realpathSync.native(resolved);
@@ -432,11 +465,22 @@ function canonicalExistingFile(value: string, source: string): string {
 }
 
 function canonicalIfExisting(value: string): string {
-  const resolved = path.resolve(value);
-  try {
-    return realpathSync.native(resolved);
-  } catch {
-    return resolved;
+  const resolved = normalizeHostPath(value);
+  if (!isNativeHostPathAbsolute(resolved)) return resolved;
+  let existingPrefix = resolved;
+  const missingSuffix: string[] = [];
+  while (true) {
+    try {
+      const canonicalPrefix = realpathSync.native(existingPrefix);
+      return missingSuffix.length === 0 ? canonicalPrefix : path.join(canonicalPrefix, ...missingSuffix);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return resolved;
+      const parent = path.dirname(existingPrefix);
+      if (parent === existingPrefix) return resolved;
+      missingSuffix.unshift(path.basename(existingPrefix));
+      existingPrefix = parent;
+    }
   }
 }
 

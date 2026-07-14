@@ -15,9 +15,12 @@ import {
   buildMountPolicy,
   defaultDeniedPaths,
   isFilesystemRoot,
+  isHostPathAbsolute,
+  isNativeHostPathAbsolute,
   isPathDenied,
   isPathWithin,
   isSensitivePath,
+  normalizeHostPath,
   normalizePathKey,
   sandboxRuntimePath,
   sensitivePathMatch
@@ -81,10 +84,45 @@ test("workspace roots advertise the real sandbox mount path, not a synthetic lab
 });
 
 test("sandboxRuntimePath mirrors a Windows drive path into the container", () => {
-  if (process.platform === "win32") {
-    assert.equal(sandboxRuntimePath("H:\\pipeline\\work"), "/h/pipeline/work");
-    assert.equal(sandboxRuntimePath("C:/proj/app"), "/c/proj/app");
-  }
+  assert.equal(sandboxRuntimePath("H:\\pipeline\\work"), "/h/pipeline/work");
+  assert.equal(sandboxRuntimePath("C:/proj/app"), "/c/proj/app");
+  assert.equal(sandboxRuntimePath("\\\\server\\share\\project"), "//server/share/project");
+});
+
+test("host path absoluteness and normalization are independent of the runner OS", () => {
+  assert.equal(isHostPathAbsolute("C:\\project\\src"), true);
+  assert.equal(isHostPathAbsolute("C:/project/src"), true);
+  assert.equal(isHostPathAbsolute("\\\\server\\share\\project"), true);
+  assert.equal(isHostPathAbsolute("\\\\?\\C:\\project\\src"), true);
+  assert.equal(isHostPathAbsolute("\\\\?\\UNC\\server\\share\\project"), true);
+  assert.equal(isHostPathAbsolute("/srv/project"), true);
+  assert.equal(isHostPathAbsolute("///srv/project"), true);
+  assert.equal(isHostPathAbsolute("C:project"), false);
+  assert.equal(isHostPathAbsolute("\\current-drive-relative"), false);
+  assert.equal(isHostPathAbsolute("\\\\.\\pipe\\drydock"), false);
+  assert.equal(isHostPathAbsolute("//./pipe/drydock"), false);
+  assert.equal(isHostPathAbsolute("\\\\server"), false);
+  assert.equal(isHostPathAbsolute("project/src"), false);
+
+  assert.equal(normalizeHostPath("C:\\project\\src\\..\\app"), "C:\\project\\app");
+  assert.equal(normalizeHostPath("\\\\server\\share\\project\\..\\app"), "\\\\server\\share\\app");
+  assert.equal(normalizeHostPath("\\\\?\\C:\\project\\app"), "C:\\project\\app");
+  assert.equal(normalizeHostPath("\\\\?\\UNC\\server\\share\\app"), "\\\\server\\share\\app");
+  assert.equal(normalizeHostPath("///srv/project"), "/srv/project");
+});
+
+test("native host paths reject absolute paths from the other OS family", () => {
+  assert.equal(isNativeHostPathAbsolute("C:\\project\\src", "win32"), true);
+  assert.equal(isNativeHostPathAbsolute("\\\\server\\share\\project", "win32"), true);
+  assert.equal(isNativeHostPathAbsolute("\\\\?\\C:\\project", "win32"), true);
+  assert.equal(isNativeHostPathAbsolute("/srv/project", "win32"), false);
+  assert.equal(isNativeHostPathAbsolute("\\current-drive-relative", "win32"), false);
+
+  assert.equal(isNativeHostPathAbsolute("/srv/project", "linux"), true);
+  assert.equal(isNativeHostPathAbsolute("C:\\project\\src", "linux"), false);
+  assert.equal(isNativeHostPathAbsolute("\\\\server\\share\\project", "linux"), false);
+  assert.equal(isNativeHostPathAbsolute("//server/share/project", "linux"), false);
+  assert.equal(isNativeHostPathAbsolute("project/src", "linux"), false);
 });
 
 test("readOnlyRoots force read-only even in implementation mode", () => {
@@ -102,6 +140,9 @@ test("readOnlyRoots force read-only even in implementation mode", () => {
 test("workspace ownership guard rejects paths outside owner root", async () => {
   const owner = await mkdtemp(path.join(os.tmpdir(), "drydock-owner-"));
   assert.throws(() => assertWorkspaceInsideOwner(path.dirname(owner), owner));
+  assert.doesNotThrow(() => assertWorkspaceInsideOwner("C:\\OWNER\\workspace", "c:\\owner"));
+  assert.doesNotThrow(() => assertWorkspaceInsideOwner("\\\\server\\share\\owner\\workspace", "\\\\SERVER\\SHARE\\owner"));
+  assert.throws(() => assertWorkspaceInsideOwner("D:\\owner\\workspace", "C:\\owner"));
 });
 
 test("path keys normalize separators, trailing slashes, and case-insensitive casing", () => {
@@ -109,6 +150,15 @@ test("path keys normalize separators, trailing slashes, and case-insensitive cas
   assert.notEqual(normalizePathKey("/a/B", false), normalizePathKey("/a/b", false));
   assert.equal(isPathWithin("C:\\project\\src\\file.ts", "C:\\PROJECT", true), true);
   assert.equal(isPathWithin("C:\\project-sibling", "C:\\project", true), false);
+  // Windows and UNC paths are inherently case-insensitive even on Linux CI.
+  assert.equal(isPathWithin("C:\\PROJECT\\src", "c:\\project"), true);
+  assert.equal(isPathWithin("\\\\SERVER\\Share\\Project", "\\\\server\\share"), true);
+  assert.equal(normalizePathKey("\\\\?\\C:\\Project"), normalizePathKey("c:\\project"));
+  assert.equal(
+    normalizePathKey("\\\\?\\UNC\\Server\\Share\\Project"),
+    normalizePathKey("\\\\server\\share\\project")
+  );
+  assert.equal(isPathWithin("/project/src", "/"), true);
 });
 
 test("denied paths block mounts in both containment directions", () => {
@@ -171,6 +221,22 @@ test("defaultDeniedPaths joins the sensitive home config roots", () => {
   );
   // Each entry lives under the home dir (join, not raw concatenation).
   assert.ok(denied.every((entry) => entry.startsWith(home)));
+  assert.deepEqual(defaultDeniedPaths("C:\\Users\\alex"), [
+    "C:\\Users\\alex\\.ssh",
+    "C:\\Users\\alex\\.aws",
+    "C:\\Users\\alex\\.gnupg",
+    "C:\\Users\\alex\\.kube",
+    "C:\\Users\\alex\\.azure",
+    "C:\\Users\\alex\\.docker"
+  ]);
+  assert.deepEqual(defaultDeniedPaths("/home/alex"), [
+    "/home/alex/.ssh",
+    "/home/alex/.aws",
+    "/home/alex/.gnupg",
+    "/home/alex/.kube",
+    "/home/alex/.azure",
+    "/home/alex/.docker"
+  ]);
 });
 
 test("isSensitivePath flags credential dirs and files across separators", () => {
