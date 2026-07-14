@@ -278,7 +278,13 @@ export function restore(): AppState {
     }
   }
   state.lastIsolation = (raw["lastIsolation"] as IsolationSummary | null | undefined) ?? null;
-  state.workspacePolicy = (raw["workspacePolicy"] as WorkspacePolicyState | null | undefined) ?? null;
+  const restoredWorkspacePolicy = raw["workspacePolicy"] as WorkspacePolicyState | null | undefined;
+  if (restoredWorkspacePolicy !== undefined && restoredWorkspacePolicy !== null) {
+    // Security decisions are host-authoritative and must be fetched fresh on
+    // every webview load; never briefly trust a persisted allocation state.
+    const { security: _staleSecurity, ...policyWithoutSecurity } = restoredWorkspacePolicy;
+    state.workspacePolicy = policyWithoutSecurity;
+  }
   if (typeof raw["selectedWorkspaceSetId"] === "string") state.selectedWorkspaceSetId = raw["selectedWorkspaceSetId"];
   if (typeof raw["planTabPlanId"] === "string") state.planTabPlanId = raw["planTabPlanId"];
   // Legacy `plans`/`selectedPlanId` keys (retired Stage-5 plan gating) are

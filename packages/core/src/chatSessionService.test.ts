@@ -33,7 +33,7 @@ import {
   type StartRuntimeRequest,
   type StoredEvent
 } from "@drydock/contracts";
-import { ChatSessionService } from "./chatSessionService.js";
+import { ChatSessionService, type ChatSessionServiceOptions } from "./chatSessionService.js";
 import type { Clock } from "./clock.js";
 import { ProductEventBus, type ProductBusEvent } from "./eventBus.js";
 import type { IdGenerator } from "./ids.js";
@@ -41,6 +41,38 @@ import type { Logger } from "./logger.js";
 import type { RuntimeAdapter } from "./runtimeAdapter.js";
 import { RuntimeCleanupService } from "./runtimeCleanupService.js";
 import { RuntimeLifecycleService } from "./runtimeLifecycleService.js";
+
+test("runtime lifecycle removes a created runtime when the running inventory update fails", async () => {
+  const clock = new FixedClock();
+  const inventory = new MemoryRuntimeInventoryStore();
+  const runtime = new FakeRuntimeAdapter();
+  const lifecycle = new RuntimeLifecycleService({
+    clock,
+    inventory,
+    runtimeAdapter: runtime,
+    logger: new NullLogger()
+  });
+  const originalError = new Error("inventory running update failed");
+  inventory.failNextStatusUpdate("running", originalError);
+
+  await assert.rejects(
+    lifecycle.startRuntime({
+      sessionId: asId<"SessionId">("session-lifecycle-failure"),
+      chatId: asId<"ChatId">("chat-lifecycle-failure"),
+      agentId: asId<"AgentId">("agent-lifecycle-failure"),
+      agentRole: "worker",
+      workspacePath: "C:\\tmp\\workspace",
+      generationId: asId<"RuntimeGenerationId">("generation-lifecycle-failure"),
+      runtimeId: asId<"RuntimeId">("runtime-lifecycle-failure"),
+      template: template()
+    }),
+    (error) => error === originalError
+  );
+
+  assert.equal(runtime.removeCalls.length, 1);
+  assert.equal(runtime.removeCalls[0]?.force, true);
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-lifecycle-failure")))?.status, "removed");
+});
 
 test("chat turns append sequenced events and synthesize a terminal event", async () => {
   const harness = createHarness(new FakeAgentAdapter("no-terminal"));
@@ -275,6 +307,53 @@ test("cross-provider restart boots the requested provider's adapter and replays 
   assert.equal(afterSwitch.status, "completed");
 });
 
+test("model discovery is refused when the current allocation guard closes", async () => {
+  let blocked = false;
+  const harness = createHarness(new FakeAgentAdapter("no-terminal"), [], {
+    validateTurn: () => {
+      if (blocked) throw new Error("AI is not allocated on this machine");
+    }
+  });
+  const session = await harness.service.startSession(sessionRequest());
+  blocked = true;
+
+  await assert.rejects(harness.service.listModels(session.sessionId), /not allocated/);
+});
+
+test("a restart blocked after runtime creation force-cleans the replacement", async () => {
+  let blocked = false;
+  const harness = createHarness(new FakeAgentAdapter("no-terminal"), [], {
+    validateTurn: () => {
+      if (blocked) throw new Error("policy changed during restart");
+    }
+  });
+  const session = await harness.service.startSession(sessionRequest());
+  blocked = true;
+
+  await assert.rejects(
+    harness.service.restartSession(session.sessionId, { providerId: "codex", model: "gpt-5" }, "test"),
+    /policy changed/
+  );
+  assert.equal(harness.runtime.createRequests.length, 2);
+  assert.equal(harness.runtime.removeCalls.length, 2, "both the old and rejected replacement runtimes are removed");
+  assert.equal(harness.runtime.removeCalls[1]?.force, true);
+});
+
+test("restart refuses to create a replacement when the previous runtime cannot be removed", async () => {
+  const harness = createHarness(new FakeAgentAdapter("no-terminal"));
+  const session = await harness.service.startSession(sessionRequest());
+  harness.runtime.failRemove = true;
+
+  await assert.rejects(
+    harness.service.restartSession(session.sessionId, { providerId: "codex", model: "gpt-5" }, "test"),
+    /previous runtime could not be removed/
+  );
+
+  assert.equal(harness.runtime.createRequests.length, 1, "no replacement runtime is created");
+  assert.equal(harness.service.isSessionLive(session.sessionId), false);
+  assert.equal((await harness.service.getSession(session.sessionId))?.status, "failed");
+});
+
 test("resumeSession revives an ended session on a fresh runtime and replays context", async () => {
   const agent = new FakeAgentAdapter("no-terminal");
   const harness = createHarness(agent);
@@ -346,6 +425,45 @@ test("resumeSession leaves the session failed when the backend boot fails", asyn
   assert.equal(harness.service.isSessionLive(session.sessionId), false);
 });
 
+test("resume refuses a second runtime when the previous runtime remains quarantined", async () => {
+  const harness = createHarness(new FakeAgentAdapter("no-terminal"));
+  const session = await harness.service.startSession(sessionRequest());
+  harness.runtime.failRemove = true;
+  const ended = await harness.service.endSession(session.sessionId, "test");
+  assert.equal(ended.status, "failed");
+  let disposed = 0;
+
+  await assert.rejects(
+    harness.service.resumeSession({
+      ...resumeRequest(session.sessionId),
+      disposeWorkspace: () => {
+        disposed += 1;
+        return Promise.resolve();
+      }
+    }),
+    /previous runtime could not be removed/
+  );
+
+  assert.equal(harness.runtime.createRequests.length, 1, "no replacement runtime is created");
+  assert.equal(disposed, 1, "the unused prepared workspace is released");
+  assert.equal((await harness.service.getSession(session.sessionId))?.status, "failed");
+});
+
+test("boot cleanup stops the adapter and removes the runtime when failed status persistence throws", async () => {
+  const agent = new FakeAgentAdapter("no-terminal");
+  const harness = createHarness(agent);
+  const originalError = new Error("active status persistence failed");
+  harness.sessionStore.failNextStatusUpdate("active", originalError);
+  harness.sessionStore.failNextStatusUpdate("failed", new Error("failed status persistence failed"));
+
+  await assert.rejects(harness.service.startSession(sessionRequest()), (error) => error === originalError);
+
+  assert.equal(agent.stopCount, 1);
+  assert.equal(harness.runtime.removeCalls.length, 1);
+  assert.equal(harness.runtime.removeCalls[0]?.force, true);
+  assert.equal(harness.runtime.names.size, 0);
+});
+
 test("reconcile leaves a session with a fresh foreign heartbeat untouched (running elsewhere)", async () => {
   const harness = createHarness(new FakeAgentAdapter("no-terminal"));
   // Window A boots and owns the session; its boot heartbeat is recent.
@@ -414,6 +532,33 @@ test("reconcile adopts a stale session whose exec-transport container still runs
   assert.equal(result.status, "completed");
 });
 
+test("reconcile can refuse adoption before attaching to a surviving runtime", async () => {
+  const claude = new FakeAgentAdapter("no-terminal", "claude");
+  const harness = createHarness(claude);
+  const session = await harness.service.startSession(execSessionRequest());
+  const startProtocolBefore = claude.startProtocolCount;
+  const survivingName = [...harness.runtime.names][0];
+  assert.ok(survivingName !== undefined);
+  let checkedRuntime = "";
+
+  const sibling = harness.spawnSibling({
+    hostInstanceId: "host-b",
+    heartbeatStaleMs: 1,
+    validateRuntimeAdoption: (_candidate, runtime) => {
+      checkedRuntime = runtime.externalName;
+      throw new Error("managed runtimes must start fresh");
+    }
+  });
+  const counts = await sibling.reconcileSessions(new Set([survivingName]));
+
+  assert.deepEqual(counts, { ended: 1, adopted: 0, elsewhere: 0 });
+  assert.equal(checkedRuntime, survivingName);
+  assert.equal(claude.startProtocolCount, startProtocolBefore, "the protocol must not attach");
+  assert.equal(sibling.isSessionLive(session.sessionId), false);
+  assert.equal((await harness.sessionStore.getSession(session.sessionId))?.status, "ended");
+  assert.equal(harness.runtime.removedNames.size, 1);
+});
+
 test("reconcile ends a stale app-server session even when its container is alive (non-adoptable)", async () => {
   const harness = createHarness(new FakeAgentAdapter("no-terminal"));
   // sessionRequest uses codex-app-server, whose live process cannot be reattached.
@@ -474,6 +619,30 @@ test("beatOnce stamps a fresh heartbeat for every live session", async () => {
   assert.ok(after! > before!, "heartbeat should advance");
 });
 
+test("deallocation ends fresh foreign sessions and heartbeat revocation ends local sessions", async () => {
+  const first = createHarness(new FakeAgentAdapter("no-terminal"));
+  const foreignSession = await first.service.startSession(sessionRequest());
+  const sibling = first.spawnSibling({ hostInstanceId: "host-b" });
+
+  assert.equal(await sibling.endAllSessionsForDeallocation(), 1);
+  assert.equal((await first.sessionStore.getSession(foreignSession.sessionId))?.status, "ended");
+  assert.equal(first.runtime.removeCalls.length, 1);
+
+  let revoked = false;
+  const second = createHarness(new FakeAgentAdapter("no-terminal"), [], {
+    validateTurn: () => {
+      if (revoked) throw new Error("allocation revoked");
+    }
+  });
+  const localSession = await second.service.startSession(sessionRequest());
+  revoked = true;
+  await second.service.beatOnce();
+
+  assert.equal(second.service.isSessionLive(localSession.sessionId), false);
+  assert.equal((await second.sessionStore.getSession(localSession.sessionId))?.status, "ended");
+  assert.equal(second.runtime.removeCalls.length, 1);
+});
+
 function resumeRequest(sessionId: SessionId) {
   return {
     sessionId,
@@ -500,13 +669,21 @@ interface Harness {
    * starts with an empty in-memory live map. This is the harness for
    * multi-window reconcile/adoption tests.
    */
-  spawnSibling(options?: { readonly hostInstanceId?: string; readonly heartbeatStaleMs?: number }): ChatSessionService;
+  spawnSibling(options?: {
+    readonly hostInstanceId?: string;
+    readonly heartbeatStaleMs?: number;
+    readonly validateRuntimeAdoption?: ChatSessionServiceOptions["validateRuntimeAdoption"];
+  }): ChatSessionService;
 }
 
 function createHarness(
   agentAdapter: FakeAgentAdapter,
   extraAdapters: readonly FakeAgentAdapter[] = [],
-  overrides: { readonly hostInstanceId?: string; readonly heartbeatStaleMs?: number } = {}
+  overrides: {
+    readonly hostInstanceId?: string;
+    readonly heartbeatStaleMs?: number;
+    readonly validateTurn?: ChatSessionServiceOptions["validateTurn"];
+  } = {}
 ): Harness {
   const ids = new FixedIds();
   const clock = new FixedClock();
@@ -525,7 +702,11 @@ function createHarness(
     adapters.set(adapter.providerId, adapter as AgentAdapter);
   }
   const hostInstanceId = overrides.hostInstanceId ?? "host-this";
-  const build = (opts: { readonly hostInstanceId: string; readonly heartbeatStaleMs?: number }): ChatSessionService =>
+  const build = (opts: {
+    readonly hostInstanceId: string;
+    readonly heartbeatStaleMs?: number;
+    readonly validateRuntimeAdoption?: ChatSessionServiceOptions["validateRuntimeAdoption"];
+  }): ChatSessionService =>
     new ChatSessionService({
       ids,
       clock,
@@ -538,13 +719,20 @@ function createHarness(
       inventory,
       bus,
       hostInstanceId: opts.hostInstanceId,
-      ...(opts.heartbeatStaleMs === undefined ? {} : { heartbeatStaleMs: opts.heartbeatStaleMs })
+      ...(overrides.validateTurn === undefined ? {} : { validateTurn: overrides.validateTurn }),
+      ...(opts.heartbeatStaleMs === undefined ? {} : { heartbeatStaleMs: opts.heartbeatStaleMs }),
+      ...(opts.validateRuntimeAdoption === undefined ? {} : { validateRuntimeAdoption: opts.validateRuntimeAdoption })
     });
   const service = build({ hostInstanceId, ...(overrides.heartbeatStaleMs === undefined ? {} : { heartbeatStaleMs: overrides.heartbeatStaleMs }) });
-  const spawnSibling = (options: { readonly hostInstanceId?: string; readonly heartbeatStaleMs?: number } = {}): ChatSessionService =>
+  const spawnSibling = (options: {
+    readonly hostInstanceId?: string;
+    readonly heartbeatStaleMs?: number;
+    readonly validateRuntimeAdoption?: ChatSessionServiceOptions["validateRuntimeAdoption"];
+  } = {}): ChatSessionService =>
     build({
       hostInstanceId: options.hostInstanceId ?? "host-sibling",
-      ...(options.heartbeatStaleMs === undefined ? {} : { heartbeatStaleMs: options.heartbeatStaleMs })
+      ...(options.heartbeatStaleMs === undefined ? {} : { heartbeatStaleMs: options.heartbeatStaleMs }),
+      ...(options.validateRuntimeAdoption === undefined ? {} : { validateRuntimeAdoption: options.validateRuntimeAdoption })
     });
   return { service, bus, runtime, inventory, sessionStore, eventStore, clock, hostInstanceId, spawnSibling };
 }
@@ -591,6 +779,7 @@ class FakeAgentAdapter implements AgentAdapter {
   /** History replayed into this adapter via restoreContext, per invocation. */
   readonly restoredContexts: (readonly AgentContextMessage[])[] = [];
   startProtocolCount = 0;
+  stopCount = 0;
   private streamStartedResolve: (() => void) | undefined;
   private cancelResolve: (() => void) | undefined;
   private readonly streamStarted = new Promise<void>((resolve) => {
@@ -678,6 +867,7 @@ class FakeAgentAdapter implements AgentAdapter {
   }
 
   stop(_connection: AgentConnection, _reason: string): Promise<void> {
+    this.stopCount += 1;
     return Promise.resolve();
   }
 
@@ -700,7 +890,9 @@ class FakeRuntimeAdapter implements RuntimeAdapter {
   readonly adapter = "docker-sandbox" as const;
   readonly names = new Set<string>();
   readonly removedNames = new Set<string>();
+  readonly removeCalls: Array<{ readonly externalName: string; readonly force: boolean }> = [];
   readonly createRequests: StartRuntimeRequest[] = [];
+  failRemove = false;
 
   createRuntime(request: StartRuntimeRequest, externalName: string): Promise<RuntimeHandle> {
     this.createRequests.push(request);
@@ -722,7 +914,9 @@ class FakeRuntimeAdapter implements RuntimeAdapter {
     return Promise.resolve(commandResult(0));
   }
 
-  removeRuntime(handle: RuntimeHandle, _force: boolean): Promise<CommandResult> {
+  removeRuntime(handle: RuntimeHandle, force: boolean): Promise<CommandResult> {
+    this.removeCalls.push({ externalName: handle.externalName, force });
+    if (this.failRemove) return Promise.resolve(commandResult(1));
     this.names.delete(handle.externalName);
     this.removedNames.add(handle.externalName);
     return Promise.resolve(commandResult(0));
@@ -735,6 +929,11 @@ class FakeRuntimeAdapter implements RuntimeAdapter {
 
 class MemoryChatSessionStore implements ChatSessionStore {
   private readonly sessions = new Map<SessionId, ChatSessionRecord>();
+  private readonly statusUpdateFailures = new Map<NonNullable<ChatSessionUpdate["status"]>, Error>();
+
+  failNextStatusUpdate(status: NonNullable<ChatSessionUpdate["status"]>, error: Error): void {
+    this.statusUpdateFailures.set(status, error);
+  }
 
   insertSession(record: ChatSessionRecord): Promise<void> {
     this.sessions.set(record.sessionId, record);
@@ -742,6 +941,13 @@ class MemoryChatSessionStore implements ChatSessionStore {
   }
 
   updateSession(sessionId: SessionId, update: ChatSessionUpdate): Promise<void> {
+    if (update.status !== undefined) {
+      const failure = this.statusUpdateFailures.get(update.status);
+      if (failure !== undefined) {
+        this.statusUpdateFailures.delete(update.status);
+        return Promise.reject(failure);
+      }
+    }
     const current = this.sessions.get(sessionId);
     if (current === undefined) return Promise.resolve();
     const next: ChatSessionRecord = {
@@ -832,6 +1038,11 @@ class MemoryEventStore implements EventStore {
 
 class MemoryRuntimeInventoryStore implements RuntimeInventoryStore {
   private readonly runtimes = new Map<string, RuntimeInventoryRecord>();
+  private statusUpdateFailure: { readonly status: RuntimeStatus; readonly error: Error } | undefined;
+
+  failNextStatusUpdate(status: RuntimeStatus, error: Error): void {
+    this.statusUpdateFailure = { status, error };
+  }
 
   insertRuntime(record: RuntimeInventoryRecord): Promise<void> {
     this.runtimes.set(record.runtimeId, record);
@@ -839,6 +1050,11 @@ class MemoryRuntimeInventoryStore implements RuntimeInventoryStore {
   }
 
   updateRuntimeStatus(runtimeId: RuntimeInventoryRecord["runtimeId"], status: RuntimeStatus, timestamp: string): Promise<void> {
+    if (this.statusUpdateFailure?.status === status) {
+      const { error } = this.statusUpdateFailure;
+      this.statusUpdateFailure = undefined;
+      return Promise.reject(error);
+    }
     const current = this.runtimes.get(runtimeId);
     if (current === undefined) return Promise.resolve();
     this.runtimes.set(runtimeId, {

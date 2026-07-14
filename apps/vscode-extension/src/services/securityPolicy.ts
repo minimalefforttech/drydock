@@ -7,6 +7,7 @@
  * select a project, widen access, or start networked AI.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { assertMountAllowed, isPathWithin, normalizePathKey, pathMatchesCloneOmission, type ClonePathOmission } from "@drydock/core";
@@ -47,11 +48,16 @@ export interface LoadSecurityPolicyOptions {
   readonly user: UserSecurityPreferences;
   /** Tests and administrative tooling may supply the same fixed path explicitly. */
   readonly studioPolicyPath?: string;
+  /** Once managed mode has been observed, a missing policy must not downgrade access. */
+  readonly requireStudioPolicy?: boolean;
+  /** Optional administrator-owned marker that makes the fixed policy mandatory. */
+  readonly studioPolicyRequiredPath?: string;
 }
 
 export class EffectiveSecurityPolicy {
   readonly managed: boolean;
   readonly policyId?: string;
+  readonly policyFingerprint?: string;
   /** Undefined means unrestricted; an empty array intentionally permits none. */
   readonly allowedProjectRoots?: readonly string[];
   readonly deniedPaths: readonly string[];
@@ -62,6 +68,9 @@ export class EffectiveSecurityPolicy {
   constructor(input: {
     readonly managed: boolean;
     readonly policyId?: string;
+    readonly policyFingerprint?: string;
+    readonly studioPolicyPath?: string;
+    readonly studioPolicyRequiredPath?: string;
     readonly allowedProjectRoots?: readonly string[];
     readonly deniedPaths: readonly string[];
     readonly cloneOnly: boolean;
@@ -70,15 +79,43 @@ export class EffectiveSecurityPolicy {
   }) {
     this.managed = input.managed;
     if (input.policyId !== undefined) this.policyId = input.policyId;
+    if (input.policyFingerprint !== undefined) this.policyFingerprint = input.policyFingerprint;
     if (input.allowedProjectRoots !== undefined) this.allowedProjectRoots = input.allowedProjectRoots;
     this.deniedPaths = input.deniedPaths;
     this.cloneOnly = input.cloneOnly;
     this.allowNetworkedAiOnThisMachine = input.allowNetworkedAiOnThisMachine;
     this.cloneOmission = input.cloneOmission;
+    if (input.studioPolicyPath !== undefined) this.studioPolicyPath = input.studioPolicyPath;
+    if (input.studioPolicyRequiredPath !== undefined) this.studioPolicyRequiredPath = input.studioPolicyRequiredPath;
+  }
+
+  private readonly studioPolicyPath?: string;
+  private readonly studioPolicyRequiredPath?: string;
+
+  /** Fails closed if administrator policy changed after this snapshot was loaded. */
+  assertPolicyCurrent(): void {
+    // Direct construction remains available to unit tests and embedders. Only
+    // policies loaded from the fixed boundary carry freshness paths.
+    if (this.studioPolicyPath === undefined || this.studioPolicyRequiredPath === undefined) return;
+    const policyExists = existsSync(this.studioPolicyPath);
+    const policyRequired = existsSync(this.studioPolicyRequiredPath);
+    if (policyExists !== this.managed || (!this.managed && policyRequired)) {
+      throw stalePolicyError();
+    }
+    if (this.managed) {
+      try {
+        const currentFingerprint = fingerprint(readFileSync(this.studioPolicyPath));
+        if (currentFingerprint !== this.policyFingerprint) throw stalePolicyError();
+      } catch (error) {
+        if (isStalePolicyError(error)) throw error;
+        throw stalePolicyError();
+      }
+    }
   }
 
   /** Canonicalizes and validates an existing host directory at the final host boundary. */
   assertHostPathAllowed(candidate: string): string {
+    this.assertPolicyCurrent();
     const canonical = canonicalExistingDirectory(candidate, "Project/access path");
     this.assertCanonicalHostPathAllowed(canonical);
     return canonical;
@@ -86,6 +123,7 @@ export class EffectiveSecurityPolicy {
 
   /** Resolves an existing file target before allowing host-side AI prompt input. */
   assertHostFileAllowed(candidate: string): string {
+    this.assertPolicyCurrent();
     const canonical = canonicalExistingFile(candidate, "AI input file");
     this.assertCanonicalHostPathAllowed(canonical);
     return canonical;
@@ -111,6 +149,7 @@ export class EffectiveSecurityPolicy {
   }
 
   assertNetworkedAiAllowed(): void {
+    this.assertPolicyCurrent();
     if (!this.allowNetworkedAiOnThisMachine) {
       throw new Error("Networked AI is disabled on this machine by the effective security policy. Use a studio-allocated AI workstation.");
     }
@@ -138,7 +177,12 @@ export class EffectiveSecurityPolicy {
 /** Loads the fixed studio policy if present, then intersects it with personal restrictions. */
 export function loadEffectiveSecurityPolicy(options: LoadSecurityPolicyOptions): EffectiveSecurityPolicy {
   const studioPath = options.studioPolicyPath ?? defaultStudioPolicyPath();
-  const studio = existsSync(studioPath) ? readStudioPolicy(studioPath) : undefined;
+  const requiredPath = options.studioPolicyRequiredPath ?? defaultStudioPolicyRequiredPath();
+  const studioResult = existsSync(studioPath) ? readStudioPolicy(studioPath) : undefined;
+  if (studioResult === undefined && (options.requireStudioPolicy === true || existsSync(requiredPath))) {
+    throw new Error(`The managed security policy is required but missing from ${studioPath}. Restore it and reload the window.`);
+  }
+  const studio = studioResult?.document;
   const userAllowed = normalizeAllowedRoots(options.user.allowedProjectRoots, "drydock.security.allowedProjectRoots");
   const studioAllowed = studio?.allowedProjectRoots === undefined
     ? undefined
@@ -164,6 +208,9 @@ export function loadEffectiveSecurityPolicy(options: LoadSecurityPolicyOptions):
   return new EffectiveSecurityPolicy({
     managed: studio !== undefined,
     ...(studio === undefined ? {} : { policyId: studio.policyId }),
+    ...(studioResult === undefined ? {} : { policyFingerprint: studioResult.fingerprint }),
+    studioPolicyPath: studioPath,
+    studioPolicyRequiredPath: requiredPath,
     ...(allowedProjectRoots === undefined ? {} : { allowedProjectRoots }),
     deniedPaths: dedupeHostPaths([
       ...options.baseDeniedPaths,
@@ -187,6 +234,14 @@ export function defaultStudioPolicyPath(
     return "/Library/Application Support/Drydock/policy.json";
   }
   return "/etc/drydock/policy.json";
+}
+
+export function defaultStudioPolicyRequiredPath(
+  platform: NodeJS.Platform = process.platform
+): string {
+  if (platform === "win32") return "C:\\ProgramData\\Drydock\\policy.required";
+  if (platform === "darwin") return "/Library/Application Support/Drydock/policy.required";
+  return "/etc/drydock/policy.required";
 }
 
 /** Only permitted, non-omitted repositories may contribute AI-bound overlays. */
@@ -228,10 +283,15 @@ export function blocksGlobalMemoryBriefing(policy: EffectiveSecurityPolicy | und
   );
 }
 
-function readStudioPolicy(policyPath: string): StudioSecurityPolicyDocument {
+function readStudioPolicy(policyPath: string): {
+  readonly document: StudioSecurityPolicyDocument;
+  readonly fingerprint: string;
+} {
+  let raw: Buffer;
   let value: unknown;
   try {
-    value = JSON.parse(readFileSync(policyPath, "utf8"));
+    raw = readFileSync(policyPath);
+    value = JSON.parse(raw.toString("utf8"));
   } catch (error) {
     throw new Error(`Studio security policy ${policyPath} is unreadable or invalid JSON: ${errorMessage(error)}`);
   }
@@ -264,7 +324,24 @@ function readStudioPolicy(policyPath: string): StudioSecurityPolicyDocument {
       throw new Error(`Studio security policy ${policyPath}: ${field} must be a boolean.`);
     }
   }
-  return value as unknown as StudioSecurityPolicyDocument;
+  return {
+    document: value as unknown as StudioSecurityPolicyDocument,
+    fingerprint: fingerprint(raw)
+  };
+}
+
+const STALE_POLICY_MESSAGE = "The managed security policy changed after startup. Reload the window before continuing.";
+
+function fingerprint(value: NodeJS.ArrayBufferView): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function stalePolicyError(): Error {
+  return new Error(STALE_POLICY_MESSAGE);
+}
+
+function isStalePolicyError(error: unknown): boolean {
+  return error instanceof Error && error.message === STALE_POLICY_MESSAGE;
 }
 
 function normalizeAllowedRoots(values: readonly string[], source: string, preserveEmpty = false): readonly string[] | undefined {

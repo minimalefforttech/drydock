@@ -2259,10 +2259,13 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   }
 
   function renderWorkspaceSets(): void {
-    securityPolicySummary.textContent = state.workspacePolicy?.security?.label ?? "Personal project access";
-    securityPolicySummary.title = state.workspacePolicy?.security?.managed === true
-      ? "Studio restrictions are host-enforced and cannot be widened here."
-      : "These settings restrict what AI can access; they do not restrict your editor.";
+    const security = state.workspacePolicy?.security;
+    securityPolicySummary.textContent = security?.label ?? "Loading project access policy…";
+    securityPolicySummary.title = security === undefined
+      ? "Waiting for the host-enforced project access policy."
+      : security.managed
+        ? "Administrator restrictions are host-enforced and cannot be widened here."
+        : "These settings restrict what AI can access; they do not restrict your editor.";
     const previousSet = workspaceSetSelect.value || state.selectedWorkspaceSetId;
     workspaceSetSelect.replaceChildren();
     workspaceSetSelect.append(option("", "— no workspace set —"));

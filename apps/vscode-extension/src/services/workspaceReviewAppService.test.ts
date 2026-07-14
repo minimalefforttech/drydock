@@ -158,6 +158,38 @@ test("effective policy filters auto roots and silently tightens the mode to clon
   }
 });
 
+test("project paths are checked before the catalog is mutated", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-project-path-policy-"));
+  try {
+    const allowed = path.join(root, "allowed");
+    const blocked = path.join(root, "blocked");
+    await Promise.all([mkdir(allowed, { recursive: true }), mkdir(blocked, { recursive: true })]);
+    let updated = false;
+    const service = new WorkspaceReviewAppService({
+      projectCatalog: {
+        updateProjectPath: () => {
+          updated = true;
+          return Promise.resolve();
+        }
+      },
+      securityPolicy: new EffectiveSecurityPolicy({
+        managed: true,
+        policyId: "test",
+        allowedProjectRoots: [allowed],
+        deniedPaths: [],
+        cloneOnly: true,
+        allowNetworkedAiOnThisMachine: true,
+        cloneOmission: { sensitive: false, paths: [] }
+      })
+    } as unknown as WorkspaceReviewAppServiceOptions);
+
+    await assert.rejects(service.updateProjectPath("project-1", blocked), /outside the configured project allowlist/);
+    assert.equal(updated, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // MARK: Diff views (session / turn / full-session)
 
 const SESSION = "session-diff-1";

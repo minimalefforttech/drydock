@@ -64,7 +64,10 @@ export class TempWorkspaceStore {
    * token file; the age floor keeps concurrently active windows safe.
    * Returns the number of roots removed.
    */
-  async sweepOwnedWorkspaces(olderThanMs: number = 24 * 60 * 60 * 1000): Promise<number> {
+  async sweepOwnedWorkspaces(
+    olderThanMs: number = 24 * 60 * 60 * 1000,
+    protectedWorkspacePaths: readonly string[] = []
+  ): Promise<number> {
     let entries;
     try {
       entries = await readdir(this.ownerRoot, { withFileTypes: true });
@@ -73,10 +76,16 @@ export class TempWorkspaceStore {
     }
     let removed = 0;
     const now = Date.now();
+    const protectedPaths = protectedWorkspacePaths.map((candidate) => path.resolve(candidate));
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const root = path.join(this.ownerRoot, entry.name);
       try {
+        const resolvedRoot = path.resolve(root);
+        if (protectedPaths.some((candidate) => {
+          const relative = path.relative(resolvedRoot, candidate);
+          return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+        })) continue;
         const ownerStat = await stat(path.join(root, ".drydock-owner"));
         const rootStat = await stat(root);
         const newestMs = Math.max(ownerStat.mtimeMs, rootStat.mtimeMs);

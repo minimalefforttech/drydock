@@ -223,7 +223,9 @@ export class IsolatedRunService {
     this.assertWorkspaceRootAllowed(localRepoPath);
     const git = await this.options.cloneSync.detectGit();
     if (!git.available) {
-      throw new Error("Clone mode requires git on the host PATH, but `git --version` failed. Install git (or fix PATH) and reload the window.");
+      throw new Error(this.options.securityPolicy?.managed === true
+        ? "Clone mode requires an approved Git installation. Ask your administrator to install Git in the standard machine location, then reload the window."
+        : "Clone mode requires git on the host PATH, but `git --version` failed. Install git (or fix PATH) and reload the window.");
     }
     return this.options.cloneSync.preflightRepo(localRepoPath);
   }
@@ -269,6 +271,7 @@ export class IsolatedRunService {
           generationId: this.options.ids.runtimeGenerationId(),
           runtimeId: this.options.ids.runtimeId()
         });
+        this.options.securityPolicy?.assertNetworkedAiAllowed();
         const probe = await this.options.prober.probe(runtime, "Reply exactly app-server-ok.");
         const cleanupDiagnostics = await this.cleanupProbe(runtime, prepared.workspace);
         return { probe, cleanupDiagnostics };
@@ -414,8 +417,13 @@ export class IsolatedRunService {
     return this.options.cleanup.cleanupRuntime(asId<"RuntimeId">(runtimeId), mode);
   }
 
-  sweepTempWorkspaces(): Promise<number> {
-    return this.options.workspaceStore.sweepOwnedWorkspaces();
+  async sweepTempWorkspaces(): Promise<number> {
+    const runtimes = await this.options.inventory.listRuntimes();
+    const protectedPaths = runtimes
+      .filter((runtime) => runtime.status !== "removed" && runtime.status !== "lost")
+      .map((runtime) => runtime.metadata["workspacePath"])
+      .filter((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+    return this.options.workspaceStore.sweepOwnedWorkspaces(undefined, protectedPaths);
   }
 
   // -------------------------------------------------------------------------
@@ -497,6 +505,7 @@ export class IsolatedRunService {
     const workspace = await this.options.workspaceStore.createWorkspace("role");
     const template: RuntimeTemplate = { ...snapshot.template, mounts: childMounts };
     const mode: SessionMode = readOnlyRole ? "plan" : "implementation";
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
     const session = await this.options.chatService.startSession({
       template,
       workspacePath: workspace.workspacePath,
@@ -524,6 +533,7 @@ export class IsolatedRunService {
     const normalizedModel = model === undefined ? undefined : this.normalizeModelSelection(model);
     this.assertSupportedModelSelection(normalizedModel);
     const briefedPrompt = await this.applySessionBriefing(sessionId, prompt);
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
     return this.options.chatService.sendTurn(asId<"SessionId">(sessionId), briefedPrompt, normalizedModel === undefined ? undefined : { model: normalizedModel });
   }
 
@@ -591,6 +601,9 @@ export class IsolatedRunService {
     model?: ChatModelSelection,
     additionalRoots?: { readonly roots: readonly string[]; readonly readOnlyRoots: readonly string[] }
   ): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
+    const stored = await this.options.chatService.getSession(asId<"SessionId">(sessionId));
+    if (stored === null) throw new Error(`Session ${sessionId} was not found.`);
+    this.assertStoredSessionAllowed(stored, additionalRoots);
     await this.options.chatService.claimOwnership(asId<"SessionId">(sessionId));
     // force: a reclaimed session is usually still `active` (running in the other
     // window / a dead prior instance), which a plain resume refuses.
@@ -619,13 +632,7 @@ export class IsolatedRunService {
     if (stored === null) {
       throw new Error(`Session ${sessionId} was not found.`);
     }
-    if (
-      this.options.securityPolicy?.cloneOnly === true
-      && stored.mode !== "clone"
-      && (stored.workspaceRoots?.length ?? 0) > 0
-    ) {
-      throw new Error("This older session used live project mounts and cannot be resumed under clone-only policy. Start a new chat; its project context will be cloned automatically.");
-    }
+    this.assertStoredSessionAllowed(stored, additionalRoots);
     // Default the model to what the session last ran under; normalize + assert
     // exactly as the start path does.
     const requestedModel = model ?? {
@@ -688,6 +695,7 @@ export class IsolatedRunService {
   async cloneState(sessionId: string): Promise<CloneRepoState[]> {
     const clones = this.requireSessionClones(sessionId);
     this.assertNoActiveTurnForSync(sessionId);
+    this.assertCloneHostAccess(clones);
     const repos: CloneRepoState[] = [];
     for (const clone of clones) {
       const files = await this.options.cloneSync.agentChanges(clone.clonePath);
@@ -705,6 +713,7 @@ export class IsolatedRunService {
   async clonePull(sessionId: string, repo?: string, filePath?: string): Promise<CloneSyncResult> {
     const clones = this.requireSessionClones(sessionId);
     this.assertNoActiveTurnForSync(sessionId);
+    this.assertCloneHostAccess(clones);
     if (repo === undefined) {
       return this.aggregateInbound(clones);
     }
@@ -729,6 +738,7 @@ export class IsolatedRunService {
     const clones = this.sessionClones.get(sessionId);
     if (clones === undefined || clones.length === 0) return null;
     this.assertNoActiveTurnForSync(sessionId);
+    this.assertCloneHostAccess(clones);
     const patches: { repoName: string; patch: string; fileCount: number; paths: readonly string[] }[] = [];
     for (const clone of clones) {
       const result = await this.options.cloneSync.outboundChangesetPatch(clone.clonePath, clone.omission);
@@ -743,6 +753,7 @@ export class IsolatedRunService {
   async clonePush(sessionId: string): Promise<CloneSyncResult> {
     const clones = this.requireSessionClones(sessionId);
     this.assertNoActiveTurnForSync(sessionId);
+    this.assertCloneHostAccess(clones);
     return this.aggregateOutbound(clones);
   }
 
@@ -750,6 +761,7 @@ export class IsolatedRunService {
   async cloneDiscard(sessionId: string, repo: string, filePath: string): Promise<void> {
     const clones = this.requireSessionClones(sessionId);
     this.assertNoActiveTurnForSync(sessionId);
+    this.assertCloneHostAccess(clones);
     const target = this.requireCloneRepo(clones, repo);
     await this.options.cloneSync.discardFile(target.clonePath, filePath);
   }
@@ -791,6 +803,11 @@ export class IsolatedRunService {
       throw new Error(`Clone repo "${repo}" is not part of this session.`);
     }
     return target;
+  }
+
+  private assertCloneHostAccess(clones: readonly SessionCloneRepo[]): void {
+    this.options.securityPolicy?.assertPolicyCurrent();
+    for (const clone of clones) this.assertWorkspaceRootAllowed(clone.localRepoPath);
   }
 
   /** Sync ops are refused mid-turn: the agent may be writing the clone concurrently. */
@@ -845,6 +862,7 @@ export class IsolatedRunService {
 
   /** Display command plus spawnable pieces for signing a provider in. */
   loginCommand(providerId: string): { readonly command: string; readonly args: readonly string[]; readonly display: string } {
+    this.assertInteractiveSetupAllowed("Provider sign-in");
     if (this.options.sbxPath === undefined) {
       throw new Error(`No login flow is available for provider ${providerId}.`);
     }
@@ -864,6 +882,26 @@ export class IsolatedRunService {
     }
     const args = ["secret", "set", "-g", service, "--oauth"];
     return { command: this.options.sbxPath, args, display: `sbx ${args.join(" ")}` };
+  }
+
+  /** Final host guard for OAuth and other interactive network setup. */
+  assertInteractiveSetupAllowed(action: string): void {
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
+    if (this.options.securityPolicy?.managed === true) {
+      throw new Error(
+        `${action} is disabled in managed mode. Ask your administrator to pre-provision access for this workstation.`
+      );
+    }
+  }
+
+  /** Managed runtimes must be operated through the bounded product controls. */
+  assertRuntimeTerminalAllowed(): void {
+    this.options.securityPolicy?.assertPolicyCurrent();
+    if (this.options.securityPolicy?.managed === true) {
+      throw new Error(
+        "Runtime terminal access is disabled in managed mode. Use the chat controls, or ask your administrator for an approved troubleshooting workflow."
+      );
+    }
   }
 
   /**
@@ -898,6 +936,7 @@ export class IsolatedRunService {
   }
 
   private loginHint(providerId: string): string {
+    if (this.options.securityPolicy?.managed === true) return "";
     // Claude signs in from inside a sandbox; Codex/OpenAI via the secret OAuth flow.
     if (providerId === CLAUDE_PROVIDER_ID) return "sbx run claude (then /login)";
     const service = PROVIDER_SBX_SERVICES[providerId];
@@ -912,6 +951,7 @@ export class IsolatedRunService {
    * richer catalog fetched from a live sandbox is never overwritten.
    */
   async refreshHostProviderCatalogs(): Promise<readonly AgentModelCatalog[]> {
+    this.options.securityPolicy?.assertPolicyCurrent();
     if (this.options.securityPolicy?.allowNetworkedAiOnThisMachine === false) {
       return this.listChatProviderCatalogs();
     }
@@ -919,6 +959,7 @@ export class IsolatedRunService {
     if (now - this.hostCatalogRefreshedAt >= HOST_CATALOG_TTL_MS) {
       this.hostCatalogRefreshedAt = now;
       await this.refreshProviderAuthStatuses();
+      this.options.securityPolicy?.assertNetworkedAiAllowed();
       const existing = this.providerCatalogs.get(CODEX_PROVIDER_ID);
       if (existing === undefined || existing.source === "fallback") {
         const hostCatalog = await this.fetchCodexCatalogFromHost();
@@ -936,6 +977,7 @@ export class IsolatedRunService {
         const catalog = await fetchCodexHostModelCatalog({
           codexPath: this.options.hostCodexPath,
           cwd: process.cwd(),
+          ...(this.options.environment === undefined ? {} : { environment: this.options.environment }),
           isoNow: () => this.options.clock.isoNow()
         });
         if (catalog.models.length > 0) {
@@ -1033,12 +1075,15 @@ export class IsolatedRunService {
    * live in this window; the caller surfaces the error otherwise.
    */
   async generateChatSummary(sessionId: string): Promise<string> {
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
     const log = await this.buildChatLogExport(sessionId);
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
     return this.options.chatService.runSidecarPrompt(asId<"SessionId">(sessionId), buildSummaryPrompt(log));
   }
 
   private async refreshModelsForSession(sessionId: SessionId): Promise<void> {
     try {
+      this.options.securityPolicy?.assertNetworkedAiAllowed();
       const catalog = await this.options.chatService.listModels(sessionId);
       this.providerCatalogs.set(catalog.providerId, {
         ...catalog,
@@ -1088,7 +1133,7 @@ export class IsolatedRunService {
       // workspace itself, which now contains the clones. That is the design.
       const clones = effectiveContext?.mode === "clone"
         ? await this.prepareClones(
-            workspace.workspacePath,
+            workspace,
             effectiveContext.roots,
             effectiveContext.dirtyHandling ?? "carry",
             effectiveContext.seedPatches ?? [],
@@ -1107,6 +1152,7 @@ export class IsolatedRunService {
         }),
         ...(this.options.deniedPaths === undefined ? {} : { deniedPaths: this.options.deniedPaths })
       }));
+      this.options.securityPolicy?.assertNetworkedAiAllowed();
       return {
         workspace,
         template,
@@ -1129,7 +1175,7 @@ export class IsolatedRunService {
    * list the caller stashes per session id.
    */
   private async prepareClones(
-    workspacePath: string,
+    workspace: TempWorkspace,
     roots: readonly string[],
     dirtyHandling: "carry" | "fresh",
     seedPatches: readonly WorkspaceSeedPatch[] = [],
@@ -1137,9 +1183,12 @@ export class IsolatedRunService {
   ): Promise<SessionCloneRepo[]> {
     const git = await this.options.cloneSync.detectGit();
     if (!git.available) {
-      throw new Error("Clone mode requires git on the host PATH, but `git --version` failed. Install git (or fix PATH) and reload the window.");
+      throw new Error(this.options.securityPolicy?.managed === true
+        ? "Clone mode requires an approved Git installation. Ask your administrator to install Git in the standard machine location, then reload the window."
+        : "Clone mode requires git on the host PATH, but `git --version` failed. Install git (or fix PATH) and reload the window.");
     }
-    const cloneParentDir = path.join(workspacePath, "repos");
+    const cloneParentDir = path.join(workspace.workspacePath, "repos");
+    const gitMetadataParentDir = path.join(workspace.root, "git");
     const clones: SessionCloneRepo[] = [];
     const usedNames = new Set<string>();
     for (const root of roots) {
@@ -1166,8 +1215,9 @@ export class IsolatedRunService {
         .filter((seed) => seed.repoName === name)
         .map((seed) => ({ label: seed.label, patch: seed.patch }));
       const result = await this.options.cloneSync.initClone({
-        localRepoPath: root,
+        localRepoPath: preflight.localRepoPath,
         cloneParentDir,
+        gitMetadataParentDir,
         name,
         dirtyHandling,
         ...(omission === undefined ? {} : { omission }),
@@ -1176,7 +1226,7 @@ export class IsolatedRunService {
       clones.push({
         name,
         clonePath: result.clonePath,
-        localRepoPath: root,
+        localRepoPath: preflight.localRepoPath,
         branch: result.branch,
         ...(omission === undefined ? {} : { omission })
       });
@@ -1198,6 +1248,27 @@ export class IsolatedRunService {
       roots,
       ...(readOnlyRoots === undefined ? {} : { readOnlyRoots })
     };
+  }
+
+  private assertStoredSessionAllowed(
+    session: ChatSessionRecord,
+    additionalRoots?: { readonly roots: readonly string[]; readonly readOnlyRoots: readonly string[] }
+  ): void {
+    this.options.securityPolicy?.assertNetworkedAiAllowed();
+    if (
+      this.options.securityPolicy?.cloneOnly === true
+      && session.mode !== "clone"
+      && (session.workspaceRoots?.length ?? 0) > 0
+    ) {
+      throw new Error("This older session used live project mounts and cannot be resumed under clone-only policy. Start a new chat; its project context will be cloned automatically.");
+    }
+    for (const root of [
+      ...(session.workspaceRoots ?? []),
+      ...(additionalRoots?.roots ?? []),
+      ...(additionalRoots?.readOnlyRoots ?? [])
+    ]) {
+      this.assertWorkspaceRootAllowed(root);
+    }
   }
 
   private assertWorkspaceRootAllowed(root: string): string {

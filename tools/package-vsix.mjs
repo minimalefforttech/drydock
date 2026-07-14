@@ -152,11 +152,9 @@ function assertPackagedFiles(stdout) {
       throw new Error(`VSIX is missing expected entry: ${entry}`);
     }
   }
-  const unexpectedExtensionEntries = entries.filter((entry) => (
-    entry.startsWith("extension/") && !required.has(entry)
-  ));
-  if (unexpectedExtensionEntries.length > 0) {
-    throw new Error(`VSIX has unexpected extension files: ${unexpectedExtensionEntries.join(", ")}`);
+  const unexpectedEntries = entries.filter((entry) => !required.has(entry));
+  if (unexpectedEntries.length > 0) {
+    throw new Error(`VSIX has unexpected files: ${unexpectedEntries.join(", ")}`);
   }
 }
 

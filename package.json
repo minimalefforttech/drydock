@@ -19,6 +19,7 @@
     "prevalidate": "npm run build:prevalidate --silent && node tools/prevalidate/dist/index.js",
     "prevalidate:strict": "npm run build:prevalidate --silent && node tools/prevalidate/dist/index.js --strict",
     "package:vsix": "node tools/package-vsix.mjs",
+    "release:verify": "node tools/release-verify.mjs",
     "test": "npm run build --silent && node --test",
     "smoke": "npm run build --silent && node tools/runtime-smoke/dist/index.js"
   },

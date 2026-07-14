@@ -819,6 +819,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   async function onSend(): Promise<void> {
     // A session running elsewhere is read-only here; refuse sends outright.
     if (selectedRunsElsewhere()) return;
+    if (!hasNetworkedAiAllocation()) {
+      appendSystemMessage(networkedAiUnavailableMessage(), "error");
+      return;
+    }
     const basePrompt = promptInput.value.trim();
     if (!basePrompt || starting || backendBusy) return;
     if (turnActive) {
@@ -1186,6 +1190,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const session = currentSession(state);
     const live = state.selectedSessionId !== null && isSessionLiveish(state, state.selectedSessionId);
     const resumable = session !== undefined && (session.status === "ended" || session.status === "failed");
+    if (!hasNetworkedAiAllocation()) {
+      restart.classList.add("disabled");
+      resume.classList.add("disabled");
+    }
     if (!state.selectedSessionId) {
       restart.classList.add("disabled");
       resume.classList.add("disabled");
@@ -1200,7 +1208,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       }
       if (!resumable || backendBusy) resume.classList.add("disabled");
     }
-    content.append(restart, resume, end, openTerminal, del, newChat);
+    content.append(restart, resume, end);
+    if (state.workspacePolicy?.security?.managed === false) content.append(openTerminal);
+    content.append(del, newChat);
   }
 
   /** Opens a VS Code terminal shelled into the selected chat's live container. */
@@ -1240,12 +1250,17 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       ai.classList.add("disabled");
       ai.title = "AI summary needs the session's backend live in this window — resume it first.";
     }
+    if (!hasNetworkedAiAllocation()) {
+      ai.classList.add("disabled");
+      ai.title = networkedAiUnavailableMessage();
+    }
     content.append(log, ai);
   }
 
   async function summarizeAction(mode: "log" | "ai"): Promise<void> {
     const sessionId = state.selectedSessionId;
     if (sessionId === null || summarizeBusySessionId !== null) return;
+    if (mode === "ai" && !hasNetworkedAiAllocation()) return;
     setSummarizePending(sessionId);
     const response = await request({ type: "session.summarize", sessionId, mode });
     if (!response.ok) {
@@ -1290,6 +1305,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   async function restartBackendAction(): Promise<void> {
+    if (!hasNetworkedAiAllocation()) return;
     if (!state.selectedSessionId || !isSessionLiveish(state, state.selectedSessionId)) return;
     backendBusy = true;
     refreshControls();
@@ -1317,6 +1333,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * the header/facts re-render off the returned session record.
    */
   async function resumeBackendAction(): Promise<void> {
+    if (!hasNetworkedAiAllocation()) return;
     const session = currentSession(state);
     if (!session || !(session.status === "ended" || session.status === "failed")) return;
     if (backendBusy || starting || turnActive) return;
@@ -1974,13 +1991,21 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * another provider's catalog).
    */
   function renderAuthBanner(): void {
+    if (!hasNetworkedAiAllocation()) {
+      authBanner.classList.add("hidden");
+      return;
+    }
     const selected = normalizeProviderId(providerSelect.value);
     const catalog = state.providerCatalogs.find((c) => normalizeProviderId(c.providerId) === selected);
     if (catalog === undefined || catalog.authStatus !== "needs-login") {
       authBanner.classList.add("hidden");
       return;
     }
-    authBannerText.textContent = `${catalog.displayName} is not signed in for the sandbox. Log in to start chats${catalog.loginHint ? ` (runs: ${catalog.loginHint})` : ""}.`;
+    const interactiveLoginAvailable = state.workspacePolicy?.security?.managed === false && Boolean(catalog.loginHint);
+    authBannerText.textContent = interactiveLoginAvailable
+      ? `${catalog.displayName} is not signed in for the sandbox. Log in to start chats (runs: ${catalog.loginHint}).`
+      : `${catalog.displayName} access is not provisioned on this workstation. Ask your administrator, then recheck.`;
+    loginButton.classList.toggle("hidden", !interactiveLoginAvailable);
     authBanner.classList.remove("hidden");
   }
 
@@ -2255,13 +2280,23 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       ? agentGroupBlock(nodeId)
       : el("div", "chat-message role-group empty")),
     onRetry: () => retryLastTurn(),
+    authenticationAvailable: () =>
+      state.workspacePolicy?.security?.managed === false && hasNetworkedAiAllocation(),
     onSignIn: () => {
+      if (state.workspacePolicy?.security?.managed === true) {
+        appendSystemMessage("Interactive sign-in is disabled here. Ask your administrator to provision access, then recheck.", "error");
+        return;
+      }
       void request({ type: "runtime.sbxLogin" }).then((response) => {
         if (!response.ok) logChat(`sbx login failed to launch: ${response.error.message}`);
         else appendSystemMessage("Opened a terminal running `sbx login`. Complete the sign-in, then reload the window and send again.");
       });
     },
     onAuthenticate: (authProviderId) => {
+      if (state.workspacePolicy?.security?.managed === true) {
+        appendSystemMessage("Interactive sign-in is disabled here. Ask your administrator to provision access, then recheck.", "error");
+        return;
+      }
       const providerId = authProviderId ?? selectedProviderId();
       void request({ type: "provider.login", providerId }).then((response) => {
         if (!response.ok) {
@@ -3562,10 +3597,34 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     return currentSession(state)?.runningElsewhere === true;
   }
 
+  function hasNetworkedAiAllocation(): boolean {
+    return state.workspacePolicy?.security?.networkedAiAllowed === true;
+  }
+
+  function networkedAiUnavailableMessage(): string {
+    const security = state.workspacePolicy?.security;
+    if (security === undefined) return "Loading the workstation security policy…";
+    return security.managed
+      ? "AI use is not allocated on this workstation. Ask your administrator if you need access."
+      : "Networked AI is off. Enable Drydock › Security: Networked AI Enabled, then reload the window.";
+  }
+
   function refreshControls(): void {
     // A session running elsewhere is view-only here: lock the composer + Send and
     // explain why via the placeholder. Provider/model stay locked too.
     const elsewhere = selectedRunsElsewhere();
+    if (!hasNetworkedAiAllocation()) {
+      promptInput.disabled = true;
+      promptInput.placeholder = networkedAiUnavailableMessage();
+      sendButton.disabled = true;
+      cancelButton.classList.add("hidden");
+      providerSelect.disabled = true;
+      modelSelect.disabled = true;
+      thinkingSelect.disabled = true;
+      modelButton.disabled = true;
+      reclaimBanner.classList.add("hidden");
+      return;
+    }
     if (elsewhere) {
       promptInput.disabled = true;
       promptInput.placeholder = "Read-only — this chat is owned by another VS Code window. Use “Take over here” to reclaim it.";
@@ -3574,6 +3633,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       providerSelect.disabled = true;
       modelSelect.disabled = true;
       thinkingSelect.disabled = true;
+      modelButton.disabled = true;
       reclaimBannerText.textContent = "This chat is marked as running in another VS Code window. If this is the right window (e.g. you just reloaded), take it over here.";
       reclaimBanner.classList.remove("hidden");
       return;
@@ -3588,6 +3648,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     providerSelect.disabled = backendBusy || turnActive || starting;
     modelSelect.disabled = !hasModelOptions || backendBusy || starting;
     thinkingSelect.disabled = backendBusy || starting;
+    modelButton.disabled = backendBusy || turnActive || starting;
   }
 
   // ---------------------------------------------------------------------------

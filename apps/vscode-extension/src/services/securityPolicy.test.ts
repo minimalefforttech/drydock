@@ -98,6 +98,93 @@ test("Invalid Studio policy fails closed instead of falling back", async () => {
   }
 });
 
+test("A required managed policy cannot silently fall back to personal settings", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  try {
+    const policyPath = path.join(root, "policy.json");
+    const requiredPath = path.join(root, "policy.required");
+    await writeFile(requiredPath, "managed\n", "utf8");
+    assert.throws(
+      () => loadEffectiveSecurityPolicy({
+        studioPolicyPath: policyPath,
+        studioPolicyRequiredPath: requiredPath,
+        baseDeniedPaths: [],
+        user: unrestrictedUser
+      }),
+      /required but missing/
+    );
+    assert.throws(
+      () => loadEffectiveSecurityPolicy({
+        studioPolicyPath: policyPath,
+        studioPolicyRequiredPath: path.join(root, "no-marker"),
+        requireStudioPolicy: true,
+        baseDeniedPaths: [],
+        user: unrestrictedUser
+      }),
+      /required but missing/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("A managed policy change or removal blocks access until reload", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  try {
+    const policyPath = path.join(root, "policy.json");
+    const requiredPath = path.join(root, "policy.required");
+    await writeFile(policyPath, JSON.stringify({
+      version: 1,
+      policyId: "managed",
+      allowNetworkedAiOnThisMachine: true
+    }), "utf8");
+    const changed = loadEffectiveSecurityPolicy({
+      studioPolicyPath: policyPath,
+      studioPolicyRequiredPath: requiredPath,
+      baseDeniedPaths: [],
+      user: unrestrictedUser
+    });
+    assert.equal(typeof changed.policyFingerprint, "string");
+    await writeFile(policyPath, JSON.stringify({
+      version: 1,
+      policyId: "managed-replaced",
+      allowNetworkedAiOnThisMachine: true
+    }), "utf8");
+    assert.throws(() => changed.assertNetworkedAiAllowed(), /changed after startup/);
+
+    const removed = loadEffectiveSecurityPolicy({
+      studioPolicyPath: policyPath,
+      studioPolicyRequiredPath: requiredPath,
+      baseDeniedPaths: [],
+      user: unrestrictedUser
+    });
+    await rm(policyPath);
+    assert.throws(() => removed.assertNetworkedAiAllowed(), /changed after startup/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Deploying a managed policy during an unmanaged session blocks further access", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  try {
+    const project = path.join(root, "project");
+    const policyPath = path.join(root, "policy.json");
+    await mkdir(project);
+    const policy = loadEffectiveSecurityPolicy({
+      studioPolicyPath: policyPath,
+      studioPolicyRequiredPath: path.join(root, "policy.required"),
+      baseDeniedPaths: [],
+      user: unrestrictedUser
+    });
+    assert.equal(policy.assertHostPathAllowed(project), project);
+    await writeFile(policyPath, JSON.stringify({ version: 1, policyId: "new-managed-policy" }), "utf8");
+    assert.throws(() => policy.assertHostPathAllowed(project), /changed after startup/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Managed policy rejects unknown fields and defaults network allocation off", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
   try {

@@ -47,10 +47,10 @@ test("reconciliation reaps orphaned quarantined/lost/stopped rows to removed", a
     runtimeRecord("runtime-lost", "drydock-lost-worker", "lost"),
     runtimeRecord("runtime-stopped", "drydock-stopped-worker", "stopped"),
     runtimeRecord("runtime-live-q", "drydock-live-q-worker", "quarantined"),
+    runtimeRecord("runtime-live-lost", "drydock-live-lost-worker", "lost"),
     runtimeRecord("runtime-removed", "drydock-removed-worker", "removed")
   ]);
-  // Only the live-q sandbox still exists externally.
-  const runtimeAdapter = new ListingRuntimeAdapter(["drydock-live-q-worker"]);
+  const runtimeAdapter = new ListingRuntimeAdapter(["drydock-live-q-worker", "drydock-live-lost-worker"]);
   const service = new RuntimeReconcileService({
     clock: new FixedClock(),
     inventory,
@@ -66,6 +66,8 @@ test("reconciliation reaps orphaned quarantined/lost/stopped rows to removed", a
   assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-stopped")))?.status, "removed");
   // A quarantined row whose sandbox STILL exists is left untouched.
   assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-live-q")))?.status, "quarantined");
+  // A supposedly lost row whose sandbox still exists is quarantined for cleanup.
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-live-lost")))?.status, "quarantined");
 });
 
 class ListingRuntimeAdapter implements RuntimeAdapter {

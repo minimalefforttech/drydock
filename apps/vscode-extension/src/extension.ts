@@ -38,20 +38,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(output);
   const logger = new OutputChannelLogger(output);
 
-  // Resolve a private child-process environment before composing the backend.
-  // Never mutate the shared extension-host environment: doing so would leak
-  // Drydock-specific PATH and variable overrides into other extensions.
-  const runtimeEnvironment = resolveRuntimeEnvironment(logger);
-
-  const stateRootPath = resolveStateRootPath();
-  const baseDeniedPaths = resolveDeniedPaths();
+  const managedPolicySeen = context.globalState.get<boolean>("drydock.managedPolicySeen", false);
+  let baseDeniedPaths = resolveDeniedPaths(false);
   let securityPolicy: EffectiveSecurityPolicy | undefined;
   let startupBlockReason: string | undefined;
+  let managedHome: string | undefined;
   try {
     securityPolicy = loadEffectiveSecurityPolicy({
       baseDeniedPaths,
-      user: resolveUserSecurityPreferences()
+      user: resolveUserSecurityPreferences(),
+      requireStudioPolicy: managedPolicySeen
     });
+    if (securityPolicy.managed) {
+      managedHome = os.userInfo().homedir;
+      // Latch managed mode before any further I/O so a remove/replace race can
+      // never turn the next activation into an unmanaged fallback.
+      await context.globalState.update("drydock.managedPolicySeen", true);
+      // Local settings may narrow managed policy, but must never remove the
+      // built-in credential/config denylist.
+      baseDeniedPaths = resolveDeniedPaths(true, managedHome);
+      securityPolicy = loadEffectiveSecurityPolicy({
+        baseDeniedPaths,
+        user: resolveUserSecurityPreferences(),
+        requireStudioPolicy: true
+      });
+    }
     logger.info("effective security policy loaded", {
       summary: securityPolicy.summary().label,
       ...(securityPolicy.policyId === undefined ? {} : { policyId: securityPolicy.policyId })
@@ -60,6 +71,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     startupBlockReason = `Security policy blocked startup: ${error instanceof Error ? error.message : String(error)}`;
     logger.error(startupBlockReason);
   }
+  const managedMode = managedPolicySeen || securityPolicy?.managed === true;
+  if (managedMode && managedHome === undefined) managedHome = os.userInfo().homedir;
+  // Resolve a private child-process environment after policy. Never mutate the
+  // extension host environment or let managed mode inherit setting overrides.
+  const runtimeEnvironment = resolveRuntimeEnvironment(logger, managedMode);
+  const stateRootPath = resolveStateRootPath(logger, managedMode, managedHome);
   const appServerInactivityTimeoutMs = vscode.workspace
     .getConfiguration("drydock")
     .get<number>("runtime.appServerInactivityTimeoutMs", 300_000);
@@ -72,7 +89,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     resolvePolicyOverlayFile(securityPolicy, root, filePath);
   const plannerAspectOverlays = createAspectOverlayReader(
     policyWorkspaceRoots(".drydock/planner-aspects.json"),
-    policyOverlayFile
+    policyOverlayFile,
+    () => vscode.workspace.isTrusted
   );
   // Team recipe packs (ADR 0007): `.drydock/recipes.json` merges read-only
   // into the recipe registry the same way.
@@ -95,7 +113,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return Math.max(1, Math.min(8, byCpu, Math.max(1, byRam)));
   };
   const autoAnswerQuestionsEnabled = (): boolean =>
-    vscode.workspace.getConfiguration("drydock").get<boolean>("autoAnswer.questions", true);
+    !managedMode && vscode.workspace.getConfiguration("drydock").get<boolean>("autoAnswer.questions", true);
   const backend = await createBackend({
     stateRootPath,
     logger,
@@ -111,6 +129,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   context.subscriptions.push(new vscode.Disposable(() => backend.dispose()));
   await writeStorePointer(context, stateRootPath);
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.security.exportEvidence", async () => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    const target = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(path.join(
+        os.homedir(),
+        `drydock-security-events-${new Date().toISOString().slice(0, 10)}.jsonl`
+      )),
+      filters: { "JSON Lines": ["jsonl"] },
+      saveLabel: "Export security events"
+    });
+    if (target === undefined) return;
+    try {
+      const jsonl = await backend.securityEvents.exportSecurityEvents();
+      await vscode.workspace.fs.writeFile(target, Buffer.from(jsonl, "utf8"));
+      void vscode.window.showInformationMessage("Security events exported.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn("security event export failed", { error: message });
+      void vscode.window.showErrorMessage(`Security event export failed: ${message}`);
+    }
+  }));
 
   const panel = new ControlPanelProvider(context.extensionUri, backend, logger);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(ControlPanelProvider.viewType, panel));
@@ -235,17 +277,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerIsolatedRunCommands(context, output, backend);
 
   if (backend.available) {
-    void backend.reconcileOnActivate().catch((error: unknown) => {
-      logger.warn("startup reconciliation failed", {
-        error: error instanceof Error ? error.message : String(error)
-      });
-    });
-    void backend.appService.sweepTempWorkspaces()
+    void backend.reconcileOnActivate()
+      .then(() => backend.appService.sweepTempWorkspaces())
       .then((removed) => {
         if (removed > 0) logger.info("swept aged temp workspaces", { removed });
       })
       .catch((error: unknown) => {
-        logger.warn("temp workspace sweep failed", {
+        logger.warn("startup reconciliation or temp workspace sweep failed", {
           error: error instanceof Error ? error.message : String(error)
         });
       });
@@ -264,11 +302,11 @@ export function deactivate(): void {
  * defaults are omitted only when `disableDefaultDeniedPaths` is explicitly set —
  * the opt-out escape hatch for the rare user who must mount one of them.
  */
-function resolveDeniedPaths(): string[] {
+function resolveDeniedPaths(enforceDefaults: boolean, homeDirectory: string = os.homedir()): string[] {
   const config = vscode.workspace.getConfiguration("drydock");
   const configured = config.get<string[]>("deniedPaths", []);
-  const disableDefaults = config.get<boolean>("disableDefaultDeniedPaths", false);
-  const merged = disableDefaults ? [...configured] : [...configured, ...defaultDeniedPaths(os.homedir())];
+  const disableDefaults = !enforceDefaults && config.get<boolean>("disableDefaultDeniedPaths", false);
+  const merged = disableDefaults ? [...configured] : [...configured, ...defaultDeniedPaths(homeDirectory)];
   const seen = new Set<string>();
   const deduped: string[] = [];
   for (const entry of merged) {
@@ -300,9 +338,103 @@ function resolveUserSecurityPreferences(): UserSecurityPreferences {
  * warning fires if one is missing, since a GUI-launched host may not carry a
  * terminal's session vars). Additive and reload-scoped.
  */
-function resolveRuntimeEnvironment(logger: OutputChannelLogger): NodeJS.ProcessEnv {
+function resolveRuntimeEnvironment(logger: OutputChannelLogger, managed: boolean): NodeJS.ProcessEnv {
   const config = vscode.workspace.getConfiguration("drydock");
   const environment: NodeJS.ProcessEnv = { ...process.env };
+
+  if (managed) {
+    const blockedEnvironmentKeys = new Set([
+      "ANTHROPIC_API_KEY",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_SESSION_TOKEN",
+      "AZURE_OPENAI_API_KEY",
+      "AZURE_CLIENT_CERTIFICATE_PATH",
+      "AZURE_CLIENT_SECRET",
+      "BASH_ENV",
+      "CLAUDE_API_KEY",
+      "CLAUDE_CONFIG_DIR",
+      "CODEX_HOME",
+      "CODEX_PATH",
+      "CURL_CA_BUNDLE",
+      "DATABASE_URL",
+      "DOCKER_AUTH_CONFIG",
+      "DOCKER_CERT_PATH",
+      "DOCKER_CONFIG",
+      "DOCKER_CONTEXT",
+      "DOCKER_HOST",
+      "DOCKER_TLS_VERIFY",
+      "DOTNET_STARTUP_HOOKS",
+      "ELECTRON_RUN_AS_NODE",
+      "ENV",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "IFS",
+      "JAVA_TOOL_OPTIONS",
+      "JDK_JAVA_OPTIONS",
+      "KUBECONFIG",
+      "NETRC",
+      "NODE_EXTRA_CA_CERTS",
+      "NODE_OPTIONS",
+      "NODE_PATH",
+      "NPM_CONFIG_USERCONFIG",
+      "OPENAI_API_KEY",
+      "PERL5LIB",
+      "PERL5OPT",
+      "PGPASSFILE",
+      "PROMPT_COMMAND",
+      "PYTHONHOME",
+      "PYTHONPATH",
+      "PYTHONSTARTUP",
+      "REQUESTS_CA_BUNDLE",
+      "RUBYLIB",
+      "RUBYOPT",
+      "SBX_PATH",
+      "SSH_AGENT_PID",
+      "SSH_ASKPASS",
+      "SSH_AUTH_SOCK",
+      "SSL_CERT_DIR",
+      "SSL_CERT_FILE",
+      "TEMP",
+      "TMP",
+      "TMPDIR",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "_JAVA_OPTIONS"
+    ]);
+    let removed = 0;
+    for (const key of Object.keys(environment)) {
+      const upper = key.toUpperCase();
+      const secretLike = /(?:^|_)(?:ACCESS_KEY|API_KEY|CONNECTION_STRING|CREDENTIALS?|PASS(?:WORD|WD)?|PRIVATE_KEY|SECRET|TOKEN)(?:$|_)/.test(upper);
+      const injectionLike = upper.startsWith("GIT_")
+        || upper.startsWith("DYLD_")
+        || upper.startsWith("LD_")
+        || upper.startsWith("BASH_FUNC_")
+        || upper.startsWith("VSCODE_GIT_ASKPASS");
+      if (blockedEnvironmentKeys.has(upper) || secretLike || injectionLike) {
+        delete environment[key];
+        removed += 1;
+      }
+    }
+    const trustedHome = os.userInfo().homedir;
+    setEnvironmentKey(environment, "HOME", trustedHome);
+    if (process.platform === "win32") {
+      const root = path.parse(trustedHome).root;
+      setEnvironmentKey(environment, "USERPROFILE", trustedHome);
+      setEnvironmentKey(environment, "HOMEDRIVE", root.replace(/[\\/]$/, ""));
+      setEnvironmentKey(environment, "HOMEPATH", trustedHome.slice(root.length - 1));
+      setEnvironmentKey(environment, "APPDATA", path.join(trustedHome, "AppData", "Roaming"));
+      setEnvironmentKey(environment, "LOCALAPPDATA", path.join(trustedHome, "AppData", "Local"));
+    }
+    const hasLocalOverrides = Object.keys(config.get<Record<string, string>>("runtime.env", {})).length > 0
+      || config.get<string[]>("runtime.pathAdditions", []).length > 0
+      || config.get<string[]>("runtime.copyEnv", []).length > 0;
+    if (hasLocalOverrides) {
+      logger.warn("Managed mode ignored local runtime environment and PATH overrides.");
+    }
+    if (removed > 0) logger.info("removed ambient credentials and process-injection settings from managed runtime tools", { count: removed });
+    return environment;
+  }
 
   const extraEnv = config.get<Record<string, string>>("runtime.env", {});
   for (const [key, value] of Object.entries(extraEnv)) {
@@ -330,8 +462,20 @@ function resolveRuntimeEnvironment(logger: OutputChannelLogger): NodeJS.ProcessE
   return environment;
 }
 
-function resolveStateRootPath(): string {
+function setEnvironmentKey(environment: NodeJS.ProcessEnv, name: string, value: string): void {
+  for (const key of Object.keys(environment)) {
+    if (key.toUpperCase() === name.toUpperCase()) delete environment[key];
+  }
+  environment[name] = value;
+}
+
+function resolveStateRootPath(logger: OutputChannelLogger, managed: boolean, managedHome?: string): string {
   const configured = vscode.workspace.getConfiguration("drydock").get<string>("stateRoot", "").trim();
+  if (managed && configured !== "") {
+    logger.warn("Managed mode ignored the custom state root and is using the fixed local state location.");
+    return path.join(managedHome ?? os.userInfo().homedir, ".drydock");
+  }
+  if (managed) return path.join(managedHome ?? os.userInfo().homedir, ".drydock");
   if (configured === "") {
     return path.join(os.homedir(), ".drydock");
   }

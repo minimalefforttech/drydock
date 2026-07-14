@@ -22,6 +22,8 @@ export interface RuntimeLifecycleServiceOptions {
   readonly inventory: RuntimeInventoryStore;
   readonly runtimeAdapter: RuntimeAdapter;
   readonly logger: Logger;
+  /** Final authorization immediately before the external runtime is created. */
+  readonly authorizeStart?: (request: StartRuntimeRequest) => void | Promise<void>;
   readonly runtimeNamePrefix?: string;
 }
 
@@ -39,13 +41,44 @@ export class RuntimeLifecycleService {
     await this.options.inventory.insertRuntime(record);
     this.options.logger.info("runtime starting", { runtimeId: request.runtimeId, externalName });
 
+    let handle: RuntimeHandle | undefined;
     try {
-      const handle = await this.options.runtimeAdapter.createRuntime(request, externalName);
+      await this.options.authorizeStart?.(request);
+      handle = await this.options.runtimeAdapter.createRuntime(request, externalName);
       await this.options.inventory.updateRuntimeStatus(request.runtimeId, "running", this.options.clock.isoNow());
       this.options.logger.info("runtime running", { runtimeId: request.runtimeId, externalName });
       return handle;
     } catch (error) {
-      await this.options.inventory.updateRuntimeStatus(request.runtimeId, "lost", this.options.clock.isoNow());
+      let finalStatus: RuntimeStatus = "lost";
+      if (handle !== undefined) {
+        try {
+          const removal = await this.options.runtimeAdapter.removeRuntime(handle, true);
+          if (removal.exitCode === 0) {
+            finalStatus = "removed";
+          } else {
+            this.options.logger.warn("runtime cleanup failed after start error", {
+              runtimeId: request.runtimeId,
+              externalName,
+              exitCode: removal.exitCode
+            });
+          }
+        } catch (cleanupError) {
+          this.options.logger.warn("runtime cleanup failed after start error", {
+            runtimeId: request.runtimeId,
+            externalName,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          });
+        }
+      }
+      try {
+        await this.options.inventory.updateRuntimeStatus(request.runtimeId, finalStatus, this.options.clock.isoNow());
+      } catch (statusError) {
+        this.options.logger.warn("runtime status update failed after start error", {
+          runtimeId: request.runtimeId,
+          externalName,
+          error: statusError instanceof Error ? statusError.message : String(statusError)
+        });
+      }
       this.options.logger.error("runtime create failed", {
         runtimeId: request.runtimeId,
         externalName,

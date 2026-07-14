@@ -11,6 +11,7 @@ export * from "./memoryCandidateStore.js";
 export * from "./migrations.js";
 export * from "./plannerStore.js";
 export * from "./runtimeInventoryStore.js";
+export * from "./securityEventStore.js";
 export * from "./sessionStore.js";
 export * from "./sqliteConnection.js";
 export * from "./subtaskHoldStore.js";

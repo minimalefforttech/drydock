@@ -3,18 +3,18 @@
  *
  * Implements the symmetric 3-way patch protocol from
  * `docs/design/clone-mode.md`. All git operations run HOST-side through the
- * injected {@link CommandRunner}, against a git clone that lives inside the
- * session workspace (`<workspace>/repos/<name>`). The developer's real repo is
- * only ever a read-only clone source / fetch remote / working-tree apply
- * target: nothing is pushed anywhere, and the local repo gains no commits.
+ * injected {@link CommandRunner}. The working tree lives inside the session
+ * workspace (`<workspace>/repos/<name>`); production keeps its Git metadata in
+ * a host-only sibling directory. The developer's real repo is only ever a
+ * clone source / fetch source / working-tree apply target: nothing is pushed
+ * anywhere, and the local repo gains no commits.
  *
- * Bookkeeping lives entirely in the clone. `refs/sync/base` always names the
- * last state both sides share; inbound/outbound patches are computed and
- * applied relative to it.
+ * `refs/sync/base` always names the last state both sides share;
+ * inbound/outbound patches are computed and applied relative to it.
  */
 
 import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   CloneFileChange,
@@ -23,7 +23,7 @@ import type {
   CommandRunner,
   DiffChangeKind
 } from "@drydock/contracts";
-import { isPathWithin, sensitivePathMatch } from "./mountPolicy.js";
+import { isPathWithin, normalizePathKey, sensitivePathMatch } from "./mountPolicy.js";
 
 /** Fixed committer identity for sync commits — never depend on host git config. */
 const SYNC_AUTHOR = ["-c", "user.name=clone-sync", "-c", "user.email=clone-sync@localhost"] as const;
@@ -38,17 +38,53 @@ const MAX_PATCH_BYTES = 50 * 1024 * 1024;
 const MARKER_SCAN_MAX_BYTES = 2 * 1024 * 1024;
 
 const CONFLICT_MARKER = "<<<<<<< ";
+const GIT_NULL_PATH = process.platform === "win32" ? "NUL" : devNull;
+
+/**
+ * Host Git runs with hooks, credential helpers, fsmonitor processes, and LFS
+ * checkout filters disabled. Repository data may be untrusted; it must not be
+ * able to turn a clone or sync into host command execution or an implicit
+ * network request.
+ */
+const SAFE_GIT_CONFIG = [
+  "-c", "core.alternateRefsCommand=",
+  "-c", `core.attributesFile=${GIT_NULL_PATH}`,
+  "-c", `core.excludesFile=${GIT_NULL_PATH}`,
+  "-c", `core.hooksPath=${GIT_NULL_PATH}`,
+  "-c", "core.fsmonitor=false",
+  "-c", "commit.gpgSign=false",
+  "-c", "credential.helper=",
+  "-c", "diff.external=",
+  "-c", "filter.lfs.required=false",
+  "-c", "filter.lfs.process=",
+  "-c", "filter.lfs.smudge=",
+  "-c", "gc.auto=0",
+  "-c", "interactive.diffFilter=",
+  "-c", "maintenance.auto=false",
+  "-c", "protocol.allow=never",
+  "-c", "protocol.file.allow=always",
+  "-c", "tag.gpgSign=false"
+] as const;
+const FILTER_SENSITIVE_GIT_COMMANDS = new Set(["add", "apply", "checkout", "diff", "hash-object", "status"]);
 
 export interface CloneSyncServiceOptions {
   readonly runner: CommandRunner;
   /** Git executable; defaults to "git" on PATH. */
   readonly gitPath?: string;
+  /** Private environment used as the base for hardened Git subprocesses. */
+  readonly environment?: NodeJS.ProcessEnv;
+  /** Re-authorizes a selected source repository at each host Git boundary. */
+  readonly authorizeHostPath?: (candidate: string) => string;
+  /** Private parent for temporary patch files; defaults to the OS temp dir. */
+  readonly temporaryDirectory?: string;
   readonly timeoutMs?: number;
 }
 
 export interface InitCloneInput {
   readonly localRepoPath: string;
   readonly cloneParentDir: string;
+  /** Host-only metadata directory outside the workspace mounted into the agent. */
+  readonly gitMetadataParentDir?: string;
   readonly name: string;
   /** carry overlays tracked/untracked working state; fresh uses current local HEAD only. */
   readonly dirtyHandling?: "carry" | "fresh";
@@ -95,22 +131,35 @@ export interface InitCloneResult {
   readonly detached: boolean;
 }
 
+interface GitRepositoryLocation {
+  readonly gitDir: string;
+  readonly workTree: string;
+}
+
 export class CloneSyncService {
   private readonly runner: CommandRunner;
   private readonly git: string;
   private readonly timeoutMs: number;
+  private readonly gitEnvironment: NodeJS.ProcessEnv;
+  private readonly protectedCloneRepositories = new Map<string, GitRepositoryLocation>();
+  private readonly sourceRepositories = new Map<string, GitRepositoryLocation>();
+  private readonly authorizeHostPath?: (candidate: string) => string;
+  private readonly temporaryDirectory: string;
   private detectCache: { available: boolean; version?: string } | undefined;
 
   constructor(options: CloneSyncServiceOptions) {
     this.runner = options.runner;
     this.git = options.gitPath ?? "git";
     this.timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
+    this.gitEnvironment = safeGitEnvironment(options.environment ?? process.env);
+    if (options.authorizeHostPath !== undefined) this.authorizeHostPath = options.authorizeHostPath;
+    this.temporaryDirectory = options.temporaryDirectory ?? tmpdir();
   }
 
   /** `git --version`, cached for the lifetime of the service. */
   async detectGit(): Promise<{ available: boolean; version?: string }> {
     if (this.detectCache !== undefined) return this.detectCache;
-    const result = await this.runner.run(this.git, ["--version"], { cwd: process.cwd(), timeoutMs: this.timeoutMs });
+    const result = await this.runGit(["--version"], process.cwd());
     if (result.exitCode !== 0) {
       this.detectCache = { available: false };
       return this.detectCache;
@@ -128,13 +177,11 @@ export class CloneSyncService {
    * otherwise changing it. A non-repository is reported, not thrown.
    */
   async preflightRepo(localRepoPath: string): Promise<CloneRepoPreflight> {
-    const inside = await this.runner.run(this.git, ["rev-parse", "--is-inside-work-tree"], {
-      cwd: localRepoPath,
-      timeoutMs: this.timeoutMs
-    });
-    if (inside.exitCode !== 0 || inside.stdout.trim() !== "true") {
+    const authorizedPath = this.authorizeHostPath?.(localRepoPath) ?? await realpath(localRepoPath);
+    const gitDir = await this.resolveContainedGitDirectory(authorizedPath);
+    if (gitDir === null) {
       return {
-        localRepoPath,
+        localRepoPath: authorizedPath,
         isGitRepo: false,
         detached: false,
         trackedChanges: 0,
@@ -142,19 +189,31 @@ export class CloneSyncService {
         dirty: false
       };
     }
-    const head = await this.gitIn(localRepoPath, ["rev-parse", "--abbrev-ref", "HEAD"], "resolve local HEAD for preflight");
+    this.sourceRepositories.set(normalizePathKey(authorizedPath), { gitDir, workTree: authorizedPath });
+    const inside = await this.runGit(["rev-parse", "--is-inside-work-tree"], authorizedPath);
+    if (inside.exitCode !== 0 || inside.stdout.trim() !== "true") {
+      return {
+        localRepoPath: authorizedPath,
+        isGitRepo: false,
+        detached: false,
+        trackedChanges: 0,
+        untrackedFiles: 0,
+        dirty: false
+      };
+    }
+    const head = await this.gitIn(authorizedPath, ["rev-parse", "--abbrev-ref", "HEAD"], "resolve local HEAD for preflight");
     const detached = head.stdout.trim() === "HEAD";
     const branch = detached
-      ? (await this.gitIn(localRepoPath, ["rev-parse", "HEAD"], "resolve detached HEAD for preflight")).stdout.trim()
+      ? (await this.gitIn(authorizedPath, ["rev-parse", "HEAD"], "resolve detached HEAD for preflight")).stdout.trim()
       : head.stdout.trim();
     const status = await this.gitIn(
-      localRepoPath,
+      authorizedPath,
       ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
       "read local repository status"
     );
     const counts = countPreflightStatus(status.stdout);
     return {
-      localRepoPath,
+      localRepoPath: authorizedPath,
       isGitRepo: true,
       branch,
       detached,
@@ -170,7 +229,13 @@ export class CloneSyncService {
    * current local HEAD. Neither path fetches or pulls a remote.
    */
   async initClone(input: InitCloneInput): Promise<InitCloneResult> {
-    const { localRepoPath, cloneParentDir, name } = input;
+    const { cloneParentDir, name } = input;
+    const localRepoPath = this.authorizeHostPath?.(input.localRepoPath) ?? await realpath(input.localRepoPath);
+    if (!this.sourceRepositories.has(normalizePathKey(localRepoPath))) {
+      const gitDir = await this.resolveContainedGitDirectory(localRepoPath);
+      if (gitDir === null) throw new Error(`Clone source is not a supported Git worktree: ${localRepoPath}`);
+      this.sourceRepositories.set(normalizePathKey(localRepoPath), { gitDir, workTree: localRepoPath });
+    }
     const dirtyHandling = input.dirtyHandling ?? "carry";
     const clonePath = join(cloneParentDir, name);
 
@@ -213,10 +278,30 @@ export class CloneSyncService {
     const cloneIsolationArgs = hasCloneOmissions(input.omission)
       ? ["--no-local"]
       : ["--local", "--no-hardlinks"];
+    const gitDir = input.gitMetadataParentDir === undefined
+      ? undefined
+      : join(input.gitMetadataParentDir, `${name}.git`);
+    if (input.gitMetadataParentDir !== undefined) {
+      await mkdir(input.gitMetadataParentDir, { recursive: true });
+    }
+    const separateGitDir = gitDir === undefined ? [] : [`--separate-git-dir=${gitDir}`];
     const cloneArgs = detached
-      ? [...SYNC_AUTHOR, "clone", ...cloneIsolationArgs, "--no-checkout", localRepoPath, clonePath]
-      : [...SYNC_AUTHOR, "clone", ...cloneIsolationArgs, "-b", branch, localRepoPath, clonePath];
+      ? [...SYNC_AUTHOR, "clone", ...cloneIsolationArgs, ...separateGitDir, "--no-checkout", localRepoPath, clonePath]
+      : [...SYNC_AUTHOR, "clone", ...cloneIsolationArgs, ...separateGitDir, "-b", branch, localRepoPath, clonePath];
+    const cloneSource = await this.assertSourceRepositoryCurrent(localRepoPath);
+    await this.localFilterOverrides(localRepoPath, cloneSource);
     await this.git0(cloneArgs, cloneParentDir, "clone local repo");
+    const cloneRepository = {
+      gitDir: await realpath(gitDir ?? join(clonePath, ".git")),
+      workTree: await realpath(clonePath)
+    };
+    this.protectedCloneRepositories.set(normalizePathKey(clonePath), cloneRepository);
+    if (gitDir !== undefined) {
+      // The pointer would expose host layout and is agent-writable. Host Git
+      // uses the protected explicit git-dir below, so the mounted snapshot
+      // deliberately contains working files only.
+      await rm(join(clonePath, ".git"), { force: true });
+    }
     if (detached) {
       await this.gitIn(clonePath, ["checkout", "--detach", branch], "checkout detached commit in clone");
     }
@@ -253,7 +338,7 @@ export class CloneSyncService {
     // delta stays scoped to work done here, never re-carrying upstream output.
     for (const seed of input.seedPatches ?? []) {
       if (seed.patch.length === 0) continue;
-      const dir = await mkdtemp(join(tmpdir(), "clone-seed-"));
+      const dir = await mkdtemp(join(this.temporaryDirectory, "clone-seed-"));
       const seedFile = join(dir, "seed.diff");
       try {
         await writeFile(seedFile, seed.patch, "utf8");
@@ -388,9 +473,9 @@ export class CloneSyncService {
   ): Promise<CloneSyncResult> {
     await this.commitAgentProgress(clonePath, "[sync] agent");
 
-    const path = opts?.path;
-    const fullPull = path === undefined;
-    const diffArgs = ["diff", "--binary", "refs/sync/base", "HEAD", ...(path === undefined ? [] : ["--", path])];
+    const scopedPath = opts?.path === undefined ? undefined : assertRepoRelativePath(opts.path, "clone pull path");
+    const fullPull = scopedPath === undefined;
+    const diffArgs = ["diff", "--binary", "refs/sync/base", "HEAD", ...(scopedPath === undefined ? [] : ["--", scopedPath])];
     const patch = await this.diffToFile(clonePath, diffArgs, "build inbound patch");
 
     let appliedFiles: number;
@@ -400,7 +485,7 @@ export class CloneSyncService {
         return { appliedFiles: 0, conflictedFiles: [], message: "nothing to pull" };
       }
 
-      const touched = await this.patchPaths(clonePath, path);
+      const touched = await this.patchPaths(clonePath, scopedPath);
       assertPathsNotOmitted(touched, opts?.omission, "clone pull");
       // Snapshot marker state BEFORE the first apply attempt. The fallback may
       // observe markers written by that whole-patch attempt, but literal marker
@@ -410,7 +495,7 @@ export class CloneSyncService {
       for (const touchedPath of touched) {
         conflictMarkersBefore.set(touchedPath, await this.hasConflictMarkers(localRepoPath, touchedPath));
       }
-      const applyArgs = ["--binary", "--3way", "--whitespace=nowarn", ...(path === undefined ? [] : [`--include=${path}`])];
+      const applyArgs = ["--binary", "--3way", "--whitespace=nowarn", ...(scopedPath === undefined ? [] : [`--include=${scopedPath}`])];
       const apply = await this.tryApplyPatchFile(localRepoPath, patch.patchFile, applyArgs);
 
       if (apply.exitCode === 0) {
@@ -436,7 +521,7 @@ export class CloneSyncService {
       await this.gitIn(clonePath, ["update-ref", "refs/sync/base", "HEAD"], "advance refs/sync/base after inbound");
     }
 
-    const message = describeSync("Pulled", appliedFiles, conflictedFiles, fullPull ? undefined : path);
+    const message = describeSync("Pulled", appliedFiles, conflictedFiles, fullPull ? undefined : scopedPath);
     return {
       appliedFiles,
       conflictedFiles,
@@ -447,8 +532,8 @@ export class CloneSyncService {
   /**
    * Outbound — "push my local edits to the VM".
    *
-   * Commit agent progress, fetch the local repo's branch tip (origin = the
-   * local repo path set by `git clone`), 3-way apply the committed local delta
+   * Commit agent progress, fetch the local repo's branch tip from the explicit
+   * host path, 3-way apply the committed local delta
    * (`sync/base..FETCH_HEAD`) onto the clone tree, then 3-way apply the local
    * DIRTY delta and copy untracked files (copy-win, skipping identical
    * content). Commit `[sync] local`, advance `sync/base`. Conflicts land as
@@ -467,8 +552,11 @@ export class CloneSyncService {
 
     const branch = await this.resolveCloneBranch(clonePath);
 
-    // origin was set to the local repo path at clone time.
-    await this.gitIn(clonePath, ["fetch", "origin", branch], "fetch local branch into clone");
+    // Never trust the clone's mutable `origin`: an agent can edit .git/config.
+    // Fetching the validated host path directly keeps this operation local.
+    const fetchSource = await this.assertSourceRepositoryCurrent(localRepoPath);
+    await this.localFilterOverrides(localRepoPath, fetchSource);
+    await this.gitIn(clonePath, ["fetch", "--no-tags", localRepoPath, branch], "fetch local branch into clone");
 
     const touched = new Set<string>();
     const conflicted = new Set<string>();
@@ -574,19 +662,21 @@ export class CloneSyncService {
    * checked out from it — those are un-staged and removed from the working tree.
    */
   async discardFile(clonePath: string, path: string): Promise<void> {
+    const safePath = assertRepoRelativePath(path, "clone discard path");
     const existsAtBase = await this.gitIn(
       clonePath,
-      ["cat-file", "-e", `refs/sync/base:${path}`],
+      ["cat-file", "-e", `refs/sync/base:${safePath}`],
       "probe file at sync base"
     );
     if (existsAtBase.exitCode === 0) {
-      await this.gitIn(clonePath, ["checkout", "refs/sync/base", "--", path], `restore ${path} from sync base`);
+      await this.gitIn(clonePath, ["checkout", "refs/sync/base", "--", safePath], `restore ${safePath} from sync base`);
       return;
     }
     // New-since-base file: drop it from the index (ignore if not tracked) and
     // delete it from the working tree.
-    await this.gitIn(clonePath, ["rm", "--cached", "--ignore-unmatch", "--", path], `unstage new file ${path}`);
-    await rm(join(clonePath, path), { force: true });
+    await assertNoSymlinkComponents(clonePath, safePath, false);
+    await this.gitIn(clonePath, ["rm", "--cached", "--ignore-unmatch", "--", safePath], `unstage new file ${safePath}`);
+    await rm(join(clonePath, safePath), { force: true });
   }
 
   // ---------------------------------------------------------------------------
@@ -735,7 +825,7 @@ export class CloneSyncService {
   private async gitIn(repoPath: string, args: readonly string[], step: string): Promise<CommandResult> {
     // rev-parse/cat-file probes are allowed to fail; callers inspect exitCode.
     const nonFatal = args[0] === "rev-parse" || args[0] === "cat-file" || args[0] === "hash-object";
-    const result = await this.runner.run(this.git, args, { cwd: repoPath, timeoutMs: this.timeoutMs });
+    const result = await this.runGit(args, repoPath);
     if (result.exitCode !== 0 && !nonFatal) {
       throw gitError(step, repoPath, result);
     }
@@ -744,7 +834,7 @@ export class CloneSyncService {
 
   /** Run git with an explicit cwd (used for `clone`, whose target does not yet exist). */
   private async git0(args: readonly string[], cwd: string, step: string): Promise<CommandResult> {
-    const result = await this.runner.run(this.git, args, { cwd, timeoutMs: this.timeoutMs });
+    const result = await this.runGit(args, cwd);
     if (result.exitCode !== 0) {
       throw gitError(step, cwd, result);
     }
@@ -761,18 +851,14 @@ export class CloneSyncService {
    * caller MUST call `cleanup()` when done.
    */
   private async diffToFile(repoPath: string, diffArgs: readonly string[], step: string): Promise<PreparedPatch> {
-    const dir = await mkdtemp(join(tmpdir(), "clone-sync-"));
+    const dir = await mkdtemp(join(this.temporaryDirectory, "clone-sync-"));
     const patchFile = join(dir, "patch.diff");
     const cleanup = async (): Promise<void> => {
       await rm(dir, { recursive: true, force: true });
     };
     try {
       const [verb, ...rest] = diffArgs;
-      const result = await this.runner.run(
-        this.git,
-        [verb ?? "diff", `--output=${patchFile}`, ...rest],
-        { cwd: repoPath, timeoutMs: this.timeoutMs }
-      );
+      const result = await this.runGit([verb ?? "diff", `--output=${patchFile}`, ...rest], repoPath);
       if (result.exitCode !== 0) {
         await cleanup();
         throw gitError(step, repoPath, result);
@@ -811,10 +897,147 @@ export class CloneSyncService {
 
   private async runApplyFile(repoPath: string, patchFile: string, applyFlags: readonly string[]): Promise<CommandResult> {
     // Patch is applied from a file, never stdin — Windows-safe and unbounded.
-    return this.runner.run(this.git, ["apply", ...applyFlags, patchFile], {
-      cwd: repoPath,
-      timeoutMs: this.timeoutMs
+    return this.runGit(["apply", ...applyFlags, patchFile], repoPath);
+  }
+
+  private async runGit(args: readonly string[], cwd: string): Promise<CommandResult> {
+    const command = gitCommand(args);
+    const cwdKey = normalizePathKey(cwd);
+    const sourceRepository = this.sourceRepositories.get(cwdKey);
+    if (sourceRepository !== undefined) {
+      await this.assertSourceRepositoryCurrent(sourceRepository.workTree);
+    }
+    const protectedRepository = this.protectedCloneRepositories.get(cwdKey);
+    if (protectedRepository !== undefined) {
+      await this.assertRepositoryPathsCurrent(protectedRepository, "protected clone");
+    }
+    const repository = protectedRepository ?? sourceRepository;
+    const repositoryArgs = repository === undefined ? [] : this.repositoryArguments(repository);
+    const filterOverrides = repository !== undefined && FILTER_SENSITIVE_GIT_COMMANDS.has(command.name)
+      ? await this.localFilterOverrides(cwd, repository)
+      : [];
+    const commandArgs = command.name === "diff"
+      ? [...args.slice(0, command.index + 1), "--no-ext-diff", "--no-textconv", ...args.slice(command.index + 1)]
+      : [...args];
+    return this.runner.run(this.git, [...SAFE_GIT_CONFIG, ...repositoryArgs, ...filterOverrides, ...commandArgs], {
+      cwd,
+      timeoutMs: this.timeoutMs,
+      env: this.gitEnvironment
     });
+  }
+
+  /** Neutralize repository-local clean/smudge processes for commands that may invoke them. */
+  private async localFilterOverrides(repoPath: string, repository: GitRepositoryLocation): Promise<string[]> {
+    const configPath = join(repository.gitDir, "config");
+    try {
+      const info = await lstat(configPath);
+      if (!info.isFile() || info.isSymbolicLink()) {
+        throw new Error(`Refusing host Git in ${repoPath}: repository config is not a regular file.`);
+      }
+      const canonical = await realpath(configPath);
+      if (!isPathWithin(canonical, repository.gitDir)) {
+        throw new Error(`Refusing host Git in ${repoPath}: repository config is outside its protected metadata directory.`);
+      }
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error
+        && (error as { readonly code?: unknown }).code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+    const result = await this.runner.run(
+      this.git,
+      [...SAFE_GIT_CONFIG, "config", "--file", configPath, "--no-includes", "--name-only", "--null", "--list"],
+      { cwd: repoPath, timeoutMs: this.timeoutMs, env: this.gitEnvironment }
+    );
+    if (result.exitCode === 1) return [];
+    if (result.exitCode !== 0) throw gitError("inspect local Git configuration", repoPath, result);
+    if (result.stdout.includes("[truncated ")) {
+      throw new Error(`Refusing host Git in ${repoPath}: local Git configuration is too large to verify safely.`);
+    }
+
+    const drivers = new Set<string>();
+    for (const key of splitZ(result.stdout)) {
+      if (/^include(?:if\..+)?\.path$/i.test(key)) {
+        throw new Error(`Refusing host Git in ${repoPath}: repository-local config includes are not allowed.`);
+      }
+      if (/^merge\..+\.driver$/i.test(key)) {
+        throw new Error(`Refusing host Git in ${repoPath}: repository-local merge commands are not allowed.`);
+      }
+      const match = /^filter\.(.+)\.(?:clean|smudge|process|required)$/i.exec(key);
+      if (match?.[1]) drivers.add(match[1]);
+    }
+    const executableDrivers = [...drivers].filter((driver) => driver.toLowerCase() !== "lfs");
+    if (executableDrivers.length > 0) {
+      throw new Error(
+        `Refusing host Git in ${repoPath}: repository-local content filters are not allowed (${executableDrivers.join(", ")}).`
+      );
+    }
+    return [...drivers].flatMap((driver) => [
+      "-c", `filter.${driver}.required=false`,
+      "-c", `filter.${driver}.clean=`,
+      "-c", `filter.${driver}.smudge=`,
+      "-c", `filter.${driver}.process=`
+    ]);
+  }
+
+  private async assertSourceRepositoryCurrent(repoPath: string): Promise<GitRepositoryLocation> {
+    const repository = this.sourceRepositories.get(normalizePathKey(repoPath));
+    if (repository === undefined) {
+      throw new Error("The source repository is no longer the approved project. Re-select it before continuing.");
+    }
+    const current = this.authorizeHostPath?.(repository.workTree) ?? await realpath(repository.workTree);
+    if (normalizePathKey(current) !== normalizePathKey(repository.workTree)) {
+      throw new Error("The source repository path changed after approval. Re-select it before continuing.");
+    }
+    await this.assertRepositoryPathsCurrent(repository, "source repository");
+    return repository;
+  }
+
+  private repositoryArguments(repository: GitRepositoryLocation): string[] {
+    return [
+      `--git-dir=${repository.gitDir}`,
+      `--work-tree=${repository.workTree}`,
+      "-c", "core.bare=false",
+      "-c", `core.worktree=${repository.workTree}`
+    ];
+  }
+
+  private async assertRepositoryPathsCurrent(repository: GitRepositoryLocation, label: string): Promise<void> {
+    const workTreeInfo = await lstat(repository.workTree);
+    if (!workTreeInfo.isDirectory() || workTreeInfo.isSymbolicLink()) {
+      throw new Error(`The ${label} path changed after approval. Recreate the session before continuing.`);
+    }
+    const gitDirInfo = await lstat(repository.gitDir);
+    if (!gitDirInfo.isDirectory() || gitDirInfo.isSymbolicLink()) {
+      throw new Error(`The ${label} Git metadata changed after approval. Recreate the session before continuing.`);
+    }
+    const [currentWorkTree, currentGitDir] = await Promise.all([
+      realpath(repository.workTree),
+      realpath(repository.gitDir)
+    ]);
+    if (normalizePathKey(currentWorkTree) !== normalizePathKey(repository.workTree)
+      || normalizePathKey(currentGitDir) !== normalizePathKey(repository.gitDir)) {
+      throw new Error(`The ${label} target changed after approval. Recreate the session before continuing.`);
+    }
+  }
+
+  private async resolveContainedGitDirectory(workTree: string): Promise<string | null> {
+    const candidate = join(workTree, ".git");
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await lstat(candidate);
+    } catch {
+      return null;
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error(`Secure clone mode does not support linked or redirected Git metadata: ${candidate}`);
+    }
+    const canonical = await realpath(candidate);
+    if (!isPathWithin(canonical, workTree)) {
+      throw new Error(`Git metadata is outside the approved project root: ${canonical}`);
+    }
+    return canonical;
   }
 }
 
@@ -823,6 +1046,40 @@ interface PreparedPatch {
   readonly patchFile: string;
   readonly bytes: number;
   readonly cleanup: () => Promise<void>;
+}
+
+/**
+ * Start from the extension host environment, but discard inherited GIT_*
+ * controls before adding a small deterministic set. In particular this keeps
+ * user/system filter configuration and credential prompts out of host sync.
+ */
+function safeGitEnvironment(baseEnvironment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(baseEnvironment)) {
+    if (!key.toUpperCase().startsWith("GIT_")) environment[key] = value;
+  }
+  environment["GIT_CONFIG_GLOBAL"] = GIT_NULL_PATH;
+  environment["GIT_CONFIG_SYSTEM"] = GIT_NULL_PATH;
+  environment["GIT_CONFIG_NOSYSTEM"] = "1";
+  environment["GIT_ATTR_NOSYSTEM"] = "1";
+  environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  environment["GIT_TERMINAL_PROMPT"] = "0";
+  environment["GCM_INTERACTIVE"] = "Never";
+  return environment;
+}
+
+/** Find the git subcommand after any global options supplied by callers. */
+function gitCommand(args: readonly string[]): { readonly name: string; readonly index: number } {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "-c") {
+      index += 1;
+      continue;
+    }
+    if (arg?.startsWith("-")) continue;
+    return { name: arg ?? "", index };
+  }
+  return { name: "", index: -1 };
 }
 
 // -----------------------------------------------------------------------------
@@ -1089,6 +1346,19 @@ async function copyIfDifferent(src: string, dest: string): Promise<boolean> {
   return true;
 }
 
+/** Normalizes and confines any UI/API supplied path to one repository. */
+function assertRepoRelativePath(value: string, label: string): string {
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized === ""
+    || normalized.includes("\0")
+    || normalized.startsWith("/")
+    || /^[A-Za-z]:/.test(normalized)
+    || normalized.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error(`Refusing unsafe ${label} "${value}".`);
+  }
+  return normalized;
+}
+
 /**
  * Untracked carry is a host-side copy, so never follow a symlink/junction from
  * either the developer repo or the agent-controlled clone. Git paths are also
@@ -1096,10 +1366,7 @@ async function copyIfDifferent(src: string, dest: string): Promise<boolean> {
  * repository paths. Fresh clone remains the zero-copy alternative.
  */
 async function assertSafeUntrackedCopy(sourceRoot: string, destinationRoot: string, relativePath: string): Promise<void> {
-  const normalized = relativePath.replace(/\\/g, "/");
-  if (normalized === "" || normalized.startsWith("/") || normalized.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
-    throw new Error(`Refusing unsafe untracked path "${relativePath}" during clone carry.`);
-  }
+  const normalized = assertRepoRelativePath(relativePath, "untracked path during clone carry");
   await assertNoSymlinkComponents(sourceRoot, normalized, true);
   await assertNoSymlinkComponents(destinationRoot, normalized, false);
   const [canonicalSourceRoot, canonicalSource] = await Promise.all([

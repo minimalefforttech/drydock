@@ -37,6 +37,8 @@ export interface MessageRowContext {
   onRetry?(): void;
   onSignIn?(): void;
   onAuthenticate?(providerId?: string): void;
+  /** False when interactive credential flows are intentionally unavailable. */
+  authenticationAvailable?(): boolean;
   /** Label for the authenticate button, e.g. "Authenticate Claude". */
   authenticateLabel?(providerId?: string): string;
 }
@@ -54,12 +56,12 @@ export function chatMessageRow(message: ChatMessage, ctx: MessageRowContext): HT
     const body = el("div", "chat-system-body");
     body.textContent = message.text;
     row.append(body);
-    if (message.signIn === true && ctx.onSignIn !== undefined) {
+    if (message.signIn === true && ctx.onSignIn !== undefined && ctx.authenticationAvailable?.() !== false) {
       const signInButton = button("Sign in to Docker Sandbox", "small primary chat-system-signin");
       signInButton.addEventListener("click", () => ctx.onSignIn?.());
       row.append(signInButton);
     }
-    if (message.authenticate === true && ctx.onAuthenticate !== undefined) {
+    if (message.authenticate === true && ctx.onAuthenticate !== undefined && ctx.authenticationAvailable?.() !== false) {
       const label = ctx.authenticateLabel?.(message.authProviderId) ?? "Authenticate";
       const authButton = button(label, "small primary chat-system-signin");
       authButton.addEventListener("click", () => {

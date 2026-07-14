@@ -71,6 +71,19 @@ export class DockerSandboxRuntimeAdapter implements RuntimeAdapter {
     if (request.template.network === "allowed" && resources) {
       const allow = await this.allowNetwork(handle, resources);
       if (allow.exitCode !== 0) {
+        try {
+          const removed = await this.removeRuntime(handle, true);
+          if (removed.exitCode !== 0) {
+            this.options.logger.warn("sandbox cleanup failed after network policy rejection", {
+              runtimeId: handle.runtimeId
+            });
+          }
+        } catch (cleanupError) {
+          this.options.logger.warn("sandbox cleanup errored after network policy rejection", {
+            runtimeId: handle.runtimeId,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          });
+        }
         throw new Error(`sbx network allow failed: ${allow.stderr || allow.error || allow.stdout}`);
       }
       this.networkPolicies.set(handle.externalName, resources);

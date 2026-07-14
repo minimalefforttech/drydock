@@ -55,7 +55,9 @@ export class LineJsonRpcClient {
     private readonly args: readonly string[],
     private readonly cwd: string,
     /** Live tee of stderr chunks (e.g. to the raw-stream debug view). */
-    private readonly onStderr?: (chunk: string) => void
+    private readonly onStderr?: (chunk: string) => void,
+    /** Private child environment; omitted only for backwards-compatible embedders. */
+    private readonly environment?: NodeJS.ProcessEnv
   ) {}
 
   async start(): Promise<void> {
@@ -63,7 +65,8 @@ export class LineJsonRpcClient {
     this.child = spawn(invocation.command, invocation.args, {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
+      windowsHide: true,
+      ...(this.environment === undefined ? {} : { env: this.environment })
     });
 
     this.child.stdout?.setEncoding("utf8");

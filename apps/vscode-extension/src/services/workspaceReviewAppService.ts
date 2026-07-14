@@ -138,7 +138,8 @@ export class WorkspaceReviewAppService {
 
   /** Repoints a project at a new host folder; returns fresh state. */
   async updateProjectPath(projectId: string, newPath: string): Promise<WorkspacePolicyState> {
-    await this.options.projectCatalog.updateProjectPath(asId<"ProjectId">(projectId), newPath);
+    const approvedPath = this.options.securityPolicy?.assertHostPathAllowed(newPath) ?? newPath;
+    await this.options.projectCatalog.updateProjectPath(asId<"ProjectId">(projectId), approvedPath);
     return this.getPolicyState();
   }
 

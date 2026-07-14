@@ -8,11 +8,22 @@
  * event sequence.
  */
 
-import { SEEDED_PLAN_ASPECTS } from "@drydock/contracts";
+import { SEEDED_PLAN_ASPECTS, type JsonObject } from "@drydock/contracts";
 import type { SqliteConnection } from "./sqliteConnection.js";
+import { sanitizePersistedEventPayload } from "./persistenceSanitizer.js";
+
+const SANITIZE_SESSION_EVENTS_MIGRATION = "sanitize-session-events-v2";
 
 export function applyMigrations(connection: SqliteConnection): void {
+  const legacySessionEventsTable = connection.database.prepare(`
+    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_events'
+  `).get() !== undefined;
   connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS storage_migrations (
+      migration_id TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS runtime_instances (
       runtime_id TEXT PRIMARY KEY,
       runtime_generation_id TEXT NOT NULL,
@@ -57,6 +68,26 @@ export function applyMigrations(connection: SqliteConnection): void {
 
     CREATE INDEX IF NOT EXISTS idx_session_events_session_created
       ON session_events(session_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS security_events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      occurred_at TEXT NOT NULL,
+      event_code TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      actor_id TEXT,
+      host_id TEXT,
+      policy_id TEXT,
+      session_id TEXT,
+      runtime_id TEXT,
+      project_id TEXT,
+      metadata_json TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_security_events_occurred
+      ON security_events(occurred_at, sequence);
+
+    CREATE INDEX IF NOT EXISTS idx_security_events_session
+      ON security_events(session_id, sequence);
 
     CREATE TABLE IF NOT EXISTS chat_sessions (
       session_id TEXT PRIMARY KEY,
@@ -580,6 +611,84 @@ export function applyMigrations(connection: SqliteConnection): void {
   // Plans belong to tasks (ADR 0006 doctrine extended to planning): additive
   // and nullable — existing rows stay valid as orphan plans.
   ensureColumn(connection, "planner_plans", "task_id", "TEXT NULL");
+  sanitizeLegacySessionEvents(connection, legacySessionEventsTable);
+}
+
+/** One-time cleanup for payloads written before the persistence boundary hardened. */
+function sanitizeLegacySessionEvents(connection: SqliteConnection, legacySessionEventsTable: boolean): void {
+  connection.database.exec("BEGIN IMMEDIATE");
+  try {
+    // Check only after taking the write lock: two extension windows may run
+    // migrations against the shared state file at the same time.
+    const applied = connection.database.prepare(`
+      SELECT migration_id FROM storage_migrations WHERE migration_id = ?
+    `).get(SANITIZE_SESSION_EVENTS_MIGRATION);
+    if (applied !== undefined) {
+      connection.database.exec("COMMIT");
+      return;
+    }
+    const rows = connection.database.prepare(`
+      SELECT id, payload_json FROM session_events
+    `).all() as { readonly id: string; readonly payload_json: string }[];
+    const update = connection.database.prepare(`
+      UPDATE session_events SET payload_json = ? WHERE id = ?
+    `);
+    for (const row of rows) {
+      let payload: JsonObject;
+      try {
+        const parsed = JSON.parse(row.payload_json) as unknown;
+        payload = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+          ? parsed as JsonObject
+          : { redacted: "legacy event payload was not an object" };
+      } catch {
+        payload = { redacted: "legacy event payload could not be parsed" };
+      }
+      const sanitized = JSON.stringify(sanitizePersistedEventPayload(payload));
+      if (sanitized !== row.payload_json) update.run(sanitized, row.id);
+    }
+    connection.database.exec("COMMIT");
+  } catch (error) {
+    try {
+      connection.database.exec("ROLLBACK");
+    } catch {
+      // COMMIT may already have completed; preserve the original error.
+    }
+    throw error;
+  }
+  if (legacySessionEventsTable) {
+    // Checkpoint the redaction, then rebuild the database so credentials from
+    // rows deleted before secure_delete was enabled cannot survive in freelist
+    // pages. VACUUM may create a fresh WAL, which is verified and truncated too.
+    checkpointWalOrThrow(connection);
+    connection.database.exec("VACUUM");
+    checkpointWalOrThrow(connection);
+  }
+
+  connection.database.exec("BEGIN IMMEDIATE");
+  try {
+    connection.database.prepare(`
+      INSERT OR IGNORE INTO storage_migrations (migration_id, applied_at) VALUES (?, ?)
+    `).run(SANITIZE_SESSION_EVENTS_MIGRATION, new Date().toISOString());
+    connection.database.exec("COMMIT");
+  } catch (error) {
+    try {
+      connection.database.exec("ROLLBACK");
+    } catch {
+      // Preserve the marker write error.
+    }
+    throw error;
+  }
+}
+
+function checkpointWalOrThrow(connection: SqliteConnection): void {
+  const checkpoint = connection.database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as {
+    readonly busy: number;
+    readonly log: number;
+    readonly checkpointed: number;
+  };
+  if (checkpoint.busy !== 0) {
+    throw new Error("Could not securely finalize legacy event redaction because the SQLite WAL is busy. Close other windows and reload.");
+  }
 }
 
 /**

@@ -160,6 +160,17 @@ export interface ChatSessionServiceOptions {
   readonly hostInstanceId: string;
   readonly heartbeatIntervalMs?: number;
   readonly heartbeatStaleMs?: number;
+  /** Final authorization immediately before any prompt-bearing adapter call. */
+  readonly validateTurn?: () => void | Promise<void>;
+  /**
+   * Optional final authorization for reattaching to a surviving runtime.
+   * Throwing refuses adoption before an agent protocol is attached and ends
+   * the stale session. Unmanaged callers can omit this to retain adoption.
+   */
+  readonly validateRuntimeAdoption?: (
+    session: ChatSessionRecord,
+    runtime: RuntimeInventoryRecord
+  ) => void | Promise<void>;
 }
 
 interface ActiveTurn {
@@ -261,15 +272,35 @@ export class ChatSessionService {
     // A resume boots a FRESH runtime generation, so the session's PREVIOUS
     // container (from a dead prior instance or an earlier generation) would leak
     // as a stray "running" sandbox. Reap it best-effort before booting the new
-    // one — otherwise repeated resume/reclaim/reload piles up dead containers.
+    // one. Refuse the new runtime unless the old one is confirmed removed.
     if (stored.runtimeId !== undefined) {
+      let cleanupFailure: string | undefined;
       try {
-        await this.options.cleanup.cleanupRuntime(stored.runtimeId, "graceful");
+        const cleanup = await this.options.cleanup.cleanupRuntime(stored.runtimeId, "graceful");
+        if (cleanup.status !== "removed") cleanupFailure = cleanup.diagnostics.join("; ");
       } catch (error) {
-        this.options.logger.warn("resume: previous runtime cleanup failed", {
+        cleanupFailure = error instanceof Error ? error.message : String(error);
+      }
+      if (cleanupFailure !== undefined) {
+        await this.disposeWorkspaceQuietly(request.disposeWorkspace);
+        try {
+          await this.updateSession(stored, {
+            status: "failed",
+            endedAt: this.options.clock.isoNow(),
+            hostInstanceId: null,
+            heartbeatAt: null
+          });
+        } catch (statusError) {
+          this.options.logger.warn("resume: failed to persist cleanup failure", {
+            sessionId: request.sessionId,
+            error: statusError instanceof Error ? statusError.message : String(statusError)
+          });
+        }
+        this.options.logger.error("resume blocked because previous runtime cleanup failed", {
           sessionId: request.sessionId,
-          error: error instanceof Error ? error.message : String(error)
+          error: cleanupFailure
         });
+        throw new Error("The previous runtime could not be removed, so resume was stopped. Clean up the quarantined runtime and try again.");
       }
     }
     const adapter = this.requiredAdapter(request.model.providerId);
@@ -321,6 +352,7 @@ export class ChatSessionService {
     const generationId = this.options.ids.runtimeGenerationId();
 
     let runtime: RuntimeHandle | undefined;
+    let connection: AgentConnection | undefined;
     try {
       runtime = await this.options.lifecycle.startRuntime({
         sessionId,
@@ -333,7 +365,8 @@ export class ChatSessionService {
         runtimeId: boot.runtimeId,
         ...(boot.workspaceOwnerToken === undefined ? {} : { workspaceOwnerToken: boot.workspaceOwnerToken })
       });
-      const connection = await adapter.startProtocol({
+      await this.options.validateTurn?.();
+      connection = await adapter.startProtocol({
         sessionId,
         agentId,
         agentRole: sessionRole(starting),
@@ -341,8 +374,10 @@ export class ChatSessionService {
         transport: boot.transport
       });
       if (boot.restoreContext) {
+        const context = await this.contextMessages(sessionId);
+        await this.options.validateTurn?.();
         try {
-          await adapter.restoreContext(connection, await this.contextMessages(sessionId));
+          await adapter.restoreContext(connection, context);
         } catch (error) {
           this.options.logger.warn("chat context restore failed during resume", {
             sessionId,
@@ -374,17 +409,42 @@ export class ChatSessionService {
       this.options.bus.publish({ kind: "inventory-changed" });
       return active;
     } catch (error) {
-      const failed = await this.updateSession(starting, { status: "failed", endedAt: this.options.clock.isoNow() });
       this.options.logger.error("chat session boot failed", {
         sessionId,
         runtimeId: boot.runtimeId,
         error: error instanceof Error ? error.message : String(error)
       });
-      this.options.bus.publish({ kind: "session-updated", session: failed });
+      if (connection !== undefined) {
+        try {
+          await adapter.stop(connection, "session boot failed");
+        } catch (stopError) {
+          this.options.logger.warn("chat adapter stop failed after boot error", {
+            sessionId,
+            error: stopError instanceof Error ? stopError.message : String(stopError)
+          });
+        }
+      }
       if (runtime !== undefined) {
-        await this.options.cleanup.cleanupRuntime(runtime.runtimeId, "force-remove");
+        try {
+          await this.options.cleanup.cleanupRuntime(runtime.runtimeId, "force-remove");
+        } catch (cleanupError) {
+          this.options.logger.warn("runtime cleanup failed after chat boot error", {
+            sessionId,
+            runtimeId: boot.runtimeId,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          });
+        }
       }
       await this.disposeWorkspaceQuietly(boot.disposeWorkspace);
+      try {
+        const failed = await this.updateSession(starting, { status: "failed", endedAt: this.options.clock.isoNow() });
+        this.options.bus.publish({ kind: "session-updated", session: failed });
+      } catch (statusError) {
+        this.options.logger.warn("chat session status update failed after boot error", {
+          sessionId,
+          error: statusError instanceof Error ? statusError.message : String(statusError)
+        });
+      }
       this.options.bus.publish({ kind: "inventory-changed" });
       throw error;
     }
@@ -409,7 +469,9 @@ export class ChatSessionService {
     let sawDone = false;
 
     try {
+      await this.options.validateTurn?.();
       await this.appendUserMessage(live, prompt, turnModel);
+      await this.options.validateTurn?.();
       runId = await live.adapter.sendPrompt(live.connection, {
         text: prompt,
         cwd: live.runtime.runtimeCwd ?? live.runtime.workspacePath,
@@ -507,6 +569,7 @@ export class ChatSessionService {
     }
     this.sidecarBusy.add(sessionId);
     try {
+      await this.options.validateTurn?.();
       // Synthetic ids: adapter connection state is keyed by generation+agent,
       // and no session row exists under this id, so the sidecar can neither
       // clobber the live connection nor leak rows into any transcript.
@@ -518,6 +581,7 @@ export class ChatSessionService {
         transport: live.transport
       });
       try {
+        await this.options.validateTurn?.();
         const runId = await live.adapter.sendPrompt(connection, {
           text: prompt,
           cwd: live.runtime.runtimeCwd ?? live.runtime.workspacePath,
@@ -556,8 +620,9 @@ export class ChatSessionService {
     }
   }
 
-  listModels(sessionId: SessionId): Promise<AgentModelCatalog> {
+  async listModels(sessionId: SessionId): Promise<AgentModelCatalog> {
     const live = this.requiredLiveSession(sessionId);
+    await this.options.validateTurn?.();
     return live.adapter.listModels(live.connection);
   }
 
@@ -593,13 +658,43 @@ export class ChatSessionService {
         error: error instanceof Error ? error.message : String(error)
       });
     }
-    await this.options.cleanup.cleanupRuntime(live.runtime.runtimeId, "graceful");
+    let cleanupFailure: string | undefined;
+    try {
+      const cleanup = await this.options.cleanup.cleanupRuntime(live.runtime.runtimeId, "graceful");
+      if (cleanup.status !== "removed") cleanupFailure = cleanup.diagnostics.join("; ");
+    } catch (error) {
+      cleanupFailure = error instanceof Error ? error.message : String(error);
+    }
+    if (cleanupFailure !== undefined) {
+      this.liveSessions.delete(sessionId);
+      try {
+        await this.updateSession(live.session, {
+          status: "failed",
+          endedAt: this.options.clock.isoNow(),
+          hostInstanceId: null,
+          heartbeatAt: null
+        });
+      } catch (statusError) {
+        this.options.logger.warn("restart: failed to persist cleanup failure", {
+          sessionId,
+          error: statusError instanceof Error ? statusError.message : String(statusError)
+        });
+      }
+      this.options.logger.error("restart blocked because previous runtime cleanup failed", {
+        sessionId,
+        error: cleanupFailure
+      });
+      this.options.bus.publish({ kind: "inventory-changed" });
+      throw new Error("The previous runtime could not be removed, so restart was stopped. Clean up the quarantined runtime and try again.");
+    }
 
     const runtimeId = this.options.ids.runtimeId();
     const generationId = this.options.ids.runtimeGenerationId();
     const agentId = this.options.ids.agentId();
+    let nextRuntime: RuntimeHandle | undefined;
+    let nextConnection: AgentConnection | undefined;
     try {
-      const runtime = await this.options.lifecycle.startRuntime({
+      nextRuntime = await this.options.lifecycle.startRuntime({
         sessionId: live.session.sessionId,
         chatId: live.session.chatId,
         agentId,
@@ -610,16 +705,19 @@ export class ChatSessionService {
         runtimeId,
         ...(live.workspaceOwnerToken === undefined ? {} : { workspaceOwnerToken: live.workspaceOwnerToken })
       });
-      const connection = await adapter.startProtocol({
+      await this.options.validateTurn?.();
+      nextConnection = await adapter.startProtocol({
         sessionId: live.session.sessionId,
         agentId,
         agentRole: sessionRole(live.session),
-        runtime,
+        runtime: nextRuntime,
         transport: nextTransport
       });
 
+      const context = await this.contextMessages(sessionId);
+      await this.options.validateTurn?.();
       try {
-        await adapter.restoreContext(connection, await this.contextMessages(sessionId));
+        await adapter.restoreContext(nextConnection, context);
       } catch (error) {
         this.options.logger.warn("chat context restore failed during restart", {
           sessionId,
@@ -628,8 +726,8 @@ export class ChatSessionService {
         });
       }
 
-      live.runtime = runtime;
-      live.connection = connection;
+      live.runtime = nextRuntime;
+      live.connection = nextConnection;
       live.adapter = adapter;
       live.transport = nextTransport;
       live.template = nextTemplate;
@@ -653,6 +751,27 @@ export class ChatSessionService {
       // the live map (the workspace is not disposed — a later new chat owns its
       // own workspace, and this one is cleaned up by startup reconciliation).
       this.liveSessions.delete(sessionId);
+      if (nextConnection !== undefined) {
+        try {
+          await adapter.stop(nextConnection, "restart failed");
+        } catch (stopError) {
+          this.options.logger.warn("chat adapter stop failed after restart error", {
+            sessionId,
+            error: stopError instanceof Error ? stopError.message : String(stopError)
+          });
+        }
+      }
+      if (nextRuntime !== undefined) {
+        try {
+          await this.options.cleanup.cleanupRuntime(nextRuntime.runtimeId, "force-remove");
+        } catch (cleanupError) {
+          this.options.logger.warn("runtime cleanup failed after restart error", {
+            sessionId,
+            runtimeId: nextRuntime.runtimeId,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          });
+        }
+      }
       await this.updateSession(live.session, { status: "failed", endedAt: this.options.clock.isoNow() });
       this.options.logger.error("chat session restart failed", {
         sessionId,
@@ -820,6 +939,35 @@ export class ChatSessionService {
     return this.options.sessionStore.listSessions(limit);
   }
 
+  /** Ends every active/starting session, including fresh sessions owned by another window. */
+  async endAllSessionsForDeallocation(): Promise<number> {
+    const sessions = await this.options.sessionStore.listSessions();
+    let ended = 0;
+    for (const session of sessions) {
+      if (session.status !== "starting" && session.status !== "active") continue;
+      const live = this.liveSessions.get(session.sessionId);
+      if (live !== undefined) {
+        await this.endSession(session.sessionId, "machine allocation removed");
+        ended += 1;
+        continue;
+      }
+      let status: ChatSessionStatus = "ended";
+      if (session.runtimeId !== undefined) {
+        const cleanup = await this.options.cleanup.cleanupRuntime(session.runtimeId, "force-remove");
+        if (cleanup.status !== "removed") status = "failed";
+      }
+      await this.updateSession(session, {
+        status,
+        endedAt: this.options.clock.isoNow(),
+        hostInstanceId: null,
+        heartbeatAt: null
+      });
+      ended += 1;
+    }
+    if (ended > 0) this.options.bus.publish({ kind: "inventory-changed" });
+    return ended;
+  }
+
   /** The durable session record, or null when the id is unknown. */
   getSession(sessionId: SessionId): Promise<ChatSessionRecord | null> {
     return this.options.sessionStore.getSession(sessionId);
@@ -900,6 +1048,23 @@ export class ChatSessionService {
     const now = this.options.clock.isoNow();
     for (const [sessionId, live] of this.liveSessions) {
       try {
+        await this.options.validateTurn?.();
+      } catch (error) {
+        this.options.logger.warn("chat session allocation was revoked; ending runtime", {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        try {
+          await this.endSession(sessionId, "machine allocation removed");
+        } catch (cleanupError) {
+          this.options.logger.error("revoked chat session cleanup failed", {
+            sessionId,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          });
+        }
+        continue;
+      }
+      try {
         const updated = await this.updateSession(live.session, { heartbeatAt: now });
         live.session = updated;
       } catch (error) {
@@ -976,6 +1141,16 @@ export class ChatSessionService {
     const transport = session.transport as AgentTransport;
     if (!ADOPTABLE_TRANSPORTS.has(transport)) {
       await this.endSession(session.sessionId, "startup-reconcile-nonadoptable");
+      return false;
+    }
+    try {
+      await this.options.validateRuntimeAdoption?.(session, record);
+    } catch (error) {
+      this.options.logger.warn("runtime adoption refused", {
+        sessionId: session.sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      await this.endSession(session.sessionId, "startup-reconcile-adoption-refused");
       return false;
     }
     const adapter = this.options.agentAdapters.get(session.providerId);

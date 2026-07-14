@@ -75,6 +75,7 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
   // Actions
   // ---------------------------------------------------------------------------
   probeButton.addEventListener("click", () => {
+    if (state.workspacePolicy?.security?.networkedAiAllowed !== true) return;
     logSystemLine("starting app-server probe…");
     void request({ type: "isolatedRun.probeAppServer" }).then((response) => {
       if (!response.ok) logSystemLine(`could not start probe: ${response.error.message}`);
@@ -336,6 +337,15 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
   }
 
   function render(): void {
+    const security = state.workspacePolicy?.security;
+    probeButton.disabled = security?.networkedAiAllowed !== true;
+    probeButton.title = probeButton.disabled
+      ? security === undefined
+        ? "Loading the workstation security policy…"
+        : security.managed
+          ? "AI use is not allocated on this workstation."
+          : "Enable Drydock › Security: Networked AI Enabled, then reload the window."
+      : "Probe the configured app-server backend.";
     renderRuntimes();
     // Fetch a fresh sample the moment the tab is shown (the interval covers the rest).
     void pollStats();

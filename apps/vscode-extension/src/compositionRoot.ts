@@ -8,14 +8,14 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { chmodSync, realpathSync, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ClaudeAdapter, CodexAdapter, CodexAppServerTransport } from "@drydock/agent-adapters";
 import { asId, type AgentAdapter } from "@drydock/contracts";
 import { ContentAddressedBlobStore, TempWorkspaceStore } from "@drydock/artifacts";
-import type { ChatSessionStore, EventStore, RuntimeInventoryStore } from "@drydock/contracts";
+import type { ChatSessionStore, EventStore, RuntimeInventoryStore, SecurityEventInput, SecurityEventStore } from "@drydock/contracts";
 import {
   AccessRequestService,
   AgentQuestionService,
@@ -26,6 +26,7 @@ import {
   extractMemoryCandidates,
   ProductEventBus,
   RandomIdGenerator,
+  normalizePathKey,
   RuntimeCleanupService,
   RuntimeLifecycleService,
   RuntimeReconcileService,
@@ -58,6 +59,7 @@ import {
   SqliteProjectCatalogStore,
   SqliteReviewStore,
   SqliteRuntimeInventoryStore,
+  SqliteSecurityEventStore,
   SqliteSubtaskHoldStore,
   SqliteSubtaskStore,
   SqliteTaskChangesetStore,
@@ -95,6 +97,8 @@ export interface BackendReady {
   readonly memory: MemoryService;
   readonly workInsights: WorkInsightsAppService;
   readonly bus: ProductEventBus;
+  /** Content-free, append-only security evidence with JSONL export. */
+  readonly securityEvents: SecurityEventStore;
   /** Debug-only per-session capture of the current turn's raw agent stream. */
   readonly rawStreamStore: SessionRawStreamStore;
   /** Session + inventory reconciliation, run once after activation. */
@@ -147,19 +151,110 @@ export interface CreateBackendOptions {
  * sbx binary's own dir plus the known Docker Desktop bin locations; each is
  * added only if it exists and is not already present.
  */
-function ensureRuntimeToolsOnPath(sbxPath: string, environment: NodeJS.ProcessEnv, logger: Logger): void {
-  const programFiles = environment["ProgramFiles"] ?? "C:\\Program Files";
-  const candidates = [
-    path.dirname(sbxPath),
-    path.join(os.homedir(), "AppData", "Local", "DockerSandboxes", "bin"),
-    path.join(programFiles, "Docker", "Docker", "resources", "bin")
-  ];
+function ensureRuntimeToolsOnPath(
+  sbxPath: string,
+  environment: NodeJS.ProcessEnv,
+  logger: Logger,
+  managed: boolean,
+  userHome: string
+): void {
+  const programFiles = managed ? "C:\\Program Files" : (environment["ProgramFiles"] ?? "C:\\Program Files");
+  const candidates = process.platform === "win32"
+    ? [
+        path.dirname(sbxPath),
+        "C:\\Windows\\System32",
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0",
+        "C:\\Windows",
+        ...(managed ? [] : [path.join(userHome, "AppData", "Local", "DockerSandboxes", "bin")]),
+        path.join(programFiles, "Docker", "Docker", "resources", "bin"),
+        path.join(programFiles, "Git", "cmd")
+      ]
+    : process.platform === "darwin"
+      ? [
+          path.dirname(sbxPath), "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+          ...(managed ? [] : ["/usr/local/bin", "/opt/homebrew/bin"])
+        ]
+      : [path.dirname(sbxPath), "/usr/bin", "/bin", ...(managed ? [] : ["/usr/local/bin"])];
+  const available = candidates.filter((dir, index) => {
+    if (!path.isAbsolute(dir) || candidates.findIndex((candidate) => normalizePathKey(candidate) === normalizePathKey(dir)) !== index) {
+      return false;
+    }
+    try {
+      return statSync(dir).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  if (managed) {
+    environment["PATH"] = available.join(path.delimiter);
+    if (process.platform === "win32") environment["PATHEXT"] = ".EXE;.COM";
+    logger.info("set restricted PATH for managed runtime tools", { directories: available });
+    return;
+  }
   const existing = (environment["PATH"] ?? "").split(path.delimiter);
-  const additions = candidates.filter((dir) => dir.length > 0 && existsSync(dir) && !existing.includes(dir));
+  const additions = available.filter((dir) => !existing.includes(dir));
   if (additions.length > 0) {
     environment["PATH"] = [...additions, ...existing].join(path.delimiter);
     logger.info("augmented PATH for runtime tools", { added: additions });
   }
+}
+
+/** Managed mode accepts only the product's expected installation locations. */
+function discoverManagedDockerSandboxCommand(): string | null {
+  const candidates = process.platform === "win32"
+    ? [
+        "C:\\Program Files\\Drydock\\bin\\sbx.exe",
+        "C:\\Program Files\\Docker\\Docker\\resources\\bin\\sbx.exe"
+      ]
+    : process.platform === "darwin"
+      ? ["/Applications/Docker.app/Contents/Resources/bin/sbx"]
+      : ["/usr/bin/sbx"];
+  for (const candidate of candidates) {
+    try {
+      if (statSync(candidate).isFile()) return realpathSync.native(candidate);
+    } catch {
+      // Continue to the next fixed install location.
+    }
+  }
+  return null;
+}
+
+/** Resolves Git before any agent-writable repository becomes a process cwd. */
+function discoverHostGitCommand(environment: NodeJS.ProcessEnv, managed: boolean): string | null {
+  const programFiles = managed ? "C:\\Program Files" : (environment["ProgramFiles"] ?? "C:\\Program Files");
+  const preferred = process.platform === "win32"
+    ? [path.join(programFiles, "Git", "cmd", "git.exe"), path.join(programFiles, "Git", "bin", "git.exe")]
+    : process.platform === "darwin"
+      ? ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"]
+      : ["/usr/bin/git", "/usr/local/bin/git"];
+  const names = process.platform === "win32" ? ["git.exe"] : ["git"];
+  const fromPath = managed
+    ? []
+    : (environment["PATH"] ?? "")
+        .split(path.delimiter)
+        .map((entry) => entry.replace(/^"|"$/g, ""))
+        .filter((entry) => path.isAbsolute(entry))
+        .flatMap((entry) => names.map((name) => path.join(entry, name)));
+  for (const candidate of [...preferred, ...fromPath]) {
+    try {
+      if (statSync(candidate).isFile()) return realpathSync.native(candidate);
+    } catch {
+      // Continue to the next fixed/absolute candidate.
+    }
+  }
+  return null;
+}
+
+async function ensurePrivateDirectory(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(directory, 0o700);
+}
+
+function setEnvironmentKey(environment: NodeJS.ProcessEnv, name: string, value: string): void {
+  for (const key of Object.keys(environment)) {
+    if (key.toUpperCase() === name.toUpperCase()) delete environment[key];
+  }
+  environment[name] = value;
 }
 
 export async function createBackend(options: CreateBackendOptions): Promise<Backend> {
@@ -174,31 +269,148 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     };
   }
   const runtimeEnvironment = options.runtimeEnvironment ?? { ...process.env };
-  const sbxPath = discoverDockerSandboxCommand(runtimeEnvironment);
+  const managed = options.securityPolicy?.managed === true;
+  const userHome = managed ? os.userInfo().homedir : os.homedir();
+  const discoveredSbxPath = managed
+    ? discoverManagedDockerSandboxCommand()
+    : discoverDockerSandboxCommand(runtimeEnvironment);
+  const sbxPath = discoveredSbxPath !== null
+    && (!managed || path.isAbsolute(discoveredSbxPath))
+    ? discoveredSbxPath
+    : null;
   if (!sbxPath) {
     return {
       available: false,
-      reason: "Docker Sandbox `sbx` was not found. Install Docker Sandbox (or set SBX_PATH to sbx.exe) and reload the window.",
+      reason: managed
+        ? "An approved Docker Sandbox installation was not found. Ask your administrator to install it in the standard location, then reload the window."
+        : "Docker Sandbox `sbx` was not found. Install Docker Sandbox (or set SBX_PATH to sbx.exe) and reload the window.",
       stateRootPath,
       dispose: () => { /* nothing composed */ }
     };
   }
-  ensureRuntimeToolsOnPath(sbxPath, runtimeEnvironment, logger);
+  ensureRuntimeToolsOnPath(sbxPath, runtimeEnvironment, logger, managed, userHome);
 
   const stateDir = path.join(stateRootPath, "state");
   const tmpDir = path.join(stateRootPath, "tmp");
-  await mkdir(stateDir, { recursive: true });
-  await mkdir(tmpDir, { recursive: true });
+  await ensurePrivateDirectory(stateRootPath);
+  await ensurePrivateDirectory(stateDir);
+  await ensurePrivateDirectory(tmpDir);
+  if (managed) {
+    setEnvironmentKey(runtimeEnvironment, "TEMP", tmpDir);
+    setEnvironmentKey(runtimeEnvironment, "TMP", tmpDir);
+    setEnvironmentKey(runtimeEnvironment, "TMPDIR", tmpDir);
+  }
 
   const ids = new RandomIdGenerator();
   const clock = new SystemClock();
   const commandRunner = new SpawnCommandRunner(runtimeEnvironment);
   const connection = new SqliteConnection(path.join(stateDir, "state.sqlite"));
   applyMigrations(connection);
+  const securityEvents: SecurityEventStore = new SqliteSecurityEventStore(connection);
   const inventory: RuntimeInventoryStore = new SqliteRuntimeInventoryStore(connection);
   const eventStore: EventStore = new SqliteEventStore(connection);
   const sessionStore: ChatSessionStore = new SqliteChatSessionStore(connection);
   const bus = new ProductEventBus();
+  const actorId = os.userInfo().username;
+  const hostId = os.hostname();
+  const appendSecurityEvent = (
+    event: Omit<SecurityEventInput, "occurredAt" | "actorId" | "hostId" | "policyId">
+  ): void => {
+    void securityEvents.appendSecurityEvent({
+      ...event,
+      occurredAt: clock.isoNow(),
+      actorId,
+      hostId,
+      ...(options.securityPolicy?.policyId === undefined ? {} : { policyId: options.securityPolicy.policyId })
+    }).catch((error: unknown) => {
+      logger.warn("security evidence write failed", {
+        eventCode: event.eventCode,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+  };
+  appendSecurityEvent({
+    eventCode: "policy.loaded",
+    outcome: "succeeded",
+    metadata: {
+      managed: options.securityPolicy?.managed === true,
+      cloneOnly: options.securityPolicy?.cloneOnly === true,
+      networkedAiAllowed: options.securityPolicy?.allowNetworkedAiOnThisMachine !== false,
+      ...(options.securityPolicy?.allowedProjectRoots === undefined
+        ? {}
+        : { allowedRootCount: options.securityPolicy.allowedProjectRoots.length }),
+      ...(options.securityPolicy?.policyFingerprint === undefined
+        ? {}
+        : { policyFingerprint: options.securityPolicy.policyFingerprint })
+    }
+  });
+  const lastSessionStatus = new Map<string, string>();
+  const stopSecurityEvidence = bus.subscribe((event) => {
+    switch (event.kind) {
+      case "turn-started":
+        appendSecurityEvent({
+          eventCode: "runtime.turn.started",
+          outcome: "succeeded",
+          sessionId: event.sessionId,
+          metadata: { runId: event.runId }
+        });
+        break;
+      case "turn-completed":
+        appendSecurityEvent({
+          eventCode: "runtime.turn.completed",
+          outcome: event.status === "completed" ? "succeeded" : "failed",
+          sessionId: event.sessionId,
+          metadata: { runId: event.runId, status: event.status }
+        });
+        break;
+      case "session-updated": {
+        const previous = lastSessionStatus.get(event.session.sessionId);
+        if (previous === event.session.status) break;
+        lastSessionStatus.set(event.session.sessionId, event.session.status);
+        appendSecurityEvent({
+          eventCode: "runtime.session.status",
+          outcome: event.session.status === "failed" ? "failed" : "succeeded",
+          sessionId: event.session.sessionId,
+          ...(event.session.runtimeId === undefined ? {} : { runtimeId: event.session.runtimeId }),
+          metadata: { status: event.session.status, mode: event.session.mode ?? "mount" }
+        });
+        break;
+      }
+      case "session-deleted":
+        lastSessionStatus.delete(event.sessionId);
+        appendSecurityEvent({
+          eventCode: "runtime.session.deleted",
+          outcome: "succeeded",
+          sessionId: event.sessionId
+        });
+        break;
+      case "access-requested":
+        appendSecurityEvent({
+          eventCode: "access.requested",
+          outcome: "succeeded",
+          sessionId: event.request.sessionId,
+          metadata: {
+            accessRequestId: event.request.accessRequestId,
+            mode: event.request.mode
+          }
+        });
+        break;
+      case "access-resolved":
+        appendSecurityEvent({
+          eventCode: "access.resolved",
+          outcome: event.request.status === "approved" ? "allowed" : "denied",
+          sessionId: event.request.sessionId,
+          metadata: {
+            accessRequestId: event.request.accessRequestId,
+            mode: event.request.mode,
+            status: event.request.status
+          }
+        });
+        break;
+      default:
+        break;
+    }
+  });
   // Work-session touch history and agent memory candidates. Constructed early
   // so the app service can inject approved memory into the first briefing of
   // each session.
@@ -210,9 +422,28 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     cwd: stateRootPath,
     logger
   });
-  const lifecycle = new RuntimeLifecycleService({ clock, inventory, runtimeAdapter, logger });
+  const lifecycle = new RuntimeLifecycleService({
+    clock,
+    inventory,
+    runtimeAdapter,
+    logger,
+    ...(options.securityPolicy === undefined
+      ? {}
+      : {
+          authorizeStart: (request: import("@drydock/contracts").StartRuntimeRequest) => {
+            options.securityPolicy?.assertNetworkedAiAllowed();
+            for (const mount of request.template.mounts) {
+              if (mount.approvedBy === "isolated-run") continue;
+              const canonical = options.securityPolicy?.assertHostPathAllowed(mount.hostPath) ?? mount.hostPath;
+              if (normalizePathKey(canonical) !== normalizePathKey(mount.hostPath)) {
+                throw new Error("A selected project path changed after approval. Re-select it before starting the runtime.");
+              }
+            }
+          }
+        })
+  });
   const cleanup = new RuntimeCleanupService({ clock, inventory, runtimeAdapter, logger });
-  const hostCodexPath = discoverStandaloneCodexCommand(runtimeEnvironment);
+  const hostCodexPath = managed ? null : discoverStandaloneCodexCommand(runtimeEnvironment);
   // Debug-only capture of the current turn's raw agent stream, read on demand by
   // the chat tab's raw view. Bounded + last-turn-only, so it scales to many sessions.
   const rawStreamStore = new SessionRawStreamStore(clock);
@@ -226,6 +457,10 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       command: sbxPath,
       argsForRuntime: (handle: { readonly externalName: string }) => ["exec", handle.externalName],
       cwd: stateRootPath,
+      environment: runtimeEnvironment,
+      ...(options.securityPolicy === undefined
+        ? {}
+        : { authorizePrompt: () => options.securityPolicy?.assertNetworkedAiAllowed() }),
       rawSink: rawStreamStore,
       ...(options.appServerInactivityTimeoutMs === undefined ? {} : { inactivityTimeoutMs: options.appServerInactivityTimeoutMs })
     }
@@ -236,7 +471,17 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     [agent.providerId, agent],
     [claudeAgent.providerId, claudeAgent]
   ]);
-  const workflow = new IsolatedRunWorkflow({ ids, logger, lifecycle, cleanup, agentAdapter: agent, eventStore });
+  const workflow = new IsolatedRunWorkflow({
+    ids,
+    logger,
+    lifecycle,
+    cleanup,
+    agentAdapter: agent,
+    eventStore,
+    ...(options.securityPolicy === undefined
+      ? {}
+      : { authorizePrompt: () => options.securityPolicy?.assertNetworkedAiAllowed() })
+  });
   // One identity per activation: stamped onto every session this window
   // owns so a sibling window can tell our fresh heartbeats from its own.
   const hostInstanceId = randomUUID();
@@ -251,17 +496,44 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     sessionStore,
     inventory,
     bus,
-    hostInstanceId
+    hostInstanceId,
+    ...(options.securityPolicy === undefined
+      ? {}
+      : { validateTurn: () => options.securityPolicy?.assertNetworkedAiAllowed() }),
+    validateRuntimeAdoption: () => {
+      options.securityPolicy?.assertPolicyCurrent();
+      throw new Error(
+        "Surviving runtime adoption is disabled. Resume the chat to start a fresh runtime under current access rules."
+      );
+    }
   });
   const runtimeReconcile = new RuntimeReconcileService({ clock, inventory, runtimeAdapter, logger });
   // Clone mode: host-side git plumbing (clone/status/inbound/outbound/discard)
   // over the shared CommandRunner. No docker, no network — pure host git.
-  const cloneSync = new CloneSyncService({ runner: commandRunner });
+  const gitPath = discoverHostGitCommand(runtimeEnvironment, options.securityPolicy?.managed === true)
+    ?? (managed
+      ? process.platform === "win32"
+        ? "C:\\Program Files\\Drydock\\unavailable-git.exe"
+        : "/nonexistent/drydock/git"
+      : path.join(stateRootPath, "unavailable", process.platform === "win32" ? "git.exe" : "git"));
+  const cloneSync = new CloneSyncService({
+    runner: commandRunner,
+    gitPath,
+    environment: runtimeEnvironment,
+    temporaryDirectory: tmpDir,
+    ...(options.securityPolicy === undefined
+      ? {}
+      : { authorizeHostPath: (candidate: string) => options.securityPolicy?.assertHostPathAllowed(candidate) ?? candidate })
+  });
   const workspaceStore = new TempWorkspaceStore(tmpDir);
   const prober = new CodexAppServerTransport({
     command: sbxPath,
     argsForRuntime: (handle) => ["exec", handle.externalName],
-    cwd: stateRootPath
+    cwd: stateRootPath,
+    environment: runtimeEnvironment,
+    ...(options.securityPolicy === undefined
+      ? {}
+      : { authorizePrompt: () => options.securityPolicy?.assertNetworkedAiAllowed() })
   });
   const appService = new IsolatedRunService({
     ids,
@@ -579,6 +851,30 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   const PURGE_LOST_OLDER_THAN_MS = 7 * 24 * 60 * 60 * 1000;
   const RUNTIME_NAME_PREFIX = "drydock";
   const reconcileOnActivate = async (): Promise<void> => {
+    let deallocatedSessions = 0;
+    let deallocatedRuntimes = 0;
+    if (options.securityPolicy?.allowNetworkedAiOnThisMachine === false) {
+      try {
+        deallocatedSessions = await chatService.endAllSessionsForDeallocation();
+      } catch (error) {
+        logger.error("session deallocation cleanup failed; continuing with runtime inventory", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+      const runtimes = await inventory.listRuntimes();
+      for (const runtime of runtimes) {
+        if (runtime.status === "removed") continue;
+        try {
+          const result = await cleanup.cleanupRuntime(runtime.runtimeId, "force-remove");
+          if (result.status === "removed") deallocatedRuntimes += 1;
+        } catch (error) {
+          logger.error("runtime deallocation cleanup failed", {
+            runtimeId: runtime.runtimeId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    }
     // Fetch the live external-name set ONCE and share it with the session
     // reconciler (adoption) so the two reconcilers do not each list sbx.
     const externalRuntimeNames = new Set(await runtimeAdapter.listExternalRuntimeNames(RUNTIME_NAME_PREFIX));
@@ -589,7 +885,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     const purgedRuntimes = await appService.purgeRuntimes(PURGE_REMOVED_OLDER_THAN_MS, PURGE_LOST_OLDER_THAN_MS);
     if (
       sessionCounts.ended > 0 || sessionCounts.adopted > 0 || sessionCounts.elsewhere > 0 ||
-      result.missingExternal.length > 0 || result.externalOnly.length > 0 || purgedRuntimes > 0
+      result.missingExternal.length > 0 || result.externalOnly.length > 0 || purgedRuntimes > 0 ||
+      deallocatedSessions > 0 || deallocatedRuntimes > 0
     ) {
       logger.info("startup reconciliation", {
         endedSessions: sessionCounts.ended,
@@ -597,13 +894,16 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
         sessionsElsewhere: sessionCounts.elsewhere,
         lostRuntimes: result.missingExternal.length,
         externalOnly: [...result.externalOnly],
-        purgedRuntimes
+        purgedRuntimes,
+        deallocatedSessions,
+        deallocatedRuntimes
       });
     }
     bus.publish({ kind: "inventory-changed" });
     // Continuity (ADR 0015): queued/parked holds reload AFTER sessions and
     // runtimes reconcile, so restored queue entries start against a settled
     // world. Failures log; a broken hold never blocks activation.
+    if (options.securityPolicy?.allowNetworkedAiOnThisMachine === false) return;
     try {
       await orchestrator.restore();
     } catch (error) {
@@ -632,6 +932,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     memory,
     workInsights,
     bus,
+    securityEvents,
     rawStreamStore,
     reconcileOnActivate,
     sbxDisplayPath: sbxPath,
@@ -642,6 +943,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       // during window teardown.
       faqAutoAnswer.dispose();
       orchestrator.dispose();
+      stopSecurityEvidence();
       stopHeartbeats();
       try {
         connection.close();

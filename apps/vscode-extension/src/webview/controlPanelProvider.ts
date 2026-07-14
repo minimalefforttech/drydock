@@ -661,6 +661,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       }
       case "provider.login": {
         const appService = this.requireBackend();
+        // loginCommand enforces the interactive/network policy before it
+        // returns anything that can be launched.
         const login = appService.loginCommand(payload.providerId);
         // The OAuth flow is interactive and user-driven; it runs in a visible
         // terminal so no secret ever passes through the extension.
@@ -677,6 +679,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         if (!this.backend.available) {
           throw new Error("Docker Sandbox is not available in this window.");
         }
+        const appService = this.requireBackend();
+        appService.assertInteractiveSetupAllowed("Docker Sandbox sign-in");
         // Interactive Docker Sandbox sign-in in a visible terminal: `sbx login`
         // drives its own OAuth flow; no secret passes through the extension.
         const sbxPath = this.backend.sbxDisplayPath;
@@ -690,6 +694,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         if (!this.backend.available) {
           throw new Error("Docker Sandbox is not available in this window.");
         }
+        appService.assertRuntimeTerminalAllowed();
         // A real VS Code terminal INTO the chat's container, so the developer can
         // watch/interrupt what the agent is running (e.g. a hung command).
         const runtime = (await appService.listRuntimes())

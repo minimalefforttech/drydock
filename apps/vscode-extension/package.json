@@ -23,6 +23,7 @@
     "onCommand:drydock.isolatedRun.appServerProbe",
     "onCommand:drydock.isolatedRun.stop",
     "onCommand:drydock.isolatedRun.status",
+    "onCommand:drydock.security.exportEvidence",
     "onCommand:drydock.panel.open",
     "onView:drydock.controlPanel"
   ],
@@ -85,6 +86,10 @@
         "title": "Drydock: Open Agents"
       },
       {
+        "command": "drydock.security.exportEvidence",
+        "title": "Drydock: Export Security Events"
+      },
+      {
         "command": "drydock.taskReview.addComment",
         "title": "Task Review: Add Review Comment"
       },
@@ -116,7 +121,7 @@
           "type": "string",
           "scope": "machine",
           "default": "",
-          "markdownDescription": "Root directory for product state (SQLite event store, disposable workspaces). Leave empty to use `~/.drydock`. Changing this requires a window reload."
+          "markdownDescription": "Root directory for product state (SQLite event store, disposable workspaces). Leave empty to use `~/.drydock`. Managed mode always uses the fixed local location. Changing this requires a window reload."
         },
         "drydock.deniedPaths": {
           "type": "array",
@@ -131,7 +136,7 @@
           "type": "boolean",
           "scope": "machine",
           "default": false,
-          "markdownDescription": "**Not recommended.** By default, sensitive home-directory config roots (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.azure`, `~/.docker`) are merged into `#drydock.deniedPaths#` so the agent can never mount them, even via an approved access request. Enabling this removes that protection \u2014 an agent could then be granted read or write access to your SSH keys, cloud credentials, and other secrets. Leave this off unless you have a specific reason and understand the risk. Changing this requires a window reload."
+          "markdownDescription": "**Not recommended.** By default, sensitive home-directory config roots (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.azure`, `~/.docker`) are merged into `#drydock.deniedPaths#` so the agent can never mount them, even via an approved access request. Enabling this removes that protection in personal mode; managed mode ignores this setting. Changing this requires a window reload."
         },
         "drydock.security.allowedProjectRoots": {
           "type": "array",
@@ -152,7 +157,7 @@
           "type": "boolean",
           "scope": "machine",
           "default": false,
-          "markdownDescription": "Keep common environment/credential paths (`.env*`, `secrets/`, key files, cloud config folders) out of AI clones. If one was ever tracked in reachable Git history, Drydock blocks the clone rather than pretending deletion is secure. Implies clone-only mode."
+          "markdownDescription": "Keep common environment/credential paths (`.env*`, `secrets/`, key files, cloud config folders) out of AI clones. If one was ever tracked in reachable Git history, Drydock blocks the clone rather than pretending deletion is secure. Implies clone-only mode. Changing this requires a window reload."
         },
         "drydock.security.omittedRepoPaths": {
           "type": "array",
@@ -161,13 +166,13 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Exact repo-relative files or folders to keep out of AI clones (for example `config/local`); descendants are included and globs are intentionally unsupported. `.git` cannot be omitted. Tracked/history content blocks the clone. Implies clone-only mode."
+          "markdownDescription": "Exact repo-relative files or folders to keep out of AI clones (for example `config/local`); descendants are included and globs are intentionally unsupported. `.git` cannot be omitted. Tracked/history content blocks the clone. Implies clone-only mode. Changing this requires a window reload."
         },
         "drydock.security.networkedAiEnabled": {
           "type": "boolean",
           "scope": "machine",
           "default": true,
-          "markdownDescription": "Allow networked AI on this machine. Turning this off blocks all current agent runtimes. When a Studio policy exists, it must also explicitly set `allowNetworkedAiOnThisMachine: true`; omission fails closed."
+          "markdownDescription": "Allow new AI requests on this machine. Turning this off prevents new turns and runtime starts; existing runtimes should be cleaned up separately. When an administrator-managed policy exists, it must also explicitly allow this machine. Changing this requires a window reload."
         },
         "drydock.runtime.pathAdditions": {
           "type": "array",
@@ -176,7 +181,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Extra directories prepended to `PATH` when Drydock runs runtime tools (`sbx` and the agent CLIs). Use this when a GUI-launched VS Code can't find the Docker credential helper or `sbx` companions your terminal can \u2014 e.g. `C:\\\\Program Files\\\\Docker\\\\Docker\\\\resources\\\\bin`. Drydock already adds the standard Docker Desktop / Docker Sandbox bin dirs; list any non-standard install locations here. Changing this requires a window reload."
+          "markdownDescription": "Extra directories prepended to `PATH` when Drydock runs runtime tools (`sbx` and the agent CLIs). Drydock already adds the standard Docker Desktop / Docker Sandbox bin dirs. Managed mode ignores local PATH overrides. Changing this requires a window reload."
         },
         "drydock.runtime.env": {
           "type": "object",
@@ -185,7 +190,7 @@
             "type": "string"
           },
           "default": {},
-          "markdownDescription": "Additional **non-secret** environment variables to set for Drydock's runtime tools (`sbx`, agent CLIs), as name\u2192value pairs. Overrides inherited values. VS Code stores these values as ordinary settings, so use the provider/Docker secret flow for credentials. Useful for injecting things the extension host is missing, e.g. `DOCKER_CONFIG` or `DOCKER_HOST`. Changing this requires a window reload."
+          "markdownDescription": "Additional **non-secret** environment variables for Drydock runtime tools. VS Code stores these as ordinary settings; managed mode ignores local environment overrides. Changing this requires a window reload."
         },
         "drydock.runtime.copyEnv": {
           "type": "array",
@@ -194,7 +199,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Names of environment variables to explicitly forward from the extension host to runtime tools. Drydock already inherits the full host environment, so this is a safeguard/diagnostic: if a listed variable is missing at load, Drydock logs a warning so you can tell your terminal's session isn't reaching the extension host. Changing this requires a window reload."
+          "markdownDescription": "Names of environment variables to explicitly forward from the extension host to runtime tools. Drydock already inherits the host environment; managed mode ignores this setting. Changing this requires a window reload."
         },
         "drydock.runtime.appServerInactivityTimeoutMs": {
           "type": "number",

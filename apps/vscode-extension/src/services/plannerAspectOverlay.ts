@@ -26,9 +26,13 @@ const OVERLAY_SORT_BASE = 100;
  */
 export function createAspectOverlayReader(
   roots: () => readonly string[],
-  resolveFile: (root: string, filePath: string) => string | undefined = (_root, filePath) => filePath
+  resolveFile: (root: string, filePath: string) => string | undefined = (_root, filePath) => filePath,
+  isWorkspaceTrusted: () => boolean = () => true
 ): () => Promise<readonly PlanAspectRecord[]> {
   return async () => {
+    // Aspect instructions become agent prompts. Treat them as executable
+    // repository content, matching the recipe-overlay trust boundary.
+    if (!isWorkspaceTrusted()) return [];
     const merged: PlanAspectRecord[] = [];
     const seen = new Set<string>();
     for (const root of roots()) {

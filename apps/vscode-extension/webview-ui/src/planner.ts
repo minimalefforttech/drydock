@@ -1089,9 +1089,12 @@ function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
     const whole = button("Whole plan", "ghost small pl-regen-item");
     whole.addEventListener("click", () => {
       close();
-      void request({ type: "planner.regenerate", planId: state.plan.planId });
-      notice = { text: "Regeneration requested for the whole plan.", tone: "info" };
-      render();
+      void request({ type: "planner.regenerate", planId: state.plan.planId }).then((response) => {
+        notice = response.ok && response.payload.type === "planner.regenerate"
+          ? { text: "Regeneration requested for the whole plan.", tone: "info" }
+          : { text: response.ok ? "Unexpected regeneration response." : response.error.message, tone: "error" };
+        render();
+      });
     });
     content.append(whole);
     for (const aspectId of state.plan.aspectIds) {
@@ -1099,9 +1102,12 @@ function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
       const item = button(label, "ghost small pl-regen-item");
       item.addEventListener("click", () => {
         close();
-        void request({ type: "planner.regenerate", planId: state.plan.planId, aspectId });
-        notice = { text: `Regeneration requested: ${label}.`, tone: "info" };
-        render();
+        void request({ type: "planner.regenerate", planId: state.plan.planId, aspectId }).then((response) => {
+          notice = response.ok && response.payload.type === "planner.regenerate"
+            ? { text: `Regeneration requested: ${label}.`, tone: "info" }
+            : { text: response.ok ? "Unexpected regeneration response." : response.error.message, tone: "error" };
+          render();
+        });
       });
       content.append(item);
     }

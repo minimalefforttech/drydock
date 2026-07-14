@@ -127,13 +127,125 @@ test("initClone snapshots dirty tracked change + untracked file into sync base",
   }
 });
 
+test("protected clone metadata stays outside the mounted worktree and sync remains functional", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    const metadataParent = join(root, "host-git");
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      gitMetadataParentDir: metadataParent,
+      name: "proj"
+    });
+
+    assert.equal(await fileExists(join(clonePath, ".git", "config")), false);
+    assert.equal(await fileExists(join(metadataParent, "proj.git", "HEAD")), true);
+
+    // An agent-authored lookalike must not redirect host Git away from the
+    // separately held metadata/worktree pair.
+    await mkdir(join(clonePath, ".git"), { recursive: true });
+    await writeFile(join(clonePath, ".git", "config"), "[core]\n\tworktree = ../outside\n", "utf8");
+    await writeFile(join(clonePath, "a.txt"), "agent\n", "utf8");
+    assert.deepEqual((await svc.agentChanges(clonePath)).map((change) => change.path), ["a.txt"]);
+
+    await svc.inboundPatch(clonePath, localRepoPath);
+    assert.equal(await read(join(localRepoPath, "a.txt")), "agent\n");
+    await git(localRepoPath, "add", "a.txt");
+    await git(localRepoPath, "commit", "-m", "accept agent change");
+    await writeFile(join(localRepoPath, "a.txt"), "developer\n", "utf8");
+    await git(localRepoPath, "commit", "-am", "developer change");
+
+    await svc.outboundSync(clonePath, localRepoPath);
+    assert.equal(await read(join(clonePath, "a.txt")), "developer\n");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("initClone does not execute a configured checkout smudge filter", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({
+    ".gitattributes": "payload.bin filter=drydock-test diff=drydock-test\n",
+    "payload.bin": "unfiltered payload\n"
+  });
+  try {
+    const globalConfig = join(root, "untrusted-global.gitconfig");
+    const filterScript = join(root, "smudge-filter.mjs");
+    const marker = join(root, "smudge-ran.txt");
+    await writeFile(filterScript, [
+      'import { writeFileSync } from "node:fs";',
+      'writeFileSync(process.argv[2], "executed", "utf8");',
+      "process.stdin.pipe(process.stdout);"
+    ].join("\n"), "utf8");
+    const command = [process.execPath, filterScript, marker]
+      .map((value) => `"${value.replace(/\\/g, "/").replace(/"/g, '\\"')}"`)
+      .join(" ");
+    await git(root, "config", "--file", globalConfig, "filter.drydock-test.smudge", command);
+    await git(root, "config", "--file", globalConfig, "filter.drydock-test.required", "true");
+
+    const configuredRunner = new SpawnCommandRunner({
+      ...process.env,
+      GIT_CONFIG_GLOBAL: globalConfig
+    });
+    const svc = new CloneSyncService({ runner: configuredRunner });
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+
+    assert.equal(await fileExists(marker), false);
+    assert.equal(await read(join(clonePath, "payload.bin")), "unfiltered payload\n");
+
+    // In legacy/in-process use the clone may still expose .git. A filter added
+    // there must fail closed before Git can execute it.
+    await git(clonePath, "config", "filter.drydock-test.smudge", command);
+    await git(clonePath, "config", "filter.drydock-test.required", "true");
+    await rm(join(clonePath, "payload.bin"));
+    await assert.rejects(svc.discardFile(clonePath, "payload.bin"), /repository-local content filters are not allowed/);
+    assert.equal(await fileExists(marker), false);
+    await git(clonePath, "config", "--unset-all", "filter.drydock-test.smudge");
+    await git(clonePath, "config", "--unset-all", "filter.drydock-test.required");
+    await writeFile(join(clonePath, "payload.bin"), "unfiltered payload\n", "utf8");
+
+    await git(clonePath, "config", "diff.drydock-test.textconv", command);
+    await writeFile(join(clonePath, "payload.bin"), "agent change\n", "utf8");
+    assert.equal((await svc.agentChanges(clonePath))[0]?.path, "payload.bin");
+    assert.equal(await fileExists(marker), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("repository-local merge commands are rejected before a 3-way apply", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+    const marker = join(root, "merge-driver-ran.txt");
+    const command = `node -e \"require('fs').writeFileSync('${marker.replace(/\\/g, "/")}', 'executed')\"`;
+    await git(clonePath, "config", "merge.drydock-test.driver", command);
+    await writeFile(join(clonePath, "a.txt"), "agent\n", "utf8");
+
+    await assert.rejects(svc.inboundPatch(clonePath, localRepoPath), /repository-local merge commands are not allowed/);
+    assert.equal(await fileExists(marker), false);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("clone omissions skip matching untracked environment and local-config files", async () => {
   const { root, localRepoPath, cleanup } = await makeLocalRepo({ "app.txt": "safe\n" });
   try {
     await writeAll(join(localRepoPath, ".env"), "TOKEN=secret\n");
     await writeAll(join(localRepoPath, "config", "local", "settings.json"), "{\"secret\":true}\n");
     const omission = { sensitive: true, paths: ["config/local"] } as const;
-    const { clonePath } = await service().initClone({
+    const svc = service();
+    const { clonePath } = await svc.initClone({
       localRepoPath,
       cloneParentDir: join(root, "repos"),
       name: "proj",
@@ -145,7 +257,7 @@ test("clone omissions skip matching untracked environment and local-config files
     assert.equal(await read(join(clonePath, "app.txt")), "safe\n");
 
     await writeAll(join(localRepoPath, "config", "local", "later.json"), "{}\n");
-    await service().outboundSync(clonePath, localRepoPath, omission);
+    await svc.outboundSync(clonePath, localRepoPath, omission);
     assert.equal(await fileExists(join(clonePath, "config", "local", "later.json")), false);
   } finally {
     await cleanup();
@@ -581,6 +693,26 @@ test("outbound lands local commit + dirty edit in clone; agent's parallel change
   }
 });
 
+test("outbound fetch cannot be rewritten to a network transport by clone config", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+    await git(clonePath, "config", "url.ssh://invalid/.insteadOf", localRepoPath);
+
+    await assert.rejects(
+      svc.outboundSync(clonePath, localRepoPath),
+      /transport 'ssh' not allowed/
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test("outbound copies untracked local files (skipping identical)", async () => {
   const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "a\n" });
   try {
@@ -652,6 +784,50 @@ test("discardFile restores sync-base content and removes new-since-base files", 
     assert.equal(await fileExists(join(clonePath, "added.txt")), false);
     const status = await git(clonePath, "status", "--porcelain");
     assert.doesNotMatch(status, /added\.txt/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("scoped pull and discard reject paths outside the clone", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({ localRepoPath, cloneParentDir: join(root, "repos"), name: "proj" });
+    const outside = join(root, "outside.txt");
+    await writeFile(outside, "keep\n", "utf8");
+
+    await assert.rejects(svc.discardFile(clonePath, "../../outside.txt"), /unsafe clone discard path/);
+    await assert.rejects(svc.discardFile(clonePath, outside), /unsafe clone discard path/);
+    await assert.rejects(svc.inboundPatch(clonePath, localRepoPath, { path: "../outside.txt" }), /unsafe clone pull path/);
+    assert.equal(await read(outside), "keep\n");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("discard refuses an intermediate symlink instead of deleting its target", async (t) => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({ localRepoPath, cloneParentDir: join(root, "repos"), name: "proj" });
+    const outsideDir = join(root, "outside");
+    const victim = join(outsideDir, "victim.txt");
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(victim, "keep\n", "utf8");
+    try {
+      await symlink(outsideDir, join(clonePath, "link"), "junction");
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error
+        && ((error as { readonly code?: unknown }).code === "EPERM" || (error as { readonly code?: unknown }).code === "EACCES")) {
+        t.skip("This account cannot create directory links.");
+        return;
+      }
+      throw error;
+    }
+
+    await assert.rejects(svc.discardFile(clonePath, "link/victim.txt"), /symbolic link/);
+    assert.equal(await read(victim), "keep\n");
   } finally {
     await cleanup();
   }

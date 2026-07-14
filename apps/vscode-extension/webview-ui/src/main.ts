@@ -125,6 +125,8 @@ void request({ type: "workspace.state" }).then((response) => {
     state.workspacePolicy = response.payload.state;
     workTab.render();
     chatTab.render();
+    planTab.render();
+    systemTab.render();
     persist();
   }
 });

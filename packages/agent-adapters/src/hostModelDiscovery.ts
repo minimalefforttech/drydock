@@ -14,11 +14,18 @@ import { LineJsonRpcClient } from "./jsonRpcClient.js";
 export interface FetchCodexHostModelCatalogOptions {
   readonly codexPath: string;
   readonly cwd: string;
+  readonly environment?: NodeJS.ProcessEnv;
   readonly isoNow?: () => string;
 }
 
 export async function fetchCodexHostModelCatalog(options: FetchCodexHostModelCatalogOptions): Promise<AgentModelCatalog> {
-  const client = new LineJsonRpcClient(options.codexPath, ["app-server", "--listen", "stdio://"], options.cwd);
+  const client = new LineJsonRpcClient(
+    options.codexPath,
+    ["app-server", "--listen", "stdio://"],
+    options.cwd,
+    undefined,
+    options.environment
+  );
   await client.start();
   try {
     await initializeCodexAppServer(client);

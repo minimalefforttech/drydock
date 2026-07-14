@@ -177,6 +177,11 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
   });
   const sendButton = button("Send", "primary small");
   const submit = (): void => {
+    if (state.workspacePolicy?.security?.networkedAiAllowed !== true) {
+      notice = planAllocationMessage();
+      render();
+      return;
+    }
     const prompt = promptInput.value.trim();
     if (prompt.length === 0) return;
     const plan = activePlan();
@@ -361,9 +366,14 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
       noticeRow.append(text, dismiss);
     }
 
-    promptInput.placeholder = plan === undefined
-      ? "Describe what you're building — this starts a new plan…"
-      : "Refine the plan…";
+    const allocated = state.workspacePolicy?.security?.networkedAiAllowed === true;
+    promptInput.disabled = !allocated;
+    sendButton.disabled = !allocated;
+    promptInput.placeholder = allocated
+      ? plan === undefined
+        ? "Describe what you're building — this starts a new plan…"
+        : "Refine the plan…"
+      : planAllocationMessage();
     mountsNote.textContent = plan === undefined
       ? (pendingTaskId === ""
         ? "orphan plan — picking a task is recommended"
@@ -371,6 +381,14 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
       : "plan session · project mounts :ro";
     stopButton.disabled = !turnActive;
     renderLog();
+  }
+
+  function planAllocationMessage(): string {
+    const security = state.workspacePolicy?.security;
+    if (security === undefined) return "Loading the workstation security policy…";
+    return security.managed
+      ? "AI planning is not allocated on this workstation. Ask your administrator if you need access."
+      : "Networked AI is off. Enable Drydock › Security: Networked AI Enabled, then reload the window.";
   }
 
   function textSpan(text: string): HTMLElement {
