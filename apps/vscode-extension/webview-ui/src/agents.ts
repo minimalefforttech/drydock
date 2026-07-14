@@ -42,6 +42,7 @@ import {
   type PanelRequestPayload,
   type PanelResponse
 } from "@drydock/contracts";
+import { createHelpExperience, setHelpTooltip } from "./help.js";
 
 interface VsCodeApi {
   postMessage(message: unknown): void;
@@ -69,6 +70,61 @@ const FILTER_LABEL: Record<FilterMode, string> = {
 const vscodeApi = acquireVsCodeApi();
 const app = document.getElementById("app");
 if (!app) throw new Error("missing #app root");
+
+const help = createHelpExperience({
+  id: "agents",
+  title: "Agents guide",
+  intro: "Inspect agent sessions across tasks, open sessions that need attention, and review clone changes before landing them.",
+  showWelcome: true,
+  pages: [
+    {
+      id: "reading",
+      label: "Session status",
+      title: "Interpret session status",
+      intro: "The list places sessions that are waiting or running before inactive history. Filters change only the current view.",
+      sections: [
+        { title: "Running", body: "A green dot and duration indicate that a turn is in progress. The activity field shows the latest reported command or tool event." },
+        { title: "Waiting", body: "Questions, access requests, failed turns, and subtasks awaiting human verification add attention indicators. Open the session for agent-specific items or the Task Board for verification." },
+        { title: "Idle", body: "Idle indicates that a live session has reported no activity for longer than the configured threshold. Open the session to determine whether it is blocked." },
+        { title: "Token totals", body: "Token totals are calculated from activity reported during the current window. They are not a billing record." }
+      ]
+    },
+    {
+      id: "groups",
+      label: "Tasks & agents",
+      title: "Open tasks and sessions",
+      intro: "Sessions are grouped under their owning task. Nested rows show delegated sessions or provider-reported subagent activity.",
+      sections: [
+        { title: "Use the task header", body: "The header shows the task, board stage, attention count, running count, and links to its board and review views." },
+        { title: "Open a session", body: "Select a session row to open that session in the sidebar. Hover the row to inspect provider, model, capability, activity, timing, and token data." },
+        { title: "Inspect nested sessions", body: "Indented rows preserve delegated parent-child relationships. Provider subagent rows show the lifecycle and activity available from that transport." },
+        { title: "Find unowned sessions", body: "Sessions without a linked task appear in the Orphan sessions drawer." }
+      ]
+    },
+    {
+      id: "landing",
+      label: "Landing work",
+      title: "Review and land clone changes",
+      intro: "Clone changes remain separate from the working copy until you confirm a pull.",
+      sections: [
+        { title: "Check ordering", body: "Candidates without known path overlap appear first. This ordering does not guarantee that a pull will be conflict-free." },
+        { title: "Inspect overlap", body: "An overlap indicator identifies concurrent changes to related paths. Open the other work before pulling." },
+        { title: "Confirm the pull", body: "Pull requires confirmation and uses the same clone integration path as the session Changes tray." },
+        { title: "Request revisions first", body: "Open Task Review when changes require agent feedback before they are pulled into the working copy." }
+      ]
+    }
+  ],
+  tour: [
+    { title: "Read the status summary", body: "The toolbar reports running and idle sessions plus every item waiting on you, including Task Board verification.", target: ".toolbar" },
+    { title: "Filter the session list", body: "Filter by activity or attention state, choose the row detail level, or search by task and session title. These controls change only the current view.", target: () => app.querySelector<HTMLElement>(".seg") ?? app },
+    { title: "Read the task rollup", body: "Each task header shows its board stage, waiting count, active sessions, and token rollup. Expand or collapse the group without changing session state.", target: () => app.querySelector<HTMLElement>(".group:not(.drawer) .ghead") ?? app },
+    { title: "Handle verification and attention", body: "Verification rows link to the Task Board. Questions and access requests appear on the responsible session; open that session before responding.", target: () => app.querySelector<HTMLElement>(".task-verification") ?? app.querySelector<HTMLElement>(".group:not(.drawer)") ?? app },
+    { title: "Open the responsible session", body: "Select a session row to open its chat in the sidebar. Hover the row for provider, model, capability, activity, questions, access requests, timing, and tokens.", target: () => app.querySelector<HTMLElement>(".session-row") ?? app },
+    { title: "Inspect delegated work", body: "Indented session and agent rows preserve parent-child relationships. A transport note explains when per-agent activity is unavailable.", target: () => app.querySelector<HTMLElement>(".row-sub, .session-row.depth-1, .row-note.depth-1") ?? app.querySelector<HTMLElement>(".session-row") ?? app },
+    { title: "Open the task board or review", body: "Use Board to manage stages and verification. Use Review to inspect changed files and send revision comments for this task.", target: () => app.querySelector<HTMLElement>(".group:not(.drawer) .gmeta") ?? app.querySelector<HTMLElement>(".group:not(.drawer)") ?? app },
+    { title: "Inspect and pull landing work", body: "The Landing drawer orders unlanded clone changes by known overlap. Inspect related work first, then confirm Pull when the changes should enter the working copy.", target: () => app.querySelector<HTMLElement>(".landing-row") ?? app.querySelector<HTMLElement>(".landing") ?? app, prepare: () => { if (!landingOpen) { landingOpen = true; render(); } } }
+  ]
+});
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const REFETCH_DEBOUNCE_MS = 300;
@@ -124,6 +180,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
 
 let overview: AgentsOverviewState | null = null;
 let loadError: string | null = null;
+let pendingGuideStart = false;
 /** Live per-session activity overlay: fresher than the snapshot's copies. */
 const activityBySession = new Map<string, AgentActivitySummary>();
 /** Sessions with a live turn right now (boot: root status; then turn pushes). */
@@ -230,6 +287,13 @@ function scheduleRefetch(): void {
 
 function applyPush(payload: PanelPushPayload): void {
   switch (payload.type) {
+    case "help.startTour":
+      if (overview === null) {
+        pendingGuideStart = true;
+      } else {
+        window.setTimeout(() => help.startTour(), 0);
+      }
+      return;
     case "agents.changed":
       scheduleRefetch();
       return;
@@ -323,6 +387,7 @@ function actionButton(label: string, title: string, onClick: () => void, classNa
   node.className = `action ${className}`.trim();
   node.textContent = label;
   node.title = title;
+  setHelpTooltip(node, title);
   node.addEventListener("click", (event) => {
     event.stopPropagation();
     onClick();
@@ -437,8 +502,12 @@ function groupRunningCount(group: AgentsTaskGroup): number {
   return group.sessions.filter((session) => turnRunning.has(session.sessionId)).length;
 }
 
+function groupVerificationCount(group: AgentsTaskGroup): number {
+  return group.task.subtasks.filter((subtask) => subtask.verifyUnmet === true).length;
+}
+
 function groupAttentionCount(group: AgentsTaskGroup): number {
-  return group.sessions.filter((session) => needsAttention(session)).length;
+  return group.sessions.filter((session) => needsAttention(session)).length + groupVerificationCount(group);
 }
 
 function orderedGroups(): AgentsTaskGroup[] {
@@ -490,7 +559,8 @@ function render(): void {
 
   let renderedGroups = 0;
   for (const group of orderedGroups()) {
-    const visible = group.sessions.filter((session) => sessionVisible(session) && matchesText(session, group));
+    const taskVerificationVisible = groupVerificationCount(group) > 0 && (filter === "active" || filter === "attention");
+    const visible = group.sessions.filter((session) => (taskVerificationVisible || sessionVisible(session)) && matchesText(session, group));
     if (visible.length === 0) continue;
     renderedGroups += 1;
     surface.append(renderGroup(group, visible));
@@ -519,7 +589,8 @@ function renderToolbar(): HTMLElement {
   rollup.setAttribute("aria-atomic", "true");
   const sessions = allSessions();
   const runningCount = sessions.filter((session) => turnRunning.has(session.sessionId)).length;
-  const waitingCount = sessions.filter((session) => needsAttention(session)).length;
+  const waitingCount = sessions.filter((session) => needsAttention(session)).length
+    + (overview?.groups.reduce((sum, group) => sum + groupVerificationCount(group), 0) ?? 0);
   const idleCount = sessions.filter((session) => isIdle(session)).length;
   const runningPart = el("span", "rollup-running", `● ${String(runningCount)} running`);
   const waitingPart = el("span", waitingCount > 0 ? "rollup-waiting loud" : "rollup-waiting", `${String(waitingCount)} waiting on you`);
@@ -588,7 +659,8 @@ function renderToolbar(): HTMLElement {
     }
   });
 
-  bar.append(rollup, seg, detailSeg, search);
+  setHelpTooltip(search, "Filter the current list by task or session title. This changes only the displayed rows.");
+  bar.append(rollup, seg, detailSeg, search, help.launcher("fleet-help-launcher"));
   return bar;
 }
 
@@ -641,6 +713,18 @@ function renderGroup(group: AgentsTaskGroup, visible: readonly ChatSessionSummar
   section.append(head);
 
   if (!collapsed) {
+    const verificationCount = groupVerificationCount(group);
+    if (verificationCount > 0) {
+      const verification = el("div", "row row-note task-verification");
+      verification.append(
+        chip("verify", "chip-attention"),
+        el("span", "task-verification-label", `${String(verificationCount)} subtask${verificationCount === 1 ? "" : "s"} awaiting human verification`),
+        actionButton("open board", "Open the Task Board to inspect and record verification", () => {
+          void request({ type: "taskBoard.open" });
+        }, "link")
+      );
+      section.append(verification);
+    }
     const visibleIds = new Set(visible.map((session) => session.sessionId));
     for (const root of sessionForest(group.sessions)) {
       appendSessionNode(section, root, 0, visibleIds);
@@ -1073,6 +1157,10 @@ async function loadOverview(): Promise<void> {
   loadError = null;
   seedTurnStateFromSnapshot();
   render();
+  if (pendingGuideStart) {
+    pendingGuideStart = false;
+    window.setTimeout(() => help.startTour(), 0);
+  }
 }
 
 window.setInterval(() => {

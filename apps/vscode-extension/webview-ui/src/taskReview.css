@@ -1,3 +1,5 @@
+@import "./help.css";
+
 /* Task Review panel styles — VS Code theme variables only, no remote assets.
    Modeled on planDocs.css (font/scrollbar/dock-layout conventions). */
 
@@ -266,10 +268,20 @@ body {
 .tr-file-path.tr-file-open {
   cursor: pointer;
   color: var(--vscode-textLink-foreground, #4daafc);
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+  min-height: 24px;
 }
 
-.tr-file-path.tr-file-open:hover {
+.tr-file-path.tr-file-open:hover,
+.tr-file-path.tr-file-open:focus-visible {
   text-decoration: underline;
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 2px;
 }
 
 .file-base { }
@@ -321,9 +333,7 @@ body {
   font-size: 0.85em;
 }
 
-/* Opened-but-still-commented marker (R3): the third reviewed state. Muted grey
-   half-tone, sitting between the unreviewed dot's blue and the reviewed ✓'s
-   green — "seen, but still has notes". */
+/* Opened-but-still-commented marker (R3): "seen, but still has notes". */
 .tr-opened {
   color: var(--vscode-descriptionForeground, #9d9d9d);
   opacity: 0.85;
@@ -335,6 +345,7 @@ body {
   flex: none;
   /* Holds the 💬+ label (R8b) without the row width jumping vs the old bare +. */
   white-space: nowrap;
+  min-height: 24px;
 }
 
 /* --------------------------------------------------------------------------
@@ -439,10 +450,21 @@ body {
 .tr-dock-group-head.tr-dock-jump {
   cursor: pointer;
   color: var(--vscode-textLink-foreground, #4daafc);
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  font-weight: 600;
+  text-align: left;
+  min-height: 24px;
 }
 
-.tr-dock-group-head.tr-dock-jump:hover {
+.tr-dock-group-head.tr-dock-jump:hover,
+.tr-dock-group-head.tr-dock-jump:focus-visible {
   text-decoration: underline;
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 2px;
 }
 
 .tr-dock-entry {
@@ -498,6 +520,7 @@ body {
   border-radius: 2px;
   padding: 2px 4px;
   font-size: 0.85em;
+  min-height: 24px;
 }
 
 /* --------------------------------------------------------------------------

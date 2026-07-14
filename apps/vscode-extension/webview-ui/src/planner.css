@@ -10,6 +10,7 @@
  */
 
 @import "./chat/chatView.css";
+@import "./help.css";
 
 :root {
   --pl-accent: var(--vscode-charts-orange, #cf7350);
@@ -313,14 +314,6 @@ button {
   background: var(--pl-panel);
   position: relative;
 }
-.pl-rail-chat { border-right: none; border-left: 1px solid var(--pl-line); }
-/* The swap keeps DOM order; flex order flips the rails. */
-.pl-rail-outputs { order: 0; }
-.pl-viewer { order: 1; }
-.pl-rail-chat { order: 2; }
-.pl-body.swapped .pl-rail-outputs { order: 2; border-right: none; border-left: 1px solid var(--pl-line); }
-.pl-body.swapped .pl-rail-chat { order: 0; border-left: none; border-right: 1px solid var(--pl-line); }
-
 .pl-rail.collapsed {
   flex: 0 0 36px;
   align-items: center;
@@ -531,29 +524,6 @@ h2.pl-heading { font-size: 1.15em; }
 .pl-dock-body { margin: 6px 0; line-height: 1.4; }
 .pl-dock-actions { display: flex; gap: 6px; }
 
-/* -------------------------------------------------------------- chat rail */
-.pl-chat-log {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 10px 12px;
-  min-height: 0;
-}
-.pl-composer {
-  flex: none;
-  border-top: 1px solid var(--pl-line);
-  padding: 8px 10px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.pl-composer textarea { min-height: 52px; }
-.pl-composer-actions { display: flex; align-items: center; gap: 8px; }
-.pl-composer-actions .pl-footnote { flex: 1; }
-.pl-rail-empty { padding: 14px; color: var(--pl-muted); line-height: 1.5; font-size: 0.9em; }
-
 /* ------------------------------------------------------------------ narrow */
 .pl-body { position: relative; }
 .pl-rail.rail-overlay {
@@ -568,9 +538,6 @@ h2.pl-heading { font-size: 1.15em; }
   border-right: 1px solid var(--pl-line);
 }
 .pl-rail-outputs.rail-overlay { left: 0; }
-.pl-rail-chat.rail-overlay { right: 0; }
-.pl-body.swapped .pl-rail-outputs.rail-overlay { left: auto; right: 0; }
-.pl-body.swapped .pl-rail-chat.rail-overlay { right: auto; left: 0; }
 
 /* --------------------------------------------------------------------------
    Plan -> board materialization (ADR 0012)

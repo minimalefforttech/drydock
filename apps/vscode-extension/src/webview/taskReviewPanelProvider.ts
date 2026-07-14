@@ -39,6 +39,8 @@ import type { TaskReviewCommentFile, TaskReviewCommentsController } from "./task
 export class TaskReviewPanelProvider {
   private readonly panels = new Map<string, vscode.WebviewPanel>();
   private readonly sequences = new Map<string, number>();
+  /** Task ids whose new review panel should begin its tour after taskReview.state. */
+  private readonly pendingStartGuide = new Set<string>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -145,12 +147,14 @@ export class TaskReviewPanelProvider {
     });
   }
 
-  async open(taskId: string, taskTitle: string): Promise<void> {
+  async open(taskId: string, taskTitle: string, startGuide = false): Promise<void> {
     const existing = this.panels.get(taskId);
     if (existing !== undefined) {
       existing.reveal(vscode.ViewColumn.Active);
+      if (startGuide) this.push(taskId, { type: "help.startTour" });
       return;
     }
+    if (startGuide) this.pendingStartGuide.add(taskId);
     const panel = vscode.window.createWebviewPanel(
       "drydock.taskReview",
       `Task review: ${taskTitle}`,
@@ -170,6 +174,7 @@ export class TaskReviewPanelProvider {
     panel.onDidDispose(() => {
       this.panels.delete(taskId);
       this.sequences.delete(taskId);
+      this.pendingStartGuide.delete(taskId);
       // Drop this task's gutter registrations and tear down its now-orphaned
       // threads (files still registered by another open panel survive).
       this.comments?.clearTask(taskId);
@@ -212,6 +217,9 @@ export class TaskReviewPanelProvider {
       case "taskReview.state": {
         const state = await taskReview.computeState(payload.taskId);
         this.respond(taskId, request.requestId, { type: "taskReview.state", state });
+        if (this.pendingStartGuide.delete(taskId)) {
+          this.push(taskId, { type: "help.startTour" });
+        }
         // Register this task's baseline-backed files for gutter commenting. The
         // state response must not block on it, so it is fire-and-forget.
         if (this.comments !== undefined) {

@@ -4,7 +4,7 @@
  * The reviewer's single surface over every changed file a task's linked
  * sessions produced, across all their projects: a left navigator (projects →
  * changed files, with change glyphs, +N/−M stats, comment badges, clone/conflict
- * markers, and a panel-local reviewed indicator) and a comment dock (right on
+ * markers, and panel-local opened indicators) and a comment dock (right on
  * wide viewports, below when narrow) grouping every open thread by file. Review
  * happens in the native diff editor — a baseline-backed row sends
  * diff.openFile and VS Code opens the diff Beside. Open comments are sent back
@@ -20,8 +20,8 @@
  *
  * PANEL-LOCAL STATE: the set of files whose diff was opened this panel session
  * is tracked here and persisted via vscodeApi.setState (mirroring how planDocs
- * persists selectedDocName) so a webview reload keeps the reviewed marks. It is
- * deliberately NOT a contract field — "reviewed" is a per-reviewer, per-panel
+ * persists selectedDocName) so a webview reload keeps the opened marks. It is
+ * deliberately NOT a contract field — "opened" is a per-reviewer, per-panel
  * notion, not shared state.
  */
 
@@ -38,6 +38,7 @@ import {
   type TaskReviewSessionRef,
   type TaskReviewState
 } from "@drydock/contracts";
+import { createHelpExperience, setHelpTooltip } from "./help.js";
 
 interface VsCodeApi {
   postMessage(message: unknown): void;
@@ -73,6 +74,7 @@ const pending = new Map<string, { resolve: (value: PanelResponse) => void; timer
 let requestCounter = 0;
 
 let reviewState: TaskReviewState | null = null;
+let pendingGuideStart = false;
 /** Per-session comment list, filtered to non-`plan:` anchors (keyed by sessionId). */
 const commentsBySession = new Map<string, readonly ReviewCommentSummary[]>();
 /** Files whose diff was opened this panel session (`repo:path@sessionId`); persisted. */
@@ -145,6 +147,14 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
 let pushDebounceTimer = 0;
 
 function applyPush(payload: PanelPushPayload): void {
+  if (payload.type === "help.startTour") {
+    if (reviewState === null) {
+      pendingGuideStart = true;
+    } else {
+      window.setTimeout(() => help.startTour(), 0);
+    }
+    return;
+  }
   if (payload.type === "taskReview.updated" && payload.taskId === taskId) {
     // Turn boundaries can arrive in bursts (start then complete); collapse a
     // burst into one refetch so the panel does not thrash.
@@ -169,7 +179,7 @@ const updatedStamp = el("span", "tr-updated-stamp");
 updatedStamp.textContent = "updated · just now";
 const revisionChip = el("span", "tr-revision-chip hidden");
 const headerSpacer = el("span", "tr-header-spacer");
-const submitButton = button("Submit review → agents", "primary small tr-submit");
+const submitButton = button("Send review", "primary small tr-submit");
 const resultLine = el("div", "tr-result hidden");
 headerBar.append(headerTitle, refreshButton, updatedStamp, revisionChip, headerSpacer, submitButton, resultLine);
 
@@ -178,8 +188,67 @@ const nav = el("nav", "tr-nav");
 const dock = el("aside", "tr-dock");
 body.append(nav, dock);
 
+const help = createHelpExperience({
+  id: "task-review",
+  title: "Task Review guide",
+  intro: "Inspect a task's changed files, add comments, and submit each open comment to the session that owns the file.",
+  showWelcome: true,
+  pages: [
+    {
+      id: "review-flow",
+      label: "Review flow",
+      title: "Review changed files",
+      intro: "Use the navigator to select files, inspect each change in the VS Code diff editor, and track open comments in the dock.",
+      sections: [
+        { title: "Open a file diff", body: "Select a file row with a baseline to open the VS Code diff beside this panel. The row records that the diff was opened; opening it is not an approval." },
+        { title: "Read file status", body: "Markers identify added, modified, deleted, and renamed files. Line counts, clone state, and conflict indicators provide additional status." },
+        { title: "Add a comment", body: "Attach the comment to the file that requires action. The file's owning session is stored with the comment for submission." },
+        { title: "Track open comments", body: "The dock groups open comments by file, including comments created from the editor gutter." }
+      ]
+    },
+    {
+      id: "threads",
+      label: "Comment states",
+      title: "Update comment state",
+      intro: "Use the comment state to indicate whether the item requires action, is blocked, or is complete.",
+      sections: [
+        { title: "Open", body: "The comment requires agent action and will be included in the next review submission." },
+        { title: "Acknowledged or delegated", body: "Use Acknowledged when the item is understood but incomplete. Use Delegated when another owner is responsible for the next action." },
+        { title: "Blocked", body: "Use Blocked when the action depends on another decision or change. Record the dependency in the comment." },
+        { title: "Resolved or won't fix", body: "Use these states to close the comment. Closed comments remain visible but are not submitted as open work." }
+      ]
+    },
+    {
+      id: "submit",
+      label: "Send revisions",
+      title: "Submit open comments",
+      intro: "Submission groups open comments by owning session and sends one revision request to each affected session.",
+      sections: [
+        { title: "Check the dispatch", body: "The Send button shows the number of open comments and affected sessions. It is disabled when no comments are open." },
+        { title: "Send the review", body: "Select Send once to give each affected session all of its open comments in a single instruction." },
+        { title: "Monitor revision state", body: "The header shows sessions that are revising. The panel reloads file and comment state when their turns finish." },
+        { title: "Review updated files", body: "Rows flash when their aggregated change state changes. Reopen the diff and verify the revision before resolving the comment." }
+      ]
+    }
+  ],
+  tour: [
+    { title: "Check review status", body: "The header shows the task, refresh state, sessions currently revising, and the number of open comments and affected sessions.", target: ".tr-header" },
+    { title: "Find the changed file", body: "The navigator groups files by project. Select the project and file that correspond to the behavior you are reviewing.", target: ".tr-nav" },
+    { title: "Interpret file status", body: "The file row reports added or removed lines, open comments, clone state, conflicts, and whether its diff has been opened. Opened does not mean approved.", target: () => nav.querySelector<HTMLElement>(".tr-file-row") ?? nav },
+    { title: "Open the VS Code diff", body: "Select the file name to open its baseline diff beside this panel. Clone-only rows are reviewed in their owning session until the changes are pulled.", target: () => nav.querySelector<HTMLElement>(".tr-file-open")?.closest<HTMLElement>(".tr-file-row") ?? nav.querySelector<HTMLElement>(".tr-file-row") ?? nav },
+    { title: "Add a revision comment", body: "Use the comment action on the file, enter the relevant line and a concrete requested change, then add it to the review dock.", target: () => nav.querySelector<HTMLElement>(".tr-file-add")?.closest<HTMLElement>(".tr-file-row") ?? nav.querySelector<HTMLElement>(".tr-file-row") ?? nav },
+    { title: "Review comments by file", body: "The dock groups comments under their file anchor and identifies the responsible session. Select a file heading to reopen its diff.", target: ".tr-dock" },
+    { title: "Set each comment's state", body: "Keep actionable items open. Use acknowledged, delegated, or blocked to record in-progress handling; resolved and won't fix close the item and exclude it from submission.", target: () => dock.querySelector<HTMLElement>(".tr-dock-status") ?? dock },
+    { title: "Send and recheck revisions", body: "Send review gives each affected session all of its open comments in one instruction. When revision activity finishes, reopen changed diffs and verify the result before resolving comments.", target: ".tr-submit" }
+  ]
+});
+
 const emptyState = el("div", "tr-empty");
 emptyState.textContent = "Loading task review…";
+
+headerBar.insertBefore(help.launcher("tr-help-launcher"), submitButton);
+setHelpTooltip(refreshButton, "Reload changed files and review comments from every session linked to this task.");
+setHelpTooltip(submitButton, "Send each open comment to the session that owns the corresponding file.");
 
 app.append(headerBar, emptyState, body);
 
@@ -190,7 +259,7 @@ submitButton.addEventListener("click", () => void onSubmit());
 // Selectors / helpers
 // ---------------------------------------------------------------------------
 
-/** Panel-local reviewed-tracking key: repo + path + owning session. */
+/** Panel-local opened-tracking key: repo + path + owning session. */
 function fileKey(file: Pick<TaskReviewFile, "repo" | "path" | "sessionId">): string {
   return `${file.repo}:${file.path}@${file.sessionId}`;
 }
@@ -205,6 +274,14 @@ function allComments(): ReviewCommentSummary[] {
   const out: ReviewCommentSummary[] = [];
   for (const list of commentsBySession.values()) out.push(...list);
   return out;
+}
+
+function openCommentSessionCount(): number {
+  let count = 0;
+  for (const comments of commentsBySession.values()) {
+    if (comments.some((comment) => comment.status === "open")) count += 1;
+  }
+  return count;
 }
 
 /** Session title lookup for the dock's dim author line. */
@@ -258,10 +335,13 @@ function render(): void {
   headerTitle.textContent = state.title;
 
   const open = state.openCommentCount;
+  const affectedSessions = openCommentSessionCount();
   submitButton.disabled = open === 0;
   submitButton.textContent = open === 0
     ? "No open comments"
-    : `Submit review → agents (${String(open)})`;
+    : affectedSessions > 0
+      ? `Send ${String(open)} comment${open === 1 ? "" : "s"} to ${String(affectedSessions)} session${affectedSessions === 1 ? "" : "s"}`
+      : `Send ${String(open)} review comment${open === 1 ? "" : "s"}`;
 
   if (state.revisionInFlight !== undefined && state.revisionInFlight > 0) {
     revisionChip.textContent = `${String(state.revisionInFlight)} agent(s) revising…`;
@@ -361,7 +441,7 @@ function renderNav(state: TaskReviewState): void {
   const legendSummary = document.createElement("summary");
   legendSummary.textContent = "Legend";
   const legendLine = el("div", "tr-legend-line");
-  legendLine.textContent = "± modify · + add · − delete · → rename · • unreviewed · ◑ opened · ✓ reviewed · ⚠ conflict";
+  legendLine.textContent = "± modify · + add · − delete · → rename · • unopened · ◑ opened with comments · ✓ opened, clear · ⚠ conflict";
   legend.append(legendSummary, legendLine);
   nav.append(legend);
 
@@ -418,17 +498,23 @@ function fileRow(file: TaskReviewFile): HTMLElement {
   }
 
   const opened = openedKeys.has(key);
-  // Unreviewed dot: baseline-backed file never opened this panel session. Clone
-  // rows are informational, so they carry no reviewed lifecycle.
+  // Unopened dot: baseline-backed file never opened this panel session. Clone
+  // rows are informational, so they carry no opened lifecycle.
   if (!isClone && !opened) {
     const unreviewed = el("span", "unreviewed-dot");
     unreviewed.textContent = "•";
-    unreviewed.title = "Unreviewed — diff not opened this session";
-    unreviewed.setAttribute("aria-label", "unreviewed");
+    unreviewed.title = "Unopened — diff not opened in this panel session";
+    unreviewed.setAttribute("aria-label", "unopened");
     row.append(unreviewed);
   }
 
-  const name = el("span", "tr-file-path");
+  const name = file.baselineId === undefined || isClone
+    ? el("span", "tr-file-path")
+    : document.createElement("button");
+  if (name instanceof HTMLButtonElement) {
+    name.type = "button";
+    name.className = "tr-file-path";
+  }
   const parts = file.path.split(/[\\/]/);
   const base = parts.pop() ?? file.path;
   const dir = parts.join("/");
@@ -441,7 +527,9 @@ function fileRow(file: TaskReviewFile): HTMLElement {
     name.append(dirEl);
   }
   // Title attribute surfaces the owning session title (per spec).
-  name.title = file.sessionTitle;
+  name.title = file.baselineId === undefined || isClone
+    ? file.sessionTitle
+    : `Open diff · ${file.sessionTitle}`;
   if (!isClone && file.baselineId !== undefined) {
     name.classList.add("tr-file-open");
     name.addEventListener("click", () => openFileDiff(file));
@@ -473,16 +561,16 @@ function fileRow(file: TaskReviewFile): HTMLElement {
     chipEl.textContent = "clone";
     markers.append(chipEl);
   }
-  // Reviewed ✓: opened AND comment-free (baseline-backed only).
+  // Opened-and-clear ✓: the diff was opened and has no open comments. This is
+  // deliberately not approval; v1 stores only panel-local opened state.
   if (!isClone && opened && file.commentCount === 0) {
     const reviewed = el("span", "tr-reviewed");
     reviewed.textContent = "✓";
-    reviewed.title = "Reviewed — diff opened, no open comments";
-    reviewed.setAttribute("aria-label", "reviewed");
+    reviewed.title = "Opened — no open comments";
+    reviewed.setAttribute("aria-label", "opened, no open comments");
     markers.append(reviewed);
   }
-  // Opened ◑: opened but still carries ≥1 open comment — the third reviewed
-  // state, now with its own affirmative glyph instead of rendering as nothing.
+  // Opened ◑: opened but still carries ≥1 open comment.
   if (!isClone && opened && file.commentCount > 0) {
     const openedMark = el("span", "tr-opened");
     openedMark.textContent = "◑";
@@ -617,9 +705,13 @@ function renderDock(): void {
   const anchors = [...byFile.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   for (const anchor of anchors) {
     const group = el("section", "tr-dock-group");
-    const groupHead = el("div", "tr-dock-group-head");
-    groupHead.textContent = anchor;
     const target = fileForAnchor(anchor);
+    const groupHead = target === undefined ? el("div", "tr-dock-group-head") : document.createElement("button");
+    if (groupHead instanceof HTMLButtonElement) {
+      groupHead.type = "button";
+      groupHead.className = "tr-dock-group-head";
+    }
+    groupHead.textContent = anchor;
     if (target !== undefined) {
       groupHead.classList.add("tr-dock-jump");
       groupHead.title = "Open this file's diff";
@@ -666,6 +758,7 @@ function dockEntry(comment: ReviewCommentSummary): HTMLElement {
 
   const statusSelect = document.createElement("select");
   statusSelect.className = "tr-dock-status";
+  statusSelect.setAttribute("aria-label", `Status for review comment on ${comment.filePath}, lines ${range}`);
   for (const status of REVIEW_STATUSES) {
     const opt = document.createElement("option");
     opt.value = status;
@@ -820,6 +913,10 @@ async function refresh(announce = true): Promise<void> {
     }
   }
   render();
+  if (pendingGuideStart && reviewState !== null) {
+    pendingGuideStart = false;
+    window.setTimeout(() => help.startTour(), 0);
+  }
 }
 
 function persist(): void {

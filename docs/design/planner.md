@@ -63,9 +63,10 @@ user rename overrides permanently.
 
 ## The panel
 
-Three columns, sides swappable (⇄), each rail collapsible to an icon strip,
-both auto-collapsing under ~900px with fly-out overlays; layout preferences
-persist as UI-local webview state.
+Two editor-area regions: a collapsible outputs rail and the artifact viewer.
+Under ~900px the outputs rail becomes an icon strip with a fly-out overlay;
+layout preferences persist as UI-local webview state. The Drydock **Plan** tab
+in the VS Code sidebar remains the conversation surface.
 
 - **Outputs rail** (left by default): artifacts grouped by aspect with
   friendly titles, kind glyphs, revision badges, "updated" flashes, and
@@ -73,7 +74,7 @@ persist as UI-local webview state.
   active document's **heading outline** (click scrolls to the block);
   non-document artifacts list their annotations there instead. Header aspect
   chips filter the tree.
-- **Viewer** (center): one `ArtifactProvider` per kind behind a common seam —
+- **Viewer** (editor area): one `ArtifactProvider` per kind behind a common seam —
   render plus `focusAnchor`. Documents render structural markdown in the
   design-doc language (kicker, tight headings, quiet rules) with hover ✎ on
   every block. Diagrams render through the shared lazy mermaid bundle with
@@ -84,11 +85,12 @@ persist as UI-local webview state.
   `iframe srcdoc` — never `allow-same-origin`; `allow-scripts` only via the
   per-artifact toggle — with Preview (page gets the pointer) and Annotate
   (overlay captures it) modes.
-- **Chat rail** (right by default): the plan session's transcript, folded and
-  rendered by the same shared chat components as the Edit tab's Chat lens
-  (`webview-ui/src/chat/transcriptModel.ts` + `messageRow.ts`), with live
-  streaming via forwarded bus events, `session.timeline` backfill, a composer,
-  and Stop.
+- **Drydock Plan tab** (VS Code sidebar): the plan session's transcript,
+  composer, Stop control, and recent-plan selector. It uses the shared chat
+  components (`webview-ui/src/chat/transcriptModel.ts` + `messageRow.ts`). Plan
+  selection is synchronized in both directions: selecting a plan in the
+  editor workspace updates the sidebar without moving editor focus, and
+  selecting a recent plan in the sidebar opens it in the workspace.
 
 ## The instruction loop
 
@@ -169,8 +171,8 @@ collect round-trips, briefing and instruction-turn composition, aspect
 registry rules, and literal-checklist materialization. Harness
 (`tools/webview-harness/planner.html`, rows V52–V56 and the materialization
 scenario):
-landing/intake, tree + splitter + outline, all four providers, layout system,
-and the chat rail on the shared components — plus the Edit tab's own rows,
-which must not regress. Live checks that need a real window: the crash drill
+landing/intake, tree + splitter + outline, all four providers, the responsive
+outputs rail, and Plan-tab selection synchronization — plus the Plan and Edit
+tab transcript rows, which must not regress. Live checks that need a real window: the crash drill
 (kill the sandbox mid-turn; reopen collects everything written), `vscode.open`
 artifact jumps, and prototype frames under the real webview CSP.

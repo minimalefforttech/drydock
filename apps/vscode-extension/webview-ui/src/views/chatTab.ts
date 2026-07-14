@@ -52,6 +52,7 @@ import {
   select,
   statusDot
 } from "../components.js";
+import { setHelpTooltip } from "../help.js";
 import { splitBlocks, type DocBlock } from "../markdownBlocks.js";
 import { onPush, request } from "../messaging.js";
 import {
@@ -260,6 +261,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const titleParentLabel = el("span", "chat-title-parent hidden");
   const titleLabel = el("span", "chat-title");
   titleLabel.title = "Click to rename";
+  setHelpTooltip(titleLabel, "Select the active session title to rename it.");
   titleTextWrap.append(titleParentLabel, titleLabel);
   const statusDotEl = statusDot("state-ended", "no live session");
   titleWrap.append(statusDotEl, titleTextWrap);
@@ -276,6 +278,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const notesPopover = popover(notesButton, (content) => buildNotesPopover(content));
 
   const infoButton = iconButton("ⓘ", "Isolation summary");
+  setHelpTooltip(infoButton, "Show this session's runtime, workspace mounts, network policy, and write access.");
   const infoPopover = popover(infoButton, (content) => buildIsolationPopover(content));
 
   // Summarize: copies a session digest to the clipboard — the trimmed chat
@@ -525,6 +528,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // <select>s stay in the DOM (hidden) as the source of truth so all the
   // existing selection/restart logic keeps working; the tree drives them.
   const modelButton = button("Model", "composer-model-button");
+  setHelpTooltip(modelButton, "Select the provider, model, and reasoning effort for the next instruction.");
   const modelButtonChevron = el("span", "composer-model-chevron");
   modelButtonChevron.textContent = "▾";
   modelButton.append(modelButtonChevron);

@@ -205,7 +205,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     void taskReviewComments.resolveThread(thread);
   }));
-  context.subscriptions.push(vscode.commands.registerCommand("drydock.taskReview.open", async (taskId?: unknown) => {
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.taskReview.open", async (taskId?: unknown, options?: unknown) => {
     if (!backend.available) {
       void vscode.window.showErrorMessage(backend.reason);
       return;
@@ -224,18 +224,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     } else {
       title = tasks.find((task) => task.taskId === resolvedId)?.title ?? title;
     }
-    await taskReviewPanels.open(resolvedId, title);
+    const startGuide = typeof options === "object" && options !== null
+      && (options as { readonly startGuide?: unknown }).startGuide === true;
+    await taskReviewPanels.open(resolvedId, title, startGuide);
   }));
   // Task Board: single global panel, so the command takes no arguments — it
   // opens (or reveals) the one instance. The control panel's taskBoard.open
   // relay routes here.
   const taskBoardPanel = new TaskBoardPanelProvider(context.extensionUri, backend, logger);
-  context.subscriptions.push(vscode.commands.registerCommand("drydock.taskBoard.open", async () => {
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.taskBoard.open", async (options?: unknown) => {
     if (!backend.available) {
       void vscode.window.showErrorMessage(backend.reason);
       return;
     }
-    await taskBoardPanel.open();
+    const startGuide = typeof options === "object" && options !== null
+      && (options as { readonly startGuide?: unknown }).startGuide === true;
+    await taskBoardPanel.open(startGuide);
   }));
   // Agents (ADR 0013): single global fleet panel over every session across
   // every task. The control panel's agents.open relay routes here; fleet row
@@ -243,23 +247,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const agentsPanel = new AgentsPanelProvider(context.extensionUri, backend, logger, (sessionId, nodeId) => {
     panel.showSession(sessionId, nodeId);
   });
-  context.subscriptions.push(vscode.commands.registerCommand("drydock.agents.open", async () => {
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.agents.open", async (options?: unknown) => {
     if (!backend.available) {
       void vscode.window.showErrorMessage(backend.reason);
       return;
     }
-    await agentsPanel.open();
+    const startGuide = typeof options === "object" && options !== null
+      && (options as { readonly startGuide?: unknown }).startGuide === true;
+    await agentsPanel.open(startGuide);
   }));
-  // Planner (ADR 0012): single global panel; landing, intake, and the
-  // three-column plan view all live inside it. The control panel's
-  // planner.open relay routes here.
-  const plannerPanel = new PlannerPanelProvider(context.extensionUri, backend, logger);
-  context.subscriptions.push(vscode.commands.registerCommand("drydock.planner.open", async (planId?: unknown) => {
+  // Planner (ADR 0012): the editor panel owns intake, outputs, and artifact
+  // review; the Drydock Plan tab remains its planning-chat sidebar. Selection
+  // is synchronized in both directions without moving focus during panel use.
+  const plannerPanel = new PlannerPanelProvider(
+    context.extensionUri,
+    backend,
+    logger,
+    (planId, reveal) => panel.showPlan(planId, reveal)
+  );
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.planner.open", async (planId?: unknown, options?: unknown) => {
     if (!backend.available) {
       void vscode.window.showErrorMessage(backend.reason);
       return;
     }
-    await plannerPanel.open(typeof planId === "string" ? planId : undefined);
+    const startGuide = typeof options === "object" && options !== null
+      && (options as { readonly startGuide?: unknown }).startGuide === true;
+    await plannerPanel.open(typeof planId === "string" ? planId : undefined, startGuide);
   }));
   if (backend.available) {
     // A plan session booting (from the panel, the sidebar Plan tab, or a

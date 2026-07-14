@@ -5,6 +5,7 @@
    are preserved to minimize churn. */
 
 @import "./chat/chatView.css";
+@import "./help.css";
 
 /* Full-height chain: the chat tab fills the panel to the bottom (a flex column),
    while the Tasks/System tabs keep their natural, document-scrolled height. */

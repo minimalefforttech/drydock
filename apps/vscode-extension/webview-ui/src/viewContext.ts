@@ -45,6 +45,8 @@ export interface PlanTabView {
   render(): void;
   /** Refetches the plan list + rail timeline on tab activation. */
   refresh(): void;
+  /** Selects the plan that the editor-area Planner is currently showing. */
+  selectPlan(planId?: string): void;
   /**
    * Task-first entry (a task card's "Plan" action): flips the composer to
    * create mode with the task preselected. The caller switches the tab.

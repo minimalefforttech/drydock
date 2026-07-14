@@ -2,12 +2,12 @@
  * Planner editor panel webview (ADR 0012).
  *
  * A single-page surface with two screens: the landing (recent plans + the
- * intake form + the aspect-registry editor) and the plan view — outputs tree
- * and heading outline behind a draggable splitter (left by default), the
- * provider viewer (center), and the chat rail (right; the shared chat
- * components land in P3). The two rails swap with ⇄, collapse to icon strips,
- * and auto-collapse below ~900px; layout preferences persist via webview state
- * (UI-local only — domain data is always refetched from the host).
+ * intake form + the aspect-registry editor) and the plan view — an outputs
+ * tree and heading outline behind a draggable splitter, plus the provider
+ * viewer. The Drydock Plan tab remains the planning conversation in the VS
+ * Code sidebar. The outputs rail collapses below ~900px; layout preferences
+ * persist via webview state (UI-local only — domain data is always refetched
+ * from the host).
  *
  * SECURITY: every dynamic string renders via textContent — NEVER innerHTML.
  * This entry is self-contained (it does not import the control-panel bundle).
@@ -28,17 +28,6 @@ import {
 } from "@drydock/contracts";
 import { badge, button, chip, el, option, popover, relativeTime, select, statusDot } from "./components.js";
 import {
-  chatMessageRow,
-  renderBriefedUserBody,
-  workingIndicatorRow,
-  type MessageRowContext
-} from "./chat/messageRow.js";
-import {
-  TranscriptFolder,
-  type AgentGroup,
-  type ChatMessage as RailMessage
-} from "./chat/transcriptModel.js";
-import {
   captureModalFocus,
   prepareModalFocus,
   queueModalFocus,
@@ -52,13 +41,12 @@ import {
   renderAnnotationDock,
   type ArtifactProvider
 } from "./plannerViewer.js";
+import { createHelpExperience, setHelpTooltip } from "./help.js";
 
 interface PersistedState {
   readonly selectedPlanId: string | null;
   readonly selectedArtifactId: string | null;
-  readonly layoutSwapped: boolean;
   readonly leftCollapsed: boolean;
-  readonly rightCollapsed: boolean;
   readonly splitRatio: number;
 }
 
@@ -145,159 +133,26 @@ let turnActive = false;
 let notice: { text: string; tone: "info" | "error" } | null = null;
 /** Header aspect-chip filter for the outputs tree (transient, click to clear). */
 let aspectFilter: string | null = null;
+/** A guide handoff that arrived while planner.showPlan was still loading its selected plan. */
+let pendingGuideStart = false;
 /** Revision seen per artifact, for the "updated" flash on refetch. */
 const seenRevisions = new Map<string, number>();
 const flashArtifacts = new Set<string>();
 
-let layoutSwapped = false;
 let leftCollapsed = false;
-let rightCollapsed = false;
 let splitRatio = 0.55;
 /**
  * Narrow windows auto-collapse both rails to strips; tapping a strip flies the
  * rail out as an overlay. This is transient presentation state — it never
  * touches the persisted collapse preferences.
  */
-let narrowOverlay: "outputs" | "chat" | null = null;
-
-// ---------------------------------------------------------------------------
-// Chat rail state: the plan session's transcript, folded through the SAME
-// shared reducer/renderer as the Chat tab (chat/transcriptModel + messageRow).
-// Rebuilt from session.timeline on session switch; live pushes append.
-// ---------------------------------------------------------------------------
-
-let railMessages: RailMessage[] = [];
-let railGroups: Record<string, AgentGroup> = {};
-let railSessionId: string | null = null;
-let railLastSequence = 0;
-let railTurnStartedAt: number | undefined;
-let railLastActivityAt: number | undefined;
-let railReasoningActive = false;
-let railReasoningText = "";
-let railTickTimer: number | undefined;
-let railLogEl: HTMLElement | null = null;
-
-const railFolder = new TranscriptFolder(
-  {
-    get messages() { return railMessages; },
-    get groups() { return railGroups; }
-  },
-  {
-    // The planner has no diagnostics feed; unrouted lines stay model-only.
-    onDiagnostic: () => {},
-    // Artifact changes arrive through collection, not the working set.
-    onFileEdit: () => {},
-    onSystemMessage: (text, tone) => {
-      railFolder.appendSystemMessage({ text, tone });
-    },
-    onReasoning: (text) => {
-      railReasoningActive = true;
-      railReasoningText += text;
-      renderRailLog();
-    },
-    onRender: () => renderRailLog(),
-    onPersist: () => {
-      // Rail state is rebuilt from the durable timeline; nothing UI-local persists.
-    }
-  }
-);
-
-const railContext: MessageRowContext = {
-  authorLabel: () => (currentSession?.model ? `Planner · ${currentSession.model}` : "Planner"),
-  openLink: (href) => {
-    void request({ type: "chat.openFile", path: href });
-  },
-  renderUserBody: (container, text) => renderBriefedUserBody(container, text),
-  groups: () => railGroups
-};
-
-function resetRail(sessionId: string | null): void {
-  railSessionId = sessionId;
-  railMessages = [];
-  railGroups = {};
-  railLastSequence = 0;
-  railReasoningActive = false;
-  railReasoningText = "";
-  railFolder.clearLiveState();
-  renderRailLog();
-}
-
-/** Incremental timeline pull — the same replay mechanism the Chat tab uses. */
-async function syncRail(): Promise<void> {
-  const sessionId = currentState?.plan.sessionId ?? null;
-  if (sessionId === null) {
-    if (railSessionId !== null) resetRail(null);
-    return;
-  }
-  if (railSessionId !== sessionId) {
-    resetRail(sessionId);
-  }
-  const response = await request({ type: "session.timeline", sessionId, fromSequence: railLastSequence + 1 });
-  if (!response.ok || response.payload.type !== "session.timeline") return;
-  if (railSessionId !== sessionId) return;
-  for (const line of response.payload.lines) {
-    if (line.sequence <= railLastSequence) continue;
-    railFolder.apply(line, false);
-    railLastSequence = line.sequence;
-  }
-  renderRailLog();
-}
-
-/** Re-renders only the rail's log (never the whole panel) — cheap per push. */
-function renderRailLog(): void {
-  if (railLogEl === null || !railLogEl.isConnected) return;
-  railLogEl.replaceChildren();
-  if (railMessages.length === 0 && !turnActive && !booting) {
-    const empty = el("div", "pl-rail-empty");
-    empty.textContent = railSessionId === null
-      ? "No session yet — creating the plan starts one, or send a message below."
-      : "The session transcript will appear here.";
-    railLogEl.append(empty);
-    return;
-  }
-  for (const message of railMessages) {
-    railLogEl.append(chatMessageRow(message, railContext));
-  }
-  if (turnActive || booting) {
-    railLogEl.append(workingIndicatorRow({
-      ...(railTurnStartedAt === undefined ? {} : { turnStartedAt: railTurnStartedAt }),
-      ...(railLastActivityAt === undefined ? {} : { lastActivityAt: railLastActivityAt }),
-      ...(railReasoningActive ? { reasoning: { text: railReasoningText } } : {})
-    }));
-  } else if (railReasoningActive) {
-    // Frozen "Thought for Ns" stays readable until the next turn starts.
-    railLogEl.append(workingIndicatorRow({ reasoning: { text: railReasoningText } }));
-  }
-  railLogEl.scrollTop = railLogEl.scrollHeight;
-}
-
-function setRailTicking(active: boolean): void {
-  if (railTickTimer !== undefined) {
-    window.clearInterval(railTickTimer);
-    railTickTimer = undefined;
-  }
-  if (active) {
-    railTickTimer = window.setInterval(() => {
-      if (!turnActive && !booting) return;
-      const existing = railLogEl?.querySelector(".chat-working, .chat-reasoning");
-      if (existing) {
-        existing.replaceWith(workingIndicatorRow({
-          ...(railTurnStartedAt === undefined ? {} : { turnStartedAt: railTurnStartedAt }),
-          ...(railLastActivityAt === undefined ? {} : { lastActivityAt: railLastActivityAt }),
-          ...(railReasoningActive ? { reasoning: { text: railReasoningText } } : {})
-        }));
-      }
-    }, 1_000);
-  }
-}
+let narrowOverlay: "outputs" | null = null;
 
 const saved = vscodeApi.getState();
 if (saved) {
   currentPlanId = saved.selectedPlanId;
   selectedArtifactId = saved.selectedArtifactId;
-  layoutSwapped = saved.layoutSwapped;
   leftCollapsed = saved.leftCollapsed;
-  rightCollapsed = saved.rightCollapsed;
   splitRatio = clampRatio(saved.splitRatio);
 }
 
@@ -305,9 +160,7 @@ function persist(): void {
   vscodeApi.setState({
     selectedPlanId: currentPlanId,
     selectedArtifactId,
-    layoutSwapped,
     leftCollapsed,
-    rightCollapsed,
     splitRatio
   });
 }
@@ -340,35 +193,23 @@ function applyPush(payload: PanelPushPayload): void {
         void openPlan(payload.planId);
       }
       return;
-    case "chat.event":
-      if (payload.sessionId === railSessionId && payload.line.sequence > railLastSequence) {
-        railLastSequence = payload.line.sequence;
-        if (turnActive) railLastActivityAt = Date.now();
-        railFolder.apply(payload.line, false);
+    case "help.startTour":
+      if (currentPlanId !== null && currentState === null) {
+        pendingGuideStart = true;
+      } else {
+        window.setTimeout(() => help.startTour(), 0);
       }
       return;
     case "chat.turnStarted":
       if (currentState?.plan.sessionId === payload.sessionId) {
         turnActive = true;
-        railFolder.clearActiveAssistant();
-        railFolder.resetTurn();
-        railReasoningActive = false;
-        railReasoningText = "";
-        railTurnStartedAt = Date.now();
-        railLastActivityAt = Date.now();
-        setRailTicking(true);
         render();
       }
       return;
     case "chat.turnCompleted":
       if (currentState?.plan.sessionId === payload.sessionId) {
         turnActive = false;
-        railTurnStartedAt = undefined;
-        setRailTicking(false);
-        railFolder.clearActiveAssistant();
-        // Catch any lines this window missed while the turn streamed.
-        void syncRail();
-        render();
+        void refreshState();
       }
       return;
     case "session.updated":
@@ -435,7 +276,10 @@ async function refreshState(): Promise<void> {
     persist();
   }
   render();
-  void syncRail();
+  if (pendingGuideStart) {
+    pendingGuideStart = false;
+    window.setTimeout(() => help.startTour(), 0);
+  }
 }
 
 async function openPlan(planId: string): Promise<void> {
@@ -444,7 +288,6 @@ async function openPlan(planId: string): Promise<void> {
   currentSession = null;
   selectedArtifactId = null;
   seenRevisions.clear();
-  resetRail(null);
   persist();
   render();
   await refreshState();
@@ -459,12 +302,93 @@ function backToLanding(): void {
   void refreshPlans().then(() => render());
 }
 
+async function showTourLanding(): Promise<void> {
+  if (currentPlanId !== null || currentState !== null) {
+    currentPlanId = null;
+    currentState = null;
+    currentSession = null;
+    notice = null;
+    persist();
+  }
+  if (plans.length === 0) await refreshPlans();
+  render();
+}
+
+async function showTourPlan(): Promise<void> {
+  if (currentPlanId !== null && currentState !== null) {
+    render();
+    return;
+  }
+  if (plans.length === 0) await refreshPlans();
+  const planId = currentPlanId ?? plans.find((plan) => plan.status !== "archived")?.planId ?? plans[0]?.planId;
+  if (planId === undefined) {
+    render();
+    return;
+  }
+  await openPlan(planId);
+}
+
 // ---------------------------------------------------------------------------
 // Structure
 // ---------------------------------------------------------------------------
 
 const root = el("div", "pl-root");
 app.append(root);
+
+const help = createHelpExperience({
+  id: "planner",
+  title: "Planner guide",
+  intro: "Create a task-linked plan, inspect its generated artifacts, and send revisions or create board work from the result.",
+  showWelcome: true,
+  pages: [
+    {
+      id: "starting",
+      label: "Start a plan",
+      title: "Create a task-linked plan",
+      intro: "Enter a planning brief, select the owning task, choose the aspects to cover, and add any required read-only context.",
+      sections: [
+        { title: "Write the brief", body: "Describe the problem, expected result, and required constraints. This text becomes the first planning instruction." },
+        { title: "Select the task", body: "Link the plan to a task so its session, artifacts, generated subtasks, and later review use the same owner." },
+        { title: "Select aspects", body: "Choose the areas the planner must address explicitly, such as architecture, UX, security, or rollout." },
+        { title: "Add read-only context", body: "Add source folders or files the planner should inspect. Planner context mounts cannot be modified by the session." }
+      ]
+    },
+    {
+      id: "workspace",
+      label: "Plan workspace",
+      title: "Navigate plan outputs",
+      intro: "The workspace contains an outputs rail, an artifact viewer, and the planning session chat.",
+      sections: [
+        { title: "Use the outputs rail", body: "Select an artifact and use its heading outline to navigate longer documents. Resize or collapse the rail as needed." },
+        { title: "Inspect an artifact", body: "The centre viewer renders documents, diagrams, images, and prototypes using the appropriate viewer for each type." },
+        { title: "Use the Plan tab for conversation", body: "Send planning questions and follow-up instructions from the Drydock Plan tab in the VS Code sidebar. Selecting a plan here selects the same plan in that tab." },
+        { title: "Use the narrow layout", body: "On narrow editor panels, select the outputs strip to open the artifact tree as an overlay. The artifact viewer remains in the editor area." }
+      ]
+    },
+    {
+      id: "handoff",
+      label: "Refine & hand off",
+      title: "Revise the plan or create board work",
+      intro: "Add instructions to plan content, submit them for revision, or convert checklist items into subtasks.",
+      sections: [
+        { title: "Add an instruction", body: "Attach feedback to the artifact being reviewed. Open instructions remain listed until they are resolved or sent." },
+        { title: "Submit instructions", body: "Send all open instructions in one revision request so the planner can update the artifacts together." },
+        { title: "Regenerate content", body: "Regenerate one aspect for a targeted revision, or regenerate the entire plan when the brief or direction has changed." },
+        { title: "Create subtasks", body: "Preview checklist-derived candidates before adding them to the Task Board. Creating subtasks does not start an agent." }
+      ]
+    }
+  ],
+  tour: [
+    { title: "Choose an existing plan", body: "Select a recent plan to continue its planning session and inspect its artifacts. Archived plans remain available below the active list.", target: () => root.querySelector<HTMLElement>(".pl-plans") ?? root, prepare: showTourLanding },
+    { title: "Write the planning brief", body: "Describe the problem, expected result, and important constraints. Select the owning task so later sessions, subtasks, and review stay under the same task.", target: () => root.querySelector<HTMLElement>(".pl-intake") ?? root, prepare: showTourLanding },
+    { title: "Set aspects and read-only context", body: "Select the areas the plan must address, then add only the files or folders the planner needs to inspect. Context mounts are read-only.", target: () => root.querySelector<HTMLElement>(".pl-chip-grid")?.closest<HTMLElement>(".pl-intake") ?? root.querySelector<HTMLElement>(".pl-intake") ?? root, prepare: showTourLanding },
+    { title: "Check plan and session status", body: "The header identifies the task, selected aspects, and planning-session state. Use the aspect chips to filter outputs when the plan covers several concerns.", target: () => root.querySelector<HTMLElement>(".pl-header") ?? root, prepare: showTourPlan },
+    { title: "Navigate generated outputs", body: "Select an artifact in the outputs tree, then use its outline to move through longer documents. The context footer lists read-only mounts.", target: () => root.querySelector<HTMLElement>(".pl-rail-outputs") ?? root, prepare: showTourPlan },
+    { title: "Review an artifact", body: "Inspect the selected artifact in the centre viewer. Use the rendered content's instruction action to attach a specific requested change to the relevant section.", target: () => root.querySelector<HTMLElement>(".pl-viewer") ?? root, prepare: showTourPlan },
+    { title: "Send revisions or create board work", body: "Send all open instructions together, regenerate only when broader rework is needed, or preview checklist items before creating board subtasks. None of these actions starts implementation work automatically.", target: () => root.querySelector<HTMLElement>(".pl-header") ?? root, prepare: showTourPlan },
+    { title: "Continue the planning conversation", body: "Use the Drydock Plan tab in the sidebar for follow-up questions and planning instructions. Selecting a plan here selects the same plan in that tab.", target: () => root.querySelector<HTMLElement>(".pl-header") ?? root, prepare: showTourPlan }
+  ]
+});
 
 const narrowQuery = window.matchMedia(NARROW_QUERY);
 function syncNarrow(): void {
@@ -478,34 +402,28 @@ narrowQuery.addEventListener("change", () => {
 syncNarrow();
 
 /** Wide: the persisted preference. Narrow: strip unless flown out. */
-function railCollapsed(side: "outputs" | "chat"): boolean {
+function outputsRailCollapsed(): boolean {
   if (narrowQuery.matches) {
-    return narrowOverlay !== side;
+    return narrowOverlay !== "outputs";
   }
-  return side === "outputs" ? leftCollapsed : rightCollapsed;
+  return leftCollapsed;
 }
 
-function expandRail(side: "outputs" | "chat"): void {
+function expandOutputsRail(): void {
   if (narrowQuery.matches) {
-    narrowOverlay = side;
-  } else if (side === "outputs") {
-    leftCollapsed = false;
-    persist();
+    narrowOverlay = "outputs";
   } else {
-    rightCollapsed = false;
+    leftCollapsed = false;
     persist();
   }
   render();
 }
 
-function collapseRail(side: "outputs" | "chat"): void {
+function collapseOutputsRail(): void {
   if (narrowQuery.matches) {
     narrowOverlay = null;
-  } else if (side === "outputs") {
-    leftCollapsed = true;
-    persist();
   } else {
-    rightCollapsed = true;
+    leftCollapsed = true;
     persist();
   }
   render();
@@ -630,7 +548,7 @@ function renderMaterializeOverlay(draft: MaterializeDraft): HTMLElement {
   const hint = el("div", "pl-mat-hint");
   hint.id = "pl-mat-hint";
   hint.textContent = draft.taskTitle !== undefined
-    ? `Creates the checked items as subtasks on "${draft.taskTitle}" — nothing starts until you say so.`
+    ? `Creates the selected items as subtasks on "${draft.taskTitle}". This action does not start an agent.`
     : "This plan has no owning task — pick one in the plan intake first.";
   modal.append(hint);
 
@@ -737,7 +655,7 @@ function renderLanding(): HTMLElement {
   const plansHead = el("div", "pl-rail-head");
   const plansTitle = el("span", "pl-kicker");
   plansTitle.textContent = "PLANS";
-  plansHead.append(plansTitle);
+  plansHead.append(plansTitle, el("span", "pl-spacer"), help.launcher("pl-help-launcher"));
   plansPane.append(plansHead);
   const active = plans.filter((plan) => plan.status !== "archived");
   const archived = plans.filter((plan) => plan.status === "archived");
@@ -779,6 +697,7 @@ function renderLanding(): HTMLElement {
   // orphan option stays available but names itself as the exception.
   form.append(fieldLabel("For task", "task-based planning is recommended"));
   const taskField = select("pl-input pl-task-select", "The task this plan belongs to");
+  setHelpTooltip(taskField, "Select the task that will own this plan, its session, its artifacts, and any generated subtasks.");
   taskField.append(option("", "no task (orphan)"));
   for (const task of workTasks) {
     if (task.state === "done") continue;
@@ -813,6 +732,7 @@ function renderLanding(): HTMLElement {
     node.classList.add("pl-aspect-chip");
     node.classList.toggle("selected", selected);
     node.title = aspect.instructions;
+    setHelpTooltip(node, aspect.instructions);
     chipGrid.append(node);
   }
   form.append(chipGrid);
@@ -1019,12 +939,10 @@ function renderPlanView(state: PlannerStateDetail): HTMLElement {
   const view = el("div", "pl-plan-view");
   view.append(renderPlanHeader(state));
 
-  const body = el("div", `pl-body${layoutSwapped ? " swapped" : ""}`);
+  const body = el("div", "pl-body");
   const outputsRail = renderOutputsRail(state);
   const viewer = renderViewer(state);
-  const chatRail = renderChatRail();
-  // DOM order stays outputs/viewer/chat; the swap is flex `order` via CSS.
-  body.append(outputsRail, viewer, chatRail);
+  body.append(outputsRail, viewer);
   view.append(body);
   return view;
 }
@@ -1068,6 +986,8 @@ function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
   const spacer = el("span", "pl-spacer");
   header.append(spacer);
 
+  header.append(help.launcher("pl-help-launcher"));
+
   header.append(sessionStatus());
 
   const openCount = state.annotations.filter((annotation) => annotation.status === "open").length;
@@ -1085,6 +1005,7 @@ function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
   });
   const regenerateTrigger = button("⟳ Regenerate ▾", "ghost small");
   regenerateTrigger.title = "Ask the agent to revisit the whole plan, or one aspect";
+  setHelpTooltip(regenerateTrigger, "Regenerate the entire plan or select one aspect for a targeted revision.");
   const regenerate = popover(regenerateTrigger, (content, close) => {
     const whole = button("Whole plan", "ghost small pl-regen-item");
     whole.addEventListener("click", () => {
@@ -1112,16 +1033,10 @@ function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
       content.append(item);
     }
   });
-  const swap = button("⇄", "ghost small");
-  swap.title = "Swap the outputs and chat rails";
-  swap.addEventListener("click", () => {
-    layoutSwapped = !layoutSwapped;
-    persist();
-    render();
-  });
   // Plan → board (ADR 0012): propose the plan's checkbox items as subtasks.
   const toBoard = button("⇪ To board…", "ghost small pl-to-board");
-  toBoard.title = "Materialize this plan's checkbox items as subtasks on its task (creates, never starts)";
+  toBoard.title = "Create selected checklist items as subtasks on this plan's task; does not start an agent";
+  setHelpTooltip(toBoard, "Preview checklist items and create selected items as subtasks. This action does not start an agent.");
   toBoard.addEventListener("click", () => {
     materializeReturnFocus = () => root.querySelector<HTMLElement>(".pl-to-board");
     materializeDraft = { planId: state.plan.planId, candidates: null, selected: new Set(), submitting: false, error: null };
@@ -1141,7 +1056,7 @@ function renderPlanHeader(state: PlannerStateDetail): HTMLElement {
       render();
     });
   });
-  header.append(send, regenerate, toBoard, swap);
+  header.append(send, regenerate, toBoard);
   return header;
 }
 
@@ -1178,17 +1093,17 @@ function textSpan(text: string): HTMLElement {
 // ---------------------------------------------------------------------------
 
 function renderOutputsRail(state: PlannerStateDetail): HTMLElement {
-  const collapsed = railCollapsed("outputs");
+  const collapsed = outputsRailCollapsed();
   const overlay = narrowQuery.matches && narrowOverlay === "outputs";
   const rail = el("aside", `pl-rail pl-rail-outputs${collapsed ? " collapsed" : ""}${overlay ? " rail-overlay" : ""}`);
   if (collapsed) {
-    return collapsedStrip(rail, "outputs", state);
+    return collapsedOutputsStrip(rail, state);
   }
   const head = el("div", "pl-rail-head");
   const label = el("span", "pl-kicker");
   label.textContent = "OUTPUTS";
   const collapse = railChevron("Collapse the outputs rail", () => {
-    collapseRail("outputs");
+    collapseOutputsRail();
   });
   head.append(label, collapse);
   rail.append(head);
@@ -1381,102 +1296,29 @@ function wireSplitter(divider: HTMLElement, container: HTMLElement, tree: HTMLEl
 }
 
 // ---------------------------------------------------------------------------
-// Chat rail (placeholder until the shared components land in P3)
+// Collapsed outputs rail: icon strip that flies out as an overlay
 // ---------------------------------------------------------------------------
 
-function renderChatRail(): HTMLElement {
-  const collapsed = railCollapsed("chat");
-  const overlay = narrowQuery.matches && narrowOverlay === "chat";
-  const rail = el("aside", `pl-rail pl-rail-chat${collapsed ? " collapsed" : ""}${overlay ? " rail-overlay" : ""}`);
-  if (collapsed) {
-    return collapsedStrip(rail, "chat", currentState);
-  }
-  const head = el("div", "pl-rail-head");
-  const label = el("span", "pl-kicker");
-  label.textContent = "PLAN CHAT";
-  const collapse = railChevron("Collapse the chat rail", () => {
-    collapseRail("chat");
-  });
-  head.append(label, sessionStatus(), collapse);
-  rail.append(head);
-
-  railLogEl = el("div", "pl-chat-log chat-log");
-  rail.append(railLogEl);
-  renderRailLog();
-
-  const composer = el("div", "pl-composer");
-  const promptInput = document.createElement("textarea");
-  promptInput.className = "pl-textarea";
-  promptInput.rows = 3;
-  promptInput.placeholder = "Refine the plan…";
-  const actions = el("div", "pl-composer-actions");
-  const mounts = el("span", "pl-footnote");
-  mounts.textContent = "plan session · project mounts :ro · plan dir :rw";
-  const stop = button("Stop", "ghost small");
-  stop.disabled = !turnActive;
-  stop.addEventListener("click", () => {
-    const sessionId = currentState?.plan.sessionId;
-    if (!sessionId) return;
-    stop.disabled = true;
-    void request({ type: "chat.cancelTurn", sessionId });
-  });
-  const send = button("Send", "primary small");
-  const submit = (): void => {
-    const prompt = promptInput.value.trim();
-    if (prompt.length === 0 || currentPlanId === null) return;
-    promptInput.value = "";
-    void request({ type: "planner.sendTurn", planId: currentPlanId, prompt }).then((response) => {
-      if (!response.ok) {
-        notice = { text: response.error.message, tone: "error" };
-        render();
-      }
-    });
-  };
-  send.addEventListener("click", submit);
-  promptInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      submit();
-    }
-  });
-  actions.append(mounts, stop, send);
-  composer.append(promptInput, actions);
-  rail.append(composer);
-  return rail;
-}
-
-// ---------------------------------------------------------------------------
-// Collapsed rails: icon strips that fly out as overlays
-// ---------------------------------------------------------------------------
-
-function collapsedStrip(rail: HTMLElement, side: "outputs" | "chat", state: PlannerStateDetail | null): HTMLElement {
+function collapsedOutputsStrip(rail: HTMLElement, state: PlannerStateDetail): HTMLElement {
   rail.classList.add("collapsed");
-  const expand = railChevron(side === "outputs" ? "Expand the outputs rail" : "Expand the chat rail", () => {
-    expandRail(side);
+  const expand = railChevron("Expand the outputs rail", () => {
+    expandOutputsRail();
   }, true);
   const strip = el("div", "pl-strip");
-  if (side === "outputs" && state !== null) {
-    const kinds = new Set(state.artifacts.map((artifact) => artifact.kind));
-    for (const kind of ["document", "diagram", "image", "prototype"] as const) {
-      if (!kinds.has(kind)) continue;
-      const glyph = el("span", "pl-strip-glyph");
-      glyph.textContent = KIND_GLYPHS[kind];
-      strip.append(glyph);
-    }
-    const openCount = state.annotations.filter((annotation) => annotation.status === "open").length;
-    if (openCount > 0) {
-      strip.append(el("span", "pl-strip-dot"));
-    }
-  }
-  if (side === "chat") {
+  const kinds = new Set(state.artifacts.map((artifact) => artifact.kind));
+  for (const kind of ["document", "diagram", "image", "prototype"] as const) {
+    if (!kinds.has(kind)) continue;
     const glyph = el("span", "pl-strip-glyph");
-    glyph.textContent = "💬";
+    glyph.textContent = KIND_GLYPHS[kind];
     strip.append(glyph);
-    if (turnActive) strip.append(el("span", "pl-strip-dot"));
+  }
+  const openCount = state.annotations.filter((annotation) => annotation.status === "open").length;
+  if (openCount > 0) {
+    strip.append(el("span", "pl-strip-dot"));
   }
   strip.addEventListener("click", (event) => {
     event.stopPropagation();
-    expandRail(side);
+    expandOutputsRail();
   });
   rail.append(strip, expand);
   return rail;

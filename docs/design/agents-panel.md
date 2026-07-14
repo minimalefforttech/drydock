@@ -27,7 +27,9 @@ ADR 0015 (durable queue/park policy).
 A single scrollable scan list, grouped by task. No graph canvas, no columns —
 rows earn their keep at fleet sizes (the same call as the Agents lens).
 
-1. **Header strip** — live rollup (`N running · N waiting on you · N idle`)
+1. **Header strip** — live rollup (`N running · N waiting on you · N idle`),
+   where waiting includes session questions/access/failures and task subtasks
+   awaiting human verification,
    plus the live fleet token total, `[Active | Needs attention | All]`, a
    `Min | Std | Full` detail control, and text filtering over task/session
    titles.
@@ -104,6 +106,9 @@ Composed host-side, folded client-side:
   (task summary + board column name/category + sessions), orphan sessions,
   pending questions, pending access requests, unlanded changeset landing
   items, and `agentIdleThresholdMs`.
+  Task summaries carry `verifyUnmet` on their subtasks, so the fleet rollup,
+  task ordering, and Needs attention filter use the same verification state as
+  the Task Board.
   Sessions arrive as plain `ChatSessionSummary` — the shape already carries
   liveness, ownership, lineage, and `agentActivity`. The activity summary
   gains an optional `root` item (the session's own agent this turn) so fleet

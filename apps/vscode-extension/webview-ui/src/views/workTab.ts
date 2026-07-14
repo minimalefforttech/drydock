@@ -44,6 +44,7 @@ import {
   statusDot,
   textInput
 } from "../components.js";
+import { setHelpTooltip } from "../help.js";
 import { onPush, request } from "../messaging.js";
 import {
   applySessionAttention,
@@ -242,6 +243,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // ("Task Board panel not available yet."); that is expected/correct.
   const openBoardButton = button("Board", "small ghost tasks-board-button");
   openBoardButton.title = "Open the Task Board panel";
+  setHelpTooltip(openBoardButton, "Open Task Board to move tasks between stages and edit subtask dependencies.");
   openBoardButton.addEventListener("click", () => {
     void request({ type: "taskBoard.open" }).then((response) => {
       if (!response.ok) ctx.bridge.chat.logChat(`open task board failed: ${response.error.message}`);
@@ -251,6 +253,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // session across every task, for the many-tasks-in-flight moment.
   const openAgentsButton = button("Agents", "small ghost tasks-board-button");
   openAgentsButton.title = "Open the Agents panel (all active agents across tasks)";
+  setHelpTooltip(openAgentsButton, "Open Agents to inspect running, waiting, idle, and failed sessions across all tasks.");
   openAgentsButton.addEventListener("click", () => {
     void request({ type: "agents.open" }).then((response) => {
       if (!response.ok) ctx.bridge.chat.logChat(`open agents panel failed: ${response.error.message}`);
@@ -273,6 +276,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   taskDescInput.rows = 2;
   taskDescInput.placeholder = "Description (optional)";
   const taskWorkspaceSelect = select("task-create-workspace", "Workspace mounted into a started chat");
+  setHelpTooltip(taskWorkspaceSelect, "Select the workspace that the new agent session can access.");
   // R10: primary (accent) — the task-first happy path (spins a runtime + chat).
   const startChatButton = button("Create & start chat", "small primary");
   const startChatRow = el("div", "button-row");

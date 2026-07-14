@@ -54,6 +54,7 @@ import {
   queueModalFocus,
   type ModalFocusSnapshot
 } from "./modalFocus.js";
+import { createHelpExperience, setHelpTooltip } from "./help.js";
 
 interface VsCodeApi {
   postMessage(message: unknown): void;
@@ -141,6 +142,14 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
 let pushDebounceTimer = 0;
 
 function applyPush(payload: PanelPushPayload): void {
+  if (payload.type === "help.startTour") {
+    if (initialLoadReady) {
+      window.setTimeout(() => help.startTour(), 0);
+    } else {
+      pendingGuideStart = true;
+    }
+    return;
+  }
   if (payload.type === "board.changed") {
     // Cascades and turn boundaries can arrive in bursts; collapse a burst into
     // one refetch so the board does not thrash.
@@ -157,6 +166,9 @@ function applyPush(payload: PanelPushPayload): void {
 // ---------------------------------------------------------------------------
 
 let board: BoardState | null = null;
+/** The initial board and workspace-set name requests have both completed and rendered. */
+let initialLoadReady = false;
+let pendingGuideStart = false;
 /** workspaceSetId → display name, best-effort from workspace.state. */
 const workspaceSetNames = new Map<string, string>();
 /** "Hide finished older than N days" — done-category cards with older doneAt hide. */
@@ -268,6 +280,8 @@ const emptyState = el("div", "tb-empty hidden");
 const loadingState = el("div", "tb-loading");
 loadingState.textContent = "Loading task board…";
 const statusLine = el("div", "tb-status");
+statusLine.setAttribute("role", "status");
+statusLine.setAttribute("aria-live", "polite");
 const modalRoot = el("div", "tb-modal-root hidden");
 railWrap.append(rail);
 // Edge overlay: absolutely positioned inside the scroll container so edges
@@ -279,6 +293,61 @@ edgeLayer.setAttribute("class", "tb-edges");
 const edgeActions = el("div", "tb-edge-actions hidden");
 railWrap.append(edgeLayer, edgeActions);
 app.append(toolbar, statusLine, loadingState, emptyState, railWrap, modalRoot);
+
+const help = createHelpExperience({
+  id: "task-board",
+  title: "Task Board guide",
+  intro: "Use the board to update stages, define subtask dependencies, and start eligible agent work.",
+  showWelcome: true,
+  pages: [
+    {
+      id: "board-basics",
+      label: "Board basics",
+      title: "Manage task and subtask state",
+      intro: "Tasks and subtasks have independent board stages. A task's colour stripe identifies its subtasks in every column.",
+      sections: [
+        { title: "Move a card", body: "Drag the card to another column or use its move menu. Column category colours identify backlog, pending, in-progress, and done stages." },
+        { title: "Identify ownership", body: "Each task has a stable colour stripe. Its subtasks use the same stripe in every column." },
+        { title: "Filter the board", body: "Use the task filter, finished-age control, lanes, and detail selector to change the current view without changing stored task state." },
+        { title: "Use the card menu", body: "Open the move menu for a keyboard-accessible alternative to drag and drop and to access task FAQ controls." }
+      ]
+    },
+    {
+      id: "dependencies",
+      label: "Dependencies",
+      title: "Define subtask dependencies",
+      intro: "Dependencies can connect sibling subtasks within one task. The board rejects cross-task edges, self-dependencies, duplicates, and cycles.",
+      sections: [
+        { title: "Create a dependency", body: "Drag from one subtask's output dot to another sibling's input dot. Invalid targets are disabled while you drag." },
+        { title: "Check blocked state", body: "A lock means an upstream dependency is not done. The normal start action remains disabled until all prerequisites are complete." },
+        { title: "Display dependency lines", body: "Select Connections: on hover, always, or hidden to control how dependency lines appear." },
+        { title: "Bypass a dependency", body: "Force start runs the selected subtask even when a dependency is unfinished. It applies only to that manual start." }
+      ]
+    },
+    {
+      id: "running",
+      label: "Starting work",
+      title: "Start and monitor agent work",
+      intro: "Card actions reflect prompt availability, dependency state, orchestration capacity, failures, and verification requirements.",
+      sections: [
+        { title: "Start eligible subtasks", body: "Start ready runs every prompted, unblocked subtask outside the backlog after confirmation." },
+        { title: "Check queue state", body: "Queued means the work is waiting for an orchestration slot. Running means an agent turn is in progress." },
+        { title: "Retry a parked subtask", body: "Automatic execution parks a subtask after repeated failures. Use the manual retry action to resume it." },
+        { title: "Record verification", body: "Run or inspect the relevant checks, then select Mark verified. Drydock records the human check; it does not run tests, move the card, or block dependent work. There is no separate Drydock test-runner panel." }
+      ]
+    }
+  ],
+  tour: [
+    { title: "Configure the board view", body: "Use the toolbar to create tasks, filter the board, set finished history, control dependency lines, choose card detail, and toggle lanes.", target: ".tb-toolbar" },
+    { title: "Read the workflow stages", body: "Each column is a configured stage. Category colour distinguishes backlog, pending, in-progress, and done stages without changing the stage name.", target: () => rail.querySelector<HTMLElement>(".tb-col") ?? railWrap },
+    { title: "Read task ownership and progress", body: "A task card owns the subtasks with the same colour stripe. Its progress count reports completed subtasks; workspace and clone chips describe where work runs.", target: () => rail.querySelector<HTMLElement>(".tb-task-card") ?? railWrap },
+    { title: "Add work under the task", body: "Add a subtask in the stage where it should begin. The new card belongs to the task above it and does not start an agent by itself.", target: () => rail.querySelector<HTMLElement>(".tb-add-subtask") ?? rail.querySelector<HTMLElement>(".tb-task-card") ?? railWrap },
+    { title: "Define execution order", body: "Drag from a subtask's output dot onto a sibling card to add a dependency. A lock means an upstream subtask is not done.", target: () => rail.querySelector<HTMLElement>(".tb-subtask-card .tb-dot-out")?.closest<HTMLElement>(".tb-subtask-card") ?? rail.querySelector<HTMLElement>(".tb-subtask-card") ?? railWrap },
+    { title: "Start eligible work", body: "Start runs a prompted, unblocked subtask. Queued work waits for a run slot; Retry resumes parked work. Force start is a manual override for an unfinished dependency.", target: () => rail.querySelector<HTMLElement>(".tb-card-actions:has(.tb-start, .tb-force)") ?? rail.querySelector<HTMLElement>(".tb-subtask-card") ?? railWrap },
+    { title: "Record human verification", body: "Run or inspect the required checks, then select Mark verified. This records the check; it does not run tests, move the card, or start dependent work.", target: () => rail.querySelector<HTMLElement>(".tb-verify-action")?.closest<HTMLElement>(".tb-subtask-card") ?? rail.querySelector<HTMLElement>(".tb-subtask-card") ?? railWrap },
+    { title: "Move work to its next stage", body: "Drag the card or use its move menu after the stage's exit condition is met. Tasks and subtasks move independently, so update each level deliberately.", target: () => rail.querySelector<HTMLElement>(".tb-menu-button")?.closest<HTMLElement>(".tb-card") ?? rail.querySelector<HTMLElement>(".tb-card") ?? railWrap }
+  ]
+});
 // Card positions shift under inner column scrolling and window resizes; the
 // capture listener catches descendants' scroll events (they do not bubble).
 railWrap.addEventListener("scroll", () => scheduleEdgeRender(), true);
@@ -524,6 +593,11 @@ function clearStatus(): void {
   statusLine.classList.remove("tb-status-error");
 }
 
+function showStatus(text: string): void {
+  statusLine.textContent = text;
+  statusLine.classList.remove("tb-status-error");
+}
+
 function persist(): void {
   vscodeApi.setState({
     ageDays,
@@ -584,7 +658,8 @@ function renderToolbar(): void {
 
   // ＋ Recipe… (ADR 0007): materialize a task + subtask DAG from a template.
   const fromRecipe = button("＋ Recipe…", "small tb-from-recipe");
-  fromRecipe.title = "Create a task with its subtasks, dependencies, and per-role defaults from a recipe (creates, never starts)";
+  fromRecipe.title = "Create a task, subtasks, dependencies, and role defaults from a recipe; does not start an agent";
+  setHelpTooltip(fromRecipe, "Create a task from a recipe, including its subtasks, dependencies, and role defaults. This action does not start an agent.");
   fromRecipe.addEventListener("click", () => {
     beginModal(() => toolbar.querySelector<HTMLElement>(".tb-from-recipe"));
     recipeDraft = { recipes: null, selectedId: null, title: "", error: null, submitting: false };
@@ -642,6 +717,7 @@ function renderToolbar(): void {
   const connSelect = document.createElement("select");
   connSelect.className = "tb-select tb-connections";
   connSelect.title = "How dependency connections render on the board";
+  setHelpTooltip(connSelect, "Set dependency lines to appear on hover, remain visible, or stay hidden.");
   for (const mode of CONNECTIONS_MODES) {
     const option = document.createElement("option");
     option.value = mode;
@@ -664,6 +740,7 @@ function renderToolbar(): void {
   const detailSelect = document.createElement("select");
   detailSelect.className = "tb-select tb-detail";
   detailSelect.title = "Card detail — minimal keeps one state chip per card; hover a card for the rest";
+  setHelpTooltip(detailSelect, "Select how much status information appears on each card: Minimal, Standard, or Full.");
   for (const level of CARD_DETAIL_LEVELS) {
     const option = document.createElement("option");
     option.value = level;
@@ -692,6 +769,8 @@ function renderToolbar(): void {
 
   const spacer = el("span", "tb-toolbar-spacer");
   toolbar.append(spacer);
+
+  toolbar.append(help.launcher("tb-help-launcher"));
 
   // Column settings modal.
   const settings = button("Columns…", "small tb-settings");
@@ -1145,7 +1224,15 @@ function renderFaqModal(draft: FaqDraft): void {
 function verifyChip(): HTMLElement {
   const chip = el("span", "tb-verify-chip");
   chip.textContent = "verify";
-  chip.title = "Human verification required (HITL gate) — check the output, then Mark verified";
+  chip.title = "Human verification has not been recorded — run or inspect the relevant checks, then select Mark verified";
+  return chip;
+}
+
+function verifiedChip(verifiedAt: string): HTMLElement {
+  const chip = el("span", "tb-verified-chip");
+  chip.textContent = `verified · ${agoText(verifiedAt)}`;
+  chip.title = `Human verification recorded ${new Date(verifiedAt).toLocaleString()}. This records the check; it does not run tests or move the card.`;
+  chip.setAttribute("aria-label", `verified ${agoText(verifiedAt)}`);
   return chip;
 }
 
@@ -1184,6 +1271,9 @@ function subtaskStateChip(subtask: SubtaskSummary): HTMLElement | null {
     lock.title = "Blocked — an upstream dependency is not done yet";
     lock.setAttribute("aria-label", "blocked");
     return lock;
+  }
+  if (subtask.verifiedAt !== undefined) {
+    return verifiedChip(subtask.verifiedAt);
   }
   return null;
 }
@@ -1254,7 +1344,8 @@ function buildSubtaskHoverCard(subtask: SubtaskSummary): HTMLElement {
     hover.append(hoverRow("seed", subtask.seedMode === "upstream" ? "local + upstream changesets" : "local HEAD"));
   }
   if (subtask.hasUnlandedChangeset === true) hover.append(hoverRow("changeset", "⎘ captured · not landed"));
-  if (subtask.verifyUnmet === true) hover.append(hoverRow("verify", "human check required · unmet"));
+  if (subtask.verifyUnmet === true) hover.append(hoverRow("verification", "human check not recorded"));
+  if (subtask.verifiedAt !== undefined) hover.append(hoverRow("verification", `recorded ${agoText(subtask.verifiedAt)}`));
   if (subtask.model !== undefined) hover.append(hoverRow("model", `${subtask.model.providerId}${subtask.model.model === undefined ? "" : ` · ${subtask.model.model}`}`));
   hover.append(hoverRow("created", agoText(subtask.createdAt)), hoverRow("updated", agoText(subtask.updatedAt)));
   return hover;
@@ -1467,14 +1558,17 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
     actions.append(linked);
   }
   if (subtask.verifyUnmet === true) {
-    // The HITL gate's one verb (ADR 0007): a human looked and says so.
-    const verified = button("Verified ✓", "ghost small tb-verify-action");
-    verified.title = "Mark this subtask verified — records the check with a timestamp";
+    // The HITL marker's one verb (ADR 0007): a human records that they ran or
+    // inspected the relevant checks. It does not run tests or move the card.
+    const verified = button("Mark verified", "ghost small tb-verify-action");
+    verified.title = "Record a human verification timestamp. This does not run tests or move the card.";
     verified.addEventListener("click", (event) => {
       event.stopPropagation();
       void markVerified(subtask.subtaskId);
     });
     actions.append(verified);
+  } else if (subtask.verifiedAt !== undefined && level !== "minimal") {
+    actions.append(verifiedChip(subtask.verifiedAt));
   }
   if (subtask.isRunning) {
     // At minimal the head already wears the one running chip.
@@ -1596,8 +1690,8 @@ async function markVerified(subtaskId: string): Promise<void> {
     render();
     return;
   }
-  clearStatus();
   await refetchBoard();
+  showStatus("Verification recorded. Tests were not run and the card was not moved.");
 }
 
 async function updateSeedMode(subtaskId: string, seedMode: "local" | "upstream"): Promise<void> {
@@ -2085,7 +2179,7 @@ function renderRecipeModal(draft: RecipeDraft): void {
   title.textContent = "New task from recipe";
   const hint = el("div", "tb-modal-hint");
   hint.id = "tb-recipe-hint";
-  hint.textContent = "Creates the task, its subtasks, and their dependencies with per-role defaults — nothing starts until you say so.";
+  hint.textContent = "Creates the task, its subtasks, dependencies, and role defaults. This action does not start an agent.";
   head.append(title, hint);
   modal.append(head);
 
@@ -2465,7 +2559,14 @@ if (saved) {
     cardDetailChoice = cardDetailLevel(saved.cardDetail);
   }
 }
-void Promise.all([loadWorkspaceSetNames(), loadBoard()]).then(() => render());
+void Promise.all([loadWorkspaceSetNames(), loadBoard()]).then(() => {
+  render();
+  initialLoadReady = true;
+  if (pendingGuideStart) {
+    pendingGuideStart = false;
+    window.setTimeout(() => help.startTour(), 0);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Local DOM helpers (kept in-module; this standalone entry does not import the

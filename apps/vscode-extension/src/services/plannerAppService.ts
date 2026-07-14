@@ -272,7 +272,7 @@ export class PlannerAppService {
     return sessionId;
   }
 
-  /** Sends a free-form turn from the panel's chat rail, reviving if needed. */
+  /** Sends a free-form turn from the sidebar Plan tab, reviving if needed. */
   async sendPlanTurn(planId: string, prompt: string): Promise<void> {
     const id = asId<"PlanId">(planId);
     const plan = await this.requirePlan(id);

@@ -1,3 +1,5 @@
+@import "./help.css";
+
 /*
  * Agents panel (ADR 0013) — fleet view styles.
  *
@@ -193,6 +195,23 @@ html, body {
   font-style: italic;
   font-size: 0.9em;
   cursor: default;
+}
+
+.task-verification {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  font-style: normal;
+}
+
+.task-verification-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-verification .action {
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 /* Indent by class only (no inline styles under the strict CSP). */

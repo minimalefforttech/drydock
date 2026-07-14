@@ -27,6 +27,7 @@ you are changing.
 | [task-review](task-review.md) | The cross-project review surface: aggregates existing diffs/comments and turns them into revision turns; never ships. |
 | [planner](planner.md) | Durable planning over disposable sessions, annotatable artifact providers, and literal-checklist materialization to the board. |
 | [agents-panel](agents-panel.md) | Fleet sessions, delegated agents, attention, density, live token scope, honest boot state, and changeset landing. |
+| [onboarding-and-help](onboarding-and-help.md) | Shared tooltips, help pages, spotlight tours, and sidebar-to-editor-panel guide handoffs. |
 | [clone-mode](clone-mode.md) | Clone operating modes, symmetric patch sync, user-selected changeset chaining, and landing semantics. |
 | [subagent-workflows](subagent-workflows.md) | Subagent visibility and role-session workflows across Codex and Claude Code transports. |
 | [prevalidation-coverage](prevalidation-coverage.md) | Original Stage 0 coverage map; useful for the environment/provider gate, not a current feature inventory. |

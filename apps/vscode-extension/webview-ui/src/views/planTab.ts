@@ -29,6 +29,7 @@ import {
   type ChatMessage
 } from "../chat/transcriptModel.js";
 import { button, collapsible, el, option, relativeTime, select, statusDot } from "../components.js";
+import { setHelpTooltip } from "../help.js";
 import { onPush, request } from "../messaging.js";
 import { upsertTasks } from "../state.js";
 import type { PlanTabView, ViewContext } from "../viewContext.js";
@@ -131,6 +132,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
   const currentLabel = el("span", "plan-tab-current");
   const newPlanButton = button("＋ New plan", "ghost small");
   newPlanButton.title = "Start a fresh planning chat (the first message becomes the plan's brief)";
+  setHelpTooltip(newPlanButton, "Create a plan. The first message becomes its planning brief.");
   newPlanButton.addEventListener("click", () => {
     composeNew = true;
     resetRail(null);
@@ -139,6 +141,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
   });
   const openPanelButton = button("Open Planner ↗", "small plan-tab-open");
   openPanelButton.title = "Open the full planning workspace (tree, viewers, annotations)";
+  setHelpTooltip(openPanelButton, "Open Planner to inspect artifacts, add instructions, and create subtasks from the plan.");
   openPanelButton.addEventListener("click", () => {
     const plan = activePlan();
     void request({ type: "planner.open", ...(plan === undefined ? {} : { planId: plan.planId }) });
@@ -156,6 +159,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
   const taskLabel = el("span", "plan-tab-footnote");
   taskLabel.textContent = "for task";
   const taskSelect = select("plan-tab-task-select", "The task this plan belongs to");
+  setHelpTooltip(taskSelect, "Select the task that will own the plan, its session, and its artifacts.");
   taskSelect.addEventListener("change", () => {
     pendingTaskId = taskSelect.value;
     render();
@@ -576,6 +580,19 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
     promptInput.focus();
   }
 
+  function selectPlan(planId?: string): void {
+    composeNew = false;
+    if (planId !== undefined && state.planTabPlanId !== planId) {
+      state.planTabPlanId = planId;
+      resetRail(null);
+      ctx.persist();
+    }
+    void refreshPlans().then(() => {
+      render();
+      return syncRail();
+    });
+  }
+
   render();
-  return { root, render, refresh, startForTask };
+  return { root, render, refresh, selectPlan, startForTask };
 }

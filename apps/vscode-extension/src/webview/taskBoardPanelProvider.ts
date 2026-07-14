@@ -38,6 +38,8 @@ export class TaskBoardPanelProvider {
   /** Single instance: at most one board panel per window. */
   private panel: vscode.WebviewPanel | undefined;
   private sequence = 0;
+  /** A cross-panel handoff waits for the boot board.state request before starting the tour. */
+  private pendingStartGuide = false;
   /** Collapses bus-event bursts (a turn boundary plus its cascade) into one push. */
   private pushDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -71,11 +73,13 @@ export class TaskBoardPanelProvider {
     }, 200);
   }
 
-  async open(): Promise<void> {
+  async open(startGuide = false): Promise<void> {
     if (this.panel !== undefined) {
       this.panel.reveal(vscode.ViewColumn.Active);
+      if (startGuide) this.push({ type: "help.startTour" });
       return;
     }
+    this.pendingStartGuide = startGuide;
     const panel = vscode.window.createWebviewPanel(
       "drydock.taskBoard",
       "Task Board",
@@ -94,6 +98,7 @@ export class TaskBoardPanelProvider {
     });
     panel.onDidDispose(() => {
       this.panel = undefined;
+      this.pendingStartGuide = false;
       if (this.pushDebounceTimer !== undefined) {
         clearTimeout(this.pushDebounceTimer);
         this.pushDebounceTimer = undefined;
@@ -128,6 +133,10 @@ export class TaskBoardPanelProvider {
       case "board.state": {
         const board = await buildBoardState(backend, this.logger);
         this.respond(request.requestId, { type: "board.state", board });
+        if (this.pendingStartGuide) {
+          this.pendingStartGuide = false;
+          this.push({ type: "help.startTour" });
+        }
         return;
       }
       case "board.moveCard": {

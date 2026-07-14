@@ -138,7 +138,7 @@ export type PanelRequestPayload =
   | { readonly type: "clone.pull"; readonly sessionId: string; readonly repo?: string; readonly path?: string }
   | { readonly type: "clone.push"; readonly sessionId: string }
   | { readonly type: "clone.discard"; readonly sessionId: string; readonly repo: string; readonly path: string }
-  | { readonly type: "taskReview.open"; readonly taskId: string }
+  | { readonly type: "taskReview.open"; readonly taskId: string; readonly startGuide?: boolean }
   | { readonly type: "taskReview.state"; readonly taskId: string }
   | { readonly type: "taskReview.submit"; readonly taskId: string }
   | { readonly type: "board.state" }
@@ -158,14 +158,14 @@ export type PanelRequestPayload =
   | { readonly type: "task.faq.list"; readonly taskId: string }
   | { readonly type: "task.faq.add"; readonly taskId: string; readonly pattern: string; readonly answer: string }
   | { readonly type: "task.faq.remove"; readonly taskId: string; readonly faqId: string }
-  | { readonly type: "taskBoard.open" }
-  | { readonly type: "agents.open" }
+  | { readonly type: "taskBoard.open"; readonly startGuide?: boolean }
+  | { readonly type: "agents.open"; readonly startGuide?: boolean }
   | { readonly type: "agents.state" }
   /** Navigate the sidebar to a session (nodeId lands on the Agents lens). */
   | { readonly type: "agents.openSession"; readonly sessionId: string; readonly nodeId?: string }
   /** Landing drawer (ADR 0014): full-pull a session's clone work into the local repo and mark its changesets landed. */
   | { readonly type: "agents.landSession"; readonly sessionId: string }
-  | { readonly type: "planner.open"; readonly planId?: string }
+  | { readonly type: "planner.open"; readonly planId?: string; readonly startGuide?: boolean }
   | { readonly type: "planner.plans" }
   | { readonly type: "planner.state"; readonly planId: string }
   | { readonly type: "planner.create"; readonly brief: string; readonly aspectIds: readonly string[]; readonly contextRoots: readonly string[]; readonly notes?: string; readonly title?: string; readonly taskId?: string; readonly model?: ChatModelSelection }
@@ -628,6 +628,8 @@ export interface SubtaskSummary {
   readonly model?: SubtaskModelSelection;
   /** ADR 0007: an armed HITL verify gate is unmet — in Review, no verified stamp. Waiting-on-you. */
   readonly verifyUnmet?: boolean;
+  /** ADR 0007: durable time at which a person recorded the latest verification check. */
+  readonly verifiedAt?: string;
 }
 
 /** Display-safe projection of an internal work task with its links. */
@@ -934,10 +936,14 @@ export type PanelPushPayload =
    * session's chat (the planner.showPlan pattern; nodeId → Agents lens).
    */
   | { readonly type: "panel.showSession"; readonly sessionId: string; readonly nodeId?: string }
+  /** Sidebar navigation: show the Plan tab and optionally select a plan. */
+  | { readonly type: "panel.showPlan"; readonly planId?: string }
   /** Coarse invalidation: the planner webview refetches planner.state. */
   | { readonly type: "planner.changed"; readonly planId: string }
   /** Panel navigation: another surface asked the panel to show this plan. */
   | { readonly type: "planner.showPlan"; readonly planId: string }
+  /** Cross-panel onboarding: begin this panel's full guided tour after its initial state is ready. */
+  | { readonly type: "help.startTour" }
   /** Terminal result of a planner.create / planner.startSession boot. */
   | { readonly type: "planner.sessionReady"; readonly planId: string; readonly sessionId: string; readonly ok: boolean; readonly error?: string };
 
@@ -1047,19 +1053,29 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
       return { type: "task.delete", taskId };
     }
-    case "taskReview.open":
     case "taskReview.state":
     case "taskReview.submit": {
       const taskId = payload["taskId"];
       if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
       return { type: payload["type"], taskId };
     }
+    case "taskReview.open": {
+      const taskId = payload["taskId"];
+      const startGuide = payload["startGuide"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (startGuide !== undefined && typeof startGuide !== "boolean") return null;
+      return { type: "taskReview.open", taskId, ...(startGuide === undefined ? {} : { startGuide }) };
+    }
     case "board.state":
-    case "taskBoard.open":
-    case "agents.open":
     case "agents.state":
     case "recipes.list":
       return { type: payload["type"] };
+    case "taskBoard.open":
+    case "agents.open": {
+      const startGuide = payload["startGuide"];
+      if (startGuide !== undefined && typeof startGuide !== "boolean") return null;
+      return { type: payload["type"], ...(startGuide === undefined ? {} : { startGuide }) };
+    }
     case "agents.landSession": {
       const sessionId = payload["sessionId"];
       if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
@@ -1570,8 +1586,14 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       return { type: payload["type"] };
     case "planner.open": {
       const planId = payload["planId"];
+      const startGuide = payload["startGuide"];
       if (planId !== undefined && !isBoundedString(planId, MAX_ID_LENGTH)) return null;
-      return { type: "planner.open", ...(planId === undefined ? {} : { planId }) };
+      if (startGuide !== undefined && typeof startGuide !== "boolean") return null;
+      return {
+        type: "planner.open",
+        ...(planId === undefined ? {} : { planId }),
+        ...(startGuide === undefined ? {} : { startGuide })
+      };
     }
     case "planner.state":
     case "planner.sendInstructions":

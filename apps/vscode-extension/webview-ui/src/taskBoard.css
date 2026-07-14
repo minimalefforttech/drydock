@@ -1,3 +1,5 @@
+@import "./help.css";
+
 /* Task Board panel styles — VS Code theme variables only, no remote assets.
    Modeled on taskReview.css (font/button conventions, var() fallback idioms).
 
@@ -946,6 +948,16 @@ body {
   padding: 1px 6px;
   color: var(--vscode-charts-green, #89d185);
   border-color: var(--vscode-charts-green, #89d185);
+}
+
+.tb-verified-chip {
+  flex: none;
+  font-size: 0.72em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--vscode-testing-iconPassed, #89d185) 55%, transparent);
+  color: var(--vscode-testing-iconPassed, #89d185);
+  white-space: nowrap;
 }
 
 /* Task FAQ modal (ADR 0007). */

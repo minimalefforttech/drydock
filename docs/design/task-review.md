@@ -7,7 +7,7 @@ Related: roadmap, `workflow-scenarios.md` (scenario #1), `clone-mode.md`.
 An engineer runs a task spanning N repos, worked by one or more AI chats.
 Before committing/PRing each repo they open ONE **Task Review** surface and see
 every changed file across all the task's projects, review each in the real
-editor, add comments, and **Submit review → agents** — the comments go back to
+editor, add comments, and **Send N comments to M sessions** — the comments go back to
 the owning session(s) as revision turns. Agents revise; changes reappear;
 repeat; then the developer does their normal git commit + PR.
 
@@ -54,12 +54,12 @@ host-side reviewer/guard flows may choose a machine author. The dock labels
 non-user comments with an `agent` or `guard` badge, so automated findings are
 never visually attributed to the developer.
 
-### "Reviewed" state (v1 decision)
+### "Opened" state (v1 decision)
 
 Lean: no new persistence. The webview tracks per-file "diff opened" in
-panel-session state (exactly like the working set's unreviewed dots) and shows
-a reviewed indicator when a file's diff was opened AND it has no open
-comments. An explicit per-file resolve is deferred until it earns its keep.
+panel-session state and distinguishes unopened, opened with comments, and
+opened with no open comments. These markers do not imply approval. An explicit
+per-file review decision is deferred until it earns its keep.
 
 ### Clone sessions (v1 scope)
 
@@ -145,10 +145,10 @@ start/completion keeps it honest without polling.
 The panel is a **navigator + dock; review happens in native editors**.
 
 - Left: projects → changed files (change glyph, `+N −M`, comment-count badge,
-  clone/conflict markers, reviewed indicator).
+  clone/conflict markers, opened indicator).
 - Right/bottom: comment dock — all open threads for the task grouped by file,
   click-to-jump to the file's diff.
-- Header: task title, "Submit review → agents (N comments)", revision-in-flight
+- Header: task title, "Send N comments to M sessions", revision-in-flight
   status, refresh.
 - Clicking a file: baseline-backed → `vscode.diff` (Beside) via the existing
   `diff.openFile` flow. Clone rows are informational in v1 (clone chip,

@@ -64,6 +64,9 @@ test("workspace and policy payloads validate their fields", () => {
 
 test("agents panel payloads validate their fields (ADR 0013)", () => {
   assert.ok(parsePanelRequest(wrap({ type: "agents.open" })));
+  const guided = parsePanelRequest(wrap({ type: "agents.open", startGuide: true }));
+  assert.deepEqual(guided?.payload, { type: "agents.open", startGuide: true });
+  assert.equal(parsePanelRequest(wrap({ type: "agents.open", startGuide: "yes" })), null);
   assert.ok(parsePanelRequest(wrap({ type: "agents.state" })));
   assert.ok(parsePanelRequest(wrap({ type: "agents.openSession", sessionId: "session-1" })));
   const withNode = parsePanelRequest(wrap({ type: "agents.openSession", sessionId: "session-1", nodeId: "node-9" }));
@@ -84,7 +87,10 @@ test("retired planDocs payloads are rejected at the boundary (ADR 0012)", () => 
 test("planner payloads validate ids, arrays, anchors, and statuses", () => {
   assert.ok(parsePanelRequest(wrap({ type: "planner.open" })));
   assert.ok(parsePanelRequest(wrap({ type: "planner.open", planId: "plan-1" })));
+  const guided = parsePanelRequest(wrap({ type: "planner.open", planId: "plan-1", startGuide: true }));
+  assert.deepEqual(guided?.payload, { type: "planner.open", planId: "plan-1", startGuide: true });
   assert.equal(parsePanelRequest(wrap({ type: "planner.open", planId: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "planner.open", startGuide: 1 })), null);
   assert.ok(parsePanelRequest(wrap({ type: "planner.plans" })));
   assert.ok(parsePanelRequest(wrap({ type: "planner.aspects.list" })));
   assert.ok(parsePanelRequest(wrap({ type: "planner.state", planId: "plan-1" })));
@@ -544,6 +550,9 @@ test("taskReview payloads validate their task id", () => {
     assert.equal(parsePanelRequest(wrap({ type, taskId: 42 })), null);
     assert.equal(parsePanelRequest(wrap({ type, taskId: "x".repeat(201) })), null);
   }
+  const guided = parsePanelRequest(wrap({ type: "taskReview.open", taskId: "task-1", startGuide: true }));
+  assert.deepEqual(guided?.payload, { type: "taskReview.open", taskId: "task-1", startGuide: true });
+  assert.equal(parsePanelRequest(wrap({ type: "taskReview.open", taskId: "task-1", startGuide: "yes" })), null);
 });
 
 test("memory.list and memory.resolve validate their fields", () => {
@@ -566,9 +575,12 @@ test("memory.open validates a bounded memoryCandidateId", () => {
   assert.equal(parsePanelRequest(wrap({ type: "memory.open", memoryCandidateId: "x".repeat(201) })), null);
 });
 
-test("board.state and taskBoard.open take no payload fields", () => {
+test("board.state and taskBoard.open validate the optional guide handoff", () => {
   assert.ok(parsePanelRequest(wrap({ type: "board.state" })));
   assert.ok(parsePanelRequest(wrap({ type: "taskBoard.open" })));
+  const guided = parsePanelRequest(wrap({ type: "taskBoard.open", startGuide: true }));
+  assert.deepEqual(guided?.payload, { type: "taskBoard.open", startGuide: true });
+  assert.equal(parsePanelRequest(wrap({ type: "taskBoard.open", startGuide: "yes" })), null);
 });
 
 test("board.moveCard validates cardKind, id, and columnId", () => {

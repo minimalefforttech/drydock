@@ -14,6 +14,7 @@
 
 import { type RuntimeStatsSummary, type RuntimeSummary } from "@drydock/contracts";
 import { badge, button, el, formatTime } from "../components.js";
+import { setHelpTooltip } from "../help.js";
 import { onPush, request } from "../messaging.js";
 import { currentSession, type DiagnosticEntry } from "../state.js";
 import type { SystemTabView, ViewContext } from "../viewContext.js";
@@ -27,6 +28,7 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
   const toolsHeading = el("h3");
   toolsHeading.textContent = "Tools";
   const probeButton = button("Probe app-server", "small");
+  setHelpTooltip(probeButton, "Run a diagnostic check against the Codex app-server transport.");
   const refreshButton = button("Refresh status", "small");
   const toolsRow = el("div", "button-row");
   toolsRow.append(probeButton, refreshButton);
@@ -41,6 +43,7 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
   showRemovedLabel.append(showRemovedCheckbox, showRemovedText);
   const cleanupButton = button("Clean up stale", "small ghost");
   cleanupButton.title = "Reap quarantined/lost runtimes whose sandbox is already gone, and purge old removed rows";
+  setHelpTooltip(cleanupButton, "Remove quarantined or lost runtimes whose sandbox no longer exists, then purge old runtime records.");
   const runtimesControls = el("div", "button-row");
   runtimesControls.append(showRemovedLabel, cleanupButton);
   const runtimesList = el("div", "runtimes");

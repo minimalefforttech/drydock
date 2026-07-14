@@ -48,6 +48,8 @@ export class AgentsPanelProvider {
   /** Single instance: at most one fleet panel per window. */
   private panel: vscode.WebviewPanel | undefined;
   private sequence = 0;
+  /** A cross-panel handoff waits for agents.state so the tour can target rendered rows. */
+  private pendingStartGuide = false;
   /** Collapses structural bus bursts (a cascade of task/question churn) into one refetch push. */
   private changedDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   /** Coalesces noisy agent-event streams into at most one projection per session per frame-sized window. */
@@ -169,11 +171,13 @@ export class AgentsPanelProvider {
       : { ...summary, agentActivity: activity };
   }
 
-  async open(): Promise<void> {
+  async open(startGuide = false): Promise<void> {
     if (this.panel !== undefined) {
       this.panel.reveal(vscode.ViewColumn.Active);
+      if (startGuide) this.push({ type: "help.startTour" });
       return;
     }
+    this.pendingStartGuide = startGuide;
     const panel = vscode.window.createWebviewPanel(
       "drydock.agents",
       "Agents",
@@ -192,6 +196,7 @@ export class AgentsPanelProvider {
     });
     panel.onDidDispose(() => {
       this.panel = undefined;
+      this.pendingStartGuide = false;
       if (this.changedDebounceTimer !== undefined) {
         clearTimeout(this.changedDebounceTimer);
         this.changedDebounceTimer = undefined;
@@ -243,6 +248,10 @@ export class AgentsPanelProvider {
           agentIdleThresholdMs: () => this.agentIdleThresholdMs()
         });
         this.respond(request.requestId, { type: "agents.state", state });
+        if (this.pendingStartGuide) {
+          this.pendingStartGuide = false;
+          this.push({ type: "help.startTour" });
+        }
         return;
       }
       case "agents.openSession": {

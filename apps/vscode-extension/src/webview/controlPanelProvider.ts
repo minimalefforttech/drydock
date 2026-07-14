@@ -225,6 +225,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
    * planner's pendingShowPlanId pattern).
    */
   private pendingShowSession: { readonly sessionId: string; readonly nodeId?: string } | null = null;
+  /** Planner navigation queued until the sidebar webview has requested its plan list. */
+  private pendingShowPlan: { readonly planId?: string } | null = null;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -258,6 +260,23 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.push({ type: "panel.showSession", ...target });
+  }
+
+  /**
+   * Shows the sidebar Plan tab and optionally selects a plan. `reveal=false`
+   * updates an already-open sidebar without moving keyboard focus out of the
+   * editor-area Planner.
+   */
+  showPlan(planId?: string, reveal = true): void {
+    const target = { ...(planId === undefined ? {} : { planId }) };
+    if (reveal) {
+      void vscode.commands.executeCommand("drydock.controlPanel.focus").then(undefined, () => undefined);
+    }
+    if (this.view === undefined) {
+      this.pendingShowPlan = target;
+      return;
+    }
+    this.push({ type: "panel.showPlan", ...target });
   }
 
   /** The active file-scheme editor as a display-safe ref, or undefined. */
@@ -1025,7 +1044,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "taskReview.open": {
         // Editor-panel open is a host action; route through the command.
         this.requireBackend();
-        await vscode.commands.executeCommand("drydock.taskReview.open", payload.taskId);
+        await vscode.commands.executeCommand("drydock.taskReview.open", payload.taskId, {
+          startGuide: payload.startGuide === true
+        });
         this.respond(request.requestId, { type: "taskReview.open", accepted: true });
         return;
       }
@@ -1211,7 +1232,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "planner.open": {
         this.requireBackend();
         try {
-          await vscode.commands.executeCommand("drydock.planner.open", payload.planId);
+          await vscode.commands.executeCommand("drydock.planner.open", payload.planId, {
+            startGuide: payload.startGuide === true
+          });
           this.respond(request.requestId, { type: "planner.open", accepted: true });
         } catch {
           this.respondError(request.requestId, "Planner panel not available yet.");
@@ -1249,6 +1272,10 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // The Plan tab's switcher + rail source (summaries carry sessionId).
         const plans = await this.requirePlanner().listPlans();
         this.respond(request.requestId, { type: "planner.plans", plans });
+        if (this.pendingShowPlan !== null) {
+          this.push({ type: "panel.showPlan", ...this.pendingShowPlan });
+          this.pendingShowPlan = null;
+        }
         return;
       }
       case "planner.startSession": {
@@ -1277,7 +1304,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "agents.open": {
         this.requireBackend();
         try {
-          await vscode.commands.executeCommand("drydock.agents.open");
+          await vscode.commands.executeCommand("drydock.agents.open", {
+            startGuide: payload.startGuide === true
+          });
           this.respond(request.requestId, { type: "agents.open", accepted: true });
         } catch {
           // Defensive: the command registers during activation; surface a
@@ -1289,7 +1318,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "taskBoard.open": {
         this.requireBackend();
         try {
-          await vscode.commands.executeCommand("drydock.taskBoard.open");
+          await vscode.commands.executeCommand("drydock.taskBoard.open", {
+            startGuide: payload.startGuide === true
+          });
           this.respond(request.requestId, { type: "taskBoard.open", accepted: true });
         } catch {
           // Defensive: the command registers during activation; surface a

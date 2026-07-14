@@ -42,9 +42,11 @@ Planning becomes a place, not a mode. A single editor-area Planner panel
   scripts per-artifact opt-in). One anchor grammar
   (`block:` / `node:` / `point:` / `region:`) feeds one annotation model:
   open → delegated (composed into a single revision turn) → resolved/reopened.
-- The panel's chat rail renders through the **same transcript components as
-  the Edit tab** (`webview-ui/src/chat/`), extracted so the two surfaces
-  cannot drift.
+- The plan transcript and composer remain in the Drydock **Plan tab** in the
+  VS Code sidebar. The editor-area Planner contains intake, outputs, artifact
+  review, annotations, and handoff controls; it does not duplicate the chat.
+  Plan selection is synchronized between the two surfaces. The Plan and Edit
+  tabs use the same transcript components (`webview-ui/src/chat/`).
 - A task-owned plan can materialize work through **To board**. Candidates are
   only literal Markdown checkbox items in document artifacts (`- [ ]`,
   `* [x]`, or numbered checkbox lines), deduplicated case-insensitively and

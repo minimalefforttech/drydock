@@ -2,16 +2,15 @@
  * Planner editor panel host (ADR 0012).
  *
  * A SINGLE editor-area WebviewPanel over all plans: landing/intake, the
- * three-column plan view, and the aspect registry editor. Same trust boundary
+ * outputs-and-viewer workspace, and the aspect registry editor. Planning chat
+ * remains in the Drydock Plan tab in the VS Code sidebar. Same trust boundary
  * as every panel — parsePanelRequest gates every inbound message and the
  * webview only sees display-safe projections from PlannerAppService.
  *
  * Pushes: the coarse `planner.changed` (debounced; the webview refetches
  * planner.state), `planner.sessionReady` (terminal result of a detached
- * session boot — boots outlive the webview request timeout), and the chat
- * stream (`chat.event` / `chat.turnStarted` / `chat.turnCompleted` /
- * `session.updated`) forwarded ONLY for sessions belonging to plans this
- * panel has served — the rail renders live output exactly like the Chat tab.
+ * session boot — boots outlive the webview request timeout), plus turn and
+ * session state for the compact status shown in the panel header.
  *
  * CSP: mirrors the plan-docs panel, including its one deviation — mermaid's
  * render path injects <style> nodes with no nonce API, so style-src carries
@@ -25,7 +24,6 @@ import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import {
   parsePanelRequest,
-  summarizeAgentEvent,
   WEBVIEW_PROTOCOL_VERSION,
   type HostToWebviewMessage,
   type PanelPushPayload,
@@ -36,7 +34,7 @@ import {
 import type { Logger, ProductBusEvent } from "@drydock/core";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import { extractSubtaskCandidates } from "../services/planMaterialize.js";
-import { openAgentFileRef, toChatSessionSummary } from "./controlPanelProvider.js";
+import { toChatSessionSummary } from "./controlPanelProvider.js";
 
 export class PlannerPanelProvider {
   /** Single instance: at most one planner panel per window. */
@@ -51,6 +49,10 @@ export class PlannerPanelProvider {
    * never race a not-yet-listening document.
    */
   private pendingShowPlanId: string | null = null;
+  /** A cross-panel guide handoff queued until planner.plans proves the webview is listening. */
+  private pendingStartGuide = false;
+  /** Last plan selection sent to the Drydock Plan tab. */
+  private sidebarPlanId: string | null = null;
   /** planner.changed debounce: collection bursts collapse into one push per plan. */
   private readonly pendingChangedPlanIds = new Set<string>();
   private changedDebounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -58,7 +60,8 @@ export class PlannerPanelProvider {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly backend: Backend,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly showPlanInSidebar: (planId: string | undefined, reveal: boolean) => void
   ) {
     if (backend.available) {
       backend.bus.subscribe((event) => {
@@ -76,26 +79,10 @@ export class PlannerPanelProvider {
         this.scheduleChanged(event.planId);
         return;
       case "planner-session-started":
-        // Watch the session as soon as it exists so its chat stream forwards,
-        // and tell the webview the boot completed (the ack-then-push contract).
+        // Watch the session as soon as it exists so turn/session status reaches
+        // the panel header, then report that detached boot has completed.
         this.watchedSessions.add(event.sessionId);
         this.push({ type: "planner.sessionReady", planId: event.planId, sessionId: event.sessionId, ok: true });
-        return;
-      case "agent-event":
-        if (!this.watchedSessions.has(event.sessionId)) return;
-        this.push({
-          type: "chat.event",
-          sessionId: event.sessionId,
-          line: {
-            ...summarizeAgentEvent(event.event),
-            sequence: event.sequence,
-            ...(event.event.type === "agent.text" ? { final: event.event.final } : {})
-          }
-        });
-        return;
-      case "transcript-line":
-        if (!this.watchedSessions.has(event.sessionId)) return;
-        this.push({ type: "chat.event", sessionId: event.sessionId, line: { ...event.line, sequence: event.sequence } });
         return;
       case "turn-started":
         if (!this.watchedSessions.has(event.sessionId)) return;
@@ -127,17 +114,21 @@ export class PlannerPanelProvider {
     }, 200);
   }
 
-  async open(planId?: string): Promise<void> {
+  async open(planId?: string, startGuide = false): Promise<void> {
+    this.showPlanInSidebar(planId, true);
+    if (planId !== undefined) this.sidebarPlanId = planId;
     if (this.panel !== undefined) {
       this.panel.reveal(vscode.ViewColumn.Active);
       if (planId !== undefined) {
         this.push({ type: "planner.showPlan", planId });
       }
+      if (startGuide) this.push({ type: "help.startTour" });
       return;
     }
     if (planId !== undefined) {
       this.pendingShowPlanId = planId;
     }
+    this.pendingStartGuide = startGuide;
     const panel = vscode.window.createWebviewPanel(
       "drydock.planner",
       "Planner",
@@ -159,6 +150,8 @@ export class PlannerPanelProvider {
       this.watchedSessions.clear();
       this.pendingChangedPlanIds.clear();
       this.pendingShowPlanId = null;
+      this.pendingStartGuide = false;
+      this.sidebarPlanId = null;
       if (this.changedDebounceTimer !== undefined) {
         clearTimeout(this.changedDebounceTimer);
         this.changedDebounceTimer = undefined;
@@ -199,10 +192,18 @@ export class PlannerPanelProvider {
           this.push({ type: "planner.showPlan", planId: this.pendingShowPlanId });
           this.pendingShowPlanId = null;
         }
+        if (this.pendingStartGuide) {
+          this.pendingStartGuide = false;
+          this.push({ type: "help.startTour" });
+        }
         return;
       }
       case "planner.state": {
         const state = await backend.planner.getPlanState(payload.planId);
+        if (this.sidebarPlanId !== payload.planId) {
+          this.sidebarPlanId = payload.planId;
+          this.showPlanInSidebar(payload.planId, false);
+        }
         const session = await this.sessionSummaryFor(backend, state.plan.sessionId);
         if (state.plan.sessionId !== null) {
           this.watchedSessions.add(state.plan.sessionId);
@@ -368,23 +369,6 @@ export class PlannerPanelProvider {
         // The intake's task picker (plans belong to tasks, ADR 0006 doctrine).
         const tasks = await backend.tasks.listTaskSummaries();
         this.respond(request.requestId, { type: "task.list", tasks });
-        return;
-      }
-      case "session.timeline": {
-        // Rail backfill: same replay mechanism the Chat tab uses.
-        const lines = await backend.appService.getChatTimeline(payload.sessionId, payload.fromSequence);
-        this.respond(request.requestId, { type: "session.timeline", sessionId: payload.sessionId, lines });
-        return;
-      }
-      case "chat.cancelTurn": {
-        await backend.appService.cancelChatTurn(payload.sessionId);
-        this.respond(request.requestId, { type: "chat.cancelTurn", accepted: true });
-        return;
-      }
-      case "chat.openFile": {
-        // The rail's markdown links: same host resolution as the Chat tab.
-        const opened = await openAgentFileRef(payload.path);
-        this.respond(request.requestId, { type: "chat.openFile", opened });
         return;
       }
       default:

@@ -115,8 +115,10 @@ Dependency rules:
 
 `verifyMode: "hitl"` is unmet when a subtask sits in a done-category column
 without `verifiedAt`. The board shows `verify` at every density level and a
-human action stamps it. This is a visible requirement, not a test runner and
-not agent self-approval; Review → Finished remains a human move.
+`Mark verified` action stamps it. The resulting `verified · <age>` marker stays
+visible so the action has a durable receipt. This is a visible requirement,
+not a test runner and not agent self-approval; Review → Finished remains a
+separate human move.
 
 ## Task Board Panel
 

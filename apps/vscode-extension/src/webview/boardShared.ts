@@ -85,7 +85,8 @@ export function toSubtaskSummary(
       && columnsById.get(record.columnId)?.category === "done"
       && record.verifiedAt === undefined
       ? { verifyUnmet: true }
-      : {})
+      : {}),
+    ...(record.verifiedAt === undefined ? {} : { verifiedAt: record.verifiedAt })
   };
 }
 
