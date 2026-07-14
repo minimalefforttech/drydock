@@ -97,8 +97,12 @@ await run(process.execPath, [vsceBin, "package", "--out", vsixPath], stageRoot);
 // tar happens to be first on PATH — GNU tar cannot read zip archives.
 const tarBin = process.platform === "win32"
   ? path.join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "tar.exe")
-  : "tar";
+  : process.platform === "linux" ? "bsdtar" : "tar";
 const listing = await runCapture(tarBin, ["-tf", vsixPath], root);
+if (listing.stderr) process.stderr.write(listing.stderr);
+if (listing.exitCode !== 0) {
+  throw new Error(`${tarBin} failed to list the packaged VSIX (exit ${String(listing.exitCode)})`);
+}
 assertPackagedFiles(listing.stdout);
 
 console.log(`VSIX created: ${vsixPath}`);

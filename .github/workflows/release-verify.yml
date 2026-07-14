@@ -22,6 +22,10 @@ jobs:
         with:
           node-version: 22.14.0
           cache: npm
+      - name: Install VSIX archive tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libarchive-tools
       - run: npm run release:verify
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
