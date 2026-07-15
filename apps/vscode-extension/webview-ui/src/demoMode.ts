@@ -157,6 +157,15 @@ function ok(requestId: string, payload: unknown): PanelResponse {
   return { protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "response", requestId, ok: true, payload } as PanelResponse;
 }
 
+/**
+ * Demo mutations mirror the host's push channel (window message with the same
+ * envelope), so surfaces that re-render on push behave exactly as with Live
+ * data — e.g. an answered question clears from the attention stack.
+ */
+function push(payload: Record<string, unknown>): void {
+  window.postMessage({ protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "push", payload }, "*");
+}
+
 function accepted(requestId: string, type: "taskBoard.open" | "agents.open" | "planner.open" | "agents.openSession"): PanelResponse {
   return ok(requestId, { type, accepted: true });
 }
@@ -217,11 +226,15 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
       return ok(requestId, { type: "question.list", questions: fixtures.questions.filter((item) => item.status === "pending") });
     case "question.answer": {
       const question = updateQuestion(payload.questionId, { status: "answered", answer: payload.answer });
-      return question === undefined ? error(requestId, "Demo question not found.") : ok(requestId, { type: "question.answer", question, dispatched: false });
+      if (question === undefined) return error(requestId, "Demo question not found.");
+      push({ type: "question.resolved", question });
+      return ok(requestId, { type: "question.answer", question, dispatched: false });
     }
     case "question.dismiss": {
       const question = updateQuestion(payload.questionId, { status: "dismissed" });
-      return question === undefined ? error(requestId, "Demo question not found.") : ok(requestId, { type: "question.dismiss", question });
+      if (question === undefined) return error(requestId, "Demo question not found.");
+      push({ type: "question.resolved", question });
+      return ok(requestId, { type: "question.dismiss", question });
     }
     case "provider.list":
       return ok(requestId, { type: "provider.list", providerCatalogs: fixtures.catalogs });
@@ -298,6 +311,12 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
       return ok(requestId, { type: "task.faq.remove", faqs: fixtures.faqs[payload.taskId] });
     case "workspace.state":
       return ok(requestId, { type: "workspace.state", state: fixtures.workspace });
+    case "policy.resolveAccess": {
+      const accessRequest = fixtures.workspace.accessRequests.find((item: DemoRecord) => item.accessRequestId === payload.accessRequestId);
+      if (accessRequest === undefined) return error(requestId, "Demo access request not found.");
+      accessRequest.status = payload.approve ? "approved" : "denied";
+      return ok(requestId, { type: "policy.resolveAccess", accessRequest });
+    }
     case "work.history":
       return ok(requestId, { type: "work.history", entries: fixtures.history });
     case "memory.list":
@@ -434,7 +453,6 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     case "workspace.removeProject":
     case "workspace.updateProjectPath":
     case "policy.requestAccess":
-    case "policy.resolveAccess":
     case "diff.snapshotWorkspace":
     case "diff.acceptFile":
     case "diff.revertFile":
@@ -799,7 +817,8 @@ function createFixtures(): DemoFixtures {
   ];
   const questions = [
     { questionId: "demo-question-scope", sessionId: "demo-session-build", question: "Should Demo mode reset each time a guide starts?", options: ["Yes, start from predictable fixtures", "Keep the previous demo changes"], status: "pending", createdAt: now },
-    { questionId: "demo-question-copy", sessionId: "demo-session-review", question: "Which panel should the completed guide offer first?", options: ["Task Board", "Planner", "Agents", "Task Review"], status: "pending", createdAt: now }
+    { questionId: "demo-question-copy", sessionId: "demo-session-review", question: "Which panel should the completed guide offer first?", options: ["Task Board", "Planner", "Agents", "Task Review"], status: "pending", createdAt: now },
+    { questionId: "demo-question-verify", sessionId: "demo-session-review", question: "Manual check — I run in a container without a display, so I cannot drive the editor UI myself. Please verify in VS Code:\n1. Open the Task Board panel\n2. Press ? and choose Start guided tour\n3. Tab through every control in the first step\nDid the focus ring stay visible on each control?", options: ["Yes — focus visible throughout", "No — focus was lost on the data menu", "Blocked — the tour did not start"], status: "pending", createdAt: now }
   ];
   const workspace = {
     projects: [
@@ -826,7 +845,7 @@ function createFixtures(): DemoFixtures {
     { providerId: "claude", displayName: "Claude", models: [{ id: "sonnet-4", displayName: "Sonnet 4", isDefault: true, hidden: false }], refreshedAt: now, source: "fallback", diagnostics: [] }
   ];
   const plans = [
-    { planId: "demo-plan-onboarding", title: "Guided onboarding implementation", brief: "Add instructions that developers can follow across every Drydock surface.", aspectIds: ["ux", "accessibility", "testing"], contextRoots: ["apps/vscode-extension/webview-ui"], notes: "Use the existing VS Code visual language and keep demo effects local.", status: "active", sessionId: "demo-session-build", taskId: "demo-task-onboarding", taskTitle: "Add guided onboarding to Drydock", artifactCount: 3, openAnnotationCount: 2, updatedAt: now },
+    { planId: "demo-plan-onboarding", title: "Guided onboarding implementation", brief: "Add instructions that developers can follow across every Drydock surface.", aspectIds: ["ux", "accessibility", "testing"], contextRoots: ["apps/vscode-extension/webview-ui"], notes: "Use the existing VS Code visual language and keep demo effects local.", status: "active", sessionId: "demo-session-build", taskId: "demo-task-onboarding", taskTitle: "Add guided onboarding to Drydock", artifactCount: 4, openAnnotationCount: 2, updatedAt: now },
     { planId: "demo-plan-telemetry", title: "Queue saturation telemetry", brief: "Define metrics and operator states before implementation.", aspectIds: ["architecture", "operations"], contextRoots: ["packages/core", "apps/vscode-extension"], notes: "Keep metric labels stable across adapters.", status: "draft", sessionId: null, taskId: "demo-task-telemetry", taskTitle: "Add queue saturation telemetry", artifactCount: 2, openAnnotationCount: 0, updatedAt: now }
   ];
   const aspects = [
@@ -839,6 +858,7 @@ function createFixtures(): DemoFixtures {
     plan: plans[0]!,
     artifacts: [
       { artifactId: "demo-artifact-flow", relPath: "ux/guide-flow.md", kind: "document", aspectId: "ux", title: "Guide flow", revision: 3, scriptsEnabled: false, collectedAt: now, content: "# Guide flow\n\n- Start in Tasks with populated demo data\n- Mark each tab transition explicitly\n- Continue into a full editor-panel guide\n- Return to the workflow chooser when a guide ends" },
+      { artifactId: "demo-artifact-proto", relPath: "ux/tour-callout.html", kind: "prototype", aspectId: "ux", title: "Tour callout prototype", revision: 1, scriptsEnabled: false, collectedAt: now, content: "<body style=\"margin:0; font-family:'Segoe UI',sans-serif; background:#1b1b1b; color:#d4d4d4; padding:28px\">\n<div style=\"max-width:360px; border:1px solid #2f81f7; border-radius:8px; background:#252526; padding:16px; box-shadow:0 8px 24px rgba(0,0,0,.4)\">\n  <div style=\"font-size:11px; letter-spacing:.12em; color:#569cd6; font-weight:600\">QUICK TOUR &middot; 3 OF 22</div>\n  <h1 style=\"font-size:16px; margin:10px 0 6px\">Review items that need a response</h1>\n  <p style=\"font-size:13px; color:#9d9d9d; margin:0 0 14px\">The attention summary counts access requests, questions, and failed chats. Expand it to answer one item at a time.</p>\n  <div style=\"display:flex; gap:8px; justify-content:flex-end\">\n    <button style=\"background:#3a3d41; color:#ccc; border:none; padding:5px 14px; border-radius:4px\">Back</button>\n    <button style=\"background:#0e639c; color:#fff; border:none; padding:5px 14px; border-radius:4px\" onclick=\"this.textContent='Clicked!'\">Next</button>\n  </div>\n</div>\n</body>" },
       { artifactId: "demo-artifact-a11y", relPath: "accessibility/checklist.md", kind: "document", aspectId: "accessibility", title: "Accessibility checklist", revision: 2, scriptsEnabled: false, collectedAt: now, content: "# Accessibility\n\n- Keep keyboard focus visible\n- Announce the active data mode\n- Respect reduced motion and forced colours\n- Keep the highlighted target operable" },
       { artifactId: "demo-artifact-tests", relPath: "testing/browser-matrix.md", kind: "document", aspectId: "testing", title: "Browser test matrix", revision: 1, scriptsEnabled: false, collectedAt: now, content: "# Browser checks\n\n- Sidebar: 16 steps\n- Task Board: populated cards and dependencies\n- Agents: grouped sessions and attention\n- Planner: landing and plan detail\n- Task Review: files, comments, and dispatch" }
     ],
@@ -899,13 +919,15 @@ function createFixtures(): DemoFixtures {
     timelines: {
       "demo-session-build": [
         { sequence: 1, eventType: "user.message", createdAt: now, summary: "Add a local Demo mode for the guided tour." },
-        { sequence: 2, eventType: "agent.text", createdAt: now, summary: "I will keep demo requests inside the webview and leave navigation as the only host action." },
+        { sequence: 2, eventType: "agent.text", createdAt: now, summary: "I will keep demo requests inside the webview and leave navigation as the only host action.", final: true },
         { sequence: 3, eventType: "agent.file_edit", createdAt: now, summary: "Updated the shared guide controller.", filePath: "apps/vscode-extension/webview-ui/src/help.ts", fileChangeKind: "modify" },
         { sequence: 4, eventType: "agent.command", createdAt: now, summary: "npm test completed", commandName: "npm", toolStatus: "completed" }
       ],
       "demo-session-review": [
         { sequence: 1, eventType: "user.message", createdAt: now, summary: "Review the tour for keyboard and screen-reader behavior." },
-        { sequence: 2, eventType: "agent.text", createdAt: now, summary: "The mode switch remains keyboard reachable inside the tour callout." }
+        { sequence: 2, eventType: "agent.text", createdAt: now, summary: "The mode switch remains keyboard reachable inside the tour callout.", final: true },
+        { sequence: 3, eventType: "agent.command", createdAt: now, summary: "axe-core static scan completed", commandName: "npx", toolStatus: "completed" },
+        { sequence: 4, eventType: "agent.text", createdAt: now, summary: "Static checks pass, but I cannot reach the editor UI from this container, so one check needs your hands.\n\n1. Open the Task Board panel\n2. Press `?` and choose **Start guided tour**\n3. Tab through every control in the first step\n\nAnswer the open question with the result and I will either fix the focus order or stamp the subtask verified.", final: true }
       ]
     },
     history: [
