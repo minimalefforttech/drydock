@@ -546,6 +546,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     inventory,
     prober,
     chatService,
+    runtimeExecutor: runtimeAdapter,
     cloneSync,
     hostInstanceId,
     memoryService: memory,
@@ -733,11 +734,32 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     // question is announced so the panel stacks it and flags attention.
     const parsedQuestions = extractAgentQuestions(finalText);
     if (parsedQuestions.length > 0) {
-      void questions.captureFromParsed(event.sessionId, parsedQuestions).then((created) => {
+      // ADR 0016: resolve agent-referenced illustrations (question images and
+      // manual-check step images) from the live sandbox BEFORE capture, so the
+      // stored record renders anywhere. Failures degrade to path-only refs.
+      void (async () => {
+        const enriched = await Promise.all(parsedQuestions.map(async (candidate) => ({
+          ...candidate,
+          ...(candidate.imagePaths === undefined ? {} : {
+            resolvedImages: await Promise.all(candidate.imagePaths.map(async (imagePath) => {
+              const dataUri = await appService.readSandboxImageDataUri(event.sessionId, imagePath);
+              return { path: imagePath, ...(dataUri === null ? {} : { dataUri }) };
+            }))
+          }),
+          ...(candidate.steps === undefined ? {} : {
+            resolvedSteps: await Promise.all(candidate.steps.map(async (step) => {
+              const dataUri = step.imagePath === undefined
+                ? null
+                : await appService.readSandboxImageDataUri(event.sessionId, step.imagePath);
+              return { text: step.text, ...(dataUri === null ? {} : { imageDataUri: dataUri }) };
+            }))
+          })
+        })));
+        const created = await questions.captureFromParsed(event.sessionId, enriched);
         for (const question of created) {
           bus.publish({ kind: "question-asked", question });
         }
-      }).catch((error: unknown) => {
+      })().catch((error: unknown) => {
         logger.warn("agent question capture failed", {
           sessionId: event.sessionId,
           error: error instanceof Error ? error.message : String(error)

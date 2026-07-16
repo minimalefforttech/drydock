@@ -118,7 +118,7 @@ const help = createHelpExperience({
       intro: "The selected workspace and security policy determine what the runtime can read and write.",
       sections: [
         {
-          title: "Workspace sets",
+          title: "Workspaces",
           body: "Select only the projects required for the task. Mark context-only projects read-only so the runtime cannot modify them."
         },
         {
@@ -221,7 +221,7 @@ const help = createHelpExperience({
     },
     {
       title: "Review advanced records and access",
-      body: "Use Orphaned Chats for unlinked sessions and Memory for reusable suggestions. AI project access defines workspace sets, read-only context, and the folders available to new chats.",
+      body: "Use Orphaned Chats for unlinked sessions and Memory for reusable suggestions. Workspaces define which folders are available to new chats, including read-only context.",
       target: () => document.querySelector<HTMLElement>(".workspace-access-section > summary")
         ?? document.querySelector<HTMLElement>(".orphaned-chats-section:not(.hidden) > summary")
         ?? document.querySelector<HTMLElement>(".memory-section > summary")

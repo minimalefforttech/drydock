@@ -18,6 +18,7 @@ import type { DiffChangeKind, DiffViewMode, ReviewThreadStatus } from "./diffs.j
 import type { TranscriptLine } from "./events.js";
 import type { AgentRole } from "./ids.js";
 import type { MemoryCandidateStatus } from "./memory.js";
+import type { AgentQuestionImage, AgentQuestionStep } from "./questions.js";
 import {
   PLAN_ANNOTATION_STATUSES,
   parsePlanAnchor,
@@ -45,6 +46,8 @@ export const MAX_NAME_LENGTH = 200;
 export interface ChatModelSelection {
   readonly providerId: string;
   readonly model?: string;
+  /** Provider-advertised reasoning effort for this turn. */
+  readonly reasoningEffort?: string;
 }
 
 /** Session start modes supported by the host. Clone mounts no live roots. */
@@ -138,9 +141,15 @@ export type PanelRequestPayload =
   | { readonly type: "clone.pull"; readonly sessionId: string; readonly repo?: string; readonly path?: string }
   | { readonly type: "clone.push"; readonly sessionId: string }
   | { readonly type: "clone.discard"; readonly sessionId: string; readonly repo: string; readonly path: string }
+  | { readonly type: "clone.exportPatch"; readonly sessionId: string; readonly repo?: string }
+  | { readonly type: "chat.uploadAttachment"; readonly sessionId: string; readonly name: string; readonly dataBase64: string }
   | { readonly type: "taskReview.open"; readonly taskId: string; readonly startGuide?: boolean }
   | { readonly type: "taskReview.state"; readonly taskId: string }
   | { readonly type: "taskReview.submit"; readonly taskId: string }
+  | { readonly type: "codeReview.open"; readonly taskId: string }
+  | { readonly type: "codeReview.state"; readonly taskId: string; readonly scope: CodeReviewScope }
+  | { readonly type: "codeReview.fileDiff"; readonly taskId: string; readonly scope: CodeReviewScope; readonly repo: string; readonly path: string; readonly baselineId?: string; readonly ignoreWhitespace?: boolean }
+  | { readonly type: "codeReview.addNote"; readonly taskId: string; readonly scope: CodeReviewScope; readonly body: string; readonly anchors: readonly CodeReviewAnchor[] }
   | { readonly type: "board.state" }
   | { readonly type: "board.moveCard"; readonly cardKind: "task" | "subtask"; readonly id: string; readonly columnId: string }
   | { readonly type: "board.columns.update"; readonly columns: readonly BoardColumnUpdateInput[]; readonly deletedColumnIds?: readonly string[] }
@@ -510,6 +519,93 @@ export interface TaskReviewState {
   readonly notes?: readonly string[];
 }
 
+// ---------------------------------------------------------------------------
+// Code Review panel (in-panel PR-style review — docs/design/code-review-panel.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the Code Review panel diffs: `uncommitted` = git working tree vs HEAD
+ * across the task's project roots, `task` = every linked session's baseline
+ * changes (v1 task-review file set), `session` = the primary session only.
+ */
+export type CodeReviewScope = "uncommitted" | "task" | "session";
+
+/** One anchored range of a review note; sessionId names the owning session when known. */
+export interface CodeReviewAnchor {
+  readonly repo: string;
+  readonly path: string;
+  /** 1-based inclusive line range in the NEW file (old file for pure deletions). */
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly sessionId?: string;
+}
+
+/** One changed file in the Code Review panel (stats only — content rides fileDiff). */
+export interface CodeReviewFile {
+  readonly repo: string;
+  readonly path: string;
+  readonly changeKind: DiffChangeKind;
+  readonly oldPath?: string;
+  /** Line stats; absent for image/binary/oversized files. */
+  readonly addedLines?: number;
+  readonly removedLines?: number;
+  readonly contentKind: "text" | "image" | "binary" | "oversized";
+  readonly bytesBefore?: number;
+  readonly bytesAfter?: number;
+  readonly commentCount: number;
+  /** Owning session (task/session scopes; absent in the uncommitted scope). */
+  readonly sessionId?: string;
+  readonly sessionTitle?: string;
+  /** Baseline backing the diff (task/session scopes; passed back on fileDiff). */
+  readonly baselineId?: string;
+  readonly clone?: boolean;
+  readonly conflicted?: boolean;
+  /** Collapse-by-default hint (large or generated/lock file — host rule). */
+  readonly largeDiff?: boolean;
+}
+
+/** One project (repo/root) group in the Code Review panel. */
+export interface CodeReviewProjectState {
+  readonly name: string;
+  readonly files: readonly CodeReviewFile[];
+}
+
+/** Everything the Code Review panel renders for one task+scope (no diff content). */
+export interface CodeReviewPanelState {
+  readonly taskId: string;
+  readonly title: string;
+  readonly scope: CodeReviewScope;
+  readonly projects: readonly CodeReviewProjectState[];
+  readonly openCommentCount: number;
+  /** Comment routing target for scopes without per-file owners (uncommitted). */
+  readonly primarySession?: TaskReviewSessionRef;
+  readonly revisionInFlight?: number;
+  readonly notes?: readonly string[];
+}
+
+/** One rendered diff row; text renders via textContent ONLY. */
+export interface ReviewDiffRow {
+  readonly kind: "context" | "add" | "del";
+  readonly oldNo?: number;
+  readonly newNo?: number;
+  readonly text: string;
+}
+
+export interface ReviewDiffHunk {
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+  readonly rows: readonly ReviewDiffRow[];
+}
+
+/** One file's renderable diff, fetched lazily per card. */
+export type ReviewFileDiff =
+  | { readonly kind: "text"; readonly hunks: readonly ReviewDiffHunk[]; readonly truncated?: boolean }
+  | { readonly kind: "image"; readonly beforeDataUri?: string; readonly afterDataUri?: string; readonly bytesBefore?: number; readonly bytesAfter?: number }
+  | { readonly kind: "binary"; readonly bytesBefore?: number; readonly bytesAfter?: number }
+  | { readonly kind: "oversized"; readonly reason: string };
+
 /** Outcome of a task/set activation against the current window's folders. */
 export interface WorkspaceActivateResult {
   readonly outcome: "replaced" | "appended" | "new-window" | "cancelled" | "no-change";
@@ -581,6 +677,11 @@ export interface AgentQuestionSummary {
   readonly status: "pending" | "answered" | "dismissed";
   readonly answer?: string;
   readonly createdAt: string;
+  /** ADR 0016: plain question (absent) vs a step-by-step manual check. */
+  readonly kind?: "manual-check";
+  readonly steps?: readonly AgentQuestionStep[];
+  readonly images?: readonly AgentQuestionImage[];
+  readonly subtaskId?: string;
 }
 
 /** Display-safe projection of a board column (task board and subtasks). */
@@ -840,9 +941,15 @@ export type PanelResponsePayload =
   | { readonly type: "clone.pull"; readonly result: CloneSyncResult }
   | { readonly type: "clone.push"; readonly result: CloneSyncResult }
   | { readonly type: "clone.discard"; readonly repos: readonly CloneRepoState[] }
+  | { readonly type: "clone.exportPatch"; readonly savedPaths: readonly string[]; readonly message: string }
+  | { readonly type: "chat.uploadAttachment"; readonly runtimePath: string; readonly name: string; readonly bytes: number }
   | { readonly type: "taskReview.open"; readonly accepted: true }
   | { readonly type: "taskReview.state"; readonly state: TaskReviewState }
   | { readonly type: "taskReview.submit"; readonly dispatched: number; readonly sessions: number; readonly sentSessions?: readonly TaskReviewSessionRef[]; readonly errors?: readonly string[] }
+  | { readonly type: "codeReview.open"; readonly accepted: true }
+  | { readonly type: "codeReview.state"; readonly state: CodeReviewPanelState }
+  | { readonly type: "codeReview.fileDiff"; readonly repo: string; readonly path: string; readonly diff: ReviewFileDiff }
+  | { readonly type: "codeReview.addNote"; readonly comments: readonly ReviewCommentSummary[] }
   | { readonly type: "board.state"; readonly board: BoardState }
   | { readonly type: "board.moveCard"; readonly board: BoardState }
   | { readonly type: "board.columns.update"; readonly board: BoardState }
@@ -927,6 +1034,7 @@ export type PanelPushPayload =
   | { readonly type: "task.deleted"; readonly taskId: string }
   | { readonly type: "memory.candidateAdded"; readonly candidate: MemoryCandidateSummary }
   | { readonly type: "taskReview.updated"; readonly taskId: string }
+  | { readonly type: "codeReview.updated"; readonly taskId: string }
   | { readonly type: "editor.active"; readonly editor: ActiveEditorRef | null }
   | { readonly type: "board.changed" }
   /** Coarse fleet invalidation: the Agents panel refetches agents.state. */
@@ -1065,6 +1173,73 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
       if (startGuide !== undefined && typeof startGuide !== "boolean") return null;
       return { type: "taskReview.open", taskId, ...(startGuide === undefined ? {} : { startGuide }) };
+    }
+    case "codeReview.open": {
+      const taskId = payload["taskId"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      return { type: "codeReview.open", taskId };
+    }
+    case "codeReview.state": {
+      const taskId = payload["taskId"];
+      const scope = payload["scope"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (scope !== "uncommitted" && scope !== "task" && scope !== "session") return null;
+      return { type: "codeReview.state", taskId, scope };
+    }
+    case "codeReview.fileDiff": {
+      const taskId = payload["taskId"];
+      const scope = payload["scope"];
+      const repo = payload["repo"];
+      const filePath = payload["path"];
+      const baselineId = payload["baselineId"];
+      const ignoreWhitespace = payload["ignoreWhitespace"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (scope !== "uncommitted" && scope !== "task" && scope !== "session") return null;
+      if (!isBoundedString(repo, MAX_NAME_LENGTH)) return null;
+      if (!isBoundedString(filePath, MAX_PATH_LENGTH)) return null;
+      if (baselineId !== undefined && !isBoundedString(baselineId, MAX_ID_LENGTH)) return null;
+      if (ignoreWhitespace !== undefined && typeof ignoreWhitespace !== "boolean") return null;
+      return {
+        type: "codeReview.fileDiff",
+        taskId,
+        scope,
+        repo,
+        path: filePath,
+        ...(baselineId === undefined ? {} : { baselineId }),
+        ...(ignoreWhitespace === undefined ? {} : { ignoreWhitespace })
+      };
+    }
+    case "codeReview.addNote": {
+      const taskId = payload["taskId"];
+      const scope = payload["scope"];
+      const body = payload["body"];
+      const anchors = payload["anchors"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (scope !== "uncommitted" && scope !== "task" && scope !== "session") return null;
+      if (!isBoundedString(body, MAX_COMMENT_LENGTH)) return null;
+      if (!Array.isArray(anchors) || anchors.length === 0 || anchors.length > 20) return null;
+      const parsedAnchors: CodeReviewAnchor[] = [];
+      for (const candidate of anchors) {
+        if (typeof candidate !== "object" || candidate === null) return null;
+        const anchor = candidate as Record<string, unknown>;
+        const repo = anchor["repo"];
+        const filePath = anchor["path"];
+        const startLine = anchor["startLine"];
+        const endLine = anchor["endLine"];
+        const sessionId = anchor["sessionId"];
+        if (!isBoundedString(repo, MAX_NAME_LENGTH)) return null;
+        if (!isBoundedString(filePath, MAX_PATH_LENGTH)) return null;
+        if (!isLineNumber(startLine) || !isLineNumber(endLine) || startLine > endLine) return null;
+        if (sessionId !== undefined && !isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+        parsedAnchors.push({
+          repo,
+          path: filePath,
+          startLine,
+          endLine,
+          ...(sessionId === undefined ? {} : { sessionId })
+        });
+      }
+      return { type: "codeReview.addNote", taskId, scope, body, anchors: parsedAnchors };
     }
     case "board.state":
     case "agents.state":
@@ -1417,6 +1592,23 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (!isBoundedString(repo, MAX_NAME_LENGTH)) return null;
       if (!isBoundedString(filePath, MAX_PATH_LENGTH)) return null;
       return { type: "clone.discard", sessionId, repo, path: filePath };
+    }
+    case "clone.exportPatch": {
+      const sessionId = payload["sessionId"];
+      const repo = payload["repo"];
+      if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      if (repo !== undefined && !isBoundedString(repo, MAX_NAME_LENGTH)) return null;
+      return { type: "clone.exportPatch", sessionId, ...(repo === undefined ? {} : { repo }) };
+    }
+    case "chat.uploadAttachment": {
+      const sessionId = payload["sessionId"];
+      const name = payload["name"];
+      const dataBase64 = payload["dataBase64"];
+      if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(name, MAX_NAME_LENGTH)) return null;
+      // ~12 MB binary as base64; the host re-validates and sanitizes the name.
+      if (typeof dataBase64 !== "string" || dataBase64.length === 0 || dataBase64.length > 16_000_000) return null;
+      return { type: "chat.uploadAttachment", sessionId, name, dataBase64 };
     }
     case "session.rename": {
       const sessionId = payload["sessionId"];
@@ -1844,11 +2036,14 @@ function parseModelSelection(value: unknown): ChatModelSelection | undefined | n
   const providerId = payload["providerId"];
   if (!isBoundedString(providerId, MAX_MODEL_ID_LENGTH)) return null;
   const model = payload["model"];
-  if (model === undefined || model === "") {
-    return { providerId };
-  }
-  if (!isBoundedString(model, MAX_MODEL_ID_LENGTH)) return null;
-  return { providerId, model };
+  if (model !== undefined && model !== "" && !isBoundedString(model, MAX_MODEL_ID_LENGTH)) return null;
+  const reasoningEffort = payload["reasoningEffort"];
+  if (reasoningEffort !== undefined && reasoningEffort !== "" && !isBoundedString(reasoningEffort, MAX_MODEL_ID_LENGTH)) return null;
+  return {
+    providerId,
+    ...(model === undefined || model === "" ? {} : { model }),
+    ...(reasoningEffort === undefined || reasoningEffort === "" ? {} : { reasoningEffort })
+  };
 }
 
 function isBoundedString(value: unknown, maxLength: number): value is string {

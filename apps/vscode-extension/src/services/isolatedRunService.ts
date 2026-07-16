@@ -83,6 +83,14 @@ export interface IsolatedRunServiceOptions {
   readonly inventory: RuntimeInventoryStore;
   readonly prober: AppServerProber;
   readonly chatService: ChatSessionService;
+  /**
+   * Bounded exec against a session's own runtime (attachment uploads). The
+   * docker runtime adapter satisfies this structurally; optional so tests
+   * that never upload need no stub.
+   */
+  readonly runtimeExecutor?: {
+    exec(handle: RuntimeHandle, args: readonly string[], timeoutMs: number, input?: string): Promise<{ readonly exitCode: number | null; readonly stdout: string; readonly stderr: string }>;
+  };
   /** Clone mode: host-side git plumbing for the workspace clones + sync. */
   readonly cloneSync: CloneSyncService;
   /**
@@ -758,6 +766,69 @@ export class IsolatedRunService {
     return this.aggregateOutbound(clones);
   }
 
+  /**
+   * Writes a user attachment (pasted screenshot, picked image/document) into
+   * the LIVE session's container at /workspace/attachments/<name> via a
+   * bounded exec — base64 over stdin, so it rides the runtime transport and
+   * works identically for remote/networked runtimes. No mounts change and
+   * nothing restarts; the agent can read the file immediately. Refuses when
+   * the session is not live in this window.
+   */
+  async uploadAttachment(sessionId: string, name: string, dataBase64: string): Promise<{ runtimePath: string; name: string; bytes: number }> {
+    const executor = this.options.runtimeExecutor;
+    if (executor === undefined) {
+      throw new Error("Attachment uploads are not available in this build.");
+    }
+    const runtime = this.options.chatService.liveRuntimeHandle(asId(sessionId));
+    if (runtime === null) {
+      throw new Error("Start or resume this chat first — attachments upload into the running sandbox.");
+    }
+    const bytes = Buffer.from(dataBase64, "base64");
+    if (bytes.length === 0) throw new Error("The attachment was empty.");
+    if (bytes.length > 12 * 1024 * 1024) throw new Error("Attachments are capped at 12 MB.");
+    // Leaf name only, shell-safe charset, stamped to avoid collisions.
+    const base = name.replace(/^.*[\\/]/, "").replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "").slice(0, 100) || "attachment";
+    const safe = `${Date.now().toString(36)}-${base}`;
+    const runtimePath = `/workspace/attachments/${safe}`;
+    const result = await executor.exec(
+      runtime,
+      ["/bin/sh", "-c", `mkdir -p /workspace/attachments && base64 -d > ${runtimePath}`],
+      60_000,
+      dataBase64
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`Attachment upload failed in the sandbox: ${result.stderr.slice(0, 300) || `exit ${String(result.exitCode)}`}`);
+    }
+    this.options.logger.info("attachment uploaded", { sessionId, runtimePath, bytes: bytes.length });
+    return { runtimePath, name: safe, bytes: bytes.length };
+  }
+
+  /**
+   * Reads one image the agent produced inside its LIVE sandbox and returns it
+   * as a data URI (ADR 0016 question illustrations). The inverse of
+   * uploadAttachment: `base64 <path>` over the runtime transport, capped at
+   * ~512 KB encoded, absolute in-sandbox image paths only. Null on any
+   * failure — callers degrade to a path-only reference, never throw.
+   */
+  async readSandboxImageDataUri(sessionId: string, imagePath: string): Promise<string | null> {
+    const executor = this.options.runtimeExecutor;
+    if (executor === undefined) return null;
+    const runtime = this.options.chatService.liveRuntimeHandle(asId(sessionId));
+    if (runtime === null) return null;
+    if (!/^\/[^\s'"`]+\.(png|jpe?g|gif|webp|bmp)$/i.test(imagePath) || imagePath.includes("..")) return null;
+    try {
+      const result = await executor.exec(runtime, ["base64", imagePath], 30_000);
+      if (result.exitCode !== 0) return null;
+      const encoded = result.stdout.replace(/\s+/g, "");
+      if (encoded.length === 0 || encoded.length > 700_000) return null;
+      const ext = imagePath.toLowerCase().split(".").pop() ?? "png";
+      const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : `image/${ext}`;
+      return `data:${mime};base64,${encoded}`;
+    } catch {
+      return null;
+    }
+  }
+
   /** Restore one file in a clone to its sync base. Refuses while a turn runs. */
   async cloneDiscard(sessionId: string, repo: string, filePath: string): Promise<void> {
     const clones = this.requireSessionClones(sessionId);
@@ -1112,7 +1183,8 @@ export class IsolatedRunService {
     const providerId = model.providerId === LEGACY_CODEX_PROVIDER_ID ? CODEX_PROVIDER_ID : model.providerId;
     return {
       providerId,
-      ...(model.model === undefined ? {} : { model: model.model })
+      ...(model.model === undefined ? {} : { model: model.model }),
+      ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort })
     };
   }
 

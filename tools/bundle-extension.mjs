@@ -49,6 +49,18 @@ await bundle(
   path.join(distRoot, "webview", "taskReview.css")
 );
 
+// Code-review panel (in-panel PR-style review): browser IIFE + styles — a
+// standalone editor-panel entry, contracts bundled in.
+await bundle(
+  path.join(extensionRoot, "webview-ui", "src", "codeReview.ts"),
+  path.join(distRoot, "webview", "codeReview.js"),
+  browserOptions
+);
+await bundle(
+  path.join(extensionRoot, "webview-ui", "src", "codeReview.css"),
+  path.join(distRoot, "webview", "codeReview.css")
+);
+
 // Task-board panel: browser IIFE + styles. Same shape as the plan-docs
 // pair — a standalone editor-panel entry, contracts bundled in.
 await bundle(

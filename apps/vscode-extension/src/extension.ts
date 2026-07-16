@@ -30,6 +30,7 @@ import {
   type UserSecurityPreferences
 } from "./services/securityPolicy.js";
 import { TaskBoardPanelProvider } from "./webview/taskBoardPanelProvider.js";
+import { CodeReviewPanelProvider } from "./webview/codeReviewPanelProvider.js";
 import { TaskReviewCommentsController } from "./webview/taskReviewCommentsController.js";
 import { TaskReviewPanelProvider } from "./webview/taskReviewPanelProvider.js";
 
@@ -227,6 +228,77 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       title = tasks.find((task) => task.taskId === resolvedId)?.title ?? title;
     }
     await taskReviewPanels.open(resolvedId, title, startGuide);
+  }));
+  // Apply a Drydock-exported .patch file to an open folder — the receive half
+  // of carrying changesets between machines. Human-driven end to end: pick the
+  // file, pick the target folder, confirm the modal; applies with
+  // `git apply --3way --binary` and NEVER commits or pushes.
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.clone.applyPatch", async () => {
+    const folders = (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === "file");
+    if (folders.length === 0) {
+      void vscode.window.showErrorMessage("Open the target repository folder first, then run Apply Patch again.");
+      return;
+    }
+    const picked = await vscode.window.showOpenDialog({
+      canSelectMany: false,
+      filters: { "Patch files": ["patch", "diff"] },
+      title: "Select the Drydock-exported .patch file"
+    });
+    const patchUri = picked?.[0];
+    if (patchUri === undefined) return;
+    const folder = folders.length === 1
+      ? folders[0]
+      : await vscode.window.showQuickPick(
+          folders.map((candidate) => ({ label: candidate.name, description: candidate.uri.fsPath, folder: candidate })),
+          { placeHolder: "Apply the patch to which open folder?" }
+        ).then((pick) => pick?.folder);
+    if (folder === undefined) return;
+    const confirmed = await vscode.window.showWarningMessage(
+      `Apply ${patchUri.fsPath} to "${folder.name}"? This edits your working tree (three-way merge; conflicts leave markers). Nothing is committed.`,
+      { modal: true },
+      "Apply patch"
+    );
+    if (confirmed !== "Apply patch") return;
+    const { execFile } = await import("node:child_process");
+    await new Promise<void>((resolve) => {
+      execFile(
+        "git",
+        ["apply", "--3way", "--binary", patchUri.fsPath],
+        { cwd: folder.uri.fsPath, maxBuffer: 32 * 1024 * 1024 },
+        (error, _stdout, stderr) => {
+          if (error) {
+            void vscode.window.showErrorMessage(`git apply failed: ${String(stderr || error.message).slice(0, 400)}`);
+          } else {
+            void vscode.window.showInformationMessage(`Patch applied to "${folder.name}" — review the working tree, then commit as usual.`);
+          }
+          resolve();
+        }
+      );
+    });
+  }));
+  // Code Review panel (in-panel PR-style review, docs/design/code-review-panel.md):
+  // one panel per task, opened from the command palette or the sidebar relay.
+  const codeReviewPanels = new CodeReviewPanelProvider(context.extensionUri, backend, logger);
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.codeReview.open", async (taskId?: unknown) => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    let resolvedId = typeof taskId === "string" ? taskId : undefined;
+    let title = "Task";
+    const tasks = await backend.tasks.listTaskSummaries();
+    if (resolvedId === undefined) {
+      const pick = await vscode.window.showQuickPick(
+        tasks.map((task) => ({ label: task.title, description: task.state, taskId: task.taskId })),
+        { placeHolder: "Select a task to code-review" }
+      );
+      if (pick === undefined) return;
+      resolvedId = pick.taskId;
+      title = pick.label;
+    } else {
+      title = tasks.find((task) => task.taskId === resolvedId)?.title ?? title;
+    }
+    await codeReviewPanels.open(resolvedId, title);
   }));
   // Task Board: single global panel, so the command takes no arguments — it
   // opens (or reveals) the one instance. The control panel's taskBoard.open

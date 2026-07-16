@@ -84,6 +84,16 @@
     {
       providerId: "codex", displayName: "Codex / OpenAI", refreshedAt: iso(1), source: "provider", diagnostics: [], authStatus: "authenticated",
       models: [
+        {
+          id: "gpt-5.6-sol", displayName: "GPT-5.6-Sol", isDefault: false, hidden: false,
+          defaultReasoningEffort: "medium",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "low", description: "Fast, well-scoped work" },
+            { reasoningEffort: "medium", description: "Balanced reasoning" },
+            { reasoningEffort: "high", description: "Deeper reasoning" },
+            { reasoningEffort: "xhigh", description: "Extra High reasoning" }
+          ]
+        },
         { id: "gpt-5.5", displayName: "GPT-5.5", isDefault: true, hidden: false },
         { id: "gpt-5.4", displayName: "GPT-5.4", isDefault: false, hidden: false }
       ]
@@ -115,7 +125,14 @@
       { accessRequestId: "ar-rw", sessionId: "s-live", displayPath: "D:\\builds\\maya2026", mode: "read-write", reason: "verify compiled plugin load", status: "pending", requestedAt: iso(4) },
       { accessRequestId: "ar-sens", sessionId: "s-live", displayPath: "C:\\hitl\\demo-project\\.env", mode: "read-only", reason: "read runtime config", status: "pending", requestedAt: iso(3), sensitive: true, sensitiveReason: "\".env\" matches a credentials/secrets file pattern" },
       { accessRequestId: "ar-ok", sessionId: "s-live", displayPath: "D:\\shared\\fixtures", mode: "read-only", reason: "test fixtures", status: "approved", requestedAt: iso(90) }
-    ]
+    ],
+    security: {
+      managed: false,
+      label: "Harness personal policy",
+      cloneOnly: false,
+      networkedAiAllowed: true,
+      omissionsEnabled: false
+    }
   };
 
   // Session-view rows (the working frame; accept removes rows here and in turn).
@@ -232,6 +249,21 @@
   const agentQuestions = [
     { questionId: "q-1", sessionId: "s-live", question: "Should the alembic exporter keep legacy 1.x sidecar files?", options: ["Drop them — 2.x readers are everywhere", "Keep writing both for one release"], status: "pending", createdAt: iso(6) },
     { questionId: "q-2", sessionId: "s-live", question: "Name the new config section?", options: [], status: "pending", createdAt: iso(5) },
+    {
+      questionId: "q-3", sessionId: "s-live", kind: "manual-check", subtaskId: "st-3",
+      question: "Does the exported alembic load correctly in Maya with the new framerange guard?",
+      options: ["Loads correctly — matches the render", "Loads but framerange is wrong", "Fails to load"],
+      images: [
+        { path: "/workspace/renders/compare.png", dataUri: "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="72"><rect width="120" height="72" fill="#2b4a6f"/><circle cx="36" cy="36" r="18" fill="#3794ff"/><text x="66" y="42" fill="#fff" font-size="12">render</text></svg>') },
+        { path: "/workspace/renders/missing.png" }
+      ],
+      steps: [
+        { text: "Open Maya 2026 with the studio env (menu: Pipeline → Dev Shell)." },
+        { text: "File → Import → /workspace/exports/publish_test.abc", imageDataUri: "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40"><rect width="120" height="40" fill="#333"/><text x="8" y="24" fill="#ccc" font-size="10">File / Import...</text></svg>') },
+        { text: "Scrub frames 1001–1050 and compare against the attached render." }
+      ],
+      status: "pending", createdAt: iso(4)
+    },
     { questionId: "q-0", sessionId: "s-live", question: "Already answered?", options: [], status: "answered", answer: "yes", createdAt: iso(50) }
   ];
 
@@ -319,6 +351,157 @@
       openCommentCount,
       notes: taskReviewNotes
     };
+  }
+
+  // --- code-review fixture (in-panel PR-style review) ----------------------
+  // Scope-shaped projections for codeReview.state plus per-file hunk content
+  // for codeReview.fileDiff. Comment counts join from taskReviewComments by
+  // the `<repo>:<path>` anchor, so notes added here show up in both panels.
+  const CR_IMG_BEFORE = "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" rx="10" fill="#444"/><circle cx="36" cy="36" r="18" fill="#888"/></svg>');
+  const CR_IMG_AFTER = "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" rx="10" fill="#2b4a6f"/><circle cx="36" cy="36" r="18" fill="#3794ff"/><path d="M28 36l6 6 12-12" stroke="#fff" stroke-width="3" fill="none"/></svg>');
+
+  function crOpenCount(repo, path) {
+    let count = 0;
+    for (const sessionId of Object.keys(taskReviewComments)) {
+      for (const comment of taskReviewComments[sessionId]) {
+        if (comment.status === "open" && comment.filePath === `${repo}:${path}`) count += 1;
+      }
+    }
+    return count;
+  }
+
+  function crFile(base) {
+    return { contentKind: "text", ...base, commentCount: crOpenCount(base.repo, base.path) };
+  }
+
+  function computeCodeReviewState(scope) {
+    const s = (sessionId, sessionTitle) => (scope === "uncommitted" ? {} : { sessionId, sessionTitle });
+    const assetApi = [
+      crFile({ repo: "asset_api", path: "src/publish_hooks.py", changeKind: "modify", addedLines: 18, removedLines: 4, baselineId: "trb-1", ...s("s-live", "Rename sweep") }),
+      crFile({ repo: "asset_api", path: "src/exporters/alembic.py", changeKind: "modify", addedLines: 9, removedLines: 2, baselineId: "trb-2", ...s("s-live", "Rename sweep") }),
+      crFile({ repo: "asset_api", path: "assets/icon_publish.png", changeKind: "modify", contentKind: "image", bytesBefore: 24_678, bytesAfter: 32_358, ...s("s-live", "Rename sweep") }),
+      crFile({ repo: "asset_api", path: "assets/data/thumbs.bin", changeKind: "modify", contentKind: "binary", bytesBefore: 12_698, bytesAfter: 13_415, ...s("s-live", "Rename sweep") }),
+      crFile({ repo: "asset_api", path: "package-lock.json", changeKind: "modify", addedLines: 178, removedLines: 64, largeDiff: true, baselineId: "trb-5", ...s("s-live", "Rename sweep") })
+    ];
+    const farmSubmit = [
+      crFile({ repo: "farm_submit", path: "submit.py", changeKind: "modify", addedLines: 9, removedLines: 2, baselineId: "trb-4", ...s("s-live", "Rename sweep") }),
+      ...(scope === "session" ? [] : [crFile({ repo: "farm_submit", path: "queue.py", changeKind: "modify", addedLines: 5, removedLines: 1, clone: true, conflicted: true, ...s("s-clone", "Clone helper") })]),
+      crFile({ repo: "farm_submit", path: "vendor/generated_api.py", changeKind: "modify", addedLines: 812, removedLines: 540, largeDiff: true, baselineId: "trb-6", ...s("s-live", "Rename sweep") })
+    ];
+    // The uncommitted scope adds a hand-edited untracked file no session owns.
+    const uncommittedExtra = scope === "uncommitted"
+      ? [crFile({ repo: "asset_api", path: "notes/review_notes.md", changeKind: "add", addedLines: 12, removedLines: 0 })]
+      : [];
+    const state = computeTaskReviewState();
+    return {
+      taskId: "t-1",
+      title: state.title,
+      scope,
+      projects: [
+        { name: "asset_api", files: [...assetApi, ...uncommittedExtra] },
+        { name: "farm_submit", files: farmSubmit }
+      ],
+      openCommentCount: state.openCommentCount,
+      primarySession: taskReviewSessions[0],
+      notes: scope === "uncommitted" ? ["farm_submit: worktree also has 1 change from outside this task."] : state.notes
+    };
+  }
+
+  const CR_WS_HUNK = {
+    oldStart: 70, oldLines: 4, newStart: 75, newLines: 4,
+    rows: [
+      { kind: "context", oldNo: 70, newNo: 75, text: "def emit_event(kind, asset_id):" },
+      { kind: "del", oldNo: 71, text: "    payload = {'kind': kind,  'id': asset_id}" },
+      { kind: "add", newNo: 76, text: "    payload = {'kind': kind, 'id': asset_id}" },
+      { kind: "context", oldNo: 72, newNo: 77, text: "    bus.emit(payload)" }
+    ]
+  };
+
+  function computeCodeReviewDiff(repo, filePath, ignoreWhitespace) {
+    const key = `${repo}:${filePath}`;
+    if (key === "asset_api:src/publish_hooks.py") {
+      const hunks = [
+        {
+          oldStart: 38, oldLines: 6, newStart: 38, newLines: 7,
+          rows: [
+            { kind: "context", oldNo: 40, newNo: 40, text: "" },
+            { kind: "context", oldNo: 41, newNo: 41, text: "def publish_asset(asset, registry):" },
+            { kind: "del", oldNo: 42, text: "    result = registry.push(asset)" },
+            { kind: "add", newNo: 42, text: "    validated = validate_asset(asset, strict=True)" },
+            { kind: "add", newNo: 43, text: "    result = registry.push(validated)" },
+            { kind: "context", oldNo: 43, newNo: 44, text: "    if result.ok:" },
+            { kind: "context", oldNo: 44, newNo: 45, text: "        emit_event('publish', asset.id)" }
+          ]
+        },
+        {
+          oldStart: 96, oldLines: 1, newStart: 101, newLines: 6,
+          rows: [
+            { kind: "context", oldNo: 96, newNo: 101, text: "" },
+            { kind: "add", newNo: 102, text: "def validate_asset(asset, strict=False):" },
+            { kind: "add", newNo: 103, text: "    problems = run_checks(asset, PUBLISH_CHECKS)" },
+            { kind: "add", newNo: 104, text: "    if problems and strict:" },
+            { kind: "add", newNo: 105, text: "        raise PublishError(problems)" },
+            { kind: "add", newNo: 106, text: "    return asset" }
+          ]
+        },
+        ...(ignoreWhitespace ? [] : [CR_WS_HUNK])
+      ];
+      return { kind: "text", hunks };
+    }
+    if (key === "asset_api:src/exporters/alembic.py") {
+      return {
+        kind: "text",
+        hunks: [{
+          oldStart: 54, oldLines: 3, newStart: 54, newLines: 4,
+          rows: [
+            { kind: "context", oldNo: 54, newNo: 54, text: "class AlembicExporter:" },
+            { kind: "context", oldNo: 55, newNo: 55, text: "    def export(self, node, path):" },
+            { kind: "del", oldNo: 56, text: "        cmds.AbcExport(j=job(node, path))" },
+            { kind: "add", newNo: 56, text: "        with framerange_guard(node):" },
+            { kind: "add", newNo: 57, text: "            cmds.AbcExport(j=job(node, path))" }
+          ]
+        }]
+      };
+    }
+    if (key === "asset_api:assets/icon_publish.png") {
+      return { kind: "image", beforeDataUri: CR_IMG_BEFORE, afterDataUri: CR_IMG_AFTER, bytesBefore: 24_678, bytesAfter: 32_358 };
+    }
+    if (key === "asset_api:assets/data/thumbs.bin") {
+      return { kind: "binary", bytesBefore: 12_698, bytesAfter: 13_415 };
+    }
+    if (key === "farm_submit:queue.py") {
+      return {
+        kind: "text",
+        hunks: [{
+          oldStart: 12, oldLines: 2, newStart: 12, newLines: 2,
+          rows: [
+            { kind: "context", oldNo: 12, newNo: 12, text: "def submit(job):" },
+            { kind: "del", oldNo: 13, text: "    return farm.submit(job, retries=0)" },
+            { kind: "add", newNo: 13, text: "    return farm.submit(job, retries=RETRY_POLICY.max)" }
+          ]
+        }]
+      };
+    }
+    if (key === "asset_api:notes/review_notes.md") {
+      return {
+        kind: "text",
+        hunks: [{
+          oldStart: 1, oldLines: 0, newStart: 1, newLines: 3,
+          rows: [
+            { kind: "add", newNo: 1, text: "# Review notes" },
+            { kind: "add", newNo: 2, text: "" },
+            { kind: "add", newNo: 3, text: "- confirm UDIM fallback with lookdev" }
+          ]
+        }]
+      };
+    }
+    // Large fixtures (package-lock.json / generated_api.py / submit.py fallback):
+    // synthesize rows so expand-on-demand has something honest to show.
+    const rows = [];
+    for (let i = 1; i <= 24; i += 1) {
+      rows.push({ kind: i % 3 === 0 ? "add" : i % 7 === 0 ? "del" : "context", ...(i % 3 === 0 ? { newNo: i } : i % 7 === 0 ? { oldNo: i } : { oldNo: i, newNo: i }), text: `    line ${String(i)} of ${filePath}` });
+    }
+    return { kind: "text", hunks: [{ oldStart: 1, oldLines: 20, newStart: 1, newLines: 20, rows }], truncated: filePath.includes("generated") };
   }
 
   /** Recomputes each subtask's isBlocked from dependsOn, mirroring the host. */
@@ -939,6 +1122,24 @@
         if (repo) repo.files = repo.files.filter((f) => f.path !== payload.path);
         return respond(requestId, { type, repos: cloneRepos });
       }
+      case "chat.uploadAttachment": {
+        const bytes = Math.ceil((payload.dataBase64.length * 3) / 4);
+        harnessLog(`chat.uploadAttachment ${String(payload.sessionId)} ${String(payload.name)} ${String(bytes)}B`);
+        return respond(requestId, {
+          type,
+          runtimePath: `/workspace/attachments/${String(payload.name)}`,
+          name: payload.name,
+          bytes
+        });
+      }
+      case "clone.exportPatch": {
+        harnessLog(`clone.exportPatch ${String(payload.sessionId)}${payload.repo ? ` ${String(payload.repo)}` : ""}`);
+        return respond(requestId, {
+          type,
+          savedPaths: ["C:\\exports\\asset_api-2026-07-16.patch"],
+          message: "Exported 1 patch file: C:\\exports\\asset_api-2026-07-16.patch"
+        });
+      }
       case "taskReview.state":
         return respond(requestId, { type, state: computeTaskReviewState() });
       case "taskReview.submit": {
@@ -970,6 +1171,38 @@
       case "taskReview.open":
         harnessLog(`taskReview.open ${String(payload.taskId)}`);
         return respond(requestId, { type, accepted: true });
+      case "codeReview.open":
+        harnessLog(`codeReview.open ${String(payload.taskId)}`);
+        return respond(requestId, { type, accepted: true });
+      case "codeReview.state":
+        return respond(requestId, { type, state: computeCodeReviewState(payload.scope) });
+      case "codeReview.fileDiff":
+        return respond(requestId, {
+          type,
+          repo: payload.repo,
+          path: payload.path,
+          diff: computeCodeReviewDiff(payload.repo, payload.path, payload.ignoreWhitespace === true)
+        });
+      case "codeReview.addNote": {
+        const created = [];
+        for (const anchor of payload.anchors) {
+          const owner = anchor.sessionId && taskReviewComments[anchor.sessionId] ? anchor.sessionId : "s-live";
+          const comment = {
+            commentId: `crc-${String(Date.now())}-${String(created.length)}`,
+            filePath: `${anchor.repo}:${anchor.path}`,
+            startLine: anchor.startLine,
+            endLine: anchor.endLine,
+            body: payload.body,
+            author: "user",
+            status: "open",
+            createdAt: new Date().toISOString()
+          };
+          taskReviewComments[owner].push(comment);
+          created.push(comment);
+        }
+        harnessLog(`codeReview.addNote anchors=${String(payload.anchors.length)} scope=${String(payload.scope)}`);
+        return respond(requestId, { type, comments: created });
+      }
       case "planner.open":
         harnessLog(`planner.open${payload.planId ? ` ${String(payload.planId)}` : ""}`);
         return respond(requestId, { type, accepted: true });

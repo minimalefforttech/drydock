@@ -4,7 +4,7 @@
 
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { parsePanelRequest, WEBVIEW_PROTOCOL_VERSION } from "./webviewMessages.js";
+import { MAX_MODEL_ID_LENGTH, parsePanelRequest, WEBVIEW_PROTOCOL_VERSION } from "./webviewMessages.js";
 
 function wrap(payload: unknown): unknown {
   return { protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "request", requestId: "req-1", payload };
@@ -324,6 +324,26 @@ test("chat.resumeSession validates the session id, optional model, and workspace
     type: "chat.resumeSession",
     sessionId: "session-1",
     workspace: { auto: true, mode: "detached" }
+  })), null);
+});
+
+test("chat model selections preserve a bounded provider-advertised reasoning effort", () => {
+  const parsed = parsePanelRequest(wrap({
+    type: "chat.sendTurn",
+    sessionId: "session-1",
+    prompt: "solve it",
+    model: { providerId: "codex", model: "gpt-5.6-sol", reasoningEffort: "ultra" }
+  }));
+  assert.ok(parsed);
+  assert.deepEqual(
+    parsed.payload.type === "chat.sendTurn" ? parsed.payload.model : undefined,
+    { providerId: "codex", model: "gpt-5.6-sol", reasoningEffort: "ultra" }
+  );
+  assert.equal(parsePanelRequest(wrap({
+    type: "chat.sendTurn",
+    sessionId: "session-1",
+    prompt: "solve it",
+    model: { providerId: "codex", reasoningEffort: "x".repeat(MAX_MODEL_ID_LENGTH + 1) }
   })), null);
 });
 

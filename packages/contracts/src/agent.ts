@@ -36,6 +36,12 @@ export interface AgentCapabilities {
   readonly eventFamilies: readonly string[];
 }
 
+/** A reasoning-effort choice exactly as advertised by an agent provider. */
+export interface AgentReasoningEffortOption {
+  readonly reasoningEffort: string;
+  readonly description: string;
+}
+
 export interface AgentModelSummary {
   /** Stable picker value sent back to the provider when starting a turn. */
   readonly id: string;
@@ -43,6 +49,10 @@ export interface AgentModelSummary {
   readonly description?: string;
   readonly isDefault: boolean;
   readonly hidden: boolean;
+  /** Provider-selected default for this model, when the catalog exposes one. */
+  readonly defaultReasoningEffort?: string;
+  /** Model-specific values accepted by the provider's turn API. */
+  readonly supportedReasoningEfforts?: readonly AgentReasoningEffortOption[];
 }
 
 /** Inertly detected sign-in state for a provider's isolated backend. */

@@ -59,6 +59,8 @@ export interface CodexAppServerSession {
   readonly cancelledRuns: Set<string>;
 }
 
+const ULTRA_MODE_INSTRUCTION = "Ultra mode is enabled for this turn. Use the maximum supported reasoning effort and proactively delegate independent work to subagents when that would materially improve speed or quality. Consolidate their results before responding.";
+
 export class CodexAppServerTransport {
   private readonly timeoutMs: number;
   private readonly inactivityTimeoutMs: number;
@@ -116,6 +118,7 @@ export class CodexAppServerTransport {
 
   async sendPrompt(session: CodexAppServerSession, prompt: AgentPrompt, runId: RunId): Promise<void> {
     await this.options.authorizePrompt?.();
+    const ultra = prompt.metadata?.["reasoningEffort"] === "ultra";
     const turnStart = await session.client.request("turn/start", {
       threadId: session.threadId,
       cwd: prompt.cwd ?? session.cwd,
@@ -126,7 +129,7 @@ export class CodexAppServerTransport {
       sandboxPolicy: {
         type: "dangerFullAccess"
       },
-      input: [{ type: "text", text: prompt.text }],
+      input: [{ type: "text", text: ultra ? `${ULTRA_MODE_INSTRUCTION}\n\n${prompt.text}` : prompt.text }],
       ...modelOverride(prompt)
     }, this.timeoutMs);
     const providerTurnId = extractTurnId(turnStart);
@@ -437,13 +440,35 @@ function parseModel(value: JsonValue): AgentModelSummary | null {
   }
   const displayName = stringValue(object["displayName"]) ?? id;
   const description = stringValue(object["description"]);
+  const defaultReasoningEffort = nonEmptyStringValue(object["defaultReasoningEffort"]);
+  const supportedReasoningEfforts = parseReasoningEffortOptions(object["supportedReasoningEfforts"]);
   return {
     id,
     displayName,
     ...(description === null ? {} : { description }),
     isDefault: booleanValue(object["isDefault"]) ?? false,
-    hidden: booleanValue(object["hidden"]) ?? false
+    hidden: booleanValue(object["hidden"]) ?? false,
+    ...(defaultReasoningEffort === null ? {} : { defaultReasoningEffort }),
+    ...(supportedReasoningEfforts === undefined ? {} : { supportedReasoningEfforts })
   };
+}
+
+function parseReasoningEffortOptions(value: JsonValue | undefined): AgentModelSummary["supportedReasoningEfforts"] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((entry) => {
+    const object = objectValue(entry);
+    const reasoningEffort = nonEmptyStringValue(object?.["reasoningEffort"]);
+    if (reasoningEffort === null) return [];
+    return [{
+      reasoningEffort,
+      description: stringValue(object?.["description"]) ?? reasoningEffort
+    }];
+  });
+}
+
+function nonEmptyStringValue(value: JsonValue | undefined): string | null {
+  const parsed = stringValue(value);
+  return parsed !== null && parsed.length > 0 ? parsed : null;
 }
 
 function contextMessageToResponseItem(message: AgentContextMessage): JsonObject {
@@ -461,7 +486,13 @@ function contextMessageToResponseItem(message: AgentContextMessage): JsonObject 
   };
 }
 
-function modelOverride(prompt: AgentPrompt): { readonly model?: string } {
+function modelOverride(prompt: AgentPrompt): { readonly model?: string; readonly effort?: string } {
   const model = prompt.metadata?.["model"];
-  return typeof model === "string" && model.length > 0 ? { model } : {};
+  const reasoningEffort = prompt.metadata?.["reasoningEffort"];
+  return {
+    ...(typeof model === "string" && model.length > 0 ? { model } : {}),
+    ...(typeof reasoningEffort === "string" && reasoningEffort.length > 0
+      ? { effort: reasoningEffort === "ultra" ? "xhigh" : reasoningEffort }
+      : {})
+  };
 }

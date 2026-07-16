@@ -24,6 +24,7 @@ import {
   subagentReportingForTransport,
   treeSourceFromLine,
   type AgentRole,
+  type AgentModelCatalog,
   type AgentTreeNode,
   type AgentTreeSource,
   type ChatModelSelection,
@@ -66,9 +67,9 @@ import {
   type AgentGroup,
   type ChatMessage,
   type DiagnosticEntry,
-  type TaskNote,
-  type ThinkingEffort
+  type TaskNote
 } from "../state.js";
+import { pastedFiles, pastedName, uploadAttachment } from "../attachments.js";
 import { nextMessageId, TranscriptFolder } from "../chat/transcriptModel.js";
 import {
   assistantBlock as sharedAssistantBlock,
@@ -141,11 +142,31 @@ const CHANGE_GLYPH: Record<DiffFileSummary["changeKind"], { glyph: string; cls: 
   rename: { glyph: "→", cls: "kind-rename" }
 };
 
-const THINKING_EFFORT_OPTIONS: readonly { id: ThinkingEffort; label: string }[] = [
+const LEGACY_CODEX_EFFORT_OPTIONS: readonly { id: string; label: string; description?: string }[] = [
   { id: "low", label: "Low" },
   { id: "medium", label: "Medium" },
   { id: "high", label: "High" }
 ];
+
+const SOL_EXTRA_EFFORT_OPTIONS: readonly { id: string; label: string; description: string }[] = [
+  { id: "xhigh", label: "Extra High", description: "Deep reasoning for difficult, multi-step work." },
+  { id: "ultra", label: "Ultra", description: "Maximum supported reasoning plus proactive delegation to subagents." }
+];
+
+/** Friendly labels for current Codex effort ids; unknown advertised ids stay usable. */
+function thinkingEffortLabel(id: string): string {
+  const known: Readonly<Record<string, string>> = {
+    none: "None",
+    minimal: "Minimal",
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "Extra High",
+    max: "Max",
+    ultra: "Ultra"
+  };
+  return known[id] ?? id.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
 
 type DisplayMount = {
   readonly runtimePath: string;
@@ -302,7 +323,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const providerSelect = select("provider-select compact", "Provider");
   const modelSelect = select("model-select compact", "Model");
   const thinkingSelect = select("thinking-select compact", "Thinking effort");
-  for (const effort of THINKING_EFFORT_OPTIONS) {
+  for (const effort of LEGACY_CODEX_EFFORT_OPTIONS) {
     thinkingSelect.append(option(effort.id, effort.label));
   }
   thinkingSelect.value = state.thinkingEffort;
@@ -344,11 +365,13 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   modelSelect.addEventListener("change", () => {
     manualModelSessionId = state.selectedSessionId;
     state.selectedModel = modelSelect.value;
+    renderThinkingEfforts();
+    renderModelButton();
     ctx.persist();
   });
   thinkingSelect.addEventListener("change", () => {
     const value = thinkingSelect.value;
-    if (value === "low" || value === "medium" || value === "high") {
+    if (value !== "" && [...thinkingSelect.options].some((candidate) => candidate.value === value)) {
       state.thinkingEffort = value;
       ctx.persist();
     }
@@ -532,7 +555,25 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const modelButtonChevron = el("span", "composer-model-chevron");
   modelButtonChevron.textContent = "▾";
   modelButton.append(modelButtonChevron);
-  const modelPopover = popover(modelButton, (content, close) => buildModelTree(content, close));
+  const modelPopover = popover(modelButton, (content, close) => {
+    buildModelTree(content, close);
+
+    // This trigger lives in the bottom-left composer rather than the top-right
+    // header where shared popovers normally live. Give the upward-opening menu
+    // its exact room inside the chat/composer so narrow or short webviews scroll
+    // the tree instead of clipping it outside their visible bounds.
+    const triggerRect = modelButton.getBoundingClientRect();
+    const chatRect = root.getBoundingClientRect();
+    const composerRect = composer.getBoundingClientRect();
+    // In an exceptionally short panel the fixed-height composer can overflow
+    // the flexed chat root, putting chatRect.top above the visible viewport.
+    // Clamp to the viewport inset in that case so a long provider catalog can
+    // never follow that off-screen coordinate.
+    const visibleTop = Math.max(8, chatRect.top);
+    content.style.setProperty("--model-popover-max-height", `${String(Math.max(0, triggerRect.top - visibleTop - 12))}px`);
+    content.style.setProperty("--model-popover-max-width", `${String(Math.max(0, composerRect.right - triggerRect.left - 10))}px`);
+  });
+  modelPopover.classList.add("composer-model-popover");
   const hiddenModelControls = el("div", "composer-hidden-controls hidden");
   hiddenModelControls.append(providerSelect, modelSelect);
 
@@ -551,6 +592,49 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const attachmentsRow = el("div", "composer-attachments hidden");
   type ComposerAttachment = { readonly hostPath: string; readonly runtimePath: string | null; readonly name: string };
   const attachments: ComposerAttachment[] = [];
+
+  // Upload path (pasted screenshots + picked images/documents): bytes go into
+  // the live session's container at /workspace/attachments/… — no mounts
+  // change, no restart, and remote runtimes receive them over their own
+  // transport. The chip's [file:…] token then points at the runtime path.
+  const attachFileInput = document.createElement("input");
+  attachFileInput.type = "file";
+  attachFileInput.multiple = true;
+  attachFileInput.className = "hidden";
+  attachFileInput.addEventListener("change", () => {
+    const files = [...(attachFileInput.files ?? [])];
+    attachFileInput.value = "";
+    void uploadComposerFiles(files);
+  });
+  const attachButton = iconButton("📎", "Attach images or documents (uploaded into the running sandbox)", "composer-attach-button");
+  attachButton.addEventListener("click", () => attachFileInput.click());
+  composerActions.prepend(attachButton, attachFileInput);
+
+  async function uploadComposerFiles(files: readonly File[]): Promise<void> {
+    if (files.length === 0) return;
+    const sessionId = state.selectedSessionId;
+    if (sessionId === null) {
+      logChat("Select or start a chat first — attachments upload into its running sandbox.");
+      return;
+    }
+    for (const [index, file] of files.entries()) {
+      try {
+        const uploaded = await uploadAttachment(sessionId, pastedName(file, index), file);
+        attachments.push({ hostPath: uploaded.runtimePath, runtimePath: uploaded.runtimePath, name: uploaded.name });
+        renderAttachments();
+        logChat(`attached ${uploaded.name} (${String(Math.ceil(uploaded.bytes / 1024))} KB) → ${uploaded.runtimePath}`);
+      } catch (error) {
+        logChat(`attach failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+  // Pasting a screenshot (or files) into the prompt uploads them as chips.
+  promptInput.addEventListener("paste", (event) => {
+    const files = pastedFiles(event);
+    if (files.length === 0) return;
+    event.preventDefault();
+    void uploadComposerFiles(files);
+  });
 
   const composer = el("div", "composer");
   composer.append(attachmentsRow, promptInput, composerActions);
@@ -588,8 +672,24 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // turnActive diff gating). Refresh (↻) is shared with the diff path.
   const pullAllButton = button("Pull all into editor", "small clone-pull-all");
   const pushButton = button("Push local → VM", "ghost small clone-push");
+  // Patch control: save the clone's captured changeset(s) as .patch files to
+  // carry between machines (receive side: the Drydock: Apply Patch command).
+  const exportPatchButton = button("Export patch…", "ghost small clone-export-patch");
+  exportPatchButton.title = "Save this clone's changeset as a .patch file (apply elsewhere with Drydock: Apply Patch to Folder)";
+  exportPatchButton.addEventListener("click", () => {
+    if (state.selectedSessionId === null) return;
+    exportPatchButton.disabled = true;
+    void request({ type: "clone.exportPatch", sessionId: state.selectedSessionId }).then((response) => {
+      exportPatchButton.disabled = false;
+      if (!response.ok) {
+        logChat(`export patch failed: ${response.error.message}`);
+        return;
+      }
+      if (response.payload.type === "clone.exportPatch") logChat(response.payload.message);
+    });
+  });
   const cloneActions = el("div", "working-set-actions clone-actions hidden");
-  cloneActions.append(pullAllButton, pushButton);
+  cloneActions.append(pullAllButton, pushButton, exportPatchButton);
   workingSetHeader.append(workingSetTitle, el("span", "working-set-spacer"), workingSetActions, cloneActions);
   // Clone-sync caption: one dim line above the Pull/Push action row that
   // explains the vocabulary shift (pull/push vs accept/discard). Shown only for
@@ -698,6 +798,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   });
   onPush("chat.turnStarted", (payload) => {
+    // Track running turns for EVERY session (not just the selected one) so
+    // Tasks-tab rows can show running-a-turn vs idle-live.
+    state.turnActiveSessionIds.add(payload.sessionId);
+    ctx.bridge.work.render();
     if (payload.sessionId === state.selectedSessionId) {
       folder.clearActiveAssistant();
       folder.resetTurn();
@@ -707,6 +811,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   });
   onPush("chat.turnCompleted", (payload) => {
+    state.turnActiveSessionIds.delete(payload.sessionId);
+    ctx.bridge.work.render();
     if (payload.sessionId === state.selectedSessionId) {
       folder.clearActiveAssistant();
       logChat(`turn ${payload.status}`);
@@ -801,9 +907,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // ---------------------------------------------------------------------------
   function currentModelSelection(): ChatModelSelection {
     const model = modelSelect.value.trim();
+    const reasoningEffort = thinkingSelect.value.trim();
     return {
       providerId: normalizeProviderId(providerSelect.value),
-      ...(model === "" ? {} : { model })
+      ...(model === "" ? {} : { model }),
+      ...(reasoningEffort === "" ? {} : { reasoningEffort })
     };
   }
 
@@ -1849,6 +1957,52 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     return [...state.openFolderNames];
   }
 
+  /** Rebuilds the effort picker from the currently selected model's catalog capabilities. */
+  function renderThinkingEfforts(catalogOverride?: AgentModelCatalog): void {
+    const catalogs = state.providerCatalogs.length === 0 ? [fallbackCatalog()] : state.providerCatalogs;
+    const providerId = normalizeProviderId(providerSelect.value);
+    const catalog = catalogOverride
+      ?? catalogs.find((candidate) => normalizeProviderId(candidate.providerId) === providerId);
+    const model = catalog?.models.find((candidate) => candidate.id === modelSelect.value);
+    const advertised = model?.supportedReasoningEfforts;
+    const baseEfforts = advertised === undefined && providerId === "codex"
+      ? LEGACY_CODEX_EFFORT_OPTIONS
+      : (advertised ?? []).map((candidate) => ({
+          id: candidate.reasoningEffort,
+          label: thinkingEffortLabel(candidate.reasoningEffort),
+          description: candidate.description
+        }));
+    // Ultra is an app mode rather than a raw app-server reasoning value. Sol's
+    // picker exposes it alongside efforts; the transport maps it to xhigh and
+    // supplies the proactive-delegation instruction that defines Ultra.
+    const efforts = providerId === "codex" && model?.id.toLowerCase() === "gpt-5.6-sol"
+      ? [...baseEfforts, ...SOL_EXTRA_EFFORT_OPTIONS.filter((extra) => !baseEfforts.some((candidate) => candidate.id === extra.id))]
+      : baseEfforts;
+
+    thinkingSelect.replaceChildren();
+    if (efforts.length === 0) {
+      thinkingSelect.append(option("", "Provider default"));
+      thinkingSelect.value = "";
+      thinkingSelect.dataset["hasEfforts"] = "false";
+      return;
+    }
+
+    for (const effort of efforts) {
+      const node = option(effort.id, effort.label);
+      if (effort.description) node.title = effort.description;
+      thinkingSelect.append(node);
+    }
+    const available = new Set(efforts.map((candidate) => candidate.id));
+    const selected = available.has(state.thinkingEffort)
+      ? state.thinkingEffort
+      : model?.defaultReasoningEffort !== undefined && available.has(model.defaultReasoningEffort)
+        ? model.defaultReasoningEffort
+        : efforts[0]?.id ?? "";
+    thinkingSelect.value = selected;
+    if (selected !== "") state.thinkingEffort = selected;
+    thinkingSelect.dataset["hasEfforts"] = "true";
+  }
+
   function renderProviderControls(preserveSelection = true): void {
     const previousProvider = normalizeProviderId(providerSelect.value || state.providerId);
     const previousModel = preserveSelection ? (modelSelect.value || state.selectedModel) : "";
@@ -1886,7 +2040,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       state.selectedModel = modelSelect.value;
     }
 
-    thinkingSelect.value = state.thinkingEffort;
+    renderThinkingEfforts(catalog);
     renderModelButton();
     renderAuthBanner();
     refreshControls();
@@ -1929,6 +2083,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       state.selectedModel = modelId;
       manualModelSessionId = state.selectedSessionId;
     }
+    renderThinkingEfforts();
     renderModelButton();
     ctx.persist();
     if (providerChanged) void onSelectionChange();
@@ -3661,9 +3816,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     sendButton.disabled = disabled || turnActive;
     cancelButton.classList.toggle("hidden", !turnActive);
     const hasModelOptions = modelSelect.options.length > 0 && modelSelect.options[0]?.value !== "";
+    const hasThinkingEfforts = thinkingSelect.dataset["hasEfforts"] === "true";
     providerSelect.disabled = backendBusy || turnActive || starting;
     modelSelect.disabled = !hasModelOptions || backendBusy || starting;
-    thinkingSelect.disabled = backendBusy || starting;
+    thinkingSelect.disabled = !hasThinkingEfforts || backendBusy || starting;
     modelButton.disabled = backendBusy || turnActive || starting;
   }
 

@@ -2,7 +2,7 @@
   "name": "drydock",
   "displayName": "Drydock",
   "description": "Drydock \u2014 the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
-  "version": "0.7.13",
+  "version": "0.9.0",
   "publisher": "local",
   "private": true,
   "type": "module",
@@ -72,6 +72,14 @@
       {
         "command": "drydock.taskReview.open",
         "title": "Drydock: Open Task Review"
+      },
+      {
+        "command": "drydock.codeReview.open",
+        "title": "Drydock: Open Code Review"
+      },
+      {
+        "command": "drydock.clone.applyPatch",
+        "title": "Drydock: Apply Patch to Folder…"
       },
       {
         "command": "drydock.taskBoard.open",
