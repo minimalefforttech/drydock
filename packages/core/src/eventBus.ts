@@ -35,6 +35,7 @@ export type ProductBusEvent =
   /** A pending agent question was answered or dismissed (any surface). */
   | { readonly kind: "question-resolved"; readonly question: AgentQuestionRecord }
   | { readonly kind: "memory-candidate-added"; readonly candidate: MemoryCandidateRecord }
+  | { readonly kind: "preview-available"; readonly preview: import("@drydock/contracts").PreviewSummary }
   | { readonly kind: "inventory-changed" }
   | { readonly kind: "card-entered-done"; readonly taskId: TaskId; readonly subtaskId: SubtaskId }
   | { readonly kind: "board-changed" }

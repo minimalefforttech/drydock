@@ -12,6 +12,20 @@ import type { AgentQuestionId, SessionId } from "./ids.js";
 
 export type AgentQuestionStatus = "pending" | "answered" | "dismissed";
 
+/** One ordered step of a manual-check question (HITL instructions). */
+export interface AgentQuestionStep {
+  readonly text: string;
+  /** Illustration resolved from the session sandbox at capture time. */
+  readonly imageDataUri?: string;
+}
+
+/** An agent-supplied illustration; dataUri absent when resolution failed. */
+export interface AgentQuestionImage {
+  /** Runtime path the agent referenced (display + honesty when unresolved). */
+  readonly path: string;
+  readonly dataUri?: string;
+}
+
 export interface AgentQuestionRecord {
   readonly questionId: AgentQuestionId;
   readonly sessionId: SessionId;
@@ -23,6 +37,14 @@ export interface AgentQuestionRecord {
   readonly answer?: string;
   readonly createdAt: string;
   readonly resolvedAt?: string;
+  /** ADR 0016: plain question (absent) vs a step-by-step manual check. */
+  readonly kind?: "manual-check";
+  /** Ordered manual-check steps; present only on kind "manual-check". */
+  readonly steps?: readonly AgentQuestionStep[];
+  /** Agent-supplied illustrations (sandbox screenshots/renders), capped + resolved at capture. */
+  readonly images?: readonly AgentQuestionImage[];
+  /** Subtask whose verify gate this check satisfies (answer can stamp Verified). */
+  readonly subtaskId?: string;
 }
 
 export interface AgentQuestionStore {

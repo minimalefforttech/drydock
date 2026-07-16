@@ -5,8 +5,8 @@
  * - "Needs attention" strip: pending access requests as cards (approve/deny).
  * - Tasks: the primary work container. Linked chats render inside task cards;
  *   old unlinked chats appear only in the small "needs task" cleanup section.
- * - Workspace sets (advanced, collapsed): register open folders / create set /
- *   pick the set consumed by the Chat context strip + chat.start.
+ * - Workspaces (advanced, collapsed): register open folders / create a
+ *   workspace / pick the one consumed by the Chat context strip + chat.start.
  *
  * The manual request-access form and the entire docs-review UI are removed.
  *
@@ -23,6 +23,7 @@ import {
   type ChatSessionSummary,
   type ColumnCategory,
   type MemoryCandidateSummary,
+  type PreviewSummary,
   type SubtaskSummary,
   type WorkHistoryEntry,
   type WorkspaceActivateResult,
@@ -48,6 +49,8 @@ import { setHelpTooltip } from "../help.js";
 import { onPush, request } from "../messaging.js";
 import {
   applySessionAttention,
+  type CompactGroupOrder,
+  type TasksViewMode,
   upsertMemoryCandidate,
   upsertSession,
   upsertTask,
@@ -238,6 +241,25 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   const tasksHeadingRow = el("div", "tasks-heading-row");
   const tasksHeading = el("h3");
   tasksHeading.textContent = "Tasks";
+  // View density seg: expanded cards (default, every mutation affordance) vs
+  // the compact recents+tree read. Persisted; active classes set in renderTasks.
+  const viewToggle = el("div", "segmented tasks-view-toggle");
+  const expandedViewSegment = el("button", "segment tasks-view-expanded");
+  expandedViewSegment.textContent = "▤";
+  expandedViewSegment.title = "Expanded view — full task cards with actions";
+  const compactViewSegment = el("button", "segment tasks-view-compact");
+  compactViewSegment.textContent = "≡";
+  compactViewSegment.title = "Compact view — recent chats plus a workspace/task/chat tree";
+  const setViewMode = (mode: TasksViewMode): void => {
+    if (state.tasksViewMode === mode) return;
+    state.tasksViewMode = mode;
+    renderTasks();
+    renderSessions();
+    ctx.persist();
+  };
+  expandedViewSegment.addEventListener("click", () => setViewMode("expanded"));
+  compactViewSegment.addEventListener("click", () => setViewMode("compact"));
+  viewToggle.append(expandedViewSegment, compactViewSegment);
   // Board button: opens the Task Board panel (drydock.taskBoard). The panel
   // command isn't registered yet this phase — this always errors today
   // ("Task Board panel not available yet."); that is expected/correct.
@@ -259,7 +281,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       if (!response.ok) ctx.bridge.chat.logChat(`open agents panel failed: ${response.error.message}`);
     });
   });
-  tasksHeadingRow.append(tasksHeading, openBoardButton, openAgentsButton);
+  tasksHeadingRow.append(tasksHeading, viewToggle, openBoardButton, openAgentsButton);
 
   const taskCreateForm = el("div", "task-create-form");
   const taskCreateRow = el("div", "button-row");
@@ -471,41 +493,82 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   const sessionsList = el("div", "session-cards");
   unassignedSessionsSection.body.append(sessionsList);
 
-  // --- AI project access ------------------------------------------------------
-  // A workspace set is an editable, ordered list of registered folders, each
-  // mounted read-write or read-only. The editor stages members in webview-local
-  // draft state; nothing persists until Save. Editing a saved set loads it back
-  // in here; saving over it calls workspace.updateSet.
-  const workspaceSets = collapsible("AI project access");
+  // --- Workspaces ---------------------------------------------------------------
+  // A workspace is an editable, ordered list of registered folders, each
+  // mounted read-write or read-only (a "workspace set" in the contracts). The
+  // section rests clean: policy line → labeled use-in-new-chats picker → saved
+  // workspace rows → ＋ New workspace. The draft editor stays HIDDEN until
+  // ＋ New workspace or a row's ✎ opens it (members staged webview-locally;
+  // nothing persists until Save). The registered-folder catalog is plumbing,
+  // so it lives in its own collapsed sub-list at the bottom.
+  const workspaceSets = collapsible("Workspaces");
   workspaceSets.details.classList.add("workspace-access-section");
   const securityPolicySummary = el("div", "ws-editor-hint");
 
   interface DraftMember { readonly projectId: string; readOnly: boolean; }
   let editingSetId: string | null = null;
+  let editorOpen = false;
   let draftMembers: DraftMember[] = [];
   let editingProjectId: string | null = null;
 
-  const setNameInput = textInput("Workspace set name");
+  const setNameInput = textInput("Workspace name");
   const editorMembers = el("div", "ws-editor-members");
-  const addProjectSelect = select("ws-add-select", "Add a registered folder to this set");
+  const addProjectSelect = select("ws-add-select", "Add a registered folder to this workspace");
   const registerFoldersButton = button("Register open folders", "small");
   const addRow = el("div", "button-row");
   addRow.append(addProjectSelect, registerFoldersButton);
-  const saveSetButton = button("Save workspace", "small");
+  const saveSetButton = button("Create workspace", "small");
   const cancelEditButton = button("Cancel", "ghost small");
   const editorActions = el("div", "button-row");
   editorActions.append(saveSetButton, cancelEditButton);
   const editorHint = el("div", "ws-editor-hint");
-  const workspaceEditor = el("div", "ws-editor");
+  const workspaceEditor = el("div", "ws-editor hidden");
   workspaceEditor.append(setNameInput, editorMembers, addRow, editorActions, editorHint);
 
-  const workspaceSetSelect = select("set-select", "Workspace set mounted into new chats");
-  const setPickRow = el("div", "button-row");
-  setPickRow.append(workspaceSetSelect);
-  // Explicit set rows (each a touch-history hover anchor); populated in render.
+  const workspaceSetSelect = select("set-select", "Workspace mounted into new chats that don't come from a task");
+  const setPickLabel = el("span", "ws-pick-label");
+  setPickLabel.textContent = "Use in new chats";
+  const setPickRow = el("div", "ws-pick-row");
+  setPickRow.append(setPickLabel, workspaceSetSelect);
+
+  // Explicit workspace rows (each a touch-history hover anchor); populated in render.
   const setsList = el("div", "sets-list");
+  const newWorkspaceButton = button("＋ New workspace", "ghost small ws-new-button");
+  newWorkspaceButton.title = "Group registered folders into a workspace the AI can access";
+  newWorkspaceButton.addEventListener("click", () => {
+    resetDraft();
+    editorOpen = true;
+    renderWorkspaceEditor();
+    setNameInput.focus();
+  });
+
+  // Registered-folder catalog: collapsed plumbing below the workspaces.
+  const registeredFolders = collapsible("Registered folders");
+  registeredFolders.details.classList.add("ws-folders-section");
   const projectsList = el("div", "projects-list");
-  workspaceSets.body.append(securityPolicySummary, workspaceEditor, setPickRow, setsList, projectsList);
+  const registerFoldersHereButton = button("Register open folders", "ghost small");
+  registerFoldersHereButton.title = "Add this window's open folders to the registered list";
+  registerFoldersHereButton.addEventListener("click", () => {
+    void request({ type: "workspace.registerOpenFolders" }).then((response) => {
+      if (!response.ok) {
+        ctx.bridge.chat.logChat(`register folders failed: ${response.error.message}`);
+        return;
+      }
+      void loadWorkspaceState();
+    });
+  });
+  const registerFoldersRow = el("div", "button-row");
+  registerFoldersRow.append(registerFoldersHereButton);
+  registeredFolders.body.append(projectsList, registerFoldersRow);
+
+  workspaceSets.body.append(
+    securityPolicySummary,
+    setPickRow,
+    setsList,
+    newWorkspaceButton,
+    workspaceEditor,
+    registeredFolders.details
+  );
 
   workspaceSetSelect.addEventListener("change", () => {
     state.selectedWorkspaceSetId = workspaceSetSelect.value;
@@ -516,15 +579,19 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     return (state.workspacePolicy?.projects ?? []).find((project) => project.projectId === projectId);
   }
 
+  /** Clears the draft and hides the editor (＋ New workspace re-opens it clean). */
   function resetDraft(): void {
     editingSetId = null;
+    editorOpen = false;
     draftMembers = [];
     setNameInput.value = "";
+    editorHint.textContent = "";
     renderWorkspaceEditor();
   }
 
   function loadSetIntoDraft(set: WorkspaceSetSummary): void {
     editingSetId = set.workspaceSetId;
+    editorOpen = true;
     setNameInput.value = set.name;
     draftMembers = set.members.map((member) => ({ projectId: member.projectId, readOnly: member.readOnly }));
     renderWorkspaceEditor();
@@ -540,7 +607,11 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   // Renders the draft editor: one row per staged member (name, path, RW/RO
   // toggle, remove), the "add registered folder" picker, and Save/Cancel.
+  // Hidden at rest; ＋ New workspace (which it replaces while open) or a row's
+  // ✎ reveals it.
   function renderWorkspaceEditor(): void {
+    workspaceEditor.classList.toggle("hidden", !editorOpen);
+    newWorkspaceButton.classList.toggle("hidden", editorOpen);
     editorMembers.replaceChildren();
     if (draftMembers.length === 0) {
       const empty = el("div", "empty");
@@ -576,9 +647,8 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       addProjectSelect.append(option(project.projectId, project.name));
     }
 
-    saveSetButton.textContent = editingSetId ? "Update workspace" : "Save workspace";
-    cancelEditButton.style.display = editingSetId ? "" : "none";
-    editorHint.textContent = editingSetId ? "Editing a saved set — Save overwrites it." : "";
+    saveSetButton.textContent = editingSetId ? "Update workspace" : "Create workspace";
+    editorHint.textContent = editingSetId ? "Editing a saved workspace — Save overwrites it." : "";
   }
 
   addProjectSelect.addEventListener("change", () => {
@@ -807,7 +877,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   });
 
   // Tasks-home order: needs-attention summary → Tasks (with chats inside) →
-  // orphan-chat cleanup → Memory → Workspace sets (advanced).
+  // orphan-chat cleanup → Memory → Workspaces (advanced).
   root.append(
     attentionSection,
     tasksHeadingRow,
@@ -984,29 +1054,56 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // Rendering
   // ---------------------------------------------------------------------------
   /**
-   * Composes the collapsed attention summary line. Renders only the
-   * non-zero parts: `⚠ 2 requests · 1 failed — review`, `⚠ 2 requests — review`,
-   * `⚠ 1 failed — review`. N = pending access requests, M = failed sessions.
+   * Composes the collapsed inbox summary line from only the non-zero parts:
+   * `⚠ 2 requests · 2 questions · 1 failed · 1 to verify · 1 parked · 1 to land — review`.
    */
-  function attentionSummaryText(requests: number, questions: number, failed: number): string {
+  function attentionSummaryText(counts: {
+    requests: number; questions: number; failed: number;
+    verify: number; parked: number; land: number; previews: number;
+  }): string {
     const parts: string[] = [];
-    if (requests > 0) parts.push(`${String(requests)} request${requests === 1 ? "" : "s"}`);
-    if (questions > 0) parts.push(`${String(questions)} question${questions === 1 ? "" : "s"}`);
-    if (failed > 0) parts.push(`${String(failed)} failed`);
+    if (counts.requests > 0) parts.push(`${String(counts.requests)} request${counts.requests === 1 ? "" : "s"}`);
+    if (counts.questions > 0) parts.push(`${String(counts.questions)} question${counts.questions === 1 ? "" : "s"}`);
+    if (counts.failed > 0) parts.push(`${String(counts.failed)} failed`);
+    if (counts.verify > 0) parts.push(`${String(counts.verify)} to verify`);
+    if (counts.parked > 0) parts.push(`${String(counts.parked)} parked`);
+    if (counts.land > 0) parts.push(`${String(counts.land)} to land`);
+    if (counts.previews > 0) parts.push(`${String(counts.previews)} preview${counts.previews === 1 ? "" : "s"}`);
     return `⚠ ${parts.join(" · ")} — review`;
+  }
+
+  /** One subtask-derived inbox entry with its owning task. */
+  interface InboxSubtaskItem {
+    readonly task: WorkTaskSummary;
+    readonly subtask: SubtaskSummary;
   }
 
   const attentionCursor = { index: 0 };
   function renderAttention(): void {
     const pending = (state.workspacePolicy?.accessRequests ?? []).filter((a) => a.status === "pending");
     const pendingQuestions = state.questions.filter((q) => q.status === "pending");
-    // M = failed SESSIONS (status flip), not attention reasons. Failed sessions
-    // are shown in their owning task row (or in the orphan cleanup drawer), not
-    // duplicated inside the expansion.
-    const failedCount = state.sessions.filter((s) => s.status === "failed").length;
+    // Failed SESSIONS (status flip), listed as jump rows in the inbox below.
+    const failedSessions = state.sessions.filter((s) => s.status === "failed");
+    // Subtask-derived inbox categories — the lead's "what needs me" beyond
+    // requests/questions: HITL verify gates, parked automation, unlanded
+    // changesets. All derived from state.tasks; no new fetches.
+    const verifyItems: InboxSubtaskItem[] = [];
+    const parkedItems: InboxSubtaskItem[] = [];
+    const landItems: InboxSubtaskItem[] = [];
+    for (const task of state.tasks) {
+      for (const subtask of task.subtasks) {
+        if (subtask.verifyUnmet === true) verifyItems.push({ task, subtask });
+        if (subtask.isParked === true) parkedItems.push({ task, subtask });
+        if (subtask.hasUnlandedChangeset === true) landItems.push({ task, subtask });
+      }
+    }
 
+    // Live sandbox previews (ADR 0017) — non-blocking "take a look" items.
+    const livePreviews = state.previews.filter((preview) => preview.status === "up");
     // Hide the whole section when nothing needs acting on.
-    if (pending.length === 0 && pendingQuestions.length === 0 && failedCount === 0) {
+    const total = pending.length + pendingQuestions.length + failedSessions.length
+      + verifyItems.length + parkedItems.length + landItems.length + livePreviews.length;
+    if (total === 0) {
       attentionSection.classList.remove("has-attention");
       attentionExpanded = false;
       attentionList.classList.add("hidden");
@@ -1015,7 +1112,15 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       return;
     }
     attentionSection.classList.add("has-attention");
-    attentionSummary.textContent = attentionSummaryText(pending.length, pendingQuestions.length, failedCount);
+    attentionSummary.textContent = attentionSummaryText({
+      requests: pending.length,
+      questions: pendingQuestions.length,
+      failed: failedSessions.length,
+      verify: verifyItems.length,
+      parked: parkedItems.length,
+      land: landItems.length,
+      previews: livePreviews.length
+    });
 
     // The expansion holds the SAME stacked card the chat surface uses — one
     // item at a time with the ‹ i/N › pager, across all sessions, oldest
@@ -1028,36 +1133,191 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       const bAt = b.kind === "access" ? b.access.requestedAt : b.question.createdAt;
       return aAt < bAt ? -1 : 1;
     });
-    renderAttentionStack(attentionList, items, attentionCursor, {
-      onResolved: () => {
-        renderAttention();
-        ctx.bridge.chat.render();
-        ctx.persist();
-      },
-      onError: (message) => {
-        ctx.bridge.chat.logChat(message);
-        renderAttention();
-      },
-      access: {
-        onResolved: (approve) => {
-          ctx.bridge.chat.logChat(approve
-            ? "access approved — backend restarts with the new mount; the agent continues automatically"
-            : "access denied — the agent is told to continue without it");
-          void loadWorkspaceState();
+    if (items.length > 0) {
+      renderAttentionStack(attentionList, items, attentionCursor, {
+        onResolved: () => {
+          renderAttention();
+          ctx.bridge.chat.render();
+          ctx.persist();
         },
         onError: (message) => {
-          ctx.bridge.chat.logChat(`resolve access failed: ${message}`);
+          ctx.bridge.chat.logChat(message);
           renderAttention();
+        },
+        access: {
+          onResolved: (approve) => {
+            ctx.bridge.chat.logChat(approve
+              ? "access approved — backend restarts with the new mount; the agent continues automatically"
+              : "access denied — the agent is told to continue without it");
+            void loadWorkspaceState();
+          },
+          onError: (message) => {
+            ctx.bridge.chat.logChat(`resolve access failed: ${message}`);
+            renderAttention();
+          }
         }
+      });
+    } else {
+      attentionList.replaceChildren();
+    }
+    const inbox = buildInboxList(failedSessions, verifyItems, parkedItems, landItems, livePreviews);
+    if (inbox !== null) attentionList.append(inbox);
+  }
+
+  /**
+   * The inbox rows below the paged question/access stack: one actionable line
+   * per failed chat, unmet verify gate, parked run, and unlanded changeset.
+   * Every row jumps somewhere useful; verify and parked also act inline.
+   */
+  function buildInboxList(
+    failedSessions: readonly ChatSessionSummary[],
+    verifyItems: readonly InboxSubtaskItem[],
+    parkedItems: readonly InboxSubtaskItem[],
+    landItems: readonly InboxSubtaskItem[],
+    livePreviews: readonly PreviewSummary[]
+  ): HTMLElement | null {
+    if (failedSessions.length + verifyItems.length + parkedItems.length + landItems.length + livePreviews.length === 0) return null;
+    const list = el("div", "inbox-list");
+
+    const row = (
+      cls: string,
+      glyph: string,
+      glyphTitle: string,
+      title: string,
+      meta: string,
+      onOpen: () => void,
+      action?: HTMLButtonElement
+    ): HTMLElement => {
+      const node = el("div", `inbox-row ${cls}`);
+      node.setAttribute("role", "button");
+      node.tabIndex = 0;
+      const glyphEl = el("span", "inbox-glyph");
+      glyphEl.textContent = glyph;
+      glyphEl.title = glyphTitle;
+      const titleEl = el("span", "inbox-title");
+      titleEl.textContent = title;
+      titleEl.title = title;
+      const metaEl = el("span", "inbox-meta");
+      metaEl.textContent = meta;
+      node.append(glyphEl, titleEl, metaEl);
+      if (action !== undefined) {
+        action.addEventListener("click", (event) => event.stopPropagation());
+        node.append(action);
       }
-    });
+      node.addEventListener("click", onOpen);
+      node.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(); }
+      });
+      return node;
+    };
+    const openAgentsPanel = (): void => {
+      void request({ type: "agents.open" }).then((response) => {
+        if (!response.ok) ctx.bridge.chat.logChat(`open agents failed: ${response.error.message}`);
+      });
+    };
+    const openBoardPanel = (): void => {
+      void request({ type: "taskBoard.open" }).then((response) => {
+        if (!response.ok) ctx.bridge.chat.logChat(`open task board failed: ${response.error.message}`);
+      });
+    };
+
+    for (const session of failedSessions) {
+      list.append(row(
+        "inbox-failed",
+        "✗",
+        "This chat failed — open it to read the error and resume",
+        session.title,
+        `failed · ${relativeTime(session.updatedAt)}`,
+        () => {
+          ctx.bridge.chat.selectSession(session.sessionId);
+          ctx.bridge.switchTab("chat");
+        }
+      ));
+    }
+    for (const item of verifyItems) {
+      const verified = button("Verified ✓", "ghost small inbox-verify-button");
+      verified.title = "Record that you ran the human check for this subtask";
+      verified.addEventListener("click", () => {
+        verified.disabled = true;
+        updateSubtask(item.subtask.subtaskId, { verified: true });
+      });
+      list.append(row(
+        "inbox-verify",
+        "☑",
+        "Human verification required before this counts as done",
+        item.subtask.title,
+        `verify · ${item.task.title}`,
+        openBoardPanel,
+        verified
+      ));
+    }
+    for (const item of parkedItems) {
+      const retry = button("↻ Retry", "ghost small inbox-retry-button");
+      retry.title = "Automation failed twice and parked this run; retry it manually";
+      retry.addEventListener("click", () => {
+        retry.disabled = true;
+        void request({ type: "subtask.start", subtaskId: item.subtask.subtaskId }).then((response) => {
+          if (!response.ok) {
+            ctx.bridge.chat.logChat(`retry failed: ${response.error.message}`);
+            retry.disabled = false;
+            return;
+          }
+          void loadTasks();
+        });
+      });
+      list.append(row(
+        "inbox-parked",
+        "⏸",
+        "Parked — automation gave up after two failures",
+        item.subtask.title,
+        `parked · ${item.task.title}`,
+        openBoardPanel,
+        retry
+      ));
+    }
+    for (const item of landItems) {
+      list.append(row(
+        "inbox-land",
+        "⎘",
+        "A captured changeset has not been pulled into your working tree",
+        item.subtask.title,
+        `to land · ${item.task.title}`,
+        openAgentsPanel
+      ));
+    }
+    for (const preview of livePreviews) {
+      const session = state.sessions.find((candidate) => candidate.sessionId === preview.sessionId);
+      const openPreview = (): void => {
+        void request({ type: "preview.open", previewId: preview.previewId }).then((response) => {
+          if (!response.ok) ctx.bridge.chat.logChat(`open preview failed: ${response.error.message}`);
+        });
+      };
+      list.append(row(
+        "inbox-preview",
+        "▶",
+        "The agent is serving a live UI preview from its sandbox — take a look",
+        preview.title,
+        `preview · ${session?.title ?? preview.sessionId.slice(0, 8)}`,
+        openPreview
+      ));
+    }
+    return list;
   }
 
   // ---------------------------------------------------------------------------
   // Tasks
   // ---------------------------------------------------------------------------
   function renderTasks(): void {
+    // Subtask-derived inbox categories (verify/parked/land) live on tasks, so
+    // any task refresh re-derives the inbox too.
+    renderAttention();
+    expandedViewSegment.classList.toggle("active", state.tasksViewMode === "expanded");
+    compactViewSegment.classList.toggle("active", state.tasksViewMode === "compact");
     tasksList.replaceChildren();
+    if (state.tasksViewMode === "compact") {
+      renderCompactView();
+      return;
+    }
     if (state.tasks.length === 0) {
       const empty = el("div", "empty");
       empty.textContent = unassignedSessions().length > 0
@@ -1340,6 +1600,308 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   }
 
   // ---------------------------------------------------------------------------
+  // Compact view (recents + workspace/task/subtask/chat tree)
+  //
+  // The low-ceremony read of the same data, for people who live in chats rather
+  // than task cards: a RECENT strip of the latest chats, a separator, then a
+  // collapsible tree grouped task-first or workspace-first (persisted seg).
+  // Rows are one line each — status dot / category glyph, title, quiet
+  // right-aligned metadata — and clicking a chat row opens it, exactly like the
+  // expanded rows. All mutation affordances (rename, link, column moves,
+  // actions) stay in the expanded view; the compact view is for orientation.
+  // ---------------------------------------------------------------------------
+
+  /** Collapse state per branch key ("ws:<id>" | "task:<id>" | "orphans"), webview-session-local. */
+  const compactCollapsed = new Set<string>();
+  const RECENT_CHATS_LIMIT = 4;
+
+  function renderCompactView(): void {
+    const view = el("div", "compact-view");
+
+    // --- Recents: the latest chats across every task (state.sessions is
+    // already newest-first by updatedAt), each naming its owning task.
+    const recents = state.sessions.slice(0, RECENT_CHATS_LIMIT);
+    if (recents.length > 0) {
+      const label = el("div", "compact-section-label");
+      label.textContent = "Recent";
+      view.append(label);
+      for (const session of recents) view.append(compactChatRow(session, 0, true));
+      const separator = el("div", "compact-separator");
+      separator.setAttribute("role", "separator");
+      view.append(separator);
+    }
+
+    // --- Grouping seg: task-first (default) vs workspace-first.
+    const groupRow = el("div", "compact-group-row");
+    const groupSeg = el("div", "segmented compact-group-seg");
+    const byTask = el("button", "segment compact-group-task");
+    byTask.textContent = "By task";
+    byTask.title = "Group the tree by task; linked workspaces appear as row metadata";
+    byTask.classList.toggle("active", state.compactGroupOrder === "task");
+    const byWorkspace = el("button", "segment compact-group-workspace");
+    byWorkspace.textContent = "By workspace";
+    byWorkspace.title = "Group the tree by workspace, then task";
+    byWorkspace.classList.toggle("active", state.compactGroupOrder === "workspace");
+    const setGroupOrder = (order: CompactGroupOrder): void => {
+      if (state.compactGroupOrder === order) return;
+      state.compactGroupOrder = order;
+      renderTasks();
+      ctx.persist();
+    };
+    byTask.addEventListener("click", () => setGroupOrder("task"));
+    byWorkspace.addEventListener("click", () => setGroupOrder("workspace"));
+    groupSeg.append(byTask, byWorkspace);
+    groupRow.append(groupSeg);
+    view.append(groupRow);
+
+    // --- Tree.
+    const tree = el("div", "compact-tree");
+    if (state.tasks.length === 0) {
+      const empty = el("div", "empty");
+      empty.textContent = "No tasks yet. Add one to track work across chats and workspaces.";
+      tree.append(empty);
+    } else if (state.compactGroupOrder === "workspace") {
+      renderCompactWorkspaceFirst(tree);
+    } else {
+      for (const task of state.tasks) tree.append(...compactTaskNode(task, 0, true));
+    }
+
+    // --- Unassigned chats: orphans join the tree here (the cleanup drawer
+    // below the list hides while the compact view owns them).
+    const orphans = unassignedSessions();
+    if (orphans.length > 0) {
+      const key = "orphans";
+      tree.append(compactBranchRow(key, 0, (row) => {
+        const title = el("span", "compact-row-title compact-dim-title");
+        title.textContent = `Unassigned chats (${String(orphans.length)})`;
+        row.append(title);
+      }));
+      if (!compactCollapsed.has(key)) {
+        for (const session of orphans) tree.append(compactChatRow(session, 1, false));
+      }
+    }
+    view.append(tree);
+    tasksList.append(view);
+  }
+
+  /**
+   * Workspace-first grouping: one branch per workspace set that links ≥1 task
+   * (a task linked to several sets appears under each), then a trailing
+   * "No workspace" branch for tasks with no resolvable set.
+   */
+  function renderCompactWorkspaceFirst(tree: HTMLElement): void {
+    const grouped = new Set<string>();
+    for (const set of state.workspacePolicy?.workspaceSets ?? []) {
+      const tasks = state.tasks.filter((task) => task.linkedWorkspaceSetIds.includes(set.workspaceSetId));
+      if (tasks.length === 0) continue;
+      for (const task of tasks) grouped.add(task.taskId);
+      const key = `ws:${set.workspaceSetId}`;
+      tree.append(compactBranchRow(key, 0, (row) => {
+        const title = el("span", "compact-row-title");
+        title.textContent = `📁 ${set.name}`;
+        const meta = el("span", "compact-row-meta");
+        meta.textContent = `${String(tasks.length)} task${tasks.length === 1 ? "" : "s"}`;
+        row.append(title, meta);
+      }));
+      if (compactCollapsed.has(key)) continue;
+      for (const task of tasks) tree.append(...compactTaskNode(task, 1, false));
+    }
+    const setless = state.tasks.filter((task) => !grouped.has(task.taskId));
+    if (setless.length === 0) return;
+    const key = "ws:none";
+    tree.append(compactBranchRow(key, 0, (row) => {
+      const title = el("span", "compact-row-title compact-dim-title");
+      title.textContent = "No workspace";
+      const meta = el("span", "compact-row-meta");
+      meta.textContent = `${String(setless.length)} task${setless.length === 1 ? "" : "s"}`;
+      row.append(title, meta);
+    }));
+    if (compactCollapsed.has(key)) return;
+    for (const task of setless) tree.append(...compactTaskNode(task, 1, false));
+  }
+
+  /** One collapsible branch row: ▸/▾ caret + caller-built content; click/Enter toggles. */
+  function compactBranchRow(key: string, depth: number, build: (row: HTMLElement) => void): HTMLElement {
+    const row = el("div", `compact-row compact-branch-row compact-depth-${String(depth)}`);
+    row.setAttribute("role", "button");
+    row.tabIndex = 0;
+    const collapsed = compactCollapsed.has(key);
+    row.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    const caret = el("span", "compact-caret");
+    caret.textContent = collapsed ? "▸" : "▾";
+    row.append(caret);
+    build(row);
+    const toggle = (): void => {
+      if (compactCollapsed.has(key)) compactCollapsed.delete(key);
+      else compactCollapsed.add(key);
+      renderTasks();
+    };
+    row.addEventListener("click", toggle);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); }
+    });
+    return row;
+  }
+
+  /**
+   * One task branch: collapsible row (live dot while a linked chat runs, bold
+   * title, tinted column pill, quiet meta) plus — expanded — its subtask and
+   * chat leaves one level deeper. `showWorkspace` names linked sets in the meta
+   * (task-first only; workspace-first already shows the set as the parent).
+   */
+  function compactTaskNode(task: WorkTaskSummary, depth: number, showWorkspace: boolean): HTMLElement[] {
+    const key = `task:${task.taskId}`;
+    const hasLiveChat = task.linkedSessionIds.some((sessionId) => {
+      const session = state.sessions.find((candidate) => candidate.sessionId === sessionId);
+      return session !== undefined && (session.status === "active" || session.status === "starting");
+    });
+    const row = compactBranchRow(key, depth, (r) => {
+      if (hasLiveChat) r.append(statusDot("state-live", "a linked chat is running"));
+      const title = el("span", "compact-row-title");
+      title.textContent = task.title;
+      title.title = task.title;
+      r.append(title);
+      const column = findColumn(task.columnId);
+      if (column !== undefined) {
+        const pill = el("span", `compact-status-pill ${CATEGORY_TINT_CLASS[column.category]}`);
+        pill.textContent = column.name;
+        r.append(pill);
+      }
+      const metaParts: string[] = [];
+      if (showWorkspace && task.linkedWorkspaceSetIds.length > 0) {
+        const names = task.linkedWorkspaceSetIds
+          .map((setId) => state.workspacePolicy?.workspaceSets.find((s) => s.workspaceSetId === setId)?.name)
+          .filter((name): name is string => name !== undefined);
+        if (names.length > 0) metaParts.push(`📁 ${names.join(", ")}`);
+      }
+      if (task.subtasks.length > 0) {
+        const done = task.subtasks.filter((subtask) => isDoneColumn(subtask.columnId)).length;
+        metaParts.push(`${String(done)}/${String(task.subtasks.length)} done`);
+      }
+      if (task.lastWorkedAt !== undefined) metaParts.push(relativeTime(task.lastWorkedAt));
+      if (metaParts.length > 0) {
+        const meta = el("span", "compact-row-meta");
+        meta.textContent = metaParts.join(" · ");
+        r.append(meta);
+      }
+    });
+    if (activeTaskSession(task) !== undefined) {
+      row.classList.add("compact-active");
+      row.setAttribute("aria-current", "true");
+    }
+    const nodes: HTMLElement[] = [row];
+    if (compactCollapsed.has(key)) return nodes;
+    const ordered = [...task.subtasks].sort((a, b) => a.sortOrder - b.sortOrder);
+    for (const subtask of ordered) nodes.push(compactSubtaskRow(subtask, depth + 1));
+    for (const sessionId of task.linkedSessionIds) {
+      const session = state.sessions.find((candidate) => candidate.sessionId === sessionId);
+      if (session !== undefined) nodes.push(compactChatRow(session, depth + 1, false));
+    }
+    return nodes;
+  }
+
+  /**
+   * One subtask leaf: category glyph (✓ done / ◐ in progress / ○ otherwise),
+   * 🔒 while blocked, quiet tinted column word. Read-only here — clicking
+   * opens the Task Board, where subtasks are actually worked.
+   */
+  function compactSubtaskRow(subtask: SubtaskSummary, depth: number): HTMLElement {
+    const row = el("div", `compact-row compact-subtask-row compact-depth-${String(depth)}`);
+    row.setAttribute("role", "button");
+    row.tabIndex = 0;
+    row.title = "Open the Task Board";
+    const column = findColumn(subtask.columnId);
+    const category: ColumnCategory = column?.category ?? "backlog";
+    const glyph = el("span", `compact-subtask-glyph compact-cat-${category}`);
+    glyph.textContent = category === "done" ? "✓" : category === "in-progress" ? "◐" : "○";
+    row.append(glyph);
+    const title = el("span", "compact-row-title");
+    title.textContent = subtask.title;
+    title.title = subtask.title;
+    row.append(title);
+    if (subtask.isBlocked) {
+      const lock = el("span", "compact-subtask-lock");
+      lock.textContent = "🔒";
+      lock.title = "Blocked — an upstream dependency has not finished yet";
+      row.append(lock);
+    }
+    if (column !== undefined) {
+      const meta = el("span", `compact-row-meta compact-cat-${category}`);
+      meta.textContent = column.name;
+      row.append(meta);
+    }
+    const open = (): void => {
+      void request({ type: "taskBoard.open" }).then((response) => {
+        if (!response.ok) ctx.bridge.chat.logChat(`open task board failed: ${response.error.message}`);
+      });
+    };
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
+    });
+    return row;
+  }
+
+  /**
+   * One chat leaf: status dot (the loud/ready halo vocabulary intact), title,
+   * the shared title-line chips, then quiet meta — owning task (recents only)
+   * · state · time. Clicking opens the chat, exactly like the expanded rows.
+   */
+  function compactChatRow(session: ChatSessionSummary, depth: number, showTask: boolean): HTMLElement {
+    const row = el("div", `compact-row compact-chat-row compact-depth-${String(depth)}`);
+    row.setAttribute("role", "button");
+    row.tabIndex = 0;
+    row.title = "Open this chat";
+    const reasons = state.attention[session.sessionId] ?? [];
+    const chips = sessionChips(session, reasons, state.agentActivity[session.sessionId]);
+    const stateChip = chips.find((k) => k.cls === "chip-failed" || k.cls === "chip-approval" || k.cls === "chip-ready");
+    const elsewhere = session.runningElsewhere === true;
+    const dot = statusDot(sessionDotClass(session), elsewhere ? "running in another window" : session.status);
+    if (isSessionLoud(session, reasons) && stateChip) {
+      dot.classList.add("attn-halo", stateChip.cls === "chip-failed" ? "attn-loud-failed" : "attn-loud-approval");
+    } else if (isSessionReady(session, reasons)) {
+      dot.classList.add("attn-halo", "attn-ready");
+    }
+    row.append(dot);
+    const title = el("span", "compact-row-title");
+    title.textContent = session.title;
+    title.title = session.title;
+    row.append(title);
+    for (const k of chips) {
+      const chipEl = el("span", `session-chip ${k.cls}`);
+      chipEl.textContent = k.text;
+      if (k.cls === "chip-clone") chipEl.title = "Clone-mode session — changes sync into your editor";
+      row.append(chipEl);
+    }
+    // Recents rows lead with the owning task and drop the state word (the dot
+    // + chips already carry state); tree rows show state · time.
+    const metaParts: string[] = [];
+    if (showTask) {
+      const owner = state.tasks.find((task) => task.linkedSessionIds.includes(session.sessionId));
+      if (owner !== undefined) metaParts.push(owner.title);
+    } else {
+      metaParts.push(sessionStateLabel(session));
+    }
+    metaParts.push(relativeTime(session.updatedAt));
+    const meta = el("span", `compact-row-meta${elsewhere ? " meta-elsewhere" : ""}`);
+    meta.textContent = metaParts.join(" · ");
+    row.append(meta);
+    if (session.sessionId === state.selectedSessionId) {
+      row.classList.add("compact-active");
+      row.setAttribute("aria-current", "true");
+    }
+    const open = (): void => {
+      ctx.bridge.chat.selectSession(session.sessionId);
+      ctx.bridge.switchTab("chat");
+    };
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
+    });
+    return row;
+  }
+
+  // ---------------------------------------------------------------------------
   // Subtasks (task card checklist)
   // ---------------------------------------------------------------------------
 
@@ -1565,7 +2127,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   /** Sends `subtask.update` for the changed field(s); re-renders from the refreshed parent task. */
   function updateSubtask(
     subtaskId: string,
-    patch: { title?: string; description?: string; prompt?: string; autoStart?: boolean; columnId?: string }
+    patch: { title?: string; description?: string; prompt?: string; autoStart?: boolean; columnId?: string; verified?: boolean }
   ): void {
     void request({ type: "subtask.update", subtaskId, ...patch }).then((response) => {
       if (!response.ok) {
@@ -1934,7 +2496,11 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   function renderSessions(): void {
     sessionsList.replaceChildren();
     const unassigned = unassignedSessions();
-    unassignedSessionsSection.details.classList.toggle("hidden", unassigned.length === 0);
+    // The compact view lists orphans inside its tree, so the drawer yields.
+    unassignedSessionsSection.details.classList.toggle(
+      "hidden",
+      unassigned.length === 0 || state.tasksViewMode === "compact"
+    );
     unassignedSessionsSection.summaryLabel.textContent = `Orphaned Chats (${String(unassigned.length)})`;
     if (unassigned.length === 0) {
       return;
@@ -1959,11 +2525,14 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     return state.sessions.filter((session) => !linked.has(session.sessionId));
   }
 
-  /** Dot state class: hollow ring for elsewhere; green pulse only for the selected session's in-flight turn. */
+  /** Dot state class: hollow ring for elsewhere; green pulse for ANY session's in-flight turn. */
   function sessionDotClass(session: ChatSessionSummary): string {
     if (session.runningElsewhere === true) return "state-elsewhere";
     const isSelected = session.sessionId === state.selectedSessionId;
-    const turnActive = isSelected && state.chatMessages.some((m) => m.streaming === true);
+    // Any row pulses while its turn runs (chat.turnStarted/Completed pushes);
+    // the selected row also keys off live streaming for pre-push coverage.
+    const turnActive = state.turnActiveSessionIds.has(session.sessionId)
+      || (isSelected && state.chatMessages.some((m) => m.streaming === true));
     if (turnActive) return "state-running";
     if (session.status === "active" || session.status === "starting") return "state-live";
     if (session.status === "failed") return "state-failed";
@@ -2277,7 +2846,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         : "These settings restrict what AI can access; they do not restrict your editor.";
     const previousSet = workspaceSetSelect.value || state.selectedWorkspaceSetId;
     workspaceSetSelect.replaceChildren();
-    workspaceSetSelect.append(option("", "— no workspace set —"));
+    workspaceSetSelect.append(option("", "— none —"));
     for (const set of state.workspacePolicy?.workspaceSets ?? []) {
       workspaceSetSelect.append(option(set.workspaceSetId, `${set.name} (${set.projectNames.join(", ")})`));
     }
@@ -2286,9 +2855,14 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     }
     state.selectedWorkspaceSetId = workspaceSetSelect.value;
 
-    // One row per set, each a touch-history hover anchor (work item 3), with
-    // Edit (load into the draft editor) and a two-click Delete.
+    // One row per workspace, each a touch-history hover anchor (work item 3),
+    // with Edit (load into the draft editor) and a two-click Delete.
     setsList.replaceChildren();
+    if ((state.workspacePolicy?.workspaceSets ?? []).length === 0) {
+      const empty = el("div", "empty");
+      empty.textContent = "No workspaces yet. Create one to choose which folders the AI can access.";
+      setsList.append(empty);
+    }
     for (const set of state.workspacePolicy?.workspaceSets ?? []) {
       const row = el("div", "set-row");
       const name = el("span", "set-row-name");
@@ -2317,9 +2891,10 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
     projectsList.replaceChildren();
     const projects = state.workspacePolicy?.projects ?? [];
+    registeredFolders.summaryLabel.textContent = `Registered folders (${String(projects.length)})`;
     if (projects.length === 0) {
       const empty = el("div", "empty");
-      empty.textContent = "No projects registered. Register the open folder(s) to mount real code.";
+      empty.textContent = "No folders registered yet. Register this window's open folders to mount real code.";
       projectsList.append(empty);
     }
     for (const project of projects) {

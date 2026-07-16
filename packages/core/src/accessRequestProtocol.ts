@@ -51,6 +51,51 @@ export function extractMemoryCandidates(text: string): string[] {
   return candidates;
 }
 
+export const PREVIEW_FENCE = "preview";
+/** Upper bound on preview announcements honored per agent text. */
+export const MAX_PREVIEWS_PER_TEXT = 2;
+const MAX_PREVIEW_TITLE_LENGTH = 100;
+const MAX_PREVIEW_PATH_LENGTH = 200;
+const PREVIEW_FENCE_PATTERN = /```preview[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;
+
+/** One agent-announced in-sandbox HTTP preview server (ADR 0017). */
+export interface ParsedPreviewAnnouncement {
+  readonly port: number;
+  readonly path: string;
+  readonly title: string;
+}
+
+/**
+ * Extracts well-formed preview announcements from final text. Strict like the
+ * other fences: malformed or out-of-bounds blocks are dropped, never guessed.
+ */
+export function extractPreviewAnnouncements(text: string): ParsedPreviewAnnouncement[] {
+  const previews: ParsedPreviewAnnouncement[] = [];
+  for (const match of text.matchAll(PREVIEW_FENCE_PATTERN)) {
+    if (previews.length >= MAX_PREVIEWS_PER_TEXT) break;
+    let value: unknown;
+    try {
+      value = JSON.parse(match[1] ?? "");
+    } catch {
+      continue;
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    const record = value as Record<string, unknown>;
+    const port = record["port"];
+    if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) continue;
+    const rawPath = record["path"];
+    const path = typeof rawPath === "string" && rawPath.startsWith("/") && rawPath.length <= MAX_PREVIEW_PATH_LENGTH
+      ? rawPath
+      : "/";
+    const rawTitle = record["title"];
+    const title = typeof rawTitle === "string" && rawTitle.trim().length > 0
+      ? rawTitle.trim().slice(0, MAX_PREVIEW_TITLE_LENGTH)
+      : "Preview";
+    previews.push({ port, path, title });
+  }
+  return previews;
+}
+
 export const QUESTION_FENCE = "question";
 /** Upper bound on questions honored per agent text, to bound prompt spam. */
 export const MAX_QUESTIONS_PER_TEXT = 4;
@@ -59,10 +104,38 @@ const MAX_QUESTION_OPTIONS = 6;
 const MAX_QUESTION_OPTION_LENGTH = 200;
 const QUESTION_FENCE_PATTERN = /```question[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;
 
+const MAX_QUESTION_STEPS = 10;
+const MAX_QUESTION_STEP_LENGTH = 300;
+const MAX_QUESTION_IMAGES = 3;
+const MAX_QUESTION_IMAGE_PATH_LENGTH = 300;
+
+/** One ordered step of a manual-check question, optionally illustrated. */
+export interface ParsedQuestionStep {
+  readonly text: string;
+  /** Absolute runtime path (/workspace/…) the app layer resolves to bytes. */
+  readonly imagePath?: string;
+}
+
 export interface ParsedAgentQuestion {
   readonly question: string;
   /** Agent-suggested answers, first = the agent's recommendation. May be empty. */
   readonly options: readonly string[];
+  /** ADR 0016: plain question (absent) vs a step-by-step manual check. */
+  readonly kind?: "manual-check";
+  readonly steps?: readonly ParsedQuestionStep[];
+  /** Illustration runtime paths (/workspace/…), resolved app-side. */
+  readonly imagePaths?: readonly string[];
+  /** Subtask whose verify gate this check satisfies. */
+  readonly subtaskId?: string;
+}
+
+/** Accepts only absolute in-sandbox image paths — never host paths. */
+function isRuntimeImagePath(candidate: unknown): candidate is string {
+  return typeof candidate === "string"
+    && candidate.length <= MAX_QUESTION_IMAGE_PATH_LENGTH
+    && candidate.startsWith("/")
+    && !candidate.includes("..")
+    && /\.(png|jpe?g|gif|webp|bmp)$/i.test(candidate);
 }
 
 /**
@@ -108,7 +181,47 @@ function parseQuestionBody(body: string): ParsedAgentQuestion | null {
     if (options.some((existing) => existing.toLowerCase() === option.toLowerCase())) continue;
     options.push(option);
   }
-  return { question: trimmed, options };
+
+  // ADR 0016 extensions — every field optional, bounded, dropped when malformed
+  // (the base question still stands; extras never make a block unparseable).
+  const kind = record["kind"] === "manual-check" ? ("manual-check" as const) : undefined;
+  const steps: ParsedQuestionStep[] = [];
+  const rawSteps = record["steps"];
+  if (Array.isArray(rawSteps)) {
+    for (const candidate of rawSteps) {
+      if (steps.length >= MAX_QUESTION_STEPS) break;
+      if (typeof candidate === "string") {
+        const text = candidate.trim();
+        if (text.length > 0 && text.length <= MAX_QUESTION_STEP_LENGTH) steps.push({ text });
+      } else if (typeof candidate === "object" && candidate !== null) {
+        const step = candidate as Record<string, unknown>;
+        const text = typeof step["text"] === "string" ? step["text"].trim() : "";
+        if (text.length === 0 || text.length > MAX_QUESTION_STEP_LENGTH) continue;
+        const imagePath = step["image"];
+        steps.push({ text, ...(isRuntimeImagePath(imagePath) ? { imagePath } : {}) });
+      }
+    }
+  }
+  const imagePaths: string[] = [];
+  const rawImages = record["images"];
+  if (Array.isArray(rawImages)) {
+    for (const candidate of rawImages) {
+      if (imagePaths.length >= MAX_QUESTION_IMAGES) break;
+      if (isRuntimeImagePath(candidate)) imagePaths.push(candidate);
+    }
+  }
+  const subtaskId = typeof record["subtaskId"] === "string" && record["subtaskId"].length <= 64
+    ? record["subtaskId"]
+    : undefined;
+
+  return {
+    question: trimmed,
+    options,
+    ...(kind === undefined ? {} : { kind }),
+    ...(steps.length === 0 ? {} : { steps }),
+    ...(imagePaths.length === 0 ? {} : { imagePaths }),
+    ...(subtaskId === undefined ? {} : { subtaskId })
+  };
 }
 
 /**
@@ -245,7 +358,19 @@ export function buildSessionBriefing(input: SessionBriefingInput): string {
     `ask by emitting a fenced block with the info string \`${QUESTION_FENCE}\` containing one JSON object: ` +
     '{"question": "<one clear question>", "options": ["<your recommended answer first>", "<alternative>", ...]}. ' +
     "Options are optional but preferred. Finish everything you can without the answer before ending your turn; " +
-    "the developer's answer arrives as a follow-up message."
+    "the developer's answer arrives as a follow-up message. " +
+    'Optional fields: "images": ["/workspace/<path>.png", ...] attaches up to 3 images you produced (screenshots, renders, diagrams) ' +
+    'so the developer sees what you see. For checks that need a human to run steps outside the sandbox, add ' +
+    '"kind": "manual-check" with "steps": ["<step 1>", {"text": "<step 2>", "image": "/workspace/<path>.png"}, ...] ' +
+    '(≤10 steps) and, when the check gates a subtask, its "subtaskId" — the developer can stamp it Verified from the answer.'
+  );
+  lines.push(
+    "UI/UX PROTOTYPING IS WEB-ONLY, even when the real target is Qt, Slate (Unreal), or another native toolkit: " +
+    "build the prototype as HTML/CSS/JS, start a plain HTTP server on any localhost port inside your sandbox, and announce it by emitting a fenced block " +
+    `with the info string \`${PREVIEW_FENCE}\` containing one JSON object: {"port": <port>, "path": "/", "title": "<short name>"}. ` +
+    "The developer gets a live, clickable proxy of your server. Theme stylesheets that make a web prototype feel like the target application are provided at " +
+    "/workspace/.drydock-themes/ (qt-dark.css, slate-dark.css, vscode-dark.css, clean-light.css, plus any studio-registered themes) — copy one next to your " +
+    "prototype and link it instead of hand-rolling native-looking chrome. Do not attempt native GUI toolkits in the sandbox; there is no display."
   );
   if (input.memories !== undefined && input.memories.length > 0) {
     lines.push("Team memory (human-approved notes from earlier work):");

@@ -193,6 +193,9 @@ export function applyMigrations(connection: SqliteConnection): void {
   // Per-path read/write intent on a set membership. Legacy rows and any member
   // added before this column existed default to read-write (0).
   ensureColumn(connection, "workspace_set_projects", "read_only", "INTEGER NOT NULL DEFAULT 0");
+  // ADR 0016: manual-check kind, steps, resolved images, and the verify-gate
+  // subtask ride one JSON extras column; legacy rows are plain questions.
+  ensureColumn(connection, "agent_questions", "extras_json", "TEXT");
 
   // Stage 4: diff baselines and review threads.
   connection.database.exec(`

@@ -7,6 +7,7 @@
  * and the control panel can render an actionable "not available" state.
  */
 
+import { execFile as execFileCb } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, realpathSync, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
@@ -23,6 +24,7 @@ import {
   CloneSyncService,
   CodeReviewService,
   extractAgentQuestions,
+  extractPreviewAnnouncements,
   extractMemoryCandidates,
   ProductEventBus,
   RandomIdGenerator,
@@ -138,6 +140,8 @@ export interface CreateBackendOptions {
   readonly maxConcurrentRuns?: () => number;
   /** ADR 0007: the global gate for task-FAQ question auto-answering. */
   readonly autoAnswerQuestionsEnabled?: () => boolean;
+  /** ADR 0017: studio-registered prototype themes (drydock.prototypeThemes). */
+  readonly prototypeThemes?: readonly { readonly name: string; readonly css: string }[];
 }
 
 /**
@@ -546,6 +550,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     inventory,
     prober,
     chatService,
+    runtimeExecutor: runtimeAdapter,
+    ...(options.prototypeThemes === undefined ? {} : { userPrototypeThemes: options.prototypeThemes }),
     cloneSync,
     hostInstanceId,
     memoryService: memory,
@@ -620,7 +626,25 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     logger,
     store: new SqliteDiffBaselineStore(connection),
     blobs: new ContentAddressedBlobStore(path.join(stateRootPath, "artifacts", "blobs")),
-    deniedPaths
+    deniedPaths,
+    // Gitignore oracle: `git check-ignore --stdin -z` per root, so baselines
+    // and diffs never report ignored churn (.pyc, caches, build output).
+    // Exit 1 (nothing ignored), a non-git root, or a missing git all resolve
+    // to "filter nothing" — the diff stays honest rather than failing.
+    gitIgnoreFilter: (rootPath, relativePaths) => new Promise((resolve) => {
+      const child = execFileCb(
+        "git",
+        ["check-ignore", "--stdin", "-z"],
+        { cwd: rootPath, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+        (_error, stdout) => {
+          const text = typeof stdout === "string" ? stdout : String(stdout ?? "");
+          resolve(new Set(text.split("\0").filter((entry) => entry.length > 0)));
+        }
+      );
+      child.on("error", () => resolve(new Set()));
+      child.stdin?.on("error", () => { /* git exited early; the callback still resolves */ });
+      child.stdin?.end(relativePaths.join("\0") + "\0");
+    })
   });
   const review = new CodeReviewService({ ids, clock, store: new SqliteReviewStore(connection) });
   const workspaceReview = new WorkspaceReviewAppService({
@@ -632,6 +656,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     review,
     chatService,
     bus,
+    // agent.file_edit replay scopes session diffs to files the agent touched.
+    events: eventStore,
     ...(options.securityPolicy === undefined ? {} : { securityPolicy: options.securityPolicy })
   });
   // Cross-project task review: a VIEW over the task's linked sessions —
@@ -733,16 +759,52 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     // question is announced so the panel stacks it and flags attention.
     const parsedQuestions = extractAgentQuestions(finalText);
     if (parsedQuestions.length > 0) {
-      void questions.captureFromParsed(event.sessionId, parsedQuestions).then((created) => {
+      // ADR 0016: resolve agent-referenced illustrations (question images and
+      // manual-check step images) from the live sandbox BEFORE capture, so the
+      // stored record renders anywhere. Failures degrade to path-only refs.
+      void (async () => {
+        const enriched = await Promise.all(parsedQuestions.map(async (candidate) => ({
+          ...candidate,
+          ...(candidate.imagePaths === undefined ? {} : {
+            resolvedImages: await Promise.all(candidate.imagePaths.map(async (imagePath) => {
+              const dataUri = await appService.readSandboxImageDataUri(event.sessionId, imagePath);
+              return { path: imagePath, ...(dataUri === null ? {} : { dataUri }) };
+            }))
+          }),
+          ...(candidate.steps === undefined ? {} : {
+            resolvedSteps: await Promise.all(candidate.steps.map(async (step) => {
+              const dataUri = step.imagePath === undefined
+                ? null
+                : await appService.readSandboxImageDataUri(event.sessionId, step.imagePath);
+              return { text: step.text, ...(dataUri === null ? {} : { imageDataUri: dataUri }) };
+            }))
+          })
+        })));
+        const created = await questions.captureFromParsed(event.sessionId, enriched);
         for (const question of created) {
           bus.publish({ kind: "question-asked", question });
         }
-      }).catch((error: unknown) => {
+      })().catch((error: unknown) => {
         logger.warn("agent question capture failed", {
           sessionId: event.sessionId,
           error: error instanceof Error ? error.message : String(error)
         });
       });
+    }
+    // Preview announcements (ADR 0017): start the host proxy and announce it.
+    const parsedPreviews = extractPreviewAnnouncements(finalText);
+    for (const announcement of parsedPreviews) {
+      void appService.registerPreview(event.sessionId, announcement.port, announcement.path, announcement.title)
+        .then((preview) => {
+          bus.publish({ kind: "preview-available", preview });
+        })
+        .catch((error: unknown) => {
+          logger.warn("preview registration failed", {
+            sessionId: event.sessionId,
+            port: announcement.port,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
     }
     const memoryTexts = extractMemoryCandidates(finalText);
     if (memoryTexts.length > 0) {

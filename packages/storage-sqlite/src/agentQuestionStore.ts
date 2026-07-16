@@ -19,10 +19,16 @@ export class SqliteAgentQuestionStore implements AgentQuestionStore {
   constructor(private readonly connection: SqliteConnection) {}
 
   async insertQuestion(record: AgentQuestionRecord): Promise<void> {
+    const extras = {
+      ...(record.kind === undefined ? {} : { kind: record.kind }),
+      ...(record.steps === undefined ? {} : { steps: record.steps }),
+      ...(record.images === undefined ? {} : { images: record.images }),
+      ...(record.subtaskId === undefined ? {} : { subtaskId: record.subtaskId })
+    };
     this.connection.database.prepare(`
       INSERT INTO agent_questions (
-        question_id, session_id, question, options_json, status, answer, created_at, resolved_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        question_id, session_id, question, options_json, status, answer, created_at, resolved_at, extras_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.questionId,
       record.sessionId,
@@ -31,7 +37,8 @@ export class SqliteAgentQuestionStore implements AgentQuestionStore {
       record.status,
       record.answer ?? null,
       record.createdAt,
-      record.resolvedAt ?? null
+      record.resolvedAt ?? null,
+      Object.keys(extras).length === 0 ? null : JSON.stringify(extras)
     );
   }
 
@@ -79,6 +86,7 @@ interface AgentQuestionRow {
   readonly answer: string | null;
   readonly created_at: string;
   readonly resolved_at: string | null;
+  readonly extras_json: string | null;
 }
 
 function mapQuestion(row: AgentQuestionRow): AgentQuestionRecord {
@@ -90,8 +98,27 @@ function mapQuestion(row: AgentQuestionRow): AgentQuestionRecord {
     status: row.status,
     ...(row.answer === null ? {} : { answer: row.answer }),
     createdAt: row.created_at,
-    ...(row.resolved_at === null ? {} : { resolvedAt: row.resolved_at })
+    ...(row.resolved_at === null ? {} : { resolvedAt: row.resolved_at }),
+    ...parseExtras(row.extras_json)
   };
+}
+
+/** Defensive extras parse: malformed JSON degrades to a plain question. */
+function parseExtras(json: string | null): Partial<Pick<AgentQuestionRecord, "kind" | "steps" | "images" | "subtaskId">> {
+  if (json === null) return {};
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== "object" || parsed === null) return {};
+    const extras = parsed as Record<string, unknown>;
+    return {
+      ...(extras["kind"] === "manual-check" ? { kind: "manual-check" as const } : {}),
+      ...(Array.isArray(extras["steps"]) ? { steps: extras["steps"] as NonNullable<AgentQuestionRecord["steps"]> } : {}),
+      ...(Array.isArray(extras["images"]) ? { images: extras["images"] as NonNullable<AgentQuestionRecord["images"]> } : {}),
+      ...(typeof extras["subtaskId"] === "string" ? { subtaskId: extras["subtaskId"] } : {})
+    };
+  } catch {
+    return {};
+  }
 }
 
 function parseOptions(json: string): readonly string[] {

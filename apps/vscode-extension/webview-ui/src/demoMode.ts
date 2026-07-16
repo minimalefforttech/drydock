@@ -20,6 +20,7 @@ const NAVIGATION_REQUESTS = new Set<PanelRequestPayload["type"]>([
   "agents.open",
   "planner.open",
   "taskReview.open",
+  "codeReview.open",
   "agents.openSession"
 ]);
 
@@ -353,6 +354,18 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     }
     case "taskReview.state":
       return ok(requestId, { type: "taskReview.state", state: fixtures.review });
+    // The Code Review panel has no demo fixtures yet; data requests are blocked
+    // in Demo mode (the panel itself is reachable via the navigation set above).
+    case "codeReview.state":
+    case "codeReview.fileDiff":
+    case "codeReview.addNote":
+    case "clone.exportPatch":
+    case "chat.uploadAttachment":
+    case "preview.open":
+    case "preview.stop":
+      return error(requestId);
+    case "preview.list":
+      return ok(requestId, { type: "preview.list", previews: [] });
     case "taskReview.submit": {
       const open = fixtures.comments.filter((comment) => comment.status === "open");
       const sessionIds = [...new Set(open.map((comment) => comment.sessionId))];
@@ -494,6 +507,8 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
       return accepted(requestId, payload.type);
     case "taskReview.open":
       return ok(requestId, { type: "taskReview.open", accepted: true });
+    case "codeReview.open":
+      return ok(requestId, { type: "codeReview.open", accepted: true });
   }
 }
 

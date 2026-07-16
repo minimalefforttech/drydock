@@ -61,6 +61,22 @@ What's shipped and what's next for Drydock.
 - **Verification and review provenance** — recipes can mark a done subtask as
   needing human verification, and machine-authored Task Review comments are
   visibly labeled `agent` or `guard` rather than presented as the user's.
+- **Code Review panel** — in-panel PR-style review over three scopes
+  (uncommitted / task / session): inline hunks, images, binary deltas,
+  whitespace + split toggles, and selection-driven multi-range comments that
+  route to the owning agents (docs/design/code-review-panel.md).
+- **Lead's inbox** — the needs-attention line covers requests, questions,
+  failed chats, verify gates, parked runs, and unlanded changesets in one
+  ranked expansion with inline Verified/Retry actions; every session row shows
+  running-a-turn vs idle-live.
+- **Human gates (ADR 0016)** — questions carry sandbox images the agent
+  produced (resolved at capture over the runtime transport); the
+  `manual-check` question kind folds HITL steps, per-step check-off, an
+  answer receipt, and one-gesture Verified stamping into a single card.
+- **Patch portability** — clone changesets export as `.patch` files
+  (`Export patch…`) and apply on another machine via
+  `Drydock: Apply Patch to Folder…` (three-way merge, human-confirmed,
+  never committed or pushed).
 
 ## Next
 

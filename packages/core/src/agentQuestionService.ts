@@ -9,8 +9,10 @@
 
 import type {
   AgentQuestionId,
+  AgentQuestionImage,
   AgentQuestionRecord,
   AgentQuestionStatus,
+  AgentQuestionStep,
   AgentQuestionStore,
   SessionId
 } from "@drydock/contracts";
@@ -29,6 +31,16 @@ export interface AgentQuestionServiceOptions {
   readonly bus?: ProductEventBus;
 }
 
+/**
+ * A parsed question plus app-layer resolutions: the caller (which owns the
+ * runtime executor) turns imagePaths into data URIs before capture so the
+ * stored record renders anywhere, live session or not.
+ */
+export interface CapturableAgentQuestion extends ParsedAgentQuestion {
+  readonly resolvedImages?: readonly AgentQuestionImage[];
+  readonly resolvedSteps?: readonly AgentQuestionStep[];
+}
+
 export class AgentQuestionService {
   constructor(private readonly options: AgentQuestionServiceOptions) {}
 
@@ -37,7 +49,7 @@ export class AgentQuestionService {
    * the session's still-pending questions by normalized text so a re-emitting
    * agent does not stack identical prompts. Returns only the newly created.
    */
-  async captureFromParsed(sessionId: SessionId, parsed: readonly ParsedAgentQuestion[]): Promise<AgentQuestionRecord[]> {
+  async captureFromParsed(sessionId: SessionId, parsed: readonly CapturableAgentQuestion[]): Promise<AgentQuestionRecord[]> {
     if (parsed.length === 0) return [];
     const pending = await this.options.store.listQuestions("pending", sessionId);
     const seen = new Set(pending.map((record) => normalizeQuestion(record.question)));
@@ -46,13 +58,23 @@ export class AgentQuestionService {
       const key = normalizeQuestion(candidate.question);
       if (seen.has(key)) continue;
       seen.add(key);
+      // Unresolved image paths still store (path-only) so the card can state
+      // honestly what the agent referenced but could not be fetched.
+      const steps = candidate.resolvedSteps
+        ?? candidate.steps?.map((step): AgentQuestionStep => ({ text: step.text }));
+      const images = candidate.resolvedImages
+        ?? candidate.imagePaths?.map((path): AgentQuestionImage => ({ path }));
       const record: AgentQuestionRecord = {
         questionId: this.options.ids.agentQuestionId(),
         sessionId,
         question: candidate.question,
         options: candidate.options,
         status: "pending",
-        createdAt: this.options.clock.isoNow()
+        createdAt: this.options.clock.isoNow(),
+        ...(candidate.kind === undefined ? {} : { kind: candidate.kind }),
+        ...(steps === undefined || steps.length === 0 ? {} : { steps }),
+        ...(images === undefined || images.length === 0 ? {} : { images }),
+        ...(candidate.subtaskId === undefined ? {} : { subtaskId: candidate.subtaskId })
       };
       await this.options.store.insertQuestion(record);
       created.push(record);

@@ -14,17 +14,19 @@ The Tasks tab is the home surface: create tasks, move them through stages with t
 
 ![Tasks tab](images/sidebar-tasks.png)
 
-### Attention
+### The lead's inbox
 
-Access requests, agent questions, and failed chats stack into one summary. Expand it to answer or dismiss items one at a time — here an agent asks for read-only access to a second project.
+Everything that needs a human decision lands in one summary line: access requests, agent questions, failed chats, human-verify gates, parked runs, and unlanded changesets. Expand it to work the queue — questions and access cards page one at a time, and the inbox rows below act inline (stamp **Verified ✓**, **↻ Retry** a parked run) or jump to the right surface.
 
-![Attention stack](images/sidebar-attention.png)
+![Lead's inbox](images/lead-inbox.png)
+
+Session dots across the panel show running-a-turn (pulsing) vs idle-live on every row, so "is it done, failed, or waiting on me?" is answered at a glance.
 
 ### Workspaces
 
-AI project access defines workspace sets: named groups of registered folders, each member optionally read-only. Tasks link to a set, and Activate opens that context for new chats.
+The Workspaces section defines named groups of registered folders, each member optionally read-only. Tasks link to a workspace, and Activate opens that context for new chats.
 
-![Workspace sets](images/sidebar-workspaces.png)
+![Workspaces](images/sidebar-workspaces.png)
 
 ## Task Board
 
@@ -50,6 +52,8 @@ HTML prototype artifacts render in a sandboxed frame with Preview and Annotate m
 
 The Edit tab controls one implementation session: transcript with subagent activity, tool and command results, access requests and questions inline, sandbox stats, and a composer with model selection.
 
+Paste a screenshot or attach images/documents (📎) directly in the composer — and in question answers: files upload into the running sandbox at `/workspace/attachments/` over the runtime's own transport (works for remote runtimes too), so the agent can open them immediately with no mount changes or restart. Attachments reference as `[file:…]` tokens in the prompt.
+
 ![Edit tab](images/sidebar-edit.png)
 
 ### Clone workflow
@@ -57,6 +61,8 @@ The Edit tab controls one implementation session: transcript with subagent activ
 Clone-mode sessions work on an isolated clone of the repository. The changes tray shows the clone's branch and touched files; changes move explicitly by Pull all into editor / Push local → VM rather than accept/discard.
 
 ![Clone sync tray](images/sidebar-clone.png)
+
+**Export patch…** saves the clone's captured changeset as a `.patch` file to carry between machines; on the receiving machine, `Drydock: Apply Patch to Folder…` applies it to an open repo with a three-way merge — human-confirmed, never committed or pushed.
 
 ### Human-in-the-loop testing
 
@@ -75,6 +81,12 @@ The Agents panel is the fleet view: every session grouped by task with live acti
 Task Review collects a task's changed files across sessions and projects (clone changes included), with per-file comment threads. Open comments dispatch back to the responsible sessions in one send.
 
 ![Task review](images/task-review.png)
+
+## Code Review
+
+The Code Review panel is the PR-style read over the same data: a scope seg (All uncommitted / Task / Session), a navigator with compressed folder trees, and every diff inline — images before/after, binary byte deltas, large files collapsed, whitespace and unified/split toggles. Select code to comment: the box follows your last selection, stacks multiple ranges into one note, and **Comment** sends the file + lines back to the owning agent. (Captured from the harness fixtures; open via `Drydock: Open Code Review`.)
+
+![Code review](images/code-review.png)
 
 ## System
 

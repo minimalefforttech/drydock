@@ -1555,6 +1555,25 @@ h3 {
   color: var(--vscode-foreground);
 }
 
+/* The model/provider trigger sits at the bottom-left of the chat view. Unlike
+   header popovers (which open down and toward the left), its menu opens upward
+   and toward the right. The geometry variables are measured when it opens so
+   the tree stays inside both the chat view and the composer at narrow/short
+   panel sizes; excess rows scroll within the menu. */
+.composer-model-popover .popover {
+  top: auto;
+  right: auto;
+  bottom: calc(100% + 4px);
+  left: 0;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: min(220px, var(--model-popover-max-width, 100cqw));
+  max-width: min(320px, var(--model-popover-max-width, 100cqw));
+  max-height: var(--model-popover-max-height, min(400px, calc(100vh - 96px)));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 /* Model popup tree (inside the shared .popover). */
 .model-tree-group + .model-tree-group {
   margin-top: 6px;
@@ -3464,8 +3483,50 @@ h3 {
 }
 
 /* --------------------------------------------------------------------------
-   Workspace set editor (draft membership)
+   Workspaces section (picker, saved rows, draft editor, folder catalog)
    -------------------------------------------------------------------------- */
+
+/* Labeled use-in-new-chats picker row. */
+.ws-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 6px;
+}
+
+.ws-pick-label {
+  flex: 0 0 auto;
+  font-size: 0.8em;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.ws-pick-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ＋ New workspace rests quiet under the saved rows; the editor replaces it. */
+.ws-new-button {
+  align-self: flex-start;
+  margin: 2px 0 4px;
+  opacity: 0.85;
+}
+
+.ws-new-button:hover {
+  opacity: 1;
+}
+
+/* Registered-folder catalog: nested collapsed plumbing, slightly dimmed. */
+.ws-folders-section {
+  margin-top: 6px;
+}
+
+.ws-folders-section > summary {
+  font-weight: 500;
+  font-size: 0.9em;
+  opacity: 0.8;
+}
 
 .ws-editor {
   display: flex;
@@ -3605,6 +3666,348 @@ h3 {
   flex: 1;
   min-width: 0;
   word-break: break-word;
+}
+
+/* --------------------------------------------------------------------------
+   Sandbox preview strip (ADR 0017) + inbox preview rows
+   -------------------------------------------------------------------------- */
+
+.preview-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.preview-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  border-radius: 999px;
+  font-size: 0.85em;
+  max-width: 100%;
+}
+
+.preview-chip-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-preview .inbox-glyph { color: var(--vscode-charts-green, #3fb950); }
+
+/* --------------------------------------------------------------------------
+   Question extras (ADR 0016): images, manual-check steps, verify stamping
+   -------------------------------------------------------------------------- */
+
+.question-kind-chip {
+  display: inline-block;
+  font-size: 0.72em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 6px;
+  border-radius: 8px;
+  margin-bottom: 4px;
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 16%, transparent);
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.question-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.question-image {
+  max-width: 160px;
+  max-height: 120px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  cursor: zoom-in;
+}
+
+.question-image.zoomed {
+  max-width: 100%;
+  max-height: none;
+  cursor: zoom-out;
+}
+
+.question-image-missing {
+  font-size: 0.8em;
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.question-steps {
+  margin: 6px 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.question-step-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.question-step .question-image {
+  display: block;
+  margin: 4px 0 2px 22px;
+}
+
+.question-verify-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85em;
+  margin: 4px 0;
+  color: var(--vscode-testing-iconPassed, #73c991);
+  cursor: pointer;
+}
+
+/* --------------------------------------------------------------------------
+   Lead's inbox (attention expansion rows below the question/access stack)
+   -------------------------------------------------------------------------- */
+
+.inbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 6px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
+  padding-top: 4px;
+}
+
+.inbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.inbox-row:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+}
+
+.inbox-row:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, var(--vscode-button-background));
+  outline-offset: -1px;
+}
+
+.inbox-glyph {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  font-size: 0.85em;
+}
+
+.inbox-failed .inbox-glyph { color: var(--vscode-editorError-foreground, #f14c4c); }
+.inbox-verify .inbox-glyph { color: var(--vscode-editorWarning-foreground, #cca700); }
+.inbox-parked .inbox-glyph { color: var(--vscode-editorWarning-foreground, #cca700); }
+.inbox-land .inbox-glyph { color: var(--vscode-charts-blue, #3794ff); }
+
+.inbox-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-meta {
+  flex: 0 4 auto;
+  min-width: 48px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75em;
+  opacity: 0.65;
+  text-align: right;
+}
+
+.inbox-row > button {
+  flex: 0 0 auto;
+}
+
+/* --------------------------------------------------------------------------
+   Tasks compact view (recents + workspace/task/subtask/chat tree)
+
+   One-line rows throughout: hierarchy is indentation, metadata is the quiet
+   right edge, and the loud/ready dot+chip vocabulary is shared verbatim with
+   the expanded rows (same classes). Category colors reuse the established
+   tint palette (text-only here — pills stay on task rows only).
+   -------------------------------------------------------------------------- */
+
+.tasks-view-toggle .segment {
+  padding: 1px 7px;
+  font-size: 0.8em;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.compact-view {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 4px;
+}
+
+/* "RECENT" strip label, styled like the SUBTASKS header inside task cards. */
+.compact-section-label {
+  font-size: 0.72em;
+  font-weight: 600;
+  opacity: 0.65;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin: 2px 0 3px;
+}
+
+.compact-separator {
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  margin: 7px 0 5px;
+}
+
+.compact-group-row {
+  display: flex;
+  margin: 0 0 5px;
+}
+
+.compact-group-seg .segment {
+  padding: 1px 8px;
+  font-size: 0.78em;
+  cursor: pointer;
+}
+
+.compact-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.compact-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 4px;
+  border-radius: 3px;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+
+.compact-row:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+}
+
+.compact-row:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, var(--vscode-button-background));
+  outline-offset: -1px;
+}
+
+/* Hierarchy = indentation. Two levels are enough for ws → task → leaf. */
+.compact-depth-1 { margin-left: 14px; }
+.compact-depth-2 { margin-left: 28px; }
+
+.compact-caret {
+  flex: 0 0 auto;
+  width: 12px;
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
+.compact-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-branch-row .compact-row-title {
+  font-weight: 600;
+}
+
+/* Structural groups that are not real entities (No workspace / Unassigned). */
+.compact-dim-title {
+  font-weight: 400 !important;
+  font-style: italic;
+  opacity: 0.75;
+}
+
+/* Quiet right-edge metadata: owning task · state · time, or counts. Shrinks
+   4× faster than the title when the row is tight — the title is the scanning
+   anchor and must win — but never below a readable time word. */
+.compact-row-meta {
+  margin-left: auto;
+  flex: 0 4 auto;
+  min-width: 56px;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75em;
+  opacity: 0.65;
+  text-align: right;
+}
+
+.compact-row-meta.meta-elsewhere {
+  font-style: italic;
+}
+
+/* Task-row column pill: the same tint vocabulary as the card pill, smaller. */
+.compact-status-pill {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.72em;
+  white-space: nowrap;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Active rows (running/selected work): a quiet accent rail + wash. */
+.compact-active {
+  border-left-color: var(--vscode-focusBorder, #3794ff);
+  background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 8%, transparent);
+}
+
+/* Category color, text-only (subtask glyphs + column words). */
+.compact-cat-backlog { color: var(--vscode-descriptionForeground, var(--vscode-foreground)); }
+.compact-cat-pending { color: var(--vscode-editorWarning-foreground, #cca700); }
+.compact-cat-in-progress { color: var(--vscode-charts-blue, #3794ff); }
+.compact-cat-done { color: var(--vscode-testing-iconPassed, #73c991); }
+
+.compact-subtask-glyph {
+  flex: 0 0 auto;
+  width: 12px;
+  text-align: center;
+  font-size: 0.85em;
+}
+
+.compact-subtask-lock {
+  flex: 0 0 auto;
+  font-size: 0.8em;
+}
+
+/* Tinted column words keep their hue readable over the dim meta opacity. */
+.compact-row-meta.compact-cat-pending,
+.compact-row-meta.compact-cat-in-progress,
+.compact-row-meta.compact-cat-done {
+  opacity: 0.85;
 }
 
 /* FIXES 1 & 4: reduced motion — the starting spinner falls back to a static

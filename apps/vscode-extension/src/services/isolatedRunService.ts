@@ -83,6 +83,16 @@ export interface IsolatedRunServiceOptions {
   readonly inventory: RuntimeInventoryStore;
   readonly prober: AppServerProber;
   readonly chatService: ChatSessionService;
+  /**
+   * Bounded exec against a session's own runtime (attachment uploads). The
+   * docker runtime adapter satisfies this structurally; optional so tests
+   * that never upload need no stub.
+   */
+  readonly runtimeExecutor?: {
+    exec(handle: RuntimeHandle, args: readonly string[], timeoutMs: number, input?: string): Promise<{ readonly exitCode: number | null; readonly stdout: string; readonly stderr: string }>;
+  };
+  /** Studio-registered prototype themes pushed alongside the built-ins (ADR 0017). */
+  readonly userPrototypeThemes?: readonly PrototypeTheme[];
   /** Clone mode: host-side git plumbing for the workspace clones + sync. */
   readonly cloneSync: CloneSyncService;
   /**
@@ -141,6 +151,9 @@ export interface WorkspaceSeedPatch {
 interface RuntimePurgingStore {
   purgeRuntimes(input: { now: string; removedOlderThanMs: number; lostOlderThanMs: number }): Promise<number>;
 }
+
+import type { PreviewSummary } from "@drydock/contracts";
+import { BUILT_IN_PROTOTYPE_THEMES, isValidThemeName, type PrototypeTheme } from "./prototypeThemes.js";
 
 export const CHAT_TITLE_MAX = 64;
 export const CODEX_PROVIDER_ID = "codex";
@@ -209,6 +222,10 @@ export class IsolatedRunService {
    * and the sync passthroughs then return a "resume the session" error.
    */
   private readonly sessionClones = new Map<string, readonly SessionCloneRepo[]>();
+  /** Live preview proxies per session (ADR 0017); process-local like clones. */
+  private readonly sessionPreviews = new Map<string, { summary: PreviewSummary; server: import("node:http").Server }[]>();
+  /** Sessions whose sandbox already received the prototype theme pack. */
+  private readonly themedSessions = new Set<string>();
   private readonly providerCatalogs = new Map<string, AgentModelCatalog>([
     [CODEX_PROVIDER_ID, fallbackCodexCatalog()],
     [CLAUDE_PROVIDER_ID, claudeModelCatalog(new Date().toISOString())]
@@ -758,6 +775,225 @@ export class IsolatedRunService {
     return this.aggregateOutbound(clones);
   }
 
+  // MARK: Sandbox preview servers (ADR 0017)
+
+  /**
+   * Registers an agent-announced in-sandbox HTTP server and starts a host
+   * 127.0.0.1 proxy for it. Each proxied request is one bounded exec into the
+   * SESSION'S OWN container (node fetch against loopback), so no container
+   * restart, no published ports, and no network reach beyond that one
+   * container — remote runtimes work over their own exec transport. Web-only
+   * previews; websockets/streaming are a recorded fast-follow.
+   */
+  async registerPreview(sessionId: string, containerPort: number, urlPath: string, title: string): Promise<PreviewSummary> {
+    const executor = this.options.runtimeExecutor;
+    if (executor === undefined) throw new Error("Preview proxying is not available in this build.");
+    if (this.options.chatService.liveRuntimeHandle(asId(sessionId)) === null) {
+      throw new Error("Start or resume this chat first — previews proxy into the running sandbox.");
+    }
+    const existing = (this.sessionPreviews.get(sessionId) ?? []).find((candidate) => candidate.summary.containerPort === containerPort);
+    if (existing !== undefined) {
+      existing.summary = { ...existing.summary, title, path: urlPath };
+      return existing.summary;
+    }
+    await this.ensurePrototypeThemes(sessionId);
+    const { createServer } = await import("node:http");
+    const server = createServer((request, response) => {
+      void this.proxyPreviewRequest(sessionId, containerPort, request, response);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+    const hostPort = typeof address === "object" && address !== null ? address.port : 0;
+    const summary: PreviewSummary = {
+      previewId: `pv-${sessionId.slice(0, 8)}-${String(containerPort)}`,
+      sessionId,
+      title,
+      containerPort,
+      path: urlPath,
+      url: `http://127.0.0.1:${String(hostPort)}${urlPath}`,
+      status: "up",
+      createdAt: this.options.clock.isoNow()
+    };
+    const list = this.sessionPreviews.get(sessionId) ?? [];
+    list.push({ summary, server });
+    this.sessionPreviews.set(sessionId, list);
+    this.options.logger.info("preview proxy started", { sessionId, containerPort, url: summary.url });
+    return summary;
+  }
+
+  listPreviews(sessionId: string): PreviewSummary[] {
+    return (this.sessionPreviews.get(sessionId) ?? []).map((entry) => entry.summary);
+  }
+
+  getPreview(previewId: string): PreviewSummary | null {
+    for (const entries of this.sessionPreviews.values()) {
+      const found = entries.find((entry) => entry.summary.previewId === previewId);
+      if (found !== undefined) return found.summary;
+    }
+    return null;
+  }
+
+  /** Closes the proxy listener and drops the record; returns the session's remaining previews. */
+  stopPreview(previewId: string): PreviewSummary[] {
+    for (const [sessionId, entries] of this.sessionPreviews.entries()) {
+      const index = entries.findIndex((entry) => entry.summary.previewId === previewId);
+      if (index === -1) continue;
+      entries[index]?.server.close();
+      entries.splice(index, 1);
+      this.sessionPreviews.set(sessionId, entries);
+      return entries.map((entry) => entry.summary);
+    }
+    return [];
+  }
+
+  /** Pushes built-in + studio prototype theme CSS into the sandbox, once per session. */
+  private async ensurePrototypeThemes(sessionId: string): Promise<void> {
+    if (this.themedSessions.has(sessionId)) return;
+    const executor = this.options.runtimeExecutor;
+    const runtime = this.options.chatService.liveRuntimeHandle(asId(sessionId));
+    if (executor === undefined || runtime === null) return;
+    const themes = [...BUILT_IN_PROTOTYPE_THEMES, ...(this.options.userPrototypeThemes ?? [])]
+      .filter((theme) => isValidThemeName(theme.name));
+    for (const theme of themes) {
+      try {
+        await executor.exec(
+          runtime,
+          ["/bin/sh", "-c", `mkdir -p /workspace/.drydock-themes && base64 -d > /workspace/.drydock-themes/${theme.name}.css`],
+          30_000,
+          Buffer.from(theme.css, "utf8").toString("base64")
+        );
+      } catch (error) {
+        this.options.logger.warn("prototype theme push failed", {
+          sessionId,
+          theme: theme.name,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    this.themedSessions.add(sessionId);
+  }
+
+  /** One proxied HTTP request: gather body → exec node-fetch inside the container → relay status/headers/body. */
+  private async proxyPreviewRequest(
+    sessionId: string,
+    containerPort: number,
+    request: import("node:http").IncomingMessage,
+    response: import("node:http").ServerResponse
+  ): Promise<void> {
+    try {
+      const executor = this.options.runtimeExecutor;
+      const runtime = this.options.chatService.liveRuntimeHandle(asId(sessionId));
+      if (executor === undefined || runtime === null) {
+        response.writeHead(503, { "content-type": "text/plain" });
+        response.end("The session is not live — resume it to serve this preview.");
+        return;
+      }
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(chunk as Buffer);
+      const headers: Record<string, string> = {};
+      for (const [key, value] of Object.entries(request.headers)) {
+        const lower = key.toLowerCase();
+        if (lower === "host" || lower === "connection" || lower === "accept-encoding" || lower === "content-length") continue;
+        if (typeof value === "string") headers[lower] = value;
+      }
+      const payload = JSON.stringify({
+        port: containerPort,
+        method: request.method ?? "GET",
+        path: request.url ?? "/",
+        headers,
+        bodyB64: chunks.length === 0 ? "" : Buffer.concat(chunks).toString("base64")
+      });
+      const script = "const c=[];process.stdin.on('data',d=>c.push(d));process.stdin.on('end',async()=>{const q=JSON.parse(Buffer.concat(c).toString('utf8'));try{const r=await fetch('http://127.0.0.1:'+q.port+q.path,{method:q.method,headers:q.headers,...(q.bodyB64?{body:Buffer.from(q.bodyB64,'base64')}:{}),redirect:'manual'});const b=Buffer.from(await r.arrayBuffer());const h={};r.headers.forEach((v,k)=>{h[k]=v});process.stdout.write(JSON.stringify({status:r.status,headers:h})+'\\n'+b.toString('base64'))}catch(e){process.stdout.write(JSON.stringify({status:502,headers:{'content-type':'text/plain'}})+'\\n'+Buffer.from(String(e)).toString('base64'))}})";
+      const result = await executor.exec(runtime, ["node", "-e", script], 30_000, payload);
+      const newline = result.stdout.indexOf("\n");
+      if (result.exitCode !== 0 || newline === -1) {
+        response.writeHead(502, { "content-type": "text/plain" });
+        response.end(`Preview proxy failed: ${result.stderr.slice(0, 300) || "no response from the sandbox server"}`);
+        return;
+      }
+      const head = JSON.parse(result.stdout.slice(0, newline)) as { status: number; headers: Record<string, string> };
+      const body = Buffer.from(result.stdout.slice(newline + 1), "base64");
+      const outHeaders: Record<string, string> = {};
+      for (const [key, value] of Object.entries(head.headers)) {
+        const lower = key.toLowerCase();
+        if (lower === "content-encoding" || lower === "transfer-encoding" || lower === "content-length" || lower === "connection") continue;
+        outHeaders[lower] = value;
+      }
+      outHeaders["content-length"] = String(body.length);
+      response.writeHead(head.status, outHeaders);
+      response.end(body);
+    } catch (error) {
+      if (!response.headersSent) response.writeHead(502, { "content-type": "text/plain" });
+      response.end(`Preview proxy error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Writes a user attachment (pasted screenshot, picked image/document) into
+   * the LIVE session's container at /workspace/attachments/<name> via a
+   * bounded exec — base64 over stdin, so it rides the runtime transport and
+   * works identically for remote/networked runtimes. No mounts change and
+   * nothing restarts; the agent can read the file immediately. Refuses when
+   * the session is not live in this window.
+   */
+  async uploadAttachment(sessionId: string, name: string, dataBase64: string): Promise<{ runtimePath: string; name: string; bytes: number }> {
+    const executor = this.options.runtimeExecutor;
+    if (executor === undefined) {
+      throw new Error("Attachment uploads are not available in this build.");
+    }
+    const runtime = this.options.chatService.liveRuntimeHandle(asId(sessionId));
+    if (runtime === null) {
+      throw new Error("Start or resume this chat first — attachments upload into the running sandbox.");
+    }
+    const bytes = Buffer.from(dataBase64, "base64");
+    if (bytes.length === 0) throw new Error("The attachment was empty.");
+    if (bytes.length > 12 * 1024 * 1024) throw new Error("Attachments are capped at 12 MB.");
+    // Leaf name only, shell-safe charset, stamped to avoid collisions.
+    const base = name.replace(/^.*[\\/]/, "").replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "").slice(0, 100) || "attachment";
+    const safe = `${Date.now().toString(36)}-${base}`;
+    const runtimePath = `/workspace/attachments/${safe}`;
+    const result = await executor.exec(
+      runtime,
+      ["/bin/sh", "-c", `mkdir -p /workspace/attachments && base64 -d > ${runtimePath}`],
+      60_000,
+      dataBase64
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`Attachment upload failed in the sandbox: ${result.stderr.slice(0, 300) || `exit ${String(result.exitCode)}`}`);
+    }
+    this.options.logger.info("attachment uploaded", { sessionId, runtimePath, bytes: bytes.length });
+    return { runtimePath, name: safe, bytes: bytes.length };
+  }
+
+  /**
+   * Reads one image the agent produced inside its LIVE sandbox and returns it
+   * as a data URI (ADR 0016 question illustrations). The inverse of
+   * uploadAttachment: `base64 <path>` over the runtime transport, capped at
+   * ~512 KB encoded, absolute in-sandbox image paths only. Null on any
+   * failure — callers degrade to a path-only reference, never throw.
+   */
+  async readSandboxImageDataUri(sessionId: string, imagePath: string): Promise<string | null> {
+    const executor = this.options.runtimeExecutor;
+    if (executor === undefined) return null;
+    const runtime = this.options.chatService.liveRuntimeHandle(asId(sessionId));
+    if (runtime === null) return null;
+    if (!/^\/[^\s'"`]+\.(png|jpe?g|gif|webp|bmp)$/i.test(imagePath) || imagePath.includes("..")) return null;
+    try {
+      const result = await executor.exec(runtime, ["base64", imagePath], 30_000);
+      if (result.exitCode !== 0) return null;
+      const encoded = result.stdout.replace(/\s+/g, "");
+      if (encoded.length === 0 || encoded.length > 700_000) return null;
+      const ext = imagePath.toLowerCase().split(".").pop() ?? "png";
+      const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : `image/${ext}`;
+      return `data:${mime};base64,${encoded}`;
+    } catch {
+      return null;
+    }
+  }
+
   /** Restore one file in a clone to its sync base. Refuses while a turn runs. */
   async cloneDiscard(sessionId: string, repo: string, filePath: string): Promise<void> {
     const clones = this.requireSessionClones(sessionId);
@@ -1112,7 +1348,8 @@ export class IsolatedRunService {
     const providerId = model.providerId === LEGACY_CODEX_PROVIDER_ID ? CODEX_PROVIDER_ID : model.providerId;
     return {
       providerId,
-      ...(model.model === undefined ? {} : { model: model.model })
+      ...(model.model === undefined ? {} : { model: model.model }),
+      ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort })
     };
   }
 

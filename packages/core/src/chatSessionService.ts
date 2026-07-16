@@ -821,6 +821,16 @@ export class ChatSessionService {
     return { template: live.template, model: live.model, transport: live.transport };
   }
 
+  /**
+   * The live session's runtime handle, or null when the session is not live in
+   * this host. Lets the app layer run bounded helper execs against the
+   * session's own container (e.g. writing composer attachments into it)
+   * without widening this service's surface.
+   */
+  liveRuntimeHandle(sessionId: SessionId): RuntimeHandle | null {
+    return this.liveSessions.get(sessionId)?.runtime ?? null;
+  }
+
   async endSession(sessionId: SessionId, reason: string): Promise<ChatSessionRecord> {
     const live = this.liveSessions.get(sessionId);
     if (live !== undefined) {
@@ -1544,10 +1554,11 @@ function modelFromRecord(session: ChatSessionRecord): ChatModelSelection {
   };
 }
 
-function modelMetadata(model: ChatModelSelection): { readonly providerId: string; readonly model?: string } {
+function modelMetadata(model: ChatModelSelection): { readonly providerId: string; readonly model?: string; readonly reasoningEffort?: string } {
   return {
     providerId: model.providerId,
-    ...(model.model === undefined ? {} : { model: model.model })
+    ...(model.model === undefined ? {} : { model: model.model }),
+    ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort })
   };
 }
 

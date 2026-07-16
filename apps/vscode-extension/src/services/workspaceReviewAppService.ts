@@ -56,6 +56,57 @@ export interface WorkspaceReviewAppServiceOptions {
   readonly chatService: ChatSessionService;
   readonly bus: ProductEventBus;
   readonly securityPolicy?: EffectiveSecurityPolicy;
+  /**
+   * Session event replay for agent-touched-file scoping (the SqliteEventStore
+   * satisfies this). Optional: absent → session diffs stay unfiltered.
+   */
+  readonly events?: { listEvents(sessionId: SessionId, fromSequence?: number): Promise<readonly { readonly eventType: string; readonly createdAt: string; readonly payload: Record<string, unknown> }[]> };
+}
+
+/** What the session's replay proves about agent writes. */
+export interface AgentTouchEvidence {
+  /** Runtime paths named by agent.file_edit events. */
+  readonly paths: ReadonlySet<string>;
+  /** [startMs, endMs] agent turn windows (user.message → agent.done), padded. */
+  readonly windows: readonly { readonly start: number; readonly end: number }[];
+}
+
+/** Clock-skew/mtime-granularity padding around each turn window. */
+const TURN_WINDOW_PAD_MS = 2_000;
+
+/**
+ * True when a baseline root-relative change matches an agent-touched runtime
+ * path (`/workspace/<mount>/<relative>`): exact tail match on the relative
+ * remainder. Same-named files across roots can false-positive; that noise is
+ * bounded and vastly preferable to attributing unrelated workspace drift.
+ */
+export function isAgentTouched(touched: ReadonlySet<string>, changePath: string, oldPath?: string): boolean {
+  for (const candidate of [changePath, oldPath]) {
+    if (candidate === undefined) continue;
+    const suffix = `/${candidate}`;
+    for (const runtimePath of touched) {
+      if (runtimePath === candidate || runtimePath.endsWith(suffix)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Attribution for one change: named by a file_edit event, OR written while an
+ * agent turn was running (batch/shell writes that never emit file_edit — the
+ * mtime is already in hand from the diff walk, so this costs nothing extra).
+ * Deletions carry no mtime; unmatched ones stay visible (hiding a real agent
+ * deletion is worse than showing a foreign one).
+ */
+export function isAttributedToSession(
+  evidence: AgentTouchEvidence,
+  change: { readonly path: string; readonly oldPath?: string; readonly changeKind: string; readonly currentMtimeMs?: number }
+): boolean {
+  if (isAgentTouched(evidence.paths, change.path, change.oldPath)) return true;
+  if (change.changeKind === "delete") return true;
+  if (change.currentMtimeMs === undefined) return true;
+  return evidence.windows.some((window) => change.currentMtimeMs !== undefined
+    && change.currentMtimeMs >= window.start && change.currentMtimeMs <= window.end);
 }
 
 export class WorkspaceReviewAppService {
@@ -469,6 +520,11 @@ export class WorkspaceReviewAppService {
     const baselines = await this.options.diff.listBaselines(
       sessionId === undefined ? undefined : asId<"SessionId">(sessionId)
     );
+    // Session views list what the AGENT touched, not everything that drifted
+    // under the mounts since baseline (user edits, other tasks, build tools).
+    // Evidence = agent.file_edit paths ∪ turn-window mtimes (covers batch/shell
+    // writes). No evidence at all → unfiltered, never hiding real work.
+    const evidence = sessionId === undefined ? null : await this.agentTouchEvidence(sessionId);
     const changes: DiffFileSummary[] = [];
     for (const frames of groupFramesByRoot(baselines).values()) {
       const baseline = pickViewBaseline(frames, view);
@@ -480,6 +536,7 @@ export class WorkspaceReviewAppService {
         ? new Map((await this.options.diff.listFileSnapshots(frames.working.baselineId)).map((snapshot) => [snapshot.path, snapshot.sha256]))
         : null;
       for (const change of await this.options.diff.computeDiff(baseline.baselineId)) {
+        if (evidence !== null && !isAttributedToSession(evidence, change)) continue;
         changes.push({
           baselineId: baseline.baselineId,
           rootName,
@@ -495,6 +552,54 @@ export class WorkspaceReviewAppService {
       }
     }
     return changes;
+  }
+
+  /**
+   * Replays the session's stored events into attribution evidence:
+   * agent.file_edit runtime paths plus [user.message → agent.done] turn
+   * windows (padded ±2 s; an unclosed window — in-flight or crashed turn —
+   * stays open-ended). Null when the port is absent or the session recorded
+   * neither paths nor windows — callers then fall back to the unfiltered diff.
+   */
+  private async agentTouchEvidence(sessionId: string): Promise<AgentTouchEvidence | null> {
+    const events = this.options.events;
+    if (events === undefined) return null;
+    try {
+      const stored = await events.listEvents(asId<"SessionId">(sessionId));
+      const paths = new Set<string>();
+      const windows: { start: number; end: number }[] = [];
+      let openStart: number | null = null;
+      for (const event of stored) {
+        if (event.eventType === "agent.file_edit") {
+          const rawPath = event.payload["path"] ?? event.payload["filePath"];
+          if (typeof rawPath === "string" && rawPath.length > 0) {
+            paths.add(rawPath.replace(/\\/g, "/"));
+          }
+        } else if (event.eventType === "user.message") {
+          if (openStart === null) {
+            const at = Date.parse(event.createdAt);
+            if (Number.isFinite(at)) openStart = at;
+          }
+        } else if (event.eventType === "agent.done" && openStart !== null) {
+          const at = Date.parse(event.createdAt);
+          if (Number.isFinite(at)) {
+            windows.push({ start: openStart - TURN_WINDOW_PAD_MS, end: at + TURN_WINDOW_PAD_MS });
+          }
+          openStart = null;
+        }
+      }
+      if (openStart !== null) {
+        windows.push({ start: openStart - TURN_WINDOW_PAD_MS, end: Number.MAX_SAFE_INTEGER });
+      }
+      if (paths.size === 0 && windows.length === 0) return null;
+      return { paths, windows };
+    } catch (error) {
+      this.options.logger.warn("agent touch-evidence scan failed; session diff stays unfiltered", {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return null;
+    }
   }
 
   /**

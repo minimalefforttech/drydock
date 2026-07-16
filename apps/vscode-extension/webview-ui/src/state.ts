@@ -24,6 +24,7 @@ import type {
   IsolationSummary,
   MemoryCandidateSummary,
   PanelInitState,
+  PreviewSummary,
   RuntimeSummary,
   WorkspacePolicyState,
   WorkTaskSummary
@@ -41,7 +42,12 @@ declare function acquireVsCodeApi(): VsCodeApi;
 export const vscode: VsCodeApi = acquireVsCodeApi();
 
 export type TabId = "work" | "plan" | "chat" | "system";
-export type ThinkingEffort = "low" | "medium" | "high";
+
+/** Tasks-tab density: full task cards (default) or the compact recents+tree read. */
+export type TasksViewMode = "expanded" | "compact";
+
+/** Compact-tree grouping order: task branches first, or workspace branches first. */
+export type CompactGroupOrder = "task" | "workspace";
 
 // The transcript message/group model moved to the shared chat module (ADR
 // 0012, P3) so the Planner rail folds lines through the same reducer as the
@@ -118,7 +124,8 @@ export interface AppState {
   promptDraft: string;
   providerId: string;
   selectedModel: string;
-  thinkingEffort: ThinkingEffort;
+  /** Last provider-advertised reasoning effort selected by the user. */
+  thinkingEffort: string;
   changedFiles: Map<string, string>;
   lastIsolation: IsolationSummary | null;
   workspacePolicy: WorkspacePolicyState | null;
@@ -152,6 +159,18 @@ export interface AppState {
   memoryCandidates: MemoryCandidateSummary[];
   /** Webview-local task notes keyed by durable taskId. */
   taskNotes: TaskNote[];
+  /**
+   * Sessions currently running a turn (from chat.turnStarted/turnCompleted
+   * pushes). Transient — rebuilt from pushes after a reload — but lets every
+   * session row show running-a-turn vs idle-live, not just the selected one.
+   */
+  turnActiveSessionIds: Set<string>;
+  /** Agent-announced sandbox previews (ADR 0017). Transient — re-pushed/refetched. */
+  previews: PreviewSummary[];
+  /** Tasks-tab view density (expanded cards vs the compact tree). */
+  tasksViewMode: TasksViewMode;
+  /** Compact-tree grouping order (task-first vs workspace-first). */
+  compactGroupOrder: CompactGroupOrder;
 }
 
 function freshState(): AppState {
@@ -185,7 +204,11 @@ function freshState(): AppState {
     boardColumns: [],
     attention: {},
     memoryCandidates: [],
-    taskNotes: []
+    taskNotes: [],
+    turnActiveSessionIds: new Set<string>(),
+    previews: [],
+    tasksViewMode: "expanded",
+    compactGroupOrder: "task"
   };
 }
 
@@ -265,7 +288,7 @@ export function restore(): AppState {
   // `selectedModel` (current) or `modelDraft` (older) both name the model.
   if (typeof raw["selectedModel"] === "string") state.selectedModel = raw["selectedModel"];
   else if (typeof raw["modelDraft"] === "string") state.selectedModel = raw["modelDraft"];
-  if (raw["thinkingEffort"] === "low" || raw["thinkingEffort"] === "medium" || raw["thinkingEffort"] === "high") {
+  if (typeof raw["thinkingEffort"] === "string" && raw["thinkingEffort"].length > 0 && raw["thinkingEffort"].length <= 120) {
     state.thinkingEffort = raw["thinkingEffort"];
   }
   // Legacy `composerMode` (the retired [Plan | Develop] switch, ADR 0012) is
@@ -317,6 +340,13 @@ export function restore(): AppState {
   if (Array.isArray(raw["taskNotes"])) {
     state.taskNotes = raw["taskNotes"].filter(isTaskNote);
   }
+  // Tasks-tab view prefs are later additions; legacy blobs keep the defaults.
+  if (raw["tasksViewMode"] === "expanded" || raw["tasksViewMode"] === "compact") {
+    state.tasksViewMode = raw["tasksViewMode"];
+  }
+  if (raw["compactGroupOrder"] === "task" || raw["compactGroupOrder"] === "workspace") {
+    state.compactGroupOrder = raw["compactGroupOrder"];
+  }
   return state;
 }
 
@@ -351,7 +381,9 @@ export function persist(state: AppState): void {
     boardColumns: state.boardColumns,
     attention: state.attention,
     memoryCandidates: state.memoryCandidates,
-    taskNotes: state.taskNotes
+    taskNotes: state.taskNotes,
+    tasksViewMode: state.tasksViewMode,
+    compactGroupOrder: state.compactGroupOrder
   });
 }
 

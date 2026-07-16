@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Webview harness — Code Review panel</title>
+  <style>
+    /* Dark-theme values for the --vscode-* variables the real panel CSS uses. */
+    :root {
+      --vscode-font-family: "Segoe UI", system-ui, sans-serif;
+      --vscode-font-size: 13px;
+      --vscode-foreground: #cccccc;
+      --vscode-descriptionForeground: #9d9d9d;
+      --vscode-errorForeground: #f48771;
+      --vscode-focusBorder: #007fd4;
+      --vscode-sideBar-background: #252526;
+      --vscode-editor-background: #1e1e1e;
+      --vscode-editor-foreground: #d4d4d4;
+      --vscode-editor-font-family: Consolas, "Courier New", monospace;
+      --vscode-editorWidget-background: #252526;
+      --vscode-input-background: #3c3c3c;
+      --vscode-input-foreground: #cccccc;
+      --vscode-input-border: #3c3c3c;
+      --vscode-button-background: #0e639c;
+      --vscode-button-foreground: #ffffff;
+      --vscode-button-hoverBackground: #1177bb;
+      --vscode-button-secondaryBackground: #3a3d41;
+      --vscode-button-secondaryForeground: #cccccc;
+      --vscode-badge-background: #4d4d4d;
+      --vscode-badge-foreground: #ffffff;
+      --vscode-dropdown-background: #3c3c3c;
+      --vscode-dropdown-foreground: #cccccc;
+      --vscode-dropdown-border: #3c3c3c;
+      --vscode-list-hoverBackground: #2a2d2e;
+      --vscode-list-activeSelectionBackground: #094771;
+      --vscode-panel-border: #3c3c3c;
+      --vscode-textLink-foreground: #3794ff;
+      --vscode-charts-green: #89d185;
+      --vscode-charts-red: #f14c4c;
+      --vscode-charts-yellow: #cca700;
+      --vscode-charts-blue: #4a90d9;
+      --vscode-editorError-foreground: #f48771;
+      --vscode-editorWarning-foreground: #cca700;
+    }
+    html, body { margin: 0; height: 100%; background: #1b1b1b; }
+    body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
+    /* Editor-panel-shaped stage: the code-review panel is an editor-area webview. */
+    #stage {
+      width: 1100px; height: calc(100vh - 32px); background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border); overflow: hidden; box-sizing: border-box;
+    }
+    #stage-note { color: #7f7f7f; font-size: 12px; max-width: 240px; }
+    #stage-note code { color: #d7ba7d; }
+  </style>
+  <link rel="stylesheet" href="/assets/codeReview.css" />
+</head>
+<body class="vscode-dark">
+  <div id="stage">
+    <div id="app" data-task-id="t-1"></div>
+  </div>
+  <div id="stage-note">
+    <p><strong>Code Review harness.</strong> Real bundled panel, mock host, dummy fixtures for task <code>t-1</code>.</p>
+    <p>Scopes: All uncommitted / Task / Session. Select diff rows to comment; multiple selections stack ranges onto one note.</p>
+    <p>Inspect sends: <code>__harness.log</code> (codeReview.addNote / taskReview.submit lines).</p>
+  </div>
+  <script src="/harness.js"></script>
+  <script src="/assets/codeReview.js"></script>
+</body>
+</html>

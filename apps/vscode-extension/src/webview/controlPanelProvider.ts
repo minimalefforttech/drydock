@@ -89,7 +89,11 @@ export function toAgentQuestionSummary(record: AgentQuestionRecord): AgentQuesti
     options: record.options,
     status: record.status,
     ...(record.answer === undefined ? {} : { answer: record.answer }),
-    createdAt: record.createdAt
+    createdAt: record.createdAt,
+    ...(record.kind === undefined ? {} : { kind: record.kind }),
+    ...(record.steps === undefined ? {} : { steps: record.steps }),
+    ...(record.images === undefined ? {} : { images: record.images }),
+    ...(record.subtaskId === undefined ? {} : { subtaskId: record.subtaskId })
   };
 }
 
@@ -199,6 +203,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   static readonly viewType = "drydock.controlPanel";
 
   private view: vscode.WebviewView | undefined;
+  /** Previews whose untrusted-content notice has already been shown. */
+  private readonly previewNoticeShown = new Set<string>();
   private sequence = 0;
   /**
    * Per-session "waiting on you" reasons. Drives the activity-bar badge, the
@@ -347,6 +353,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // no separate pending-request query is needed here.
         this.push({ type: "policy.accessRequested", accessRequest: toAccessRequestSummary(event.request) });
         void this.flagAttention(event.request.sessionId, "access-request", "needs access approval");
+        return;
+      case "preview-available":
+        this.push({ type: "preview.available", preview: event.preview });
         return;
       case "question-asked":
         // A pending agent question is a standing "waiting on you" item: stack
@@ -1050,6 +1059,13 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.respond(request.requestId, { type: "taskReview.open", accepted: true });
         return;
       }
+      case "codeReview.open": {
+        // Editor-panel open is a host action; route through the command.
+        this.requireBackend();
+        await vscode.commands.executeCommand("drydock.codeReview.open", payload.taskId);
+        this.respond(request.requestId, { type: "codeReview.open", accepted: true });
+        return;
+      }
       case "clone.state": {
         const appService = this.requireCloneSession(payload.sessionId);
         const repos = await appService.cloneState(payload.sessionId);
@@ -1088,6 +1104,81 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // Return the fresh repo state so the caller can render without a round-trip.
         const repos = await appService.cloneState(payload.sessionId);
         this.respond(request.requestId, { type: "clone.discard", repos });
+        return;
+      }
+      case "chat.uploadAttachment": {
+        const uploaded = await this.requireBackend().uploadAttachment(payload.sessionId, payload.name, payload.dataBase64);
+        this.respond(request.requestId, { type: "chat.uploadAttachment", ...uploaded });
+        return;
+      }
+      case "preview.list": {
+        this.respond(request.requestId, { type: "preview.list", previews: this.requireBackend().listPreviews(payload.sessionId) });
+        return;
+      }
+      case "preview.open": {
+        const preview = this.requireBackend().getPreview(payload.previewId);
+        if (preview === null) {
+          this.respondError(request.requestId, "This preview is no longer running.");
+          return;
+        }
+        // Agent-served content is untrusted: it opens in a browser surface,
+        // never a privileged webview, with a one-time notice per preview.
+        if (!this.previewNoticeShown.has(preview.previewId)) {
+          this.previewNoticeShown.add(preview.previewId);
+          void vscode.window.showInformationMessage(
+            `Opening "${preview.title}" — this page is served by the agent's sandbox. Treat it as untrusted content.`
+          );
+        }
+        if (payload.external === true) {
+          await vscode.env.openExternal(vscode.Uri.parse(preview.url));
+        } else {
+          await vscode.commands.executeCommand("simpleBrowser.show", preview.url);
+        }
+        this.respond(request.requestId, { type: "preview.open", accepted: true });
+        return;
+      }
+      case "preview.stop": {
+        this.respond(request.requestId, { type: "preview.stop", previews: this.requireBackend().stopPreview(payload.previewId) });
+        return;
+      }
+      case "clone.exportPatch": {
+        // Save the clone's captured changeset(s) as .patch files the developer
+        // can carry to another machine (applied there via Drydock: Apply Patch,
+        // or plain `git apply --3way --binary`). Read-only: capture never
+        // advances the sync base, and the file goes only where the save dialog
+        // points. One dialog per repo patch.
+        const appService = this.requireCloneSession(payload.sessionId);
+        const patches = await appService.buildOutboundPatches(payload.sessionId);
+        const wanted = (patches ?? []).filter((patch) => payload.repo === undefined || patch.repoName === payload.repo);
+        if (wanted.length === 0) {
+          this.respond(request.requestId, {
+            type: "clone.exportPatch",
+            savedPaths: [],
+            message: patches === null
+              ? "This session's clone state is not available in this window."
+              : "Nothing to export — the clone has no captured changes."
+          });
+          return;
+        }
+        const savedPaths: string[] = [];
+        const stamp = new Date().toISOString().slice(0, 10);
+        for (const patch of wanted) {
+          const target = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(`${patch.repoName}-${stamp}.patch`),
+            filters: { "Patch files": ["patch", "diff"] },
+            title: `Export ${patch.repoName} changeset (${String(patch.fileCount)} file${patch.fileCount === 1 ? "" : "s"})`
+          });
+          if (target === undefined) continue;
+          await vscode.workspace.fs.writeFile(target, Buffer.from(patch.patch, "utf8"));
+          savedPaths.push(target.fsPath);
+        }
+        this.respond(request.requestId, {
+          type: "clone.exportPatch",
+          savedPaths,
+          message: savedPaths.length === 0
+            ? "Export cancelled."
+            : `Exported ${String(savedPaths.length)} patch file${savedPaths.length === 1 ? "" : "s"}: ${savedPaths.join(", ")}`
+        });
         return;
       }
       case "board.state": {
