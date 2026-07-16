@@ -2,7 +2,7 @@
   "name": "drydock",
   "displayName": "Drydock",
   "description": "Drydock \u2014 the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "publisher": "local",
   "private": true,
   "type": "module",
@@ -247,6 +247,20 @@
           "scope": "machine",
           "default": true,
           "markdownDescription": "Master switch for task-FAQ auto-answering of agent questions. Each task ALSO has its own toggle (off by default), so nothing auto-answers until a task opts in. Every auto-answer lands in the transcript as a `[host]` receipt. Access requests are never auto-answered."
+        },
+        "drydock.prototypeThemes": {
+          "type": "array",
+          "scope": "machine",
+          "default": [],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Theme file stem (a-z0-9-); lands as /workspace/.drydock-themes/<name>.css" },
+              "cssPath": { "type": "string", "description": "Absolute host path of the CSS file." }
+            },
+            "required": ["name", "cssPath"]
+          },
+          "markdownDescription": "Extra prototype theme stylesheets pushed into agent sandboxes alongside the built-ins (`qt-dark`, `slate-dark`, `vscode-dark`, `clean-light`). Agents link them from web prototypes to match a target application's look (ADR 0017)."
         }
       }
     }

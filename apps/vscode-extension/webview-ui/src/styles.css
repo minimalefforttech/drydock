@@ -3669,6 +3669,38 @@ h3 {
 }
 
 /* --------------------------------------------------------------------------
+   Sandbox preview strip (ADR 0017) + inbox preview rows
+   -------------------------------------------------------------------------- */
+
+.preview-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.preview-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  border-radius: 999px;
+  font-size: 0.85em;
+  max-width: 100%;
+}
+
+.preview-chip-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-preview .inbox-glyph { color: var(--vscode-charts-green, #3fb950); }
+
+/* --------------------------------------------------------------------------
    Question extras (ADR 0016): images, manual-check steps, verify stamping
    -------------------------------------------------------------------------- */
 

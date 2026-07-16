@@ -60,6 +60,8 @@ export interface DiffFileChange {
   readonly baselineSha256?: string;
   readonly currentSha256?: string;
   readonly currentSize?: number;
+  /** Live file mtime (ms) — lets callers attribute changes to agent turn windows. */
+  readonly currentMtimeMs?: number;
   /** Line-diff stats vs the baseline; absent for binary/oversized files. */
   readonly addedLines?: number;
   readonly removedLines?: number;

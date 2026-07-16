@@ -318,6 +318,11 @@
     "s-clone": []
   };
 
+  // Sandbox preview fixtures (ADR 0017): one live preview on s-live.
+  let previewFixtures = [
+    { previewId: "pv-s-live-8080", sessionId: "s-live", title: "Publish settings mockup (qt-dark)", containerPort: 8080, path: "/", url: "http://127.0.0.1:39181/", status: "up", createdAt: iso(3) }
+  ];
+
   const taskReviewNotes = [
     "Clone session \"Clone helper\" is not live in this window — its changes are not listed."
   ];
@@ -1121,6 +1126,18 @@
         const repo = cloneRepos.find((r) => r.name === payload.repo);
         if (repo) repo.files = repo.files.filter((f) => f.path !== payload.path);
         return respond(requestId, { type, repos: cloneRepos });
+      }
+      case "preview.list":
+        harnessLog(`preview.list ${String(payload.sessionId)}`);
+        return respond(requestId, { type, previews: previewFixtures.filter((p) => p.sessionId === payload.sessionId) });
+      case "preview.open":
+        harnessLog(`preview.open ${String(payload.previewId)}${payload.external ? " external" : ""}`);
+        return respond(requestId, { type, accepted: true });
+      case "preview.stop": {
+        const stopped = previewFixtures.find((p) => p.previewId === payload.previewId);
+        previewFixtures = previewFixtures.filter((p) => p.previewId !== payload.previewId);
+        harnessLog(`preview.stop ${String(payload.previewId)}`);
+        return respond(requestId, { type, previews: previewFixtures.filter((p) => p.sessionId === (stopped ? stopped.sessionId : "")) });
       }
       case "chat.uploadAttachment": {
         const bytes = Math.ceil((payload.dataBase64.length * 3) / 4);

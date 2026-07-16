@@ -23,6 +23,7 @@ import {
   type ChatSessionSummary,
   type ColumnCategory,
   type MemoryCandidateSummary,
+  type PreviewSummary,
   type SubtaskSummary,
   type WorkHistoryEntry,
   type WorkspaceActivateResult,
@@ -1058,7 +1059,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
    */
   function attentionSummaryText(counts: {
     requests: number; questions: number; failed: number;
-    verify: number; parked: number; land: number;
+    verify: number; parked: number; land: number; previews: number;
   }): string {
     const parts: string[] = [];
     if (counts.requests > 0) parts.push(`${String(counts.requests)} request${counts.requests === 1 ? "" : "s"}`);
@@ -1067,6 +1068,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     if (counts.verify > 0) parts.push(`${String(counts.verify)} to verify`);
     if (counts.parked > 0) parts.push(`${String(counts.parked)} parked`);
     if (counts.land > 0) parts.push(`${String(counts.land)} to land`);
+    if (counts.previews > 0) parts.push(`${String(counts.previews)} preview${counts.previews === 1 ? "" : "s"}`);
     return `⚠ ${parts.join(" · ")} — review`;
   }
 
@@ -1096,9 +1098,11 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       }
     }
 
+    // Live sandbox previews (ADR 0017) — non-blocking "take a look" items.
+    const livePreviews = state.previews.filter((preview) => preview.status === "up");
     // Hide the whole section when nothing needs acting on.
     const total = pending.length + pendingQuestions.length + failedSessions.length
-      + verifyItems.length + parkedItems.length + landItems.length;
+      + verifyItems.length + parkedItems.length + landItems.length + livePreviews.length;
     if (total === 0) {
       attentionSection.classList.remove("has-attention");
       attentionExpanded = false;
@@ -1114,7 +1118,8 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       failed: failedSessions.length,
       verify: verifyItems.length,
       parked: parkedItems.length,
-      land: landItems.length
+      land: landItems.length,
+      previews: livePreviews.length
     });
 
     // The expansion holds the SAME stacked card the chat surface uses — one
@@ -1155,7 +1160,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     } else {
       attentionList.replaceChildren();
     }
-    const inbox = buildInboxList(failedSessions, verifyItems, parkedItems, landItems);
+    const inbox = buildInboxList(failedSessions, verifyItems, parkedItems, landItems, livePreviews);
     if (inbox !== null) attentionList.append(inbox);
   }
 
@@ -1168,9 +1173,10 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     failedSessions: readonly ChatSessionSummary[],
     verifyItems: readonly InboxSubtaskItem[],
     parkedItems: readonly InboxSubtaskItem[],
-    landItems: readonly InboxSubtaskItem[]
+    landItems: readonly InboxSubtaskItem[],
+    livePreviews: readonly PreviewSummary[]
   ): HTMLElement | null {
-    if (failedSessions.length + verifyItems.length + parkedItems.length + landItems.length === 0) return null;
+    if (failedSessions.length + verifyItems.length + parkedItems.length + landItems.length + livePreviews.length === 0) return null;
     const list = el("div", "inbox-list");
 
     const row = (
@@ -1277,6 +1283,22 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         item.subtask.title,
         `to land · ${item.task.title}`,
         openAgentsPanel
+      ));
+    }
+    for (const preview of livePreviews) {
+      const session = state.sessions.find((candidate) => candidate.sessionId === preview.sessionId);
+      const openPreview = (): void => {
+        void request({ type: "preview.open", previewId: preview.previewId }).then((response) => {
+          if (!response.ok) ctx.bridge.chat.logChat(`open preview failed: ${response.error.message}`);
+        });
+      };
+      list.append(row(
+        "inbox-preview",
+        "▶",
+        "The agent is serving a live UI preview from its sandbox — take a look",
+        preview.title,
+        `preview · ${session?.title ?? preview.sessionId.slice(0, 8)}`,
+        openPreview
       ));
     }
     return list;

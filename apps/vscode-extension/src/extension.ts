@@ -115,6 +115,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   const autoAnswerQuestionsEnabled = (): boolean =>
     !managedMode && vscode.workspace.getConfiguration("drydock").get<boolean>("autoAnswer.questions", true);
+  // ADR 0017: studio-registered prototype themes ({name, cssPath}), loaded at
+  // activation; unreadable entries are skipped with a warning, never fatal.
+  const prototypeThemes: { name: string; css: string }[] = [];
+  for (const entry of vscode.workspace.getConfiguration("drydock").get<readonly { name?: string; cssPath?: string }[]>("prototypeThemes", [])) {
+    if (typeof entry.name !== "string" || typeof entry.cssPath !== "string") continue;
+    try {
+      const css = await vscode.workspace.fs.readFile(vscode.Uri.file(entry.cssPath));
+      prototypeThemes.push({ name: entry.name, css: Buffer.from(css).toString("utf8") });
+    } catch {
+      logger.warn("prototype theme unreadable; skipped", { name: entry.name, cssPath: entry.cssPath });
+    }
+  }
   const backend = await createBackend({
     stateRootPath,
     logger,
@@ -126,7 +138,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     plannerAspectOverlays,
     recipeOverlays,
     maxConcurrentRuns,
-    autoAnswerQuestionsEnabled
+    autoAnswerQuestionsEnabled,
+    prototypeThemes
   });
   context.subscriptions.push(new vscode.Disposable(() => backend.dispose()));
   await writeStorePointer(context, stateRootPath);

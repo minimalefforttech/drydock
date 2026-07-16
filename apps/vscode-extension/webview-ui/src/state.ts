@@ -24,6 +24,7 @@ import type {
   IsolationSummary,
   MemoryCandidateSummary,
   PanelInitState,
+  PreviewSummary,
   RuntimeSummary,
   WorkspacePolicyState,
   WorkTaskSummary
@@ -164,6 +165,8 @@ export interface AppState {
    * session row show running-a-turn vs idle-live, not just the selected one.
    */
   turnActiveSessionIds: Set<string>;
+  /** Agent-announced sandbox previews (ADR 0017). Transient — re-pushed/refetched. */
+  previews: PreviewSummary[];
   /** Tasks-tab view density (expanded cards vs the compact tree). */
   tasksViewMode: TasksViewMode;
   /** Compact-tree grouping order (task-first vs workspace-first). */
@@ -203,6 +206,7 @@ function freshState(): AppState {
     memoryCandidates: [],
     taskNotes: [],
     turnActiveSessionIds: new Set<string>(),
+    previews: [],
     tasksViewMode: "expanded",
     compactGroupOrder: "task"
   };

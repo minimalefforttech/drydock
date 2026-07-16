@@ -643,6 +643,73 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // the "is this agent actually working" signal right where you're watching it.
   const sandboxStatsBar = el("div", "sandbox-stats hidden");
 
+  // Sandbox preview servers (ADR 0017): a pinned strip of agent-announced
+  // preview proxies for the selected session — dot, title, Open (Simple
+  // Browser), ↗ (external browser), ✕ stop. Previews arrive via the
+  // preview.available push and are refetched per selected session.
+  const previewStrip = el("div", "preview-strip hidden");
+  let previewsFetchedFor: string | null = null;
+  function renderPreviews(): void {
+    const sessionId = state.selectedSessionId;
+    if (sessionId !== null && previewsFetchedFor !== sessionId) {
+      previewsFetchedFor = sessionId;
+      void request({ type: "preview.list", sessionId }).then((response) => {
+        if (response.ok && response.payload.type === "preview.list") {
+          state.previews = [
+            ...state.previews.filter((preview) => preview.sessionId !== sessionId),
+            ...response.payload.previews
+          ];
+          renderPreviews();
+        }
+      });
+    }
+    const mine = state.previews.filter((preview) => preview.sessionId === sessionId && preview.status === "up");
+    previewStrip.classList.toggle("hidden", mine.length === 0);
+    previewStrip.replaceChildren();
+    for (const preview of mine) {
+      const chipEl = el("span", "preview-chip");
+      chipEl.append(statusDot("state-live", "preview server running"));
+      const title = el("span", "preview-chip-title");
+      title.textContent = preview.title;
+      title.title = `${preview.url} (container port ${String(preview.containerPort)}) — agent-served content`;
+      chipEl.append(title);
+      const open = button("Open", "ghost small preview-open");
+      open.addEventListener("click", () => {
+        void request({ type: "preview.open", previewId: preview.previewId }).then((response) => {
+          if (!response.ok) logChat(`open preview failed: ${response.error.message}`);
+        });
+      });
+      const external = iconButton("↗", "Open in external browser", "preview-open-external");
+      external.addEventListener("click", () => {
+        void request({ type: "preview.open", previewId: preview.previewId, external: true });
+      });
+      const stop = iconButton("✕", "Stop this preview proxy", "preview-stop");
+      stop.addEventListener("click", () => {
+        void request({ type: "preview.stop", previewId: preview.previewId }).then((response) => {
+          if (response.ok && response.payload.type === "preview.stop") {
+            state.previews = [
+              ...state.previews.filter((candidate) => candidate.sessionId !== preview.sessionId),
+              ...response.payload.previews
+            ];
+            renderPreviews();
+            ctx.bridge.work.render();
+          }
+        });
+      });
+      chipEl.append(open, external, stop);
+      previewStrip.append(chipEl);
+    }
+  }
+  onPush("preview.available", (payload) => {
+    state.previews = [
+      ...state.previews.filter((preview) => preview.previewId !== payload.preview.previewId),
+      payload.preview
+    ];
+    logChat(`preview up: ${payload.preview.title} → ${payload.preview.url}`);
+    renderPreviews();
+    ctx.bridge.work.render();
+  });
+
   sendButton.addEventListener("click", () => void onSend());
   cancelButton.addEventListener("click", () => {
     if (!state.selectedSessionId || !turnActive) return;
@@ -770,7 +837,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   changes.details.classList.add("changes-tray");
   const composerDock = el("div", "composer-dock");
   composerDock.append(changes.details, composer);
-  root.append(header, chatScroll, sandboxStatsBar, composerDock);
+  root.append(header, chatScroll, previewStrip, sandboxStatsBar, composerDock);
 
   // --- drag-drop: file paths from the explorer/OS into the composer -----------
   wireComposerDropTarget();
@@ -4082,6 +4149,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   function selectSession(sessionId: string | null): void {
     pendingSessionStart = false;
     state.selectedSessionId = sessionId;
+    // Selection uses selective renderers (not the full render()), so refresh
+    // the preview strip for the newly selected session explicitly.
+    renderPreviews();
     manualModelSessionId = null;
     state.chatMessages = [];
     folder.clearLiveState();
@@ -4163,6 +4233,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderFacts();
     renderAccessCards();
     renderAttachments();
+    renderPreviews();
     // Refresh the sandbox usage bar promptly on tab activation / session switch
     // (the interval keeps it live thereafter).
     void pollSandboxStats();

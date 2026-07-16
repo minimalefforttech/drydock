@@ -361,7 +361,11 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     case "codeReview.addNote":
     case "clone.exportPatch":
     case "chat.uploadAttachment":
+    case "preview.open":
+    case "preview.stop":
       return error(requestId);
+    case "preview.list":
+      return ok(requestId, { type: "preview.list", previews: [] });
     case "taskReview.submit": {
       const open = fixtures.comments.filter((comment) => comment.status === "open");
       const sessionIds = [...new Set(open.map((comment) => comment.sessionId))];

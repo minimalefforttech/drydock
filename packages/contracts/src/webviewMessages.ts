@@ -143,6 +143,9 @@ export type PanelRequestPayload =
   | { readonly type: "clone.discard"; readonly sessionId: string; readonly repo: string; readonly path: string }
   | { readonly type: "clone.exportPatch"; readonly sessionId: string; readonly repo?: string }
   | { readonly type: "chat.uploadAttachment"; readonly sessionId: string; readonly name: string; readonly dataBase64: string }
+  | { readonly type: "preview.list"; readonly sessionId: string }
+  | { readonly type: "preview.open"; readonly previewId: string; readonly external?: boolean }
+  | { readonly type: "preview.stop"; readonly previewId: string }
   | { readonly type: "taskReview.open"; readonly taskId: string; readonly startGuide?: boolean }
   | { readonly type: "taskReview.state"; readonly taskId: string }
   | { readonly type: "taskReview.submit"; readonly taskId: string }
@@ -668,6 +671,24 @@ export interface AccessRequestSummary {
 export type SessionAttentionReason = "turn-completed" | "turn-failed" | "access-request" | "question";
 
 /** Display-safe projection of one pending/resolved agent question. */
+/**
+ * One agent-announced sandbox preview (ADR 0017): an HTTP server the agent
+ * started inside its container, proxied to a host 127.0.0.1 port. Web-only —
+ * even Qt/Slate work prototypes as HTML styled by the shipped theme packs.
+ */
+export interface PreviewSummary {
+  readonly previewId: string;
+  readonly sessionId: string;
+  readonly title: string;
+  /** Port the agent bound inside the container. */
+  readonly containerPort: number;
+  readonly path: string;
+  /** Host-side 127.0.0.1 URL the proxy serves. */
+  readonly url: string;
+  readonly status: "up" | "stopped";
+  readonly createdAt: string;
+}
+
 export interface AgentQuestionSummary {
   readonly questionId: string;
   readonly sessionId: string;
@@ -943,6 +964,9 @@ export type PanelResponsePayload =
   | { readonly type: "clone.discard"; readonly repos: readonly CloneRepoState[] }
   | { readonly type: "clone.exportPatch"; readonly savedPaths: readonly string[]; readonly message: string }
   | { readonly type: "chat.uploadAttachment"; readonly runtimePath: string; readonly name: string; readonly bytes: number }
+  | { readonly type: "preview.list"; readonly previews: readonly PreviewSummary[] }
+  | { readonly type: "preview.open"; readonly accepted: true }
+  | { readonly type: "preview.stop"; readonly previews: readonly PreviewSummary[] }
   | { readonly type: "taskReview.open"; readonly accepted: true }
   | { readonly type: "taskReview.state"; readonly state: TaskReviewState }
   | { readonly type: "taskReview.submit"; readonly dispatched: number; readonly sessions: number; readonly sentSessions?: readonly TaskReviewSessionRef[]; readonly errors?: readonly string[] }
@@ -1035,6 +1059,7 @@ export type PanelPushPayload =
   | { readonly type: "memory.candidateAdded"; readonly candidate: MemoryCandidateSummary }
   | { readonly type: "taskReview.updated"; readonly taskId: string }
   | { readonly type: "codeReview.updated"; readonly taskId: string }
+  | { readonly type: "preview.available"; readonly preview: PreviewSummary }
   | { readonly type: "editor.active"; readonly editor: ActiveEditorRef | null }
   | { readonly type: "board.changed" }
   /** Coarse fleet invalidation: the Agents panel refetches agents.state. */
@@ -1599,6 +1624,23 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
       if (repo !== undefined && !isBoundedString(repo, MAX_NAME_LENGTH)) return null;
       return { type: "clone.exportPatch", sessionId, ...(repo === undefined ? {} : { repo }) };
+    }
+    case "preview.list": {
+      const sessionId = payload["sessionId"];
+      if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      return { type: "preview.list", sessionId };
+    }
+    case "preview.open": {
+      const previewId = payload["previewId"];
+      const external = payload["external"];
+      if (!isBoundedString(previewId, MAX_ID_LENGTH)) return null;
+      if (external !== undefined && typeof external !== "boolean") return null;
+      return { type: "preview.open", previewId, ...(external === undefined ? {} : { external }) };
+    }
+    case "preview.stop": {
+      const previewId = payload["previewId"];
+      if (!isBoundedString(previewId, MAX_ID_LENGTH)) return null;
+      return { type: "preview.stop", previewId };
     }
     case "chat.uploadAttachment": {
       const sessionId = payload["sessionId"];

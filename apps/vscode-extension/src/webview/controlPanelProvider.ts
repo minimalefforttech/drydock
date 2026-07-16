@@ -203,6 +203,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   static readonly viewType = "drydock.controlPanel";
 
   private view: vscode.WebviewView | undefined;
+  /** Previews whose untrusted-content notice has already been shown. */
+  private readonly previewNoticeShown = new Set<string>();
   private sequence = 0;
   /**
    * Per-session "waiting on you" reasons. Drives the activity-bar badge, the
@@ -351,6 +353,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // no separate pending-request query is needed here.
         this.push({ type: "policy.accessRequested", accessRequest: toAccessRequestSummary(event.request) });
         void this.flagAttention(event.request.sessionId, "access-request", "needs access approval");
+        return;
+      case "preview-available":
+        this.push({ type: "preview.available", preview: event.preview });
         return;
       case "question-asked":
         // A pending agent question is a standing "waiting on you" item: stack
@@ -1104,6 +1109,36 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "chat.uploadAttachment": {
         const uploaded = await this.requireBackend().uploadAttachment(payload.sessionId, payload.name, payload.dataBase64);
         this.respond(request.requestId, { type: "chat.uploadAttachment", ...uploaded });
+        return;
+      }
+      case "preview.list": {
+        this.respond(request.requestId, { type: "preview.list", previews: this.requireBackend().listPreviews(payload.sessionId) });
+        return;
+      }
+      case "preview.open": {
+        const preview = this.requireBackend().getPreview(payload.previewId);
+        if (preview === null) {
+          this.respondError(request.requestId, "This preview is no longer running.");
+          return;
+        }
+        // Agent-served content is untrusted: it opens in a browser surface,
+        // never a privileged webview, with a one-time notice per preview.
+        if (!this.previewNoticeShown.has(preview.previewId)) {
+          this.previewNoticeShown.add(preview.previewId);
+          void vscode.window.showInformationMessage(
+            `Opening "${preview.title}" — this page is served by the agent's sandbox. Treat it as untrusted content.`
+          );
+        }
+        if (payload.external === true) {
+          await vscode.env.openExternal(vscode.Uri.parse(preview.url));
+        } else {
+          await vscode.commands.executeCommand("simpleBrowser.show", preview.url);
+        }
+        this.respond(request.requestId, { type: "preview.open", accepted: true });
+        return;
+      }
+      case "preview.stop": {
+        this.respond(request.requestId, { type: "preview.stop", previews: this.requireBackend().stopPreview(payload.previewId) });
         return;
       }
       case "clone.exportPatch": {

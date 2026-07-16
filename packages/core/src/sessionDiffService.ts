@@ -29,8 +29,15 @@ import type { Logger } from "./logger.js";
 import { isPathDenied } from "./mountPolicy.js";
 
 export const DEFAULT_MAX_BLOB_BYTES = 5 * 1024 * 1024;
-/** Never snapshotted: VCS internals, dependency trees, product state. */
-export const DEFAULT_EXCLUDED_NAMES = [".git", "node_modules", ".drydock-owner"] as const;
+/** Never snapshotted: VCS internals, dependency trees, product state, and
+ * common generated/cache trees that only produce review noise. */
+export const DEFAULT_EXCLUDED_NAMES = [
+  ".git", "node_modules", ".drydock-owner",
+  "__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache",
+  ".ruff_cache", ".tox", ".DS_Store", "Thumbs.db"
+] as const;
+/** Generated-artifact file extensions never worth reviewing. */
+export const DEFAULT_EXCLUDED_EXTENSIONS = [".pyc", ".pyo"] as const;
 /**
  * Files whose mtime falls within this window before their snapshot capture are
  * re-hashed during diff: size+mtime cannot prove they are unchanged when the
@@ -50,6 +57,14 @@ export interface SessionDiffServiceOptions {
   readonly maxBlobBytes?: number;
   readonly excludedNames?: readonly string[];
   readonly deniedPaths?: readonly string[];
+  /**
+   * Optional gitignore oracle: given a root and candidate root-relative paths
+   * (forward slashes), returns the subset the repo ignores. Applied to new
+   * baselines AND both sides of every diff, so legacy baselines that already
+   * snapshotted ignored churn (.pyc, caches) stop reporting it as changes.
+   * Absent or failing → nothing extra is filtered.
+   */
+  readonly gitIgnoreFilter?: (rootPath: string, relativePaths: readonly string[]) => Promise<ReadonlySet<string>>;
 }
 
 interface WalkedFile {
@@ -86,7 +101,7 @@ export class SessionDiffService {
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
       throw new Error(`Diff root is not a real directory: ${input.rootPath}`);
     }
-    const files = await this.walk(rootPath);
+    const files = await this.filterIgnored(rootPath, await this.walk(rootPath));
     const snapshots: FileBaselineSnapshot[] = [];
     for (const file of files) {
       snapshots.push(await this.snapshotFile(file));
@@ -149,9 +164,18 @@ export class SessionDiffService {
 
   async computeDiff(baselineId: BaselineId): Promise<DiffFileChange[]> {
     const baseline = await this.requiredBaseline(baselineId);
-    const snapshots = await this.options.store.listFileSnapshots(baselineId);
-    const baselineByPath = new Map(snapshots.map((snapshot) => [snapshot.path, snapshot]));
-    const current = await this.walk(baseline.rootPath);
+    // BOTH sides pass the junk/gitignore filters: a legacy baseline that
+    // snapshotted ignored churn must not report it as deletions, and the live
+    // walk must not report it as adds/modifications.
+    const snapshots = (await this.options.store.listFileSnapshots(baselineId))
+      .filter((snapshot) => !this.isJunkPath(snapshot.path));
+    const walked = (await this.walk(baseline.rootPath)).filter((file) => !this.isJunkPath(file.relativePath));
+    const ignored = await this.ignoredSet(baseline.rootPath, [
+      ...new Set([...walked.map((file) => file.relativePath), ...snapshots.map((snapshot) => snapshot.path)])
+    ]);
+    const filteredSnapshots = snapshots.filter((snapshot) => !ignored.has(snapshot.path));
+    const current = walked.filter((file) => !ignored.has(file.relativePath));
+    const baselineByPath = new Map(filteredSnapshots.map((snapshot) => [snapshot.path, snapshot]));
     const currentByPath = new Map(current.map((file) => [file.relativePath, file]));
 
     const added: { readonly file: WalkedFile; readonly sha256: string }[] = [];
@@ -180,12 +204,13 @@ export class SessionDiffService {
         baselineSha256: snapshot.sha256,
         currentSha256,
         currentSize: file.size,
+        currentMtimeMs: file.mtimeMs,
         ...(await this.modifyLineStats(snapshot, file)),
         ...this.revertability(snapshot)
       });
     }
 
-    const deleted = snapshots.filter((snapshot) => !currentByPath.has(snapshot.path));
+    const deleted = filteredSnapshots.filter((snapshot) => !currentByPath.has(snapshot.path));
     const pairedAdds = new Set<string>();
     for (const snapshot of deleted) {
       // Rename-like pair: a deleted baseline file whose content reappeared at
@@ -200,6 +225,7 @@ export class SessionDiffService {
           baselineSha256: snapshot.sha256,
           currentSha256: match.sha256,
           currentSize: match.file.size,
+          currentMtimeMs: match.file.mtimeMs,
           ...(await this.modifyLineStats(snapshot, match.file)),
           ...this.revertability(snapshot)
         });
@@ -224,6 +250,7 @@ export class SessionDiffService {
         changeKind: "add",
         currentSha256: sha256,
         currentSize: file.size,
+        currentMtimeMs: file.mtimeMs,
         ...(await this.addLineStats(file)),
         revertSupported: true
       });
@@ -317,6 +344,31 @@ export class SessionDiffService {
       capturedAtMs,
       blobStored: true
     };
+  }
+
+  /** True when any path segment is an excluded name or the file has a generated extension. */
+  private isJunkPath(relativePath: string): boolean {
+    const segments = relativePath.split("/");
+    if (segments.some((segment) => this.excludedNames.has(segment))) return true;
+    const leaf = (segments[segments.length - 1] ?? "").toLowerCase();
+    return DEFAULT_EXCLUDED_EXTENSIONS.some((extension) => leaf.endsWith(extension));
+  }
+
+  /** The gitignore oracle's verdict for `paths`, or an empty set when absent/failing. */
+  private async ignoredSet(rootPath: string, paths: readonly string[]): Promise<ReadonlySet<string>> {
+    if (this.options.gitIgnoreFilter === undefined || paths.length === 0) return new Set();
+    try {
+      return await this.options.gitIgnoreFilter(rootPath, paths);
+    } catch {
+      return new Set();
+    }
+  }
+
+  /** Applies junk + gitignore filtering to a fresh walk (baseline creation). */
+  private async filterIgnored(rootPath: string, files: readonly WalkedFile[]): Promise<WalkedFile[]> {
+    const candidates = files.filter((file) => !this.isJunkPath(file.relativePath));
+    const ignored = await this.ignoredSet(rootPath, candidates.map((file) => file.relativePath));
+    return candidates.filter((file) => !ignored.has(file.relativePath));
   }
 
   private async walk(rootPath: string): Promise<WalkedFile[]> {

@@ -51,6 +51,51 @@ export function extractMemoryCandidates(text: string): string[] {
   return candidates;
 }
 
+export const PREVIEW_FENCE = "preview";
+/** Upper bound on preview announcements honored per agent text. */
+export const MAX_PREVIEWS_PER_TEXT = 2;
+const MAX_PREVIEW_TITLE_LENGTH = 100;
+const MAX_PREVIEW_PATH_LENGTH = 200;
+const PREVIEW_FENCE_PATTERN = /```preview[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;
+
+/** One agent-announced in-sandbox HTTP preview server (ADR 0017). */
+export interface ParsedPreviewAnnouncement {
+  readonly port: number;
+  readonly path: string;
+  readonly title: string;
+}
+
+/**
+ * Extracts well-formed preview announcements from final text. Strict like the
+ * other fences: malformed or out-of-bounds blocks are dropped, never guessed.
+ */
+export function extractPreviewAnnouncements(text: string): ParsedPreviewAnnouncement[] {
+  const previews: ParsedPreviewAnnouncement[] = [];
+  for (const match of text.matchAll(PREVIEW_FENCE_PATTERN)) {
+    if (previews.length >= MAX_PREVIEWS_PER_TEXT) break;
+    let value: unknown;
+    try {
+      value = JSON.parse(match[1] ?? "");
+    } catch {
+      continue;
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    const record = value as Record<string, unknown>;
+    const port = record["port"];
+    if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) continue;
+    const rawPath = record["path"];
+    const path = typeof rawPath === "string" && rawPath.startsWith("/") && rawPath.length <= MAX_PREVIEW_PATH_LENGTH
+      ? rawPath
+      : "/";
+    const rawTitle = record["title"];
+    const title = typeof rawTitle === "string" && rawTitle.trim().length > 0
+      ? rawTitle.trim().slice(0, MAX_PREVIEW_TITLE_LENGTH)
+      : "Preview";
+    previews.push({ port, path, title });
+  }
+  return previews;
+}
+
 export const QUESTION_FENCE = "question";
 /** Upper bound on questions honored per agent text, to bound prompt spam. */
 export const MAX_QUESTIONS_PER_TEXT = 4;
@@ -318,6 +363,14 @@ export function buildSessionBriefing(input: SessionBriefingInput): string {
     'so the developer sees what you see. For checks that need a human to run steps outside the sandbox, add ' +
     '"kind": "manual-check" with "steps": ["<step 1>", {"text": "<step 2>", "image": "/workspace/<path>.png"}, ...] ' +
     '(≤10 steps) and, when the check gates a subtask, its "subtaskId" — the developer can stamp it Verified from the answer.'
+  );
+  lines.push(
+    "UI/UX PROTOTYPING IS WEB-ONLY, even when the real target is Qt, Slate (Unreal), or another native toolkit: " +
+    "build the prototype as HTML/CSS/JS, start a plain HTTP server on any localhost port inside your sandbox, and announce it by emitting a fenced block " +
+    `with the info string \`${PREVIEW_FENCE}\` containing one JSON object: {"port": <port>, "path": "/", "title": "<short name>"}. ` +
+    "The developer gets a live, clickable proxy of your server. Theme stylesheets that make a web prototype feel like the target application are provided at " +
+    "/workspace/.drydock-themes/ (qt-dark.css, slate-dark.css, vscode-dark.css, clean-light.css, plus any studio-registered themes) — copy one next to your " +
+    "prototype and link it instead of hand-rolling native-looking chrome. Do not attempt native GUI toolkits in the sandbox; there is no display."
   );
   if (input.memories !== undefined && input.memories.length > 0) {
     lines.push("Team memory (human-approved notes from earlier work):");
