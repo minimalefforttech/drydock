@@ -348,7 +348,7 @@ test("chat model selections preserve a bounded provider-advertised reasoning eff
 });
 
 test("chat.reclaim accepts an optional model for a forced provider switch", () => {
-  // Bare reclaim (no model) is valid — same-provider takeover.
+  // Bare reclaim (no model) is valid - same-provider takeover.
   const bare = parsePanelRequest(wrap({ type: "chat.reclaim", sessionId: "session-1" }));
   assert.ok(bare);
   assert.equal(bare.payload.type === "chat.reclaim" ? bare.payload.model : "sentinel", undefined);

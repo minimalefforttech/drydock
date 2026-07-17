@@ -1,8 +1,8 @@
 /*
  * Planner panel styles (ADR 0012).
  *
- * The rendered-document look follows the drydock design-doc language — mono
- * kicker labels, tight headings, quiet rules — expressed entirely through
+ * The rendered-document look follows the drydock design-doc language - mono
+ * kicker labels, tight headings, quiet rules - expressed entirely through
  * VS Code theme tokens so it holds up in any color theme. Coloring is
  * class-based; the only inline style is the splitter's flex-basis, set via
  * CSSOM property assignment (allowed under the CSP; parsed style attributes

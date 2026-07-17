@@ -87,7 +87,7 @@ function harness(rows: TaskRecipeRecord[], overlays?: () => Promise<readonly Tas
   return { service, created, logger };
 }
 
-test("materializeTask creates task, subtasks with defaults, and the DAG — never starts", async () => {
+test("materializeTask creates task, subtasks with defaults, and the DAG - never starts", async () => {
   const { service, created } = harness([recipe()]);
   const task = await service.materializeTask("recipe-1", "Alembic export");
 
@@ -187,7 +187,7 @@ test("overlays merge read-only with prefixed ids; a failing overlay degrades to 
   assert.equal(overlay?.source, "overlay");
   assert.equal(overlay?.archived, false);
 
-  // getRecipe resolves overlay ids too — materialization works from them.
+  // getRecipe resolves overlay ids too - materialization works from them.
   assert.ok(await service.getRecipe("overlay:vfx-shot"));
 
   const { service: broken } = harness([stored], async () => {

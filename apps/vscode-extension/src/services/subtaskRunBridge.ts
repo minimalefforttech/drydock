@@ -17,7 +17,7 @@
  * loudly instead of silently starting without the intended code.
  *
  * Concurrency: `IsolatedRunService.startChat` -> `startChatSession` never
- * touches the single-flight `runInFlight` slot — that guard only covers
+ * touches the single-flight `runInFlight` slot - that guard only covers
  * `startPromptRun` and `runAppServerProbe` (see acquireRunSlot call sites in
  * isolatedRunService.ts). Chat sessions are per-session concurrent
  * (ChatSessionService keeps a liveSessions map; only turns within ONE session
@@ -71,7 +71,7 @@ export function createSubtaskRunBridge(options: SubtaskRunBridgeOptions): StartS
     let workspace = await resolveTaskWorkspace(options, taskId);
     // Stored `upstream` seed choice (ADR 0014): resolve the upstream subtasks'
     // unlanded changesets and ride them into clone init. No unlanded output is
-    // NOT an error — the upstreams simply produced nothing to carry — but a
+    // NOT an error - the upstreams simply produced nothing to carry - but a
     // resolution failure (missing blob) aborts the start honestly.
     if (seedMode === "upstream" && dependsOn.length > 0 && options.changesets !== undefined) {
       const seeds = await options.changesets.seedPatchesFor(dependsOn);

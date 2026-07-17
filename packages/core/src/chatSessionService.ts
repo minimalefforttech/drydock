@@ -252,7 +252,7 @@ export class ChatSessionService {
    * rules, replaying the durable transcript. The session row stays; a new
    * runtime generation boots and the same context is restored (warn-only on
    * failure, matching restartSession). Rejects a live session or one that is
-   * neither ended nor failed — resume is for revival, not for hijacking a
+   * neither ended nor failed - resume is for revival, not for hijacking a
    * running backend.
    */
   async resumeSession(request: ResumeChatSessionRequest): Promise<ChatSessionRecord> {
@@ -748,7 +748,7 @@ export class ChatSessionService {
     } catch (error) {
       // The old generation is already torn down; a failed boot must not leave a
       // live session pointing at a dead runtime. Mark it failed and drop it from
-      // the live map (the workspace is not disposed — a later new chat owns its
+      // the live map (the workspace is not disposed - a later new chat owns its
       // own workspace, and this one is cleaned up by startup reconciliation).
       this.liveSessions.delete(sessionId);
       if (nextConnection !== undefined) {
@@ -794,7 +794,7 @@ export class ChatSessionService {
     const live = this.requiredLiveSession(sessionId);
     // Threat-model rule: a role child can never out-grow its parent.
     // Approving a new mount on the child requires the PARENT to already hold
-    // it — grant to the parent first, then to the child. A parent that is not
+    // it - grant to the parent first, then to the child. A parent that is not
     // live in this host cannot vouch, so the expansion is refused outright.
     const parentSessionId = live.session.parentSessionId;
     if (parentSessionId !== undefined) {
@@ -829,6 +829,11 @@ export class ChatSessionService {
    */
   liveRuntimeHandle(sessionId: SessionId): RuntimeHandle | null {
     return this.liveSessions.get(sessionId)?.runtime ?? null;
+  }
+
+  /** Sessions currently live in THIS host (e.g. bulk MCP config refresh). */
+  liveSessionIds(): SessionId[] {
+    return [...this.liveSessions.keys()];
   }
 
   async endSession(sessionId: SessionId, reason: string): Promise<ChatSessionRecord> {
@@ -895,7 +900,7 @@ export class ChatSessionService {
 
   /**
    * Force-claims a not-live session's ownership for THIS host instance with a
-   * fresh heartbeat — the backend half of "Take over here". It clears the
+   * fresh heartbeat - the backend half of "Take over here". It clears the
    * running-elsewhere lock (isFreshForeignHeartbeat now sees our own id) so this
    * window can revive/drive the session. A session already live here is returned
    * unchanged. The caller (reclaim) then resumes it on a fresh runtime; the
@@ -999,7 +1004,7 @@ export class ChatSessionService {
   /**
    * The live session's mounts, projected for the session briefing. Empty when
    * the session is not live in this host. hostDisplayPath is the template
-   * mount's host path verbatim — it stays host-side; only the app layer's
+   * mount's host path verbatim - it stays host-side; only the app layer's
    * briefing text ever consumes it.
    */
   getSessionMounts(sessionId: SessionId): readonly { runtimePath: string; mode: "read-only" | "read-write"; hostDisplayPath?: string }[] {
@@ -1093,7 +1098,7 @@ export class ChatSessionService {
    *  - stale/absent heartbeat + container gone → end it (the old behaviour);
    *  - stale/absent heartbeat + container alive + adoptable transport → adopt
    *    it (reattach to the surviving container with no new container, no context
-   *    restore — exec transports keep in-container CLI state);
+   *    restore - exec transports keep in-container CLI state);
    *  - stale/absent heartbeat + container alive + non-adoptable transport
    *    (codex-app-server, whose live process cannot be reattached) → end it.
    * `externalRuntimeNames` is the adapter's current external-name set, fetched
@@ -1187,7 +1192,7 @@ export class ChatSessionService {
    * Adoption limitations, documented honestly: the inventory record does not
    * persist the original RuntimeTemplate, so a MINIMAL template is reconstructed
    * (id from templateId, adapter kind, empty mounts). That is sufficient for
-   * turns — sendTurn/exec only need the handle's externalName + cwd — but a
+   * turns - sendTurn/exec only need the handle's externalName + cwd - but a
    * later restartSession or expandSessionMounts on an adopted session boots a
    * fresh runtime from this minimal template and thus loses the original mounts
    * (it falls back to a fresh resume of the transcript). getSessionMounts also
@@ -1211,7 +1216,7 @@ export class ChatSessionService {
     const template = minimalTemplateFromRecord(record);
     const workspacePath = runtime.workspacePath;
     // Stamp ownership + heartbeat and flip to active (a "starting" row that was
-    // never activated is now adopted live). No restoreContext — see doc comment.
+    // never activated is now adopted live). No restoreContext - see doc comment.
     const active = await this.updateSession(session, {
       status: "active",
       hostInstanceId: this.options.hostInstanceId,
@@ -1294,7 +1299,7 @@ export class ChatSessionService {
 
   /**
    * True when the stored record carries a fresh heartbeat owned by a DIFFERENT
-   * host instance — i.e. the session is live in another VS Code window. A record
+   * host instance - i.e. the session is live in another VS Code window. A record
    * this host owns is never "foreign" even if its heartbeat is fresh. Invariant:
    * callers must have already confirmed the session is not live in this process.
    */
@@ -1396,7 +1401,7 @@ export class ChatSessionService {
       if (event.eventType === "user.message") {
         const raw = event.payload["text"];
         if (typeof raw === "string" && raw.length > 0) {
-          // Strip the host briefing so restored context is just the dialogue —
+          // Strip the host briefing so restored context is just the dialogue -
           // replaying mount/protocol boilerplate crowds out real history.
           const text = stripHostBriefing(raw);
           if (text.length > 0) {
@@ -1406,11 +1411,11 @@ export class ChatSessionService {
         continue;
       }
       // Only final agent.text becomes assistant context. agent.reasoning is
-      // DISPLAY-ONLY (see AgentReasoningEvent in contracts/events.ts) — it is
+      // DISPLAY-ONLY (see AgentReasoningEvent in contracts/events.ts) - it is
       // the agent's own scratch thinking, not user/assistant dialogue, and is
       // naturally excluded here since it never matches "agent.text". It still
       // flows through appendAndPublish like any other agent event (stored +
-      // pushed to the webview) — that part is correct; only replay-as-context
+      // pushed to the webview) - that part is correct; only replay-as-context
       // must skip it.
       if (event.eventType !== "agent.text") {
         continue;
@@ -1491,7 +1496,7 @@ interface MutableReconcileCounts {
  * Rebuilds a running RuntimeHandle from a persisted inventory record for
  * adoption. Faithful for exec transports: exec (dockerSandboxRuntimeAdapter)
  * addresses the container purely by externalName, and sendPrompt's cwd comes
- * from runtimeCwd ?? workspacePath — both persisted (workspacePath in metadata,
+ * from runtimeCwd ?? workspacePath - both persisted (workspacePath in metadata,
  * runtimeCwd derived below). mounts is empty because the inventory record only
  * stores a mount COUNT, not the policies; that is acceptable because exec/turns
  * never read handle.mounts (only createRuntime does, and adoption never creates
@@ -1519,7 +1524,7 @@ function handleFromInventoryRecord(record: RuntimeInventoryRecord): RuntimeHandl
  * Best-effort in-container cwd for an adopted handle when the record never
  * persisted runtimeCwd. Mirrors dockerSandboxRuntimeAdapter's Windows→POSIX
  * drive rewrite; a non-Windows path passes through. Only used as a cwd hint for
- * exec — a wrong value degrades to the container default, never a host escape.
+ * exec - a wrong value degrades to the container default, never a host escape.
  */
 function toContainerCwd(hostPath: string): string | undefined {
   if (hostPath.length === 0) {

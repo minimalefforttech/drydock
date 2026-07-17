@@ -1,4 +1,4 @@
-# ADR 0017 — Sandbox preview servers and web-only prototyping
+# ADR 0017 - Sandbox preview servers and web-only prototyping
 
 Status: accepted · Related: ADR 0016 (human gates), ADR 0001 (isolation),
 `threat-model.md`.
@@ -8,13 +8,13 @@ Status: accepted · Related: ADR 0016 (human gates), ADR 0001 (isolation),
 **Prototyping is web-only, even for Qt/Slate (Unreal) targets.** Agents build
 UI prototypes as HTML/CSS/JS, serve them on any localhost port inside their
 own sandbox, and announce them via a ` ```preview ` fence
-(`{"port", "path", "title"}` — strict, bounded, ≤2 per text). The host starts
+(`{"port", "path", "title"}` - strict, bounded, ≤2 per text). The host starts
 a `127.0.0.1` proxy per announcement: each request is one bounded exec into
 the session's own container (node `fetch` against loopback, body/headers
 base64-relayed over stdio). No published ports, no container restarts, no
-network reach beyond that one container — and remote runtimes work unchanged
+network reach beyond that one container - and remote runtimes work unchanged
 because the relay rides the runtime's own exec transport. Websockets/streaming
-and per-request latency (~100–300 ms) are the accepted v1 limits; a persistent
+and per-request latency (~100-300 ms) are the accepted v1 limits; a persistent
 duplex relay is the recorded fast-follow.
 
 **Theme packs make web prototypes feel native.** Built-in stylesheets
@@ -36,7 +36,7 @@ Previews are process-local like clone state; a window reload drops the proxy
 The proxy listener binds `127.0.0.1` only and bridges to exactly one
 container's loopback. Agent-served pages are untrusted content: they open in
 Simple Browser / external browser (never a privileged webview) with a one-time
-notice per preview. The container's no-egress policy is unchanged — an inbound
+notice per preview. The container's no-egress policy is unchanged - an inbound
 preview grants no outbound network. Fence parsing carries the same strictness
 and caps as the access/question protocol.
 

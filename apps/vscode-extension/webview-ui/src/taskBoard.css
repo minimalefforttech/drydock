@@ -1,6 +1,6 @@
 @import "./help.css";
 
-/* Task Board panel styles — VS Code theme variables only, no remote assets.
+/* Task Board panel styles - VS Code theme variables only, no remote assets.
    Modeled on taskReview.css (font/button conventions, var() fallback idioms).
 
    Palette contract:
@@ -10,7 +10,7 @@
    - --dd-stripe-0..7: the deterministic 8-hue parent-task palette. A card's
      stripe class (stripe-h0..stripe-h7) is picked host-side-stable from a hash
      of the taskId, so a task's cards keep one colour across renders/panels.
-     Classes, never inline styles — the strict CSP has no 'unsafe-inline'. */
+     Classes, never inline styles - the strict CSP has no 'unsafe-inline'. */
 
 :root {
   --dd-cat-backlog: var(--vscode-descriptionForeground, #9d9d9d);
@@ -148,7 +148,7 @@ body {
 /* Lanes toggle ON: the rail stacks one .tb-lane per column category instead
    of laying every column out in a single row. .tb-lane is shared with the
    column-settings modal's category grouping (same box: category-accented
-   left border, small caption) — .tb-lane-cols is the rail-specific
+   left border, small caption) - .tb-lane-cols is the rail-specific
    horizontal row of columns nested inside it. */
 .tb-rail.tb-lanes {
   flex-direction: column;
@@ -349,7 +349,7 @@ body {
 .tb-card.stripe-h7 { border-left-color: var(--dd-stripe-7); }
 
 /* Blocked subtask: dashed amber border + 🔒 chip (computed, never stored).
-   The LEFT edge stays the solid parent-task stripe — only the other three
+   The LEFT edge stays the solid parent-task stripe - only the other three
    sides go amber/dashed, so the family colour survives the blocked state. */
 .tb-subtask-card.blocked {
   border-style: dashed;
@@ -859,7 +859,7 @@ body {
   border-color: var(--vscode-errorForeground, #f48771);
 }
 
-/* Linked-chat count chip: subtasks aren't just pre-prompts — chats run
+/* Linked-chat count chip: subtasks aren't just pre-prompts - chats run
    against them, and this surfaces how many are linked (running or finished)
    alongside the ▶ Start affordance for starting another one. */
 .tb-linked-chip {
@@ -930,7 +930,7 @@ body {
   opacity: 0.85;
 }
 
-/* HITL verify gate (ADR 0007): waiting-on-you — warn accent, never hidden. */
+/* HITL verify gate (ADR 0007): waiting-on-you - warn accent, never hidden. */
 .tb-verify-chip {
   flex: none;
   font-size: 0.68em;

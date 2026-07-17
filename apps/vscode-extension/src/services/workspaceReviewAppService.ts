@@ -63,16 +63,35 @@ export interface WorkspaceReviewAppServiceOptions {
   readonly events?: { listEvents(sessionId: SessionId, fromSequence?: number): Promise<readonly { readonly eventType: string; readonly createdAt: string; readonly payload: Record<string, unknown> }[]> };
 }
 
-/** What the session's replay proves about agent writes. */
-export interface AgentTouchEvidence {
+/** What the session's replay proves about agent work. */
+export interface AgentWorkEvidence {
   /** Runtime paths named by agent.file_edit events. */
   readonly paths: ReadonlySet<string>;
-  /** [startMs, endMs] agent turn windows (user.message → agent.done), padded. */
-  readonly windows: readonly { readonly start: number; readonly end: number }[];
+  /** [startMs, endMs] spans of continuous agent activity (agent.* events). */
+  readonly spans: readonly { readonly start: number; readonly end: number }[];
 }
 
-/** Clock-skew/mtime-granularity padding around each turn window. */
-const TURN_WINDOW_PAD_MS = 2_000;
+/** Consecutive agent events within this gap merge into one activity span. */
+const AGENT_SPAN_GAP_MS = 10 * 60_000;
+/** Clock-skew/mtime-granularity padding around each span. */
+const AGENT_SPAN_PAD_MS = 2_000;
+
+/**
+ * Attribution: named by a file_edit event, or written while the agent was
+ * demonstrably active (mtime inside an activity span). Spans are bounded by
+ * the agent's OWN event timestamps, so developer edits after the agent
+ * finished always fall outside. Unattributable rows (deletions with no named
+ * evidence, missing mtimes) are excluded - unsure means not listed.
+ */
+export function isAgentWork(
+  evidence: AgentWorkEvidence,
+  change: { readonly path: string; readonly oldPath?: string; readonly currentMtimeMs?: number }
+): boolean {
+  if (isAgentTouched(evidence.paths, change.path, change.oldPath)) return true;
+  if (change.currentMtimeMs === undefined) return false;
+  const at = change.currentMtimeMs;
+  return evidence.spans.some((span) => at >= span.start && at <= span.end);
+}
 
 /**
  * True when a baseline root-relative change matches an agent-touched runtime
@@ -91,23 +110,6 @@ export function isAgentTouched(touched: ReadonlySet<string>, changePath: string,
   return false;
 }
 
-/**
- * Attribution for one change: named by a file_edit event, OR written while an
- * agent turn was running (batch/shell writes that never emit file_edit — the
- * mtime is already in hand from the diff walk, so this costs nothing extra).
- * Deletions carry no mtime; unmatched ones stay visible (hiding a real agent
- * deletion is worse than showing a foreign one).
- */
-export function isAttributedToSession(
-  evidence: AgentTouchEvidence,
-  change: { readonly path: string; readonly oldPath?: string; readonly changeKind: string; readonly currentMtimeMs?: number }
-): boolean {
-  if (isAgentTouched(evidence.paths, change.path, change.oldPath)) return true;
-  if (change.changeKind === "delete") return true;
-  if (change.currentMtimeMs === undefined) return true;
-  return evidence.windows.some((window) => change.currentMtimeMs !== undefined
-    && change.currentMtimeMs >= window.start && change.currentMtimeMs <= window.end);
-}
 
 export class WorkspaceReviewAppService {
   constructor(private readonly options: WorkspaceReviewAppServiceOptions) {}
@@ -437,7 +439,7 @@ export class WorkspaceReviewAppService {
    * Baselines every root of an implementation-mode session at session start:
    * a working `current-session` baseline (advanced per file by accept) plus an
    * immutable `session-start` copy that backs the Full Session view. Re-runs
-   * on resume/reclaim are additive only — a root that already has baselines
+   * on resume/reclaim are additive only - a root that already has baselines
    * keeps them, so the Session view stays continuous across resumes instead of
    * silently resetting to the resume moment.
    */
@@ -483,7 +485,7 @@ export class WorkspaceReviewAppService {
       const fresh = await this.options.diff.cloneBaseline(source.baselineId, "turn");
       for (const change of changes) {
         // acceptFile re-snapshots the path's current state (or drops the row
-        // when the file is gone) — for renames both sides need it.
+        // when the file is gone) - for renames both sides need it.
         await this.options.diff.acceptFile(fresh.baselineId, change.path);
         if (change.oldPath !== undefined) {
           await this.options.diff.acceptFile(fresh.baselineId, change.oldPath);
@@ -507,24 +509,30 @@ export class WorkspaceReviewAppService {
   }
 
   /**
-   * Changed files per root — session-scoped when a sessionId is given,
+   * Changed files per root - session-scoped when a sessionId is given,
    * otherwise the latest workspace snapshots. The view picks the frame each
    * root diffs against: `session` uses the working baseline (accept advances
    * it), `turn` the last send's snapshot, `full-session` the immutable
    * session-start snapshot. Missing frames fall back to the working baseline,
    * so legacy sessions and the pre-first-send state degrade to the Session
    * view. Full Session rows whose content already matches the working
-   * baseline are marked `accepted` — history, not pending work.
+   * baseline are marked `accepted` - history, not pending work.
    */
   async diffStatus(sessionId?: string, view: DiffViewMode = "session"): Promise<DiffFileSummary[]> {
     const baselines = await this.options.diff.listBaselines(
       sessionId === undefined ? undefined : asId<"SessionId">(sessionId)
     );
-    // Session views list what the AGENT touched, not everything that drifted
-    // under the mounts since baseline (user edits, other tasks, build tools).
-    // Evidence = agent.file_edit paths ∪ turn-window mtimes (covers batch/shell
-    // writes). No evidence at all → unfiltered, never hiding real work.
-    const evidence = sessionId === undefined ? null : await this.agentTouchEvidence(sessionId);
+    // Session views list what the agent worked on: files it explicitly
+    // reported editing (agent.file_edit), plus files whose mtime falls inside
+    // an AGENT ACTIVITY SPAN - windows built purely from agent.* event
+    // timestamps (commands, tool calls, output), so they END when the agent
+    // actually stopped working. Edits the developer makes after the agent
+    // finishes fall outside every span and never show. No evidence at all →
+    // NO files; unfiltered only when the events port itself is absent.
+    const evidence = sessionId === undefined ? null : await this.agentWorkEvidence(sessionId);
+    if (evidence !== null && evidence.paths.size === 0 && evidence.spans.length === 0) {
+      return [];
+    }
     const changes: DiffFileSummary[] = [];
     for (const frames of groupFramesByRoot(baselines).values()) {
       const baseline = pickViewBaseline(frames, view);
@@ -536,7 +544,7 @@ export class WorkspaceReviewAppService {
         ? new Map((await this.options.diff.listFileSnapshots(frames.working.baselineId)).map((snapshot) => [snapshot.path, snapshot.sha256]))
         : null;
       for (const change of await this.options.diff.computeDiff(baseline.baselineId)) {
-        if (evidence !== null && !isAttributedToSession(evidence, change)) continue;
+        if (evidence !== null && !isAgentWork(evidence, change)) continue;
         changes.push({
           baselineId: baseline.baselineId,
           rootName,
@@ -555,46 +563,43 @@ export class WorkspaceReviewAppService {
   }
 
   /**
-   * Replays the session's stored events into attribution evidence:
-   * agent.file_edit runtime paths plus [user.message → agent.done] turn
-   * windows (padded ±2 s; an unclosed window — in-flight or crashed turn —
-   * stays open-ended). Null when the port is absent or the session recorded
-   * neither paths nor windows — callers then fall back to the unfiltered diff.
+   * Replays the session's stored events into work evidence: file_edit paths
+   * plus activity spans merged from every agent.* event timestamp (gap-merged
+   * at 10 min, padded ±2 s). Spans end at the agent's LAST event - developer
+   * edits after the agent finished are provably outside. Empty evidence IS an
+   * answer (the session did nothing); null only when the port is absent or
+   * the scan fails.
    */
-  private async agentTouchEvidence(sessionId: string): Promise<AgentTouchEvidence | null> {
+  private async agentWorkEvidence(sessionId: string): Promise<AgentWorkEvidence | null> {
     const events = this.options.events;
     if (events === undefined) return null;
     try {
       const stored = await events.listEvents(asId<"SessionId">(sessionId));
       const paths = new Set<string>();
-      const windows: { start: number; end: number }[] = [];
-      let openStart: number | null = null;
+      const stamps: number[] = [];
       for (const event of stored) {
-        if (event.eventType === "agent.file_edit") {
-          const rawPath = event.payload["path"] ?? event.payload["filePath"];
-          if (typeof rawPath === "string" && rawPath.length > 0) {
-            paths.add(rawPath.replace(/\\/g, "/"));
-          }
-        } else if (event.eventType === "user.message") {
-          if (openStart === null) {
-            const at = Date.parse(event.createdAt);
-            if (Number.isFinite(at)) openStart = at;
-          }
-        } else if (event.eventType === "agent.done" && openStart !== null) {
-          const at = Date.parse(event.createdAt);
-          if (Number.isFinite(at)) {
-            windows.push({ start: openStart - TURN_WINDOW_PAD_MS, end: at + TURN_WINDOW_PAD_MS });
-          }
-          openStart = null;
+        if (!event.eventType.startsWith("agent.")) continue;
+        const at = Date.parse(event.createdAt);
+        if (Number.isFinite(at)) stamps.push(at);
+        if (event.eventType !== "agent.file_edit") continue;
+        const rawPath = event.payload["path"] ?? event.payload["filePath"];
+        if (typeof rawPath === "string" && rawPath.length > 0) {
+          paths.add(rawPath.replace(/\\/g, "/"));
         }
       }
-      if (openStart !== null) {
-        windows.push({ start: openStart - TURN_WINDOW_PAD_MS, end: Number.MAX_SAFE_INTEGER });
+      stamps.sort((a, b) => a - b);
+      const spans: { start: number; end: number }[] = [];
+      for (const at of stamps) {
+        const last = spans[spans.length - 1];
+        if (last !== undefined && at - last.end <= AGENT_SPAN_GAP_MS + AGENT_SPAN_PAD_MS) {
+          last.end = at + AGENT_SPAN_PAD_MS;
+        } else {
+          spans.push({ start: at - AGENT_SPAN_PAD_MS, end: at + AGENT_SPAN_PAD_MS });
+        }
       }
-      if (paths.size === 0 && windows.length === 0) return null;
-      return { paths, windows };
+      return { paths, spans };
     } catch (error) {
-      this.options.logger.warn("agent touch-evidence scan failed; session diff stays unfiltered", {
+      this.options.logger.warn("agent work-evidence scan failed; session diff stays unfiltered", {
         sessionId,
         error: error instanceof Error ? error.message : String(error)
       });
@@ -625,7 +630,7 @@ export class WorkspaceReviewAppService {
   }
 
   /**
-   * Accepts one file — the file's current state becomes its new starting point
+   * Accepts one file - the file's current state becomes its new starting point
    * in BOTH the working (Session) and turn (This Turn) frames of its root, so
    * an accepted row clears from either view. The immutable session-start frame
    * is never advanced: the Full Session view keeps the accepted change as
@@ -644,9 +649,9 @@ export class WorkspaceReviewAppService {
   }
 
   /**
-   * Reverts one file from the row's own frame — a Session row restores the
+   * Reverts one file from the row's own frame - a Session row restores the
    * last-accepted content, a This Turn row restores the state at the last
-   * send — and returns the refreshed diff for the caller's active view.
+   * send - and returns the refreshed diff for the caller's active view.
    */
   async revertFile(baselineId: string, filePath: string, view: DiffViewMode = "session"): Promise<DiffFileSummary[]> {
     const id = asId<"BaselineId">(baselineId);
@@ -688,7 +693,7 @@ export class WorkspaceReviewAppService {
     /**
      * ADR 0004: host-side agent flows (reviewer roles) may author comments;
      * every webview/user path omits this and stays "user". The webview never
-     * chooses authorship — it is not part of the panel contract.
+     * chooses authorship - it is not part of the panel contract.
      */
     readonly author?: ReviewCommentAuthor;
   }): Promise<ReviewCommentSummary> {
@@ -778,7 +783,7 @@ function pickViewBaseline(frames: RootFrames, view: DiffViewMode): DiffBaselineR
 
 /**
  * True when a Full Session change is already reflected in the working
- * baseline (path-keyed sha map) — i.e. it was accepted and nothing moved
+ * baseline (path-keyed sha map) - i.e. it was accepted and nothing moved
  * since: a modify/add/rename matches the working sha (and a rename's old path
  * is gone from it), a delete has no working row at all.
  */

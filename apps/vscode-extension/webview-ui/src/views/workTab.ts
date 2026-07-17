@@ -10,7 +10,7 @@
  *
  * The manual request-access form and the entire docs-review UI are removed.
  *
- * SECURITY: all dynamic strings render via textContent — never innerHTML.
+ * SECURITY: all dynamic strings render via textContent - never innerHTML.
  * Re-renders use replaceChildren so per-card handlers cannot leak.
  */
 
@@ -23,6 +23,7 @@ import {
   type ChatSessionSummary,
   type ColumnCategory,
   type MemoryCandidateSummary,
+  type MemoryScope,
   type PreviewSummary,
   type SubtaskSummary,
   type WorkHistoryEntry,
@@ -40,12 +41,14 @@ import {
   iconButton,
   inlineConfirmButton,
   option,
+  popover,
   relativeTime,
   select,
   statusDot,
   textInput
 } from "../components.js";
 import { setHelpTooltip } from "../help.js";
+import { buildMcpTogglePanel, enabledMcpCount, loadMcpState } from "../mcpControls.js";
 import { onPush, request } from "../messaging.js";
 import {
   applySessionAttention,
@@ -84,7 +87,7 @@ function isSessionReady(session: ChatSessionSummary, reasons: readonly string[])
 
 /**
  * Ordered title-line chips for a session row. ONE helper so the whole
- * chip vocabulary — and its ordering — lives in a single place.
+ * chip vocabulary - and its ordering - lives in a single place.
  *
  * FORWARD-COMPAT (next phase, multi-agent roles): a per-session `role` chip
  * (orchestrator / researcher / worker) becomes one more `{ text, cls }` entry
@@ -110,7 +113,7 @@ function sessionChips(
   } else if (reasons.includes("turn-completed")) {
     chips.push({ text: "· ready", cls: "chip-ready" });
   }
-  // Role chip: the promised forward-compat entry — a spawned child
+  // Role chip: the promised forward-compat entry - a spawned child
   // session names its role.
   if (session.spawnedRole !== undefined) {
     chips.push({ text: session.spawnedRole, cls: "chip-role" });
@@ -135,7 +138,7 @@ function sessionChips(
  * ONE helper so the meta line is composed in a single place.
  *
  * FORWARD-COMPAT (next phase, multi-agent roles): a `role` segment (e.g. the
- * session's agent role) is one insert into this array — no caller change.
+ * session's agent role) is one insert into this array - no caller change.
  *
  * Returns [providerModel, stateWord, timeWord]. The caller wraps the stateWord
  * in a `.meta-word-failed` span on a failed row (red accent) instead of the
@@ -148,11 +151,11 @@ function sessionMetaSegments(session: ChatSessionSummary): string[] {
 
 /**
  * Row-ordering comparator with a named loudness rule: LOUD rows first,
- * then READY rows, then the rest — each group stable in the existing
+ * then READY rows, then the rest - each group stable in the existing
  * newest-first order (the input array is already newest-first by updatedAt).
  *
  * FORWARD-COMPAT (next phase): role weighting extends THIS single function
- * (e.g. an orchestrator row could tie-break above workers) — nothing else moves.
+ * (e.g. an orchestrator row could tie-break above workers) - nothing else moves.
  */
 function sessionLoudness(session: ChatSessionSummary, reasons: readonly string[]): number {
   if (isSessionLoud(session, reasons)) return 0; // loudest
@@ -160,7 +163,7 @@ function sessionLoudness(session: ChatSessionSummary, reasons: readonly string[]
   return 2;
 }
 
-/** "running elsewhere" | "running" | "ended" | "failed" — the state the row shows. */
+/** "running elsewhere" | "running" | "ended" | "failed" - the state the row shows. */
 function sessionStateLabel(session: ChatSessionSummary): string {
   if (session.runningElsewhere === true) return "running elsewhere";
   if (session.status === "active" || session.status === "starting") return "running";
@@ -217,8 +220,8 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   const root = el("div", "work-tab");
 
   // --- Needs attention (collapsed one-line summary, expands in place) ---------
-  // At rest this is a single line (`⚠ N requests · M failed — review`); clicking
-  // it toggles the full access cards (typed-confirm and all — no friction
+  // At rest this is a single line (`⚠ N requests · M failed - review`); clicking
+  // it toggles the full access cards (typed-confirm and all - no friction
   // removed). Expansion state is webview-session-local (not persisted). The whole
   // section hides when there is nothing to act on.
   const attentionSection = el("div", "attention-section");
@@ -246,10 +249,10 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   const viewToggle = el("div", "segmented tasks-view-toggle");
   const expandedViewSegment = el("button", "segment tasks-view-expanded");
   expandedViewSegment.textContent = "▤";
-  expandedViewSegment.title = "Expanded view — full task cards with actions";
+  expandedViewSegment.title = "Expanded view - full task cards with actions";
   const compactViewSegment = el("button", "segment tasks-view-compact");
   compactViewSegment.textContent = "≡";
-  compactViewSegment.title = "Compact view — recent chats plus a workspace/task/chat tree";
+  compactViewSegment.title = "Compact view - recent chats plus a workspace/task/chat tree";
   const setViewMode = (mode: TasksViewMode): void => {
     if (state.tasksViewMode === mode) return;
     state.tasksViewMode = mode;
@@ -261,7 +264,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   compactViewSegment.addEventListener("click", () => setViewMode("compact"));
   viewToggle.append(expandedViewSegment, compactViewSegment);
   // Board button: opens the Task Board panel (drydock.taskBoard). The panel
-  // command isn't registered yet this phase — this always errors today
+  // command isn't registered yet this phase - this always errors today
   // ("Task Board panel not available yet."); that is expected/correct.
   const openBoardButton = button("Board", "small ghost tasks-board-button");
   openBoardButton.title = "Open the Task Board panel";
@@ -271,7 +274,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       if (!response.ok) ctx.bridge.chat.logChat(`open task board failed: ${response.error.message}`);
     });
   });
-  // Agents button: opens the fleet view (drydock.agents, ADR 0013) — every
+  // Agents button: opens the fleet view (drydock.agents, ADR 0013) - every
   // session across every task, for the many-tasks-in-flight moment.
   const openAgentsButton = button("Agents", "small ghost tasks-board-button");
   openAgentsButton.title = "Open the Agents panel (all active agents across tasks)";
@@ -299,7 +302,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   taskDescInput.placeholder = "Description (optional)";
   const taskWorkspaceSelect = select("task-create-workspace", "Workspace mounted into a started chat");
   setHelpTooltip(taskWorkspaceSelect, "Select the workspace that the new agent session can access.");
-  // R10: primary (accent) — the task-first happy path (spins a runtime + chat).
+  // R10: primary (accent) - the task-first happy path (spins a runtime + chat).
   const startChatButton = button("Create & start chat", "small primary");
   startChatButton.disabled = ctx.isDemo();
   if (ctx.isDemo()) startChatButton.title = "Demo data does not start chats. Use Create task only, or switch to Live data.";
@@ -407,11 +410,11 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
    * Create & start chat: task.create → (set picked → task.link {workspaceSetId})
    * → chat.startSession {model, workspace, title} → task.link {sessionId} →
    * upsert the session, select it. Buttons disabled while in flight; on any
-   * step failing we log to chat diagnostics and stop — earlier steps stay (a
+   * step failing we log to chat diagnostics and stop - earlier steps stay (a
    * created task without a chat is a fine partial outcome).
    *
    * UX: the Chat tab switch happens RIGHT AFTER the task is created (and its
-   * workspace-set link, if any) — not after chat.startSession resolves — so the
+   * workspace-set link, if any) - not after chat.startSession resolves - so the
    * user sees the Chat tab immediately with a "Starting the chat backend…"
    * placeholder (ctx.bridge.chat.showStarting) instead of a perceived hang
    * while the backend boots. The real session is selected (clearing the
@@ -428,7 +431,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         const linked = await linkTaskAwait(task.taskId, { workspaceSetId: setId });
         if (linked === null) { renderTasks(); ctx.persist(); setCreateButtonsDisabled(false); return; }
       }
-      // Jump to Chat now with a loading placeholder — the backend boot below
+      // Jump to Chat now with a loading placeholder - the backend boot below
       // takes a few seconds and should not look like a hang on this tab.
       resetTaskCreateForm();
       renderTasks();
@@ -475,15 +478,26 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // --- Memory (collapsed) -----------------------------------------------------
   // Agent-proposed memory candidates: pending cards (Approve / Reject) plus a dim
   // collapsed "Memories (N)" sub-list of approved, openable entries. Memory is
-  // not urgent — no toast/attention.
+  // not urgent - no toast/attention.
   const memorySection = collapsible("Memory");
   memorySection.details.classList.add("memory-section");
+  // Quick-add: one line, never a form - user memories are short by design.
+  // The scope pill cycles task → workspace → global; tag chips come from the
+  // workspace's detected tags (glob rule table).
+  const memoryQuickAdd = el("div", "memory-quick-add");
+  const memoryQuickRow = el("div", "memory-quick-row");
+  const memoryQuickInput = textInput("Remember…  (Enter saves)");
+  memoryQuickInput.classList.add("memory-quick-input");
+  const memoryQuickScopePill = button("", "ghost small scope-pill");
+  memoryQuickRow.append(memoryQuickInput, memoryQuickScopePill);
+  const memoryQuickTags = el("div", "memory-tag-row");
+  memoryQuickAdd.append(memoryQuickRow, memoryQuickTags);
   const memoryPending = el("div", "memory-pending");
   const memoryApproved = collapsible("Memories (0)");
   memoryApproved.details.classList.add("memory-approved");
   const memoryApprovedList = el("div", "memory-approved-list");
   memoryApproved.body.append(memoryApprovedList);
-  memorySection.body.append(memoryPending, memoryApproved.details);
+  memorySection.body.append(memoryQuickAdd, memoryPending, memoryApproved.details);
 
   // --- Orphaned Chats --------------------------------------------------------
   // Chats are owned by a task in the main UI. This collapsed cleanup drawer is
@@ -615,7 +629,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     editorMembers.replaceChildren();
     if (draftMembers.length === 0) {
       const empty = el("div", "empty");
-      empty.textContent = "No folders yet — register open folders or add a registered one below.";
+      empty.textContent = "No folders yet - register open folders or add a registered one below.";
       editorMembers.append(empty);
     }
     draftMembers.forEach((member, index) => {
@@ -626,7 +640,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       const path = el("span", "ws-member-path");
       path.textContent = project?.displayPath ?? "";
       const mode = button(member.readOnly ? "RO" : "RW", `ws-mode-toggle ${member.readOnly ? "ro" : "rw"}`);
-      mode.title = member.readOnly ? "Read-only — click to allow writes" : "Read-write — click to fence read-only";
+      mode.title = member.readOnly ? "Read-only - click to allow writes" : "Read-write - click to fence read-only";
       mode.addEventListener("click", () => {
         draftMembers[index] = { projectId: member.projectId, readOnly: !member.readOnly };
         renderWorkspaceEditor();
@@ -648,7 +662,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     }
 
     saveSetButton.textContent = editingSetId ? "Update workspace" : "Create workspace";
-    editorHint.textContent = editingSetId ? "Editing a saved workspace — Save overwrites it." : "";
+    editorHint.textContent = editingSetId ? "Editing a saved workspace - Save overwrites it." : "";
   }
 
   addProjectSelect.addEventListener("change", () => {
@@ -722,7 +736,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   }
 
   // Subtasks: the currently-expanded (inline-editing) subtaskId per task,
-  // webview-session-local (not persisted). One at a time per task — expanding a
+  // webview-session-local (not persisted). One at a time per task - expanding a
   // row collapses any other open one in the same task.
   const expandedSubtaskByTask = new Map<string, string>();
 
@@ -912,7 +926,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // The status dot pulses only for the selected session's in-flight turn; these
   // two pushes are the only signal of that (state.chatMessages streaming flag
   // is set by the Chat tab's own handlers, which may run before or after this
-  // one, so re-rendering here — not just relying on that flag — keeps the dot
+  // one, so re-rendering here - not just relying on that flag - keeps the dot
   // in sync regardless of handler order).
   onPush("chat.turnStarted", (payload) => {
     if (payload.sessionId === state.selectedSessionId) {
@@ -975,7 +989,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     ctx.persist();
   });
   // --- push: memory.candidateAdded --------------------------------------------
-  // Upsert + re-render. Deliberately NO toast/attention — memory is not urgent.
+  // Upsert + re-render. Deliberately NO toast/attention - memory is not urgent.
   onPush("memory.candidateAdded", (payload) => {
     upsertMemoryCandidate(state, payload.candidate);
     renderMemory();
@@ -1045,9 +1059,14 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     const response = await request({ type: "memory.list" });
     if (response.ok && response.payload.type === "memory.list") {
       state.memoryCandidates = [...response.payload.candidates];
+      state.detectedTags = [...response.payload.detectedTags];
       renderMemory();
       ctx.persist();
     }
+  }
+
+  async function loadMcp(): Promise<void> {
+    if (await loadMcpState(state)) renderWorkspaceSets();
   }
 
   // ---------------------------------------------------------------------------
@@ -1055,7 +1074,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // ---------------------------------------------------------------------------
   /**
    * Composes the collapsed inbox summary line from only the non-zero parts:
-   * `⚠ 2 requests · 2 questions · 1 failed · 1 to verify · 1 parked · 1 to land — review`.
+   * `⚠ 2 requests · 2 questions · 1 failed · 1 to verify · 1 parked · 1 to land - review`.
    */
   function attentionSummaryText(counts: {
     requests: number; questions: number; failed: number;
@@ -1069,7 +1088,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     if (counts.parked > 0) parts.push(`${String(counts.parked)} parked`);
     if (counts.land > 0) parts.push(`${String(counts.land)} to land`);
     if (counts.previews > 0) parts.push(`${String(counts.previews)} preview${counts.previews === 1 ? "" : "s"}`);
-    return `⚠ ${parts.join(" · ")} — review`;
+    return `⚠ ${parts.join(" · ")} - review`;
   }
 
   /** One subtask-derived inbox entry with its owning task. */
@@ -1084,7 +1103,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     const pendingQuestions = state.questions.filter((q) => q.status === "pending");
     // Failed SESSIONS (status flip), listed as jump rows in the inbox below.
     const failedSessions = state.sessions.filter((s) => s.status === "failed");
-    // Subtask-derived inbox categories — the lead's "what needs me" beyond
+    // Subtask-derived inbox categories - the lead's "what needs me" beyond
     // requests/questions: HITL verify gates, parked automation, unlanded
     // changesets. All derived from state.tasks; no new fetches.
     const verifyItems: InboxSubtaskItem[] = [];
@@ -1098,7 +1117,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       }
     }
 
-    // Live sandbox previews (ADR 0017) — non-blocking "take a look" items.
+    // Live sandbox previews (ADR 0017) - non-blocking "take a look" items.
     const livePreviews = state.previews.filter((preview) => preview.status === "up");
     // Hide the whole section when nothing needs acting on.
     const total = pending.length + pendingQuestions.length + failedSessions.length
@@ -1122,9 +1141,9 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       previews: livePreviews.length
     });
 
-    // The expansion holds the SAME stacked card the chat surface uses — one
+    // The expansion holds the SAME stacked card the chat surface uses - one
     // item at a time with the ‹ i/N › pager, across all sessions, oldest
-    // first (failed sessions are the loud rows below — not duplicated here).
+    // first (failed sessions are the loud rows below - not duplicated here).
     const items: AttentionItem[] = [
       ...pending.map((access): AttentionItem => ({ kind: "access", access })),
       ...pendingQuestions.map((question): AttentionItem => ({ kind: "question", question }))
@@ -1147,8 +1166,8 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         access: {
           onResolved: (approve) => {
             ctx.bridge.chat.logChat(approve
-              ? "access approved — backend restarts with the new mount; the agent continues automatically"
-              : "access denied — the agent is told to continue without it");
+              ? "access approved - backend restarts with the new mount; the agent continues automatically"
+              : "access denied - the agent is told to continue without it");
             void loadWorkspaceState();
           },
           onError: (message) => {
@@ -1225,7 +1244,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       list.append(row(
         "inbox-failed",
         "✗",
-        "This chat failed — open it to read the error and resume",
+        "This chat failed - open it to read the error and resume",
         session.title,
         `failed · ${relativeTime(session.updatedAt)}`,
         () => {
@@ -1268,7 +1287,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       list.append(row(
         "inbox-parked",
         "⏸",
-        "Parked — automation gave up after two failures",
+        "Parked - automation gave up after two failures",
         item.subtask.title,
         `parked · ${item.task.title}`,
         openBoardPanel,
@@ -1295,7 +1314,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       list.append(row(
         "inbox-preview",
         "▶",
-        "The agent is serving a live UI preview from its sandbox — take a look",
+        "The agent is serving a live UI preview from its sandbox - take a look",
         preview.title,
         `preview · ${session?.title ?? preview.sessionId.slice(0, 8)}`,
         openPreview
@@ -1337,6 +1356,11 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   }
 
   function activeTaskId(): string | undefined {
+    // The explicit shared choice wins (kept in sync with Plan/Edit); fall
+    // back to deriving from the selected session, then any live session.
+    if (state.activeTaskId !== null && state.tasks.some((task) => task.taskId === state.activeTaskId)) {
+      return state.activeTaskId;
+    }
     const selected = selectedTaskId();
     if (selected !== undefined) return selected;
     return state.tasks.find((task) => task.linkedSessionIds.some((sessionId) => {
@@ -1437,10 +1461,21 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       linkTask(task.taskId, { sessionId });
     });
     const activeSession = activeTaskSession(task);
-    if (activeSession !== undefined) {
+    // The CURRENT task is marked active whether or not a session is live -
+    // it's the shared target of Plan/new-chat, not a liveness indicator.
+    if (task.taskId === activeTaskId()) {
       c.classList.add("active");
       c.setAttribute("aria-current", "true");
     }
+    // Clicking the card body (not its controls) makes this the CURRENT task -
+    // shared with the Plan tab's picker and the Edit tab's new-chat linking.
+    c.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("button,input,select,textarea,details,summary,a,[role=button]")) return;
+      if (state.activeTaskId === task.taskId) return;
+      state.activeTaskId = task.taskId;
+      renderTasks();
+      ctx.persist();
+    });
 
     // --- top row: title (click → rename) · column pill · delete ---------------
     const top = el("div", "task-card-top");
@@ -1567,6 +1602,27 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       });
       actions.append(linkSet);
     }
+    // MCP: this task's server toggles over the workspace/registry defaults.
+    if (state.mcpServers.length > 0) {
+      const mcpContext = {
+        scope: "task" as const,
+        refId: task.taskId,
+        workspaceSetIds: task.linkedWorkspaceSetIds
+      };
+      const mcpTrigger = button(`MCP (${String(enabledMcpCount(state, mcpContext))})`, "small task-mcp");
+      mcpTrigger.title = "MCP servers for this task's chats (overrides workspace defaults)";
+      const mcpWrap = popover(mcpTrigger, (content) => {
+        const rerender = (): void => {
+          mcpTrigger.textContent = `MCP (${String(enabledMcpCount(state, mcpContext))})`;
+          content.replaceChildren();
+          buildMcpTogglePanel(content, state, mcpContext, rerender);
+        };
+        buildMcpTogglePanel(content, state, mcpContext, rerender);
+      });
+      // Mid-row trigger: anchor the panel LEFT so it never clips the panel edge.
+      mcpWrap.classList.add("mcp-popover-left");
+      actions.append(mcpWrap);
+    }
     // Activate: visible on every task for a stable action row; disabled until
     // the task has a linked workspace set for the host to activate.
     const divider = el("span", "task-actions-divider");
@@ -1584,7 +1640,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     }
     actions.append(divider, activate);
 
-    // Open on board: minor/secondary text link, always visible (bare open —
+    // Open on board: minor/secondary text link, always visible (bare open -
     // the contract carries no taskId to deep-link to this specific card).
     const openOnBoard = button("Open on board ▸", "ghost small task-open-board");
     openOnBoard.title = "Open the Task Board panel";
@@ -1605,8 +1661,8 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // The low-ceremony read of the same data, for people who live in chats rather
   // than task cards: a RECENT strip of the latest chats, a separator, then a
   // collapsible tree grouped task-first or workspace-first (persisted seg).
-  // Rows are one line each — status dot / category glyph, title, quiet
-  // right-aligned metadata — and clicking a chat row opens it, exactly like the
+  // Rows are one line each - status dot / category glyph, title, quiet
+  // right-aligned metadata - and clicking a chat row opens it, exactly like the
   // expanded rows. All mutation affordances (rename, link, column moves,
   // actions) stay in the expanded view; the compact view is for orientation.
   // ---------------------------------------------------------------------------
@@ -1745,7 +1801,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   /**
    * One task branch: collapsible row (live dot while a linked chat runs, bold
-   * title, tinted column pill, quiet meta) plus — expanded — its subtask and
+   * title, tinted column pill, quiet meta) plus - expanded - its subtask and
    * chat leaves one level deeper. `showWorkspace` names linked sets in the meta
    * (task-first only; workspace-first already shows the set as the parent).
    */
@@ -1785,7 +1841,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         r.append(meta);
       }
     });
-    if (activeTaskSession(task) !== undefined) {
+    if (task.taskId === activeTaskId()) {
       row.classList.add("compact-active");
       row.setAttribute("aria-current", "true");
     }
@@ -1802,7 +1858,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   /**
    * One subtask leaf: category glyph (✓ done / ◐ in progress / ○ otherwise),
-   * 🔒 while blocked, quiet tinted column word. Read-only here — clicking
+   * 🔒 while blocked, quiet tinted column word. Read-only here - clicking
    * opens the Task Board, where subtasks are actually worked.
    */
   function compactSubtaskRow(subtask: SubtaskSummary, depth: number): HTMLElement {
@@ -1822,7 +1878,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     if (subtask.isBlocked) {
       const lock = el("span", "compact-subtask-lock");
       lock.textContent = "🔒";
-      lock.title = "Blocked — an upstream dependency has not finished yet";
+      lock.title = "Blocked - an upstream dependency has not finished yet";
       row.append(lock);
     }
     if (column !== undefined) {
@@ -1844,7 +1900,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   /**
    * One chat leaf: status dot (the loud/ready halo vocabulary intact), title,
-   * the shared title-line chips, then quiet meta — owning task (recents only)
+   * the shared title-line chips, then quiet meta - owning task (recents only)
    * · state · time. Clicking opens the chat, exactly like the expanded rows.
    */
   function compactChatRow(session: ChatSessionSummary, depth: number, showTask: boolean): HTMLElement {
@@ -1870,7 +1926,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     for (const k of chips) {
       const chipEl = el("span", `session-chip ${k.cls}`);
       chipEl.textContent = k.text;
-      if (k.cls === "chip-clone") chipEl.title = "Clone-mode session — changes sync into your editor";
+      if (k.cls === "chip-clone") chipEl.title = "Clone-mode session - changes sync into your editor";
       row.append(chipEl);
     }
     // Recents rows lead with the owning task and drop the state word (the dot
@@ -1913,7 +1969,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   /**
    * SUBTASKS block: "SUBTASKS · x of y done" header, one row per subtask
    * (sortOrder ascending, click-to-expand inline editor), and an add-subtask
-   * input at the bottom. `boardColumns` may not have loaded yet — done-count
+   * input at the bottom. `boardColumns` may not have loaded yet - done-count
    * degrades to 0 in that case, but the total and rows still render.
    */
   function subtasksSection(task: WorkTaskSummary): HTMLElement {
@@ -1996,7 +2052,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     if (subtask.isBlocked) {
       const lock = el("span", "subtask-lock");
       lock.textContent = "🔒";
-      lock.title = "Blocked — an upstream dependency has not finished yet";
+      lock.title = "Blocked - an upstream dependency has not finished yet";
       summaryLine.append(lock);
     }
     if (subtask.autoStart) {
@@ -2019,7 +2075,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   /**
    * Inline subtask editor: title/description/prompt fields (commit on blur or
-   * Enter, revert on Escape — mirroring `beginTaskRename`/`beginTaskNoteEdit`
+   * Enter, revert on Escape - mirroring `beginTaskRename`/`beginTaskNoteEdit`
    * exactly), an auto-start checkbox (commits immediately on change), a column
    * pill scoped to this subtask, and a Delete button (inline-confirm).
    */
@@ -2055,7 +2111,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     const promptInput = document.createElement("textarea");
     promptInput.className = "note-input subtask-editor-prompt";
     promptInput.rows = 2;
-    promptInput.placeholder = "Prompt (leave empty — not startable)";
+    promptInput.placeholder = "Prompt (leave empty - not startable)";
     promptInput.value = subtask.prompt ?? "";
     bindCommitOnBlurOrEnter(promptInput, () => {
       const next = promptInput.value.trim();
@@ -2205,7 +2261,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       for (const k of chips) {
         const chipEl = el("span", `session-chip ${k.cls}`);
         chipEl.textContent = k.text;
-        if (k.cls === "chip-clone") chipEl.title = "Clone-mode session — changes sync into your editor";
+        if (k.cls === "chip-clone") chipEl.title = "Clone-mode session - changes sync into your editor";
         top.append(chipEl);
       }
 
@@ -2330,7 +2386,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   /**
    * Moves a task or subtask card to a different column (the column-pill
-   * dropdown's pick handler). The response carries the whole refreshed board —
+   * dropdown's pick handler). The response carries the whole refreshed board -
    * upsert every task (there is no single-task shape here) then re-render.
    */
   function moveCard(cardKind: "task" | "subtask", id: string, columnId: string): void {
@@ -2413,6 +2469,84 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   // ---------------------------------------------------------------------------
   // Memory (work item 5)
   // ---------------------------------------------------------------------------
+  /** Quick-add state: scope pill cycle + toggled suggestion tags. */
+  let quickScope: MemoryScope = "task";
+  const quickTags = new Set<string>();
+
+  const MEMORY_SCOPE_CYCLE: readonly MemoryScope[] = ["task", "workspace", "global"];
+
+  function activeTaskTitle(): string | undefined {
+    const taskId = activeTaskId();
+    return taskId === undefined ? undefined : state.tasks.find((task) => task.taskId === taskId)?.title;
+  }
+
+  function scopePillText(scope: MemoryScope): string {
+    if (scope === "task") {
+      const title = activeTaskTitle();
+      return title === undefined ? "task" : `task: ${title.slice(0, 24)}`;
+    }
+    return scope === "workspace" ? "workspace" : "global";
+  }
+
+  function nextScope(scope: MemoryScope): MemoryScope {
+    // Skip task scope when no current task exists to anchor it.
+    const start = MEMORY_SCOPE_CYCLE.indexOf(scope);
+    for (let step = 1; step <= MEMORY_SCOPE_CYCLE.length; step += 1) {
+      const candidate = MEMORY_SCOPE_CYCLE[(start + step) % MEMORY_SCOPE_CYCLE.length] as MemoryScope;
+      if (candidate !== "task" || activeTaskId() !== undefined) return candidate;
+    }
+    return scope;
+  }
+
+  memoryQuickScopePill.addEventListener("click", () => {
+    quickScope = nextScope(quickScope);
+    memoryQuickScopePill.textContent = scopePillText(quickScope);
+  });
+  memoryQuickInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    const content = memoryQuickInput.value.trim();
+    if (content.length === 0) return;
+    const taskId = quickScope === "task" ? activeTaskId() : undefined;
+    void request({
+      type: "memory.add",
+      content,
+      scope: quickScope,
+      ...(taskId === undefined ? {} : { taskId }),
+      ...(quickTags.size === 0 ? {} : { tags: [...quickTags] })
+    }).then((response) => {
+      if (!response.ok) {
+        ctx.bridge.chat.logChat(`remember failed: ${response.error.message}`);
+        return;
+      }
+      if (response.payload.type === "memory.add") {
+        memoryQuickInput.value = "";
+        quickTags.clear();
+        upsertMemoryCandidate(state, response.payload.candidate);
+        renderMemory();
+        ctx.persist();
+      }
+    });
+  });
+
+  /** Toggleable tag chip row from the workspace's detected tags (+ extras). */
+  function renderTagChips(container: HTMLElement, selected: Set<string>, extraTags: readonly string[] = []): void {
+    container.replaceChildren();
+    const all = [...new Set([...extraTags, ...state.detectedTags])];
+    if (all.length === 0) return;
+    const label = el("span", "muted memory-tag-label");
+    label.textContent = "for:";
+    container.append(label);
+    for (const tag of all) {
+      const tagChip = chip(tag, () => {
+        if (selected.has(tag)) selected.delete(tag); else selected.add(tag);
+        renderTagChips(container, selected, extraTags);
+      });
+      tagChip.classList.add("memory-tag-chip");
+      if (selected.has(tag)) tagChip.classList.add("selected");
+      container.append(tagChip);
+    }
+  }
+
   function renderMemory(): void {
     const pending = state.memoryCandidates
       .filter((c) => c.status === "pending")
@@ -2422,6 +2556,12 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 
     memorySection.summaryLabel.textContent = pending.length > 0 ? `Memory (${String(pending.length)})` : "Memory";
+
+    // Quick-add adornments only - the input element persists so typing
+    // survives unrelated re-renders.
+    if (quickScope === "task" && activeTaskId() === undefined) quickScope = "workspace";
+    memoryQuickScopePill.textContent = scopePillText(quickScope);
+    renderTagChips(memoryQuickTags, quickTags);
 
     memoryPending.replaceChildren();
     if (pending.length === 0) {
@@ -2440,11 +2580,26 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     }
   }
 
-  /** One approved memory row: content snippet + an Open affordance for the read-only virtual doc. */
+  /** Compact scope descriptor for chips ("task: Fix export", "ws: drydock", "global"). */
+  function scopeChipText(candidate: MemoryCandidateSummary): string {
+    if (candidate.scope === "task") return `task: ${(candidate.scopeLabel ?? "?").slice(0, 24)}`;
+    if (candidate.scope === "workspace") return `ws: ${(candidate.scopeLabel ?? "?").slice(0, 24)}`;
+    return "global";
+  }
+
+  /** One approved memory row: content + scope/tag chips + Open + Delete. */
   function memoryApprovedRow(candidate: MemoryCandidateSummary): HTMLElement {
     const row = el("div", "memory-approved-row");
     const content = el("span", "memory-approved-content");
     content.textContent = candidate.content;
+    const scopeChip = chip(scopeChipText(candidate));
+    scopeChip.classList.add("memory-scope-chip", `scope-${candidate.scope}`);
+    row.append(content, scopeChip);
+    for (const tag of candidate.tags) {
+      const tagChip = chip(tag);
+      tagChip.classList.add("memory-tag-chip", "dim");
+      row.append(tagChip);
+    }
     const open = button("Open", "ghost small");
     open.addEventListener("click", () => {
       void request({ type: "memory.open", memoryCandidateId: candidate.memoryCandidateId }).then((response) => {
@@ -2453,33 +2608,78 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         }
       });
     });
-    row.append(content, open);
+    const remove = inlineConfirmButton("✕", "Delete?", () => {
+      void request({ type: "memory.delete", memoryCandidateId: candidate.memoryCandidateId }).then((response) => {
+        if (response.ok && response.payload.type === "memory.delete") {
+          state.memoryCandidates = state.memoryCandidates.filter((c) => c.memoryCandidateId !== candidate.memoryCandidateId);
+          renderMemory();
+          ctx.persist();
+        }
+      });
+    }, "ghost small danger");
+    row.append(open, remove);
     return row;
   }
 
-  /** One pending memory candidate: content + source session + Approve / Reject. */
+  /**
+   * One pending memory candidate - EVERYTHING is editable before approval
+   * (agent proposals run wordy; the human trims to the durable sentence and
+   * retargets scope/tags). Approve sends the edited values; the card is the
+   * ask-user gate.
+   */
   function memoryCard(candidate: MemoryCandidateSummary): HTMLElement {
     const c = card("memory-card");
-    const content = el("div", "memory-card-content");
-    content.textContent = candidate.content;
+    const content = document.createElement("textarea");
+    content.className = "memory-card-edit";
+    content.value = candidate.content;
+    content.rows = Math.min(6, Math.max(2, Math.ceil(candidate.content.length / 60)));
     const source = el("div", "memory-card-source");
     const session = state.sessions.find((s) => s.sessionId === candidate.sessionId);
-    source.textContent = `from ${session ? session.title : `${candidate.sessionId.slice(0, 8)}…`}`;
+    source.textContent = `proposed by agent - ${session ? session.title : `${candidate.sessionId.slice(0, 8)}…`}`;
+
+    // Scope pill + tag chips, editable pre-approval.
+    let cardScope: MemoryScope = candidate.scope;
+    const cardTags = new Set(candidate.tags);
+    const scopeRow = el("div", "memory-card-scope-row");
+    const scopePill = button("", "ghost small scope-pill");
+    const setPill = (): void => {
+      scopePill.textContent = cardScope === "task"
+        ? `task: ${(candidate.scopeLabel ?? activeTaskTitle() ?? "?").slice(0, 24)}`
+        : cardScope === "workspace" ? `workspace${candidate.scopeLabel === undefined ? "" : `: ${candidate.scopeLabel.slice(0, 24)}`}` : "global";
+    };
+    setPill();
+    scopePill.addEventListener("click", () => {
+      const order: readonly MemoryScope[] = ["task", "workspace", "global"];
+      cardScope = order[(order.indexOf(cardScope) + 1) % order.length] as MemoryScope;
+      setPill();
+    });
+    const cardTagRow = el("div", "memory-tag-row");
+    renderTagChips(cardTagRow, cardTags, candidate.tags);
+    scopeRow.append(scopePill, cardTagRow);
+
     const actions = el("div", "memory-card-actions");
     const approve = button("Approve", "ghost small");
     approve.addEventListener("click", () => {
       approve.disabled = true;
-      resolveMemory(candidate.memoryCandidateId, true);
+      resolveMemory(candidate.memoryCandidateId, true, {
+        content: content.value.trim() || candidate.content,
+        scope: cardScope,
+        tags: [...cardTags]
+      });
     });
     // Reject is inline-confirm (irreversible-ish; a second deliberate click).
     const reject = inlineConfirmButton("Reject", "Confirm?", () => resolveMemory(candidate.memoryCandidateId, false), "ghost small danger");
     actions.append(approve, reject);
-    c.append(content, source, actions);
+    c.append(content, source, scopeRow, actions);
     return c;
   }
 
-  function resolveMemory(memoryCandidateId: string, approve: boolean): void {
-    void request({ type: "memory.resolve", memoryCandidateId, approve }).then((response) => {
+  function resolveMemory(
+    memoryCandidateId: string,
+    approve: boolean,
+    edits?: { content: string; scope: MemoryScope; tags: string[] }
+  ): void {
+    void request({ type: "memory.resolve", memoryCandidateId, approve, ...(edits === undefined ? {} : { edits }) }).then((response) => {
       if (!response.ok) {
         ctx.bridge.chat.logChat(`memory ${approve ? "approve" : "reject"} failed: ${response.error.message}`);
         renderMemory();
@@ -2506,7 +2706,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       return;
     }
     // Ordering: loud rows (failed / waiting-on-access) first, then ready
-    // rows, then the rest — stable within each group (state.sessions is already
+    // rows, then the rest - stable within each group (state.sessions is already
     // newest-first, and Array.prototype.sort is stable). ONE comparator drives
     // this; the loudness rule lives in sessionLoudness().
     const ordered = [...unassigned].sort((a, b) =>
@@ -2565,7 +2765,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     // halo; a merely-ready row (turn completed) is demoted to a thin 1px ring.
     const reasons = state.attention[session.sessionId] ?? [];
     const chips = sessionChips(session, reasons, state.agentActivity[session.sessionId]);
-    // Only true STATE chips drive halo/meta treatment — role/subagent/clone
+    // Only true STATE chips drive halo/meta treatment - role/subagent/clone
     // chips are decorative and must not be mistaken for one.
     // The state chip (first chip when present, else the clone chip) names the
     // halo/meta treatment: failed → red, approval → amber, ready → thin ring.
@@ -2610,13 +2810,13 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     for (const k of chips) {
       const chipEl = el("span", `session-chip ${k.cls}`);
       chipEl.textContent = k.text;
-      if (k.cls === "chip-clone") chipEl.title = "Clone-mode session — changes sync into your editor";
+      if (k.cls === "chip-clone") chipEl.title = "Clone-mode session - changes sync into your editor";
       chipAnchor.after(chipEl);
       chipAnchor = chipEl;
     }
 
     // Meta line: provider/model · state · time. On a failed row the state
-    // word renders in the red accent (not dim) — same loudness source as the row.
+    // word renders in the red accent (not dim) - same loudness source as the row.
     const meta = el("div", `session-card-meta${elsewhere ? " meta-elsewhere" : ""}`);
     const [providerModel, stateWord, timeWord] = sessionMetaSegments(session);
     const showFailedWord = stateChip?.cls === "chip-failed";
@@ -2635,7 +2835,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       beginNoteEdit(session, note);
     });
 
-    // Clicking the card body (not the note/delete) selects and jumps to Chat —
+    // Clicking the card body (not the note/delete) selects and jumps to Chat -
     // an elsewhere session still opens read-only in the Chat tab. The delete
     // button (when present) stops propagation itself so it never also selects.
     c.addEventListener("click", () => {
@@ -2707,7 +2907,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
    * Grants ledger for a session: a "⛨ N grant(s)" chip that toggles an inline
    * list of approved access mounts (`rw D:\builds\maya2026`). Sensitive-flagged
    * grants carry a small warning glyph. Data comes straight from workspace-policy
-   * state — no new request. Clicks here must not bubble to the card's select.
+   * state - no new request. Clicks here must not bubble to the card's select.
    */
   function grantsLedger(grants: readonly AccessRequestSummary[]): HTMLElement {
     const wrap = el("div", "session-grants");
@@ -2763,7 +2963,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       ctx.persist();
       ctx.bridge.chat.selectSession(response.payload.session.sessionId);
       ctx.bridge.switchTab("chat");
-      ctx.bridge.chat.logChat("session resumed on a fresh backend — context replayed");
+      ctx.bridge.chat.logChat("session resumed on a fresh backend - context replayed");
     }
   }
 
@@ -2832,7 +3032,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     const result = response.payload.result;
     ctx.bridge.chat.logChat(activateOutcomeLine(result));
     if (result.windowReload === true) {
-      ctx.bridge.chat.logChat("window will reload — chats end and may be adopted back");
+      ctx.bridge.chat.logChat("window will reload - chats end and may be adopted back");
     }
   }
 
@@ -2846,7 +3046,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         : "These settings restrict what AI can access; they do not restrict your editor.";
     const previousSet = workspaceSetSelect.value || state.selectedWorkspaceSetId;
     workspaceSetSelect.replaceChildren();
-    workspaceSetSelect.append(option("", "— none —"));
+    workspaceSetSelect.append(option("", "- none -"));
     for (const set of state.workspacePolicy?.workspaceSets ?? []) {
       workspaceSetSelect.append(option(set.workspaceSetId, `${set.name} (${set.projectNames.join(", ")})`));
     }
@@ -2884,7 +3084,19 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         event.stopPropagation();
         void activateWorkspace({ workspaceSetId: set.workspaceSetId }, activate);
       });
-      row.append(name, paths, edit, del, activate);
+      // MCP defaults for chats mounted from this workspace (tri-state popover).
+      const mcpContext = { scope: "workspace-set" as const, refId: set.workspaceSetId };
+      const mcpTrigger = button(`MCP (${String(enabledMcpCount(state, mcpContext))})`, "ghost small set-row-mcp");
+      mcpTrigger.title = "Which MCP servers chats in this workspace get by default";
+      const mcpWrap = popover(mcpTrigger, (content) => {
+        const rerender = (): void => {
+          mcpTrigger.textContent = `MCP (${String(enabledMcpCount(state, mcpContext))})`;
+          content.replaceChildren();
+          buildMcpTogglePanel(content, state, mcpContext, rerender);
+        };
+        buildMcpTogglePanel(content, state, mcpContext, rerender);
+      });
+      row.append(name, paths, mcpWrap, edit, del, activate);
       attachHistoryHover(row, set.workspaceSetId);
       setsList.append(row);
     }
@@ -2939,6 +3151,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     void loadSessions();
     void loadTasks();
     void loadMemory();
+    void loadMcp();
     void loadBoardColumns();
   }
 
@@ -2969,6 +3182,8 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   // Boot-load memory candidates (also re-hydrated on every tab refresh).
   void loadMemory();
+  // Boot-load the MCP registry + overrides (drives MCP chips everywhere).
+  void loadMcp();
   // Boot-load board columns (also re-hydrated on every tab refresh); drives the
   // column pill on task/subtask rows.
   void loadBoardColumns();

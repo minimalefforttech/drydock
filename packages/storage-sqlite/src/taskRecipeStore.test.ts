@@ -41,7 +41,7 @@ test("migration seeds recipes once; user rows round-trip with steps; archive hid
       updatedAt: "2026-07-12T00:00:00.000Z"
     });
 
-    // Archiving a seeded row removes it from the default list — and a re-run
+    // Archiving a seeded row removes it from the default list - and a re-run
     // of migrations must NOT resurrect or duplicate the seeds.
     await store.setArchived("recipe-implement-verify", true, "2026-07-12T01:00:00.000Z");
     connection.close();

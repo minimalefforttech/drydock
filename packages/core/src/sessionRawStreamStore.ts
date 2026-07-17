@@ -7,8 +7,8 @@
  * demand to show "what the sandbox process is emitting right now" plus a
  * last-activity timestamp for the running indicator.
  *
- * Adapters write here at the exact seam where the raw frames already exist —
- * Claude's buffered `result.stdout`, each Codex app-server notification — so no
+ * Adapters write here at the exact seam where the raw frames already exist -
+ * Claude's buffered `result.stdout`, each Codex app-server notification - so no
  * process plumbing changes are needed.
  */
 
@@ -25,7 +25,7 @@ export interface RawStreamSink {
 
 export interface RawStreamSnapshot {
   readonly text: string;
-  /** ISO time of the most recent write — drives "seconds since last response". */
+  /** ISO time of the most recent write - drives "seconds since last response". */
   readonly lastChunkAt: string;
 }
 

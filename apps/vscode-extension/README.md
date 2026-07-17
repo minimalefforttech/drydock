@@ -1,5 +1,9 @@
 # Drydock
 
+> **Note:** Drydock is currently an AI-generated prototype experiment. It is
+> an attempt to solve the compliance boundary for AI-assisted development in
+> VFX. Use in production is at your own risk. Contributions welcome.
+
 Drydock is a security-first engineering AI workbench for VS Code. Coding
 agents run in disposable Docker Sandbox runtimes, with explicit host mounts
 and review before work is pulled back into your working tree.

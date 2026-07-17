@@ -1,4 +1,4 @@
-# Drydock — Design Docs
+# Drydock - Design Docs
 
 Focused documents behind the ADRs: current feature behavior, security
 invariants, and day-to-day workflows. The older Stage 0/1 plans remain useful
@@ -25,6 +25,7 @@ you are changing.
 | [task-board-and-subtasks](task-board-and-subtasks.md) | Subtasks, recipes, bounded dependency automation, verification markers, and the configurable kanban panel. |
 | [task-chat-and-agent-visibility](task-chat-and-agent-visibility.md) | Task-owned Edit UI, Plan/Edit separation, context mounts, file tokens, safe transcript rendering, and delegated-agent visibility. |
 | [task-review](task-review.md) | The cross-project review surface: aggregates existing diffs/comments and turns them into revision turns; never ships. |
+| [mcp-and-memory](mcp-and-memory.md) | MCP server registry with global→workspace→task→chat toggle cascade, and scoped memory (global/workspace/task + glob-rule tags detected at mount time) with quick-add and agent-proposed, edit-before-approve commits. |
 | [code-review-panel](code-review-panel.md) | In-panel GitHub-style review (v2 of task-review): continuous diff scroll, scope toggle, inline multi-range comments routed to owning agents. Prototype: `prototypes/code-review-panel.html`. |
 | [planner](planner.md) | Durable planning over disposable sessions, annotatable artifact providers, and literal-checklist materialization to the board. |
 | [agents-panel](agents-panel.md) | Fleet sessions, delegated agents, attention, density, live token scope, honest boot state, and changeset landing. |

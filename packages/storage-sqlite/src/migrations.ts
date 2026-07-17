@@ -350,10 +350,10 @@ export function applyMigrations(connection: SqliteConnection): void {
   ensureColumn(connection, "work_tasks", "clone_dirty_handling", "TEXT NULL");
 
   // LEGACY / ORPHANED (ADR 0012): the per-session plan-docs surface is retired
-  // — the Planner panel (planner_* tables below) supersedes it and planDocStore
+  // - the Planner panel (planner_* tables below) supersedes it and planDocStore
   // is deleted; no code reads or writes this table anymore. The CREATE TABLE is
   // kept per the additive migration policy so historical DBs still open
-  // unchanged. (Named plan_docs, not plan_documents — the retired Stage 5
+  // unchanged. (Named plan_docs, not plan_documents - the retired Stage 5
   // subsystem above already claims that name.)
   connection.database.exec(`
     CREATE TABLE IF NOT EXISTS plan_docs (
@@ -396,11 +396,47 @@ export function applyMigrations(connection: SqliteConnection): void {
     CREATE INDEX IF NOT EXISTS idx_memory_candidates_status
       ON memory_candidates(status);
   `);
+  // Scoped memory (docs/design/mcp-and-memory.md): scope kind + its anchor
+  // (task id, or a JSON array of workspace root paths), tag selectors as a
+  // JSON array, and the author. All NULL on legacy rows = global agent memory.
+  ensureColumn(connection, "memory_candidates", "scope", "TEXT NULL");
+  ensureColumn(connection, "memory_candidates", "scope_task_id", "TEXT NULL");
+  ensureColumn(connection, "memory_candidates", "scope_roots_json", "TEXT NULL");
+  ensureColumn(connection, "memory_candidates", "tags_json", "TEXT NULL");
+  ensureColumn(connection, "memory_candidates", "origin", "TEXT NULL");
+
+  // MCP registry (docs/design/mcp-and-memory.md): servers are defined once,
+  // toggled everywhere. Overrides cascade defaults → workspace-set → task →
+  // session; no row = inherit. Env values live host-side in env_json and are
+  // injected only into a session's own /workspace/.mcp.json - never rendered
+  // in the webview.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS mcp_servers (
+      server_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      command TEXT NOT NULL,
+      args_json TEXT NOT NULL,
+      env_json TEXT NOT NULL,
+      enabled_by_default INTEGER NOT NULL DEFAULT 0,
+      sensitive INTEGER NOT NULL DEFAULT 0,
+      notes TEXT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS mcp_overrides (
+      scope TEXT NOT NULL,
+      ref_id TEXT NOT NULL,
+      server_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      PRIMARY KEY (scope, ref_id, server_id)
+    );
+  `);
 
   // Task board and subtasks: board columns are global and user-configurable;
   // subtasks are child work items of exactly one task; dependencies are
   // directed edges between two subtasks of the SAME task (never cross-task,
-  // never cyclic — enforced by TaskService/SubtaskService, not the schema).
+  // never cyclic - enforced by TaskService/SubtaskService, not the schema).
   connection.database.exec(`
     CREATE TABLE IF NOT EXISTS board_columns (
       column_id TEXT PRIMARY KEY,
@@ -458,7 +494,7 @@ export function applyMigrations(connection: SqliteConnection): void {
   // Per-role model profile (ADR 0002), set by recipe materialization; NULL
   // means the provider default (JSON: { providerId, model? }).
   ensureColumn(connection, "subtasks", "model_json", "TEXT NULL");
-  // Task FAQ auto-answer toggle (ADR 0007); 0 = off (the safe default —
+  // Task FAQ auto-answer toggle (ADR 0007); 0 = off (the safe default -
   // the global config is a second gate).
   ensureColumn(connection, "work_tasks", "auto_answer_faq", "INTEGER NOT NULL DEFAULT 0");
   // HITL verify gate (ADR 0007): "hitl" arms it (NULL = no gate);
@@ -535,7 +571,7 @@ export function applyMigrations(connection: SqliteConnection): void {
       ON task_changesets(session_id);
   `);
   // Landing overlap pre-check (ADR 0014): the patch's touched paths as JSON.
-  // NULL on older captures — overlap is then unknown, not assumed absent.
+  // NULL on older captures - overlap is then unknown, not assumed absent.
   ensureColumn(connection, "task_changesets", "paths_json", "TEXT NULL");
   // work_tasks.state is replaced by column_id (+ optional done_at); state is
   // kept transitionally (see WorkTaskRecord doc comment) until the board UI
@@ -612,7 +648,7 @@ export function applyMigrations(connection: SqliteConnection): void {
   `);
   seedPlannerAspects(connection);
   // Plans belong to tasks (ADR 0006 doctrine extended to planning): additive
-  // and nullable — existing rows stay valid as orphan plans.
+  // and nullable - existing rows stay valid as orphan plans.
   ensureColumn(connection, "planner_plans", "task_id", "TEXT NULL");
   sanitizeLegacySessionEvents(connection, legacySessionEventsTable);
 }
@@ -696,7 +732,7 @@ function checkpointWalOrThrow(connection: SqliteConnection): void {
 
 /**
  * Seeds the aspect registry once (empty table only), so user edits to seeded
- * rows — including archiving them — are never overwritten on a later run.
+ * rows - including archiving them - are never overwritten on a later run.
  */
 function seedPlannerAspects(connection: SqliteConnection): void {
   const count = connection.database.prepare(`SELECT COUNT(*) AS count FROM planner_aspects`).get() as { readonly count: number };
@@ -714,7 +750,7 @@ function seedPlannerAspects(connection: SqliteConnection): void {
 
 /**
  * Seeds the recipe registry once (empty table only), so user edits to seeded
- * rows — including archiving them — are never overwritten on a later run
+ * rows - including archiving them - are never overwritten on a later run
  * (the planner-aspects rule). Prompts use `{title}` for the task title.
  */
 function seedTaskRecipes(connection: SqliteConnection): void {

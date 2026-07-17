@@ -3,20 +3,20 @@
  *
  * GitHub/GitLab-style continuous review over a task's changes: a left
  * navigator (projects → compressed folder tree → files) and a right review
- * scroll of file cards in navigator order — text diffs (unified or split),
+ * scroll of file cards in navigator order - text diffs (unified or split),
  * image before/after, binary byte deltas, large/generated files collapsed by
  * default. A header scope seg switches between All uncommitted / Task /
  * Session; whitespace hiding refetches host-side.
  *
  * COMMENTING (selection-driven): selecting diff rows shows the comment box on
  * mouseup, anchored after the LAST selected row. Further selections (any file)
- * add ranges to the same pending note — chips list them, ✕ removes one, and
+ * add ranges to the same pending note - chips list them, ✕ removes one, and
  * Dismiss clears the box. Comment stores the note (one comment per anchor via
  * codeReview.addNote) and hides the box. Open threads render inline under
  * their anchored rows and go back to the owning agents via taskReview.submit.
  *
  * SECURITY: every dynamic string (titles, paths, diff row text, comment
- * bodies) renders via textContent — NEVER innerHTML, no DOM-from-string.
+ * bodies) renders via textContent - NEVER innerHTML, no DOM-from-string.
  * Re-renders use replaceChildren so stale listeners drop with their nodes.
  */
 
@@ -187,7 +187,7 @@ function button(label: string, className: string, onClick: () => void): HTMLButt
 }
 
 function formatBytes(bytes: number | undefined): string {
-  if (bytes === undefined) return "—";
+  if (bytes === undefined) return "-";
   if (bytes < 1024) return `${String(bytes)} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -294,7 +294,7 @@ async function ensureDiff(key: string): Promise<void> {
 function renderHeader(): void {
   header.replaceChildren();
   const title = el("h1", "cr-title", "Code Review");
-  const taskName = el("span", "cr-task-name", state === null ? "" : ` — ${state.title}`);
+  const taskName = el("span", "cr-task-name", state === null ? "" : ` - ${state.title}`);
   title.append(taskName);
 
   const scopeSeg = el("div", "seg cr-scope-seg");
@@ -590,7 +590,7 @@ function fileCard(file: CodeReviewFile): HTMLElement {
   card.append(head);
 
   if (file.conflicted === true) {
-    card.append(el("div", "cr-conflict-note", "⚠ Unresolved sync conflict markers — resolve in the owning session's sync view before landing."));
+    card.append(el("div", "cr-conflict-note", "⚠ Unresolved sync conflict markers - resolve in the owning session's sync view before landing."));
   }
 
   const body = el("div", "cr-card-body");
@@ -609,7 +609,7 @@ function renderCardBody(card: HTMLElement, file: CodeReviewFile): void {
   if (isCollapsed(file)) {
     const reason = file.largeDiff === true ? "Large diff" : "Collapsed";
     const note = el("div", "cr-collapsed-note",
-      `${reason} (+${String(file.addedLines ?? 0)} −${String(file.removedLines ?? 0)}) — click to expand`);
+      `${reason} (+${String(file.addedLines ?? 0)} −${String(file.removedLines ?? 0)}) - click to expand`);
     body.append(note);
     return;
   }
@@ -665,7 +665,7 @@ function renderTextDiff(body: HTMLElement, file: CodeReviewFile, hunks: readonly
     else body.append(unifiedHunk(file, hunk, rowIndex));
   }
   if (truncated) {
-    body.append(el("div", "cr-collapsed-note", "Diff truncated — open in the editor for the rest."));
+    body.append(el("div", "cr-collapsed-note", "Diff truncated - open in the editor for the rest."));
   }
   // Inline threads: after the anchored row when visible, else at the card foot.
   for (const comment of commentsFor(file)) {
@@ -827,7 +827,7 @@ function threadBlock(file: CodeReviewFile, comment: ReviewCommentSummary): HTMLE
   return block;
 }
 
-/** Threads whose anchor row is not in the rendered hunks (context gaps) — card foot. */
+/** Threads whose anchor row is not in the rendered hunks (context gaps) - card foot. */
 function renderUnanchoredThreads(body: HTMLElement, file: CodeReviewFile): void {
   // threadBlock placement handles visible anchors; nothing extra needed here
   // beyond non-text files, whose comments would otherwise be invisible.
@@ -846,7 +846,7 @@ const composer = el("div", "cr-composer hidden");
 const chipsRow = el("div", "cr-anchor-chips");
 const composerText = document.createElement("textarea");
 composerText.className = "cr-composer-text";
-composerText.placeholder = "Leave instructions for the agent — file and lines ride along automatically";
+composerText.placeholder = "Leave instructions for the agent - file and lines ride along automatically";
 composerText.addEventListener("input", () => { composerDraft = composerText.value; });
 const composerActions = el("div", "cr-composer-actions");
 const commentButton = button("Comment", "cr-btn primary", () => void submitNote());

@@ -2,7 +2,7 @@
  * Inert host-side model catalog discovery.
  *
  * Spawns the host Codex CLI's app-server, performs the initialize handshake,
- * pages model/list, and stops — pure capability discovery, allowed by the
+ * pages model/list, and stops - pure capability discovery, allowed by the
  * threat model. No thread is created and no prompt or model output ever flows
  * through this path.
  */

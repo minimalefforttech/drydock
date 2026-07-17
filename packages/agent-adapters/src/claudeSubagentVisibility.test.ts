@@ -2,7 +2,7 @@
  * Claude lineage tests. FIXTURE IS SYNTHETIC: built from the documented
  * stream-json format (Task tool_use + parent_tool_use_id sidechains +
  * tool_result user lines) because the standalone CLI is unauthenticated on
- * this host — replace with a live capture when available
+ * this host - replace with a live capture when available
  * (docs/design/subagent-workflows.md).
  */
 

@@ -3,17 +3,17 @@
  *
  * Instead of stacking full cards vertically (the W1 problem: two escalated
  * cards ate ~310px at rest), pending items share ONE card slot with a small
- * `‹ i/N ›` pager top-right — the claude/codex-style prompt block. Questions
+ * `‹ i/N ›` pager top-right - the claude/codex-style prompt block. Questions
  * render as: the question, the agent's suggested answers as one-click buttons
  * (first marked recommended), and a free-text answer row. Access requests
- * render the EXISTING buildAccessCard unchanged — no approval friction is
+ * render the EXISTING buildAccessCard unchanged - no approval friction is
  * added or removed by the presentation (B4: the typed-confirm survives).
  *
  * Resolving an item advances to the next unresolved one; the caller re-renders
  * with the item removed and the pager clamps. `StackCursor` is caller-owned so
  * the position survives re-renders (webview-session-local, not persisted).
  *
- * SECURITY: question text, options, and answers are agent/user text — every
+ * SECURITY: question text, options, and answers are agent/user text - every
  * dynamic string reaches the DOM via textContent, never innerHTML.
  */
 
@@ -33,14 +33,14 @@ export interface StackCursor {
 }
 
 export interface AttentionStackCallbacks {
-  /** An item was resolved (answered/dismissed/approved/denied) — re-render surfaces. */
+  /** An item was resolved (answered/dismissed/approved/denied) - re-render surfaces. */
   onResolved(): void;
   onError(message: string): void;
   readonly access: AccessCardCallbacks;
 }
 
 /**
- * Renders the stack into `container` (replaceChildren). Hidden when empty —
+ * Renders the stack into `container` (replaceChildren). Hidden when empty -
  * callers toggle their own section visibility off the item count.
  */
 export function renderAttentionStack(
@@ -148,7 +148,7 @@ function buildQuestionCard(question: AgentQuestionSummary, callbacks: AttentionS
   }
 
   // Verify-gate stamping: a manual check tied to a subtask can stamp it
-  // Verified with the same gesture (checked by default — answering IS the check).
+  // Verified with the same gesture (checked by default - answering IS the check).
   let verifyBox: HTMLInputElement | null = null;
   if (question.kind === "manual-check" && question.subtaskId !== undefined) {
     const verifyLabel = el("label", "question-verify-row");

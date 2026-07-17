@@ -2,8 +2,8 @@
  * Board-column service (task board and subtasks).
  *
  * Board columns are global, ordered, user-configurable groupings within one
- * of four fixed categories (backlog/pending/in-progress/done). Category —
- * never the column name — drives every automation rule; this service owns
+ * of four fixed categories (backlog/pending/in-progress/done). Category -
+ * never the column name - drives every automation rule; this service owns
  * that invariant plus the reorder/delete policy. Persistence lives in the
  * store.
  */
@@ -99,7 +99,7 @@ export class BoardService {
    * Deletes a column, moving its task and subtask cards to the nearest
    * remaining column of the SAME category (nearest by sortOrder distance;
    * ties prefer the column earlier in sort order). Every category must keep
-   * at least one column — deleting the last column of a category is rejected.
+   * at least one column - deleting the last column of a category is rejected.
    */
   async deleteColumn(columnId: string): Promise<void> {
     const id = asId<"ColumnId">(columnId);

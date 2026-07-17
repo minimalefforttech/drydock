@@ -1,7 +1,7 @@
 /**
  * Assembly tests for the Agents panel overview (ADR 0013): task grouping,
  * role-child grafting, orphan collection, column chip join, and pending
- * passthrough — pinned against plain fakes of the narrow ports.
+ * passthrough - pinned against plain fakes of the narrow ports.
  */
 
 import { strict as assert } from "node:assert";
@@ -195,8 +195,8 @@ test("buildLandingItems flags overlap-unknown when a row has no stored paths", (
   const fresh = items.find((item) => item.subtaskId === "sub-new");
   assert.equal(legacy?.overlapUnknown, true);
   assert.deepEqual(legacy?.overlapsWith, []);
-  // The pair's overlap is unknown from the fresh side too — flagged, never
-  // assumed disjoint — so BOTH carry the unknown risk class and keep their
+  // The pair's overlap is unknown from the fresh side too - flagged, never
+  // assumed disjoint - so BOTH carry the unknown risk class and keep their
   // capture order (unknown sorts after known-disjoint, before overlapping).
   assert.equal(fresh?.overlapUnknown, true);
   assert.deepEqual(items.map((item) => item.subtaskId), ["sub-legacy", "sub-new"]);

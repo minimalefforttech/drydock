@@ -3,7 +3,7 @@
  *
  * Files (picked documents/images or pasted screenshots) upload into the LIVE
  * session's container at /workspace/attachments/… through the host
- * `chat.uploadAttachment` request — the bytes ride the runtime transport, so
+ * `chat.uploadAttachment` request - the bytes ride the runtime transport, so
  * no mounts change, nothing restarts, and remote/networked runtimes receive
  * them the same way. The returned runtime path is referenced in prompts and
  * answers as a `[file:…]` token the agent can open directly.

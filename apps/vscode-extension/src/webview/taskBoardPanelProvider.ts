@@ -2,7 +2,7 @@
  * Task Board editor panel host (task board and subtasks).
  *
  * A SINGLE editor-area WebviewPanel over the global board: all columns, all
- * tasks, all subtasks. Same trust boundary as the control panel —
+ * tasks, all subtasks. Same trust boundary as the control panel -
  * parsePanelRequest gates every inbound message, the CSP is the strict
  * task-review CSP (no `unsafe-inline` anywhere), and the webview only sees
  * display-safe projections assembled by the shared boardShared helpers (one
@@ -52,7 +52,7 @@ export class TaskBoardPanelProvider {
       // The subscription lives for the extension lifetime; push() is a no-op
       // while the panel is closed. turn-completed: a finished run can change
       // blocked/done projections. board-changed: any board/subtask mutation
-      // (subtask service, orchestrator cascade) — both collapse into the one
+      // (subtask service, orchestrator cascade) - both collapse into the one
       // coarse board.changed push and the webview refetches board.state.
       backend.bus.subscribe((event) => {
         if (event.kind !== "turn-completed" && event.kind !== "board-changed") {
@@ -345,7 +345,7 @@ export class TaskBoardPanelProvider {
     const nonce = randomBytes(16).toString("hex");
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "taskBoard.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "taskBoard.css"));
-    // The density default (ADR 0013) rides in as a body data attribute —
+    // The density default (ADR 0013) rides in as a body data attribute -
     // sanitized to the closed enum, so no free-form setting text reaches HTML.
     const cardDetail = cardDetailLevel(vscode.workspace.getConfiguration("drydock").get("ui.cardDetail"));
     // Strict CSP, matching the task-review panel exactly: no remote content,

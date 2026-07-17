@@ -3,7 +3,7 @@
  *
  * This module is the ONE sanctioned exception to the textContent-only
  * rendering invariant: mermaid returns an SVG markup string that must become
- * DOM. It never touches innerHTML on the live document — the string is parsed
+ * DOM. It never touches innerHTML on the live document - the string is parsed
  * in an inert DOMParser document, scrubbed, and only then imported. The scrub
  * is defense-in-depth on top of mermaid's securityLevel "strict" +
  * htmlLabels:false (which already drop script/foreignObject pathways): we do
@@ -12,7 +12,7 @@
  * Scrub policy: drop script/foreignObject/iframe/object/embed/animate*
  * elements outright; drop <use> unless it references a local fragment; strip
  * every on* attribute; strip href/xlink:href values that are not local
- * fragments. Inline style attributes/elements are allowed — this panel's CSP
+ * fragments. Inline style attributes/elements are allowed - this panel's CSP
  * permits inline styles (owner-approved) and mermaid needs them.
  */
 
@@ -30,7 +30,7 @@ const FORBIDDEN_ELEMENTS: ReadonlySet<string> = new Set([
 
 /**
  * Parses and scrubs an SVG markup string, returning a node imported into the
- * caller's document — or null when the input is not a well-formed lone <svg>.
+ * caller's document - or null when the input is not a well-formed lone <svg>.
  */
 export function adoptSanitizedSvg(targetDocument: Document, svgText: string): SVGSVGElement | null {
   const parsed = new DOMParser().parseFromString(svgText, "image/svg+xml");

@@ -11,21 +11,21 @@
  * Dependency editor: subtask cards carry input/output dots; dragging from an
  * output dot draws a ghost edge and greys out every card that is not a
  * sibling subtask of the same parent task (the boundary is visible, not just
- * enforced — the host validates same-task + acyclicity again on drop).
+ * enforced - the host validates same-task + acyclicity again on drop).
  * Edges render on an SVG overlay tinted by the parent-task stripe hue, shown
  * for the hovered card by default (toolbar: on hover / all / hidden); clicking
  * an edge selects it and floats a "✕ Remove dependency" at its midpoint.
  * Start actions: runnable subtasks get ▶ Start (disabled + Force start… while
- * blocked — force is manual-only); task cards get ▶ Start ready (N) with a
+ * blocked - force is manual-only); task cards get ▶ Start ready (N) with a
  * two-click confirm; running/failed chips come from the host's orchestrator
  * projections (isRunning / lastFailureAt).
  *
  * SECURITY: every dynamic string (task/subtask titles, column names,
- * workspace-set names, error messages) renders via textContent — NEVER
+ * workspace-set names, error messages) renders via textContent - NEVER
  * innerHTML, NEVER insertAdjacentHTML, no DOM-from-string of any kind.
  * Re-renders use replaceChildren, so listeners on discarded nodes are dropped
  * with them. Card stripe/accent colours are picked by CLASS (a fixed 8-class
- * palette over VS Code theme variables), never by inline style attributes —
+ * palette over VS Code theme variables), never by inline style attributes -
  * the panel's strict CSP has no 'unsafe-inline' for styles. This entry is
  * self-contained (it does not import the control-panel bundle); the small DOM
  * helpers live in-module.
@@ -69,7 +69,7 @@ declare function acquireVsCodeApi(): VsCodeApi;
 /**
  * Only the toolbar filters persist across webview reloads; the board itself is
  * re-fetched on boot. (Product-store persistence for board settings is a noted
- * later item — this is panel-local for now.)
+ * later item - this is panel-local for now.)
  */
 interface PersistedState {
   readonly ageDays: number;
@@ -175,7 +175,7 @@ let initialLoadReady = false;
 let pendingGuideStart = document.body.dataset["startGuide"] === "true";
 /** workspaceSetId → display name, best-effort from workspace.state. */
 const workspaceSetNames = new Map<string, string>();
-/** "Hide finished older than N days" — done-category cards with older doneAt hide. */
+/** "Hide finished older than N days" - done-category cards with older doneAt hide. */
 let ageDays = 1;
 /** Focus filter: a taskId, or null for all tasks. */
 let taskFilter: string | null = null;
@@ -249,7 +249,7 @@ function detailLevel(): CardDetailLevel {
 let armedForceId: string | null = null;
 /** Task id whose "Start ready" confirm is armed. */
 let armedTaskStartId: string | null = null;
-/** Subtask card under the pointer — drives the "hover" connections mode. */
+/** Subtask card under the pointer - drives the "hover" connections mode. */
 let hoveredSubtaskId: string | null = null;
 /** Selected edge (floats the ✕ delete affordance at its midpoint). */
 let selectedEdge: { readonly fromSubtaskId: string; readonly toSubtaskId: string; readonly taskId: string } | null = null;
@@ -501,7 +501,7 @@ function stripeIndex(taskId: string): number {
 
 /**
  * The lowest stripe index (0..7) not already claimed by a sibling subtask's
- * colorOverride — the colour picker's default highlighted choice, so picking
+ * colorOverride - the colour picker's default highlighted choice, so picking
  * distinct colours across a task's subtasks is the path of least resistance.
  * Falls back to 0 once every hue is already in use.
  */
@@ -751,7 +751,7 @@ function renderToolbar(): void {
   // passive metadata (dates) inline.
   const detailSelect = document.createElement("select");
   detailSelect.className = "tb-select tb-detail";
-  detailSelect.title = "Card detail — minimal keeps one state chip per card; hover a card for the rest";
+  detailSelect.title = "Card detail - minimal keeps one state chip per card; hover a card for the rest";
   setHelpTooltip(detailSelect, "Select how much status information appears on each card: Minimal, Standard, or Full.");
   for (const level of CARD_DETAIL_LEVELS) {
     const option = document.createElement("option");
@@ -792,7 +792,7 @@ function renderToolbar(): void {
   });
   toolbar.append(settings);
 
-  const refresh = iconButton("↻", "Refresh — refetch the board", "tb-refresh");
+  const refresh = iconButton("↻", "Refresh - refetch the board", "tb-refresh");
   refresh.addEventListener("click", () => void refetchBoard());
   toolbar.append(refresh);
 }
@@ -856,7 +856,7 @@ function renderEmptyState(): void {
 /**
  * OFF (default): every column in one horizontal flex row (`.tb-rail`'s own
  * flex layout). ON: columns group by `category` (fixed CATEGORY_ORDER) into
- * stacked `.tb-lane` rows — a labelled lane per category containing that
+ * stacked `.tb-lane` rows - a labelled lane per category containing that
  * category's columns, lanes stacked vertically. Toggling swaps `rail`'s
  * layout class; the column-building logic (buildColumn) is unchanged either way.
  */
@@ -1106,10 +1106,10 @@ function renderFaqModal(draft: FaqDraft): void {
   const head = el("div", "tb-modal-head");
   const title = el("h2", "tb-modal-title");
   title.id = "tb-faq-title";
-  title.textContent = `FAQ — ${draft.taskTitle}`;
+  title.textContent = `FAQ - ${draft.taskTitle}`;
   const hint = el("div", "tb-modal-hint");
   hint.id = "tb-faq-hint";
-  hint.textContent = "When auto-answer is on (and the global setting allows it), an agent question containing a pattern is answered automatically — with a [host] receipt in the transcript. Access requests are never auto-answered.";
+  hint.textContent = "When auto-answer is on (and the global setting allows it), an agent question containing a pattern is answered automatically - with a [host] receipt in the transcript. Access requests are never auto-answered.";
   head.append(title, hint);
   modal.append(head);
 
@@ -1236,7 +1236,7 @@ function renderFaqModal(draft: FaqDraft): void {
 function verifyChip(): HTMLElement {
   const chip = el("span", "tb-verify-chip");
   chip.textContent = "verify";
-  chip.title = "Human verification has not been recorded — run or inspect the relevant checks, then select Mark verified";
+  chip.title = "Human verification has not been recorded - run or inspect the relevant checks, then select Mark verified";
   return chip;
 }
 
@@ -1262,7 +1262,7 @@ function subtaskStateChip(subtask: SubtaskSummary): HTMLElement | null {
   if (subtask.isParked === true) {
     const parked = el("span", "tb-parked-chip");
     parked.textContent = "parked";
-    parked.title = "Failed twice under automation — ↻ Retry (a manual start) resumes it";
+    parked.title = "Failed twice under automation - ↻ Retry (a manual start) resumes it";
     return parked;
   }
   if (subtask.lastFailureAt !== undefined) {
@@ -1280,7 +1280,7 @@ function subtaskStateChip(subtask: SubtaskSummary): HTMLElement | null {
   if (subtask.isBlocked) {
     const lock = el("span", "tb-lock-chip");
     lock.textContent = "🔒";
-    lock.title = "Blocked — an upstream dependency is not done yet";
+    lock.title = "Blocked - an upstream dependency is not done yet";
     lock.setAttribute("aria-label", "blocked");
     return lock;
   }
@@ -1311,7 +1311,7 @@ function hoverRow(label: string, value: string): HTMLElement {
 
 /**
  * The consolidated hover card (ADR 0013): ONE popover per card carrying
- * everything the current detail level hides — never per-chip tooltips. Pure
+ * everything the current detail level hides - never per-chip tooltips. Pure
  * CSS reveal on card :hover/:focus-within; pointer-events stay off so it
  * never steals clicks from cards beneath it.
  */
@@ -1400,7 +1400,7 @@ function buildTaskCard(
       meta.append(cloneChip);
     }
   }
-  // Progress is the task card's ONE state chip — it survives every level.
+  // Progress is the task card's ONE state chip - it survives every level.
   const total = task.subtasks.length;
   if (total > 0) {
     const doneCount = task.subtasks.filter((subtask) => isDoneColumn(subtask.columnId)).length;
@@ -1411,7 +1411,7 @@ function buildTaskCard(
   if (meta.childNodes.length > 0) card.append(meta);
   if (level === "full") card.append(buildDatesLine(task.createdAt, task.updatedAt, task.doneAt));
 
-  // ▶ Start ready (N): two-click confirm, then task.start — the host starts
+  // ▶ Start ready (N): two-click confirm, then task.start - the host starts
   // every ready subtask (prompt, unblocked, not backlog/done/running).
   const ready = readySubtasks(task);
   if (ready.length > 0) {
@@ -1469,7 +1469,7 @@ function buildSubtaskCard(
     if (subtask.prompt !== undefined && subtask.prompt.length > 0) {
       const promptGlyph = el("span", "tb-prompt-glyph");
       promptGlyph.textContent = "⚡";
-      promptGlyph.title = "Has a prompt — startable";
+      promptGlyph.title = "Has a prompt - startable";
       promptGlyph.setAttribute("aria-label", "has prompt");
       head.append(promptGlyph);
     }
@@ -1482,7 +1482,7 @@ function buildSubtaskCard(
     if (subtask.isBlocked) {
       const lock = el("span", "tb-lock-chip");
       lock.textContent = "🔒";
-      lock.title = "Blocked — an upstream dependency is not done yet";
+      lock.title = "Blocked - an upstream dependency is not done yet";
       lock.setAttribute("aria-label", "blocked");
       head.append(lock);
     }
@@ -1491,7 +1491,7 @@ function buildSubtaskCard(
     // Quiet passive marker (ADR 0014): output captured, not yet pulled local.
     const unlanded = el("span", "tb-changeset-chip");
     unlanded.textContent = "⎘";
-    unlanded.title = "Changeset captured from this subtask's run — not yet pulled into your working copy";
+    unlanded.title = "Changeset captured from this subtask's run - not yet pulled into your working copy";
     unlanded.setAttribute("aria-label", "unlanded changeset");
     head.append(unlanded);
   }
@@ -1507,15 +1507,15 @@ function buildSubtaskCard(
   if (level !== "minimal" && subtask.verifyUnmet === true) head.append(verifyChip());
   card.append(head);
   if (level === "full") card.append(buildDatesLine(subtask.createdAt, subtask.updatedAt, subtask.doneAt));
-  // Seed toggle (ADR 0014): full detail only — passive config stays quiet at
+  // Seed toggle (ADR 0014): full detail only - passive config stays quiet at
   // minimal/standard (hover card carries it); the stored value drives starts.
   if (level === "full" && subtask.dependsOn.length > 0) {
     const seedRow = el("div", "tb-seed-row");
     const upstream = subtask.seedMode === "upstream";
     const toggle = button(`⎘ seed: ${upstream ? "upstream" : "local"}`, `ghost small tb-seed-chip${upstream ? " upstream" : ""}`);
     toggle.title = upstream
-      ? "Next start clones local HEAD + applies unlanded upstream changesets — click for local HEAD only"
-      : "Next start clones local HEAD only — click to also apply unlanded upstream changesets";
+      ? "Next start clones local HEAD + applies unlanded upstream changesets - click for local HEAD only"
+      : "Next start clones local HEAD only - click to also apply unlanded upstream changesets";
     toggle.addEventListener("click", (event) => {
       event.stopPropagation();
       void updateSeedMode(subtask.subtaskId, upstream ? "local" : "upstream");
@@ -1543,7 +1543,7 @@ function buildSubtaskCard(
   // Dependency dots. The input dot is the drop cue; a drop is accepted
   // anywhere on a valid sibling card (friendlier target than a 9px dot).
   const inDot = el("span", "tb-dot tb-dot-in");
-  inDot.title = "Dependency input — drop a connection from a sibling subtask here";
+  inDot.title = "Dependency input - drop a connection from a sibling subtask here";
   const outDot = el("span", "tb-dot tb-dot-out");
   outDot.title = "Drag onto a sibling subtask to add a dependency";
   outDot.addEventListener("pointerdown", (event) => {
@@ -1562,7 +1562,7 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
   const actions = el("div", "tb-card-actions");
   const startable = subtask.prompt !== undefined && subtask.prompt.length > 0;
   const isDone = column.category === "done";
-  // Subtasks aren't just pre-prompts — chats run against them and stay grouped
+  // Subtasks aren't just pre-prompts - chats run against them and stay grouped
   // under the task. This chip surfaces that grouping (running or finished
   // chats alike) alongside the ▶ Start affordance for starting another.
   // At minimal the count is hover-card data only.
@@ -1596,7 +1596,7 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
     return actions;
   }
   if (subtask.isQueued === true) {
-    // A queued start is pending — the chip replaces the Start affordance.
+    // A queued start is pending - the chip replaces the Start affordance.
     if (level !== "minimal") {
       const queued = el("span", "tb-queued-chip");
       queued.textContent = "queued";
@@ -1615,14 +1615,14 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
       start.title = isDemoMode()
         ? "Demo data does not start agents. Switch to Live data to run this subtask."
         : parked
-        ? "Failed twice under automation — retry now (clears the parked state)"
+        ? "Failed twice under automation - retry now (clears the parked state)"
         : "Start a chat with this subtask's prompt";
       start.addEventListener("click", () => void startSubtask(subtask.subtaskId, false));
       actions.append(start);
       if (parked && level !== "minimal") {
         const chip = el("span", "tb-parked-chip");
         chip.textContent = "parked";
-        chip.title = "Failed twice under automation — automation gave up on this one";
+        chip.title = "Failed twice under automation - automation gave up on this one";
         actions.append(chip);
       }
     } else {
@@ -1630,7 +1630,7 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
       // (two-click confirm). Automation never forces.
       const start = button("▶ Start", "ghost small tb-start");
       start.disabled = true;
-      start.title = "Blocked — upstream dependencies are not finished";
+      start.title = "Blocked - upstream dependencies are not finished";
       const armed = armedForceId === subtask.subtaskId;
       const force = button(armed ? "Confirm force start" : "Force start…", `ghost small tb-force${armed ? " armed" : ""}`);
       force.disabled = isDemoMode();
@@ -1911,7 +1911,7 @@ let edgeRenderScheduled = false;
 /**
  * Coalesces edge redraws (render, hover, scroll, resize) into one pass. rAF is
  * suspended while the document is hidden (an occluded harness tab, a hidden
- * editor tab), which would leave the scheduled flag stuck until reveal — so a
+ * editor tab), which would leave the scheduled flag stuck until reveal - so a
  * hidden document falls back to a timeout, keeping edge geometry deterministic
  * for automation. Geometry measured in a hidden layout can be degenerate; the
  * visibilitychange listener below re-renders on reveal to correct it.
@@ -1949,7 +1949,7 @@ function visibleEdges(): VisibleEdge[] {
           if (!touchesHover && !isSelected) continue;
         }
         // An edge tints by its downstream (dependent) subtask's own colour
-        // override when set, else the parent task's stripe hue — two
+        // override when set, else the parent task's stripe hue - two
         // overlapping tasks' webs no longer blend together once subtasks pick
         // distinct colours.
         edges.push({
@@ -2021,7 +2021,7 @@ function positionEdgeActions(from: DotPoint, to: DotPoint, edge: VisibleEdge): v
   });
   edgeActions.append(remove);
   edgeActions.classList.remove("hidden");
-  // CSSOM assignment (not a parsed style attribute) — fine under the strict CSP.
+  // CSSOM assignment (not a parsed style attribute) - fine under the strict CSP.
   edgeActions.style.left = `${String(Math.max(0, (from.x + to.x) / 2 - 70))}px`;
   edgeActions.style.top = `${String(Math.max(0, (from.y + to.y) / 2 - 26))}px`;
 }
@@ -2045,7 +2045,7 @@ async function removeDependency(edge: VisibleEdge): Promise<void> {
 
 /**
  * Connection drag from an output dot. While it is live, every card that is not
- * a sibling subtask of the same parent task greys out and drops its dots — the
+ * a sibling subtask of the same parent task greys out and drops its dots - the
  * task boundary is visible during the gesture, not just enforced on drop (the
  * host re-validates same-task + acyclicity anyway).
  */
@@ -2230,7 +2230,7 @@ function renderRecipeModal(draft: RecipeDraft): void {
       const name = el("span", "tb-recipe-name");
       name.textContent = recipe.name + (recipe.source === "overlay" ? " · repo" : "");
       const meta = el("span", "tb-recipe-meta");
-      meta.textContent = `${String(recipe.subtasks.length)} step${recipe.subtasks.length === 1 ? "" : "s"}${recipe.description === undefined ? "" : ` — ${recipe.description}`}`;
+      meta.textContent = `${String(recipe.subtasks.length)} step${recipe.subtasks.length === 1 ? "" : "s"}${recipe.description === undefined ? "" : ` - ${recipe.description}`}`;
       row.append(name, meta);
       row.addEventListener("click", () => {
         draft.selectedId = recipe.recipeId;
@@ -2490,7 +2490,7 @@ async function submitSettings(): Promise<void> {
   draft.submitting = true;
   draft.error = null;
   render();
-  // Global sortOrder: lanes in fixed category order, chips in lane order —
+  // Global sortOrder: lanes in fixed category order, chips in lane order -
   // preserves category grouping in the rail.
   let sortOrder = 0;
   const columns = [];

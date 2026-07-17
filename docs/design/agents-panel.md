@@ -1,7 +1,7 @@
 # Agents Panel
 
 The fleet view (ADR 0013): one editor-area panel showing every agent across
-every task — what each is doing right now, its delegated subagents, and who is
+every task - what each is doing right now, its delegated subagents, and who is
 blocked on the user. It is the surface for the many-tasks-in-flight moment
 that the board (cards), the Agents lens (one session), and the attention slot
 (one card) each answer only partially.
@@ -24,30 +24,30 @@ ADR 0015 (durable queue/park policy).
 
 ## Structure
 
-A single scrollable scan list, grouped by task. No graph canvas, no columns —
+A single scrollable scan list, grouped by task. No graph canvas, no columns -
 rows earn their keep at fleet sizes (the same call as the Agents lens).
 
-1. **Header strip** — live rollup (`N running · N waiting on you · N idle`),
+1. **Header strip** - live rollup (`N running · N waiting on you · N idle`),
    where waiting includes session questions/access/failures and task subtasks
    awaiting human verification,
    plus the live fleet token total, `[Active | Needs attention | All]`, a
    `Min | Std | Full` detail control, and text filtering over task/session
    titles.
-2. **Task groups** — one collapsible group per task that has linked sessions,
+2. **Task groups** - one collapsible group per task that has linked sessions,
    ordered: groups needing attention first, then by running count, then by
    `lastWorkedAt`. The group header carries the task title, its board column
    chip (name + category accent), rollup counts, and open actions (board,
    task review).
-3. **Session rows** — one row per root session under its task. Role-session
+3. **Session rows** - one row per root session under its task. Role-session
    children indent under their parent (`parentSessionId`), depth-N.
-4. **Subagent rows** — native delegated agents indent under their session
+4. **Subagent rows** - native delegated agents indent under their session
    row, derived from `AgentActivitySummary.agents` (`parentNodeId` gives
    depth). The same items feed the sidebar ⑂ chips, so the two surfaces
    cannot disagree.
-5. **Orphan drawer** — sessions with no task link collapse into a trailing
+5. **Orphan drawer** - sessions with no task link collapse into a trailing
    `Sessions without a task` drawer, consistent with the sidebar's cleanup
    drawer: present, not competing with tasks.
-6. **Landing drawer** — unlanded changesets grouped one item per subtask,
+6. **Landing drawer** - unlanded changesets grouped one item per subtask,
    ordered by overlap confidence and age. It is the one mutating fleet
    exception: two-click Pull reuses the full clone-sync operation from ADR
    0014.
@@ -59,11 +59,11 @@ Session row: status dot → title → chips → activity → right meta.
 - **Status dot** keys off `live` (authoritative), never stored status: pulsing
   while a turn runs, steady when live-idle, hollow when ended, halved when
   running elsewhere. `starting` is the boot exception: a pulsing hollow dot
-  plus "resuming — recreating the runtime and clones". `failed` uses the
+  plus "resuming - recreating the runtime and clones". `failed` uses the
   standard loud accent.
 - **Chips**: provider/model, mode (planning/implementation/clone), role (for spawned
-  children), ⑂ N while subagents run, and attention chips — `? question`,
-  `⚠ access`, `✗ failed turn` — in the loud vocabulary.
+  children), ⑂ N while subagents run, and attention chips - `? question`,
+  `⚠ access`, `✗ failed turn` - in the loud vocabulary.
 - **Activity line**: the root agent's `lastCommand` + clipped `lastActivity`
   while live; the session description otherwise. Idle state (`idle 12m`)
   appears when `lastActivityAt` exceeds `agentIdleThresholdMs`.
@@ -76,7 +76,7 @@ their honest "lifecycle only, no feed" note; `none` renders "no subagent
 signal for this transport" rather than an all-quiet tree.
 
 Running-elsewhere rows show the owning-host note and no activity feed or
-controls (0008 posture) — the fleet view never invites a second window to
+controls (0008 posture) - the fleet view never invites a second window to
 fight over a runtime.
 
 ## Density and usage
@@ -109,12 +109,12 @@ Composed host-side, folded client-side:
   Task summaries carry `verifyUnmet` on their subtasks, so the fleet rollup,
   task ordering, and Needs attention filter use the same verification state as
   the Task Board.
-  Sessions arrive as plain `ChatSessionSummary` — the shape already carries
+  Sessions arrive as plain `ChatSessionSummary` - the shape already carries
   liveness, ownership, lineage, and `agentActivity`. The activity summary
   gains an optional `root` item (the session's own agent this turn) so fleet
   rows know pulse/last-command/tokens on boot; the sidebar ⑂ chip ignores it.
 - Structural bus events collapse into ONE debounced coarse push,
-  `agents.changed`, and the webview refetches — the board's self-healing
+  `agents.changed`, and the webview refetches - the board's self-healing
   shape. The panel host subscribes to `board-changed` (which task
   create/update/delete/link/unlink now also publish), `turn-completed`,
   `question-asked`/`question-resolved`, and
@@ -125,7 +125,7 @@ Composed host-side, folded client-side:
   a session's agent rows (folded by the panel host from bus agent-events
   through the same `agentActivitySummaryOfTree` projection the sidebar chips
   use), `chat.turnStarted`/`chat.turnCompleted` flip running state,
-  `session.updated`/`session.deleted` swap or drop one row — an update for an
+  `session.updated`/`session.deleted` swap or drop one row - an update for an
   unknown session schedules the coarse refetch instead (membership changed).
 - Durations and idle labels tick locally from timestamps; nothing polls the
   host for time to pass.

@@ -2,7 +2,7 @@
  * Read-only virtual documents for baseline file content.
  *
  * The diff editor's left pane shows a file's state at baseline capture, which
- * lives only in the content-addressed blob store — there is no on-disk path for
+ * lives only in the content-addressed blob store - there is no on-disk path for
  * it. This provider serves that content under the `drydock-baseline` scheme;
  * the URI carries the baselineId and the root-relative path so the resolver can
  * fetch the right blob and VS Code can pick a language from the path's suffix.

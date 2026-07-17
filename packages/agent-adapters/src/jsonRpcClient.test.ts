@@ -26,7 +26,7 @@ test("an already-aborted signal rejects as aborted, never as a timeout", async (
   );
 });
 
-test("timeoutMs=0 installs no stall timeout — a later abort still wins", async () => {
+test("timeoutMs=0 installs no stall timeout - a later abort still wins", async () => {
   const client = new LineJsonRpcClient("noop", [], ".");
   const controller = new AbortController();
   const pending = client.nextNotification(controller.signal, 0);

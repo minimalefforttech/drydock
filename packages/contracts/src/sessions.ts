@@ -33,7 +33,7 @@ export interface ChatSessionRecord {
   /**
    * Absolute project roots mounted at start. Persisted so a resume/reclaim/reload
    * re-mounts the SAME folders instead of coming up with only the disposable
-   * workspace — otherwise a revived session can't touch the project it edited.
+   * workspace - otherwise a revived session can't touch the project it edited.
    */
   readonly workspaceRoots?: readonly string[];
   /** Subset of workspaceRoots mounted read-only (per-set read-only flags). */
@@ -44,7 +44,7 @@ export interface ChatSessionRecord {
   /**
    * Multi-window ownership: which extension-host instance currently
    * runs this session, and when it last proved it. A fresh heartbeat from
-   * another instance means "running elsewhere" — never touch its runtime.
+   * another instance means "running elsewhere" - never touch its runtime.
    */
   readonly hostInstanceId?: string;
   readonly heartbeatAt?: string;

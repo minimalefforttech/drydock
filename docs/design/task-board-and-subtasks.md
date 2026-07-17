@@ -16,7 +16,7 @@ panel. Durable decisions live in ADR [0007](../adr/0007-task-board-subtasks-and-
 - `Subtask`: child work item of exactly one task. Always title + optional description; optionally a `prompt` (which makes it startable); optionally linked chat sessions.
 - `SubtaskDependency`: directed edge between two subtasks of the same task. Never crosses tasks, never cycles.
 - `BoardColumn`: named column in one of four fixed categories: `backlog`, `pending`, `in-progress`, `done`. Global, ordered, user-configurable.
-- Category semantics — not column names — drive all automation.
+- Category semantics - not column names - drive all automation.
 - The legacy `MiniTask` concept folds into `Subtask`: review-created work uses
   `origin: "review"`, not a separate record type.
 - `TaskRecipeRecord`: an ordered, key-addressed subtask/DAG template. It creates
@@ -30,7 +30,7 @@ export type ColumnCategory = (typeof COLUMN_CATEGORIES)[number];
 
 export interface BoardColumnRecord {
   readonly columnId: ColumnId;
-  readonly name: string;               // "Review" — cosmetic, user-editable
+  readonly name: string;               // "Review" - cosmetic, user-editable
   readonly category: ColumnCategory;   // drives every behaviour rule
   readonly sortOrder: number;
 }
@@ -49,7 +49,7 @@ Column rules:
 ```ts
 export interface SubtaskRecord {
   readonly subtaskId: SubtaskId;
-  readonly taskId: TaskId;             // owning task — dependencies never leave it
+  readonly taskId: TaskId;             // owning task - dependencies never leave it
   readonly title: string;
   readonly description?: string;
   readonly prompt?: string;            // present ⇒ startable
@@ -78,7 +78,7 @@ Dependency rules:
 
 - Both endpoints of an edge must share `taskId`. The service validates same-parent, no self-edge, no duplicate, and acyclicity on insert; the board UI enforces the same boundary by greying out and de-dotting every card outside the parent task during a connection drag.
 - Blocked is computed, never stored: a card is blocked while any upstream subtask is not in a `done`-category column. The blocked badge renders wherever the card sits; the default "Blocked" column is just a manual parking spot.
-- Linking to an already-done sibling is allowed — the dependency is satisfied on creation and only documents order.
+- Linking to an already-done sibling is allowed - the dependency is satisfied on creation and only documents order.
 - Deleting a subtask deletes its edges. Deleting a task cascades subtasks and edges (same pattern as the existing link cascade in `workTaskStore`).
 - Sessions link to subtasks by adding an optional `subtaskId` to session-target `WorkTaskLinkRecord`s.
 
@@ -93,9 +93,9 @@ Dependency rules:
 - A cancelled or manually-started failed run stays a human concern and never
   auto-retries. A failed cascade run retries once, then parks durably; a manual
   Retry clears that policy state. Parked dependents do not cascade.
-- Starting a card never starts its dependencies. Manual start is disabled while any upstream is unfinished; an explicit Force start override exists for that case (manual only — automation never forces). Starting a task starts its ready subtasks (dependencies done, prompt present, not in backlog) after a count confirmation; any cascade beyond that happens through per-subtask `autoStart` flags.
+- Starting a card never starts its dependencies. Manual start is disabled while any upstream is unfinished; an explicit Force start override exists for that case (manual only - automation never forces). Starting a task starts its ready subtasks (dependencies done, prompt present, not in backlog) after a count confirmation; any cascade beyond that happens through per-subtask `autoStart` flags.
 - Manual drags always win. Dragging a card into a `done` column counts as finishing and runs dependent evaluation; dragging it out clears `doneAt` but never cancels dependents already started.
-- Nothing ever moves into a Finished column automatically — Review → Finished is a human drag.
+- Nothing ever moves into a Finished column automatically - Review → Finished is a human drag.
 
 ### Recipes and standing task policy
 
@@ -154,7 +154,7 @@ separate human move.
   `work_task_links` gains nullable `subtask_id`; task/subtask rows carry the
   additive clone, seed, model, verification, and FAQ-toggle fields. Changeset
   storage is described in ADR 0014. Migrations remain forward-only.
-- Column config is product state in the store — identical wherever the board opens. The board's toolbar settings (age filter, task focus, connections mode) currently persist per panel via webview state; promoting them to product state is a noted later item.
+- Column config is product state in the store - identical wherever the board opens. The board's toolbar settings (age filter, task focus, connections mode) currently persist per panel via webview state; promoting them to product state is a noted later item.
 
 ## Known Boundaries
 

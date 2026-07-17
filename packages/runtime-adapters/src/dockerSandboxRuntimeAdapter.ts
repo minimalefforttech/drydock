@@ -175,7 +175,7 @@ function escapeRegExp(value: string): string {
 /**
  * Appends actionable guidance when sbx fails on authentication. The common cause
  * is NOT that the user is signed out, but that the extension host (a GUI-launched
- * VS Code) can't reach the same Docker/sbx session the user's terminal can —
+ * VS Code) can't reach the same Docker/sbx session the user's terminal can -
  * usually the Docker credential helper isn't on the extension's PATH.
  */
 function authHint(detail: string): string {

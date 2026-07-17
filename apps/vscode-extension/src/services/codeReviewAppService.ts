@@ -1,17 +1,17 @@
 /**
- * Code Review panel application facade (in-panel PR-style review —
+ * Code Review panel application facade (in-panel PR-style review -
  * docs/design/code-review-panel.md).
  *
  * Same data spine as the v1 task review: the task/session scopes project the
  * TaskReviewAppService aggregation; the only new capability is serving DIFF
  * CONTENT (hunk rows, image data URIs, byte sizes) to the webview, computed
- * host-side from baseline text + the live tree — or, for the uncommitted
+ * host-side from baseline text + the live tree - or, for the uncommitted
  * scope, from `git` against HEAD in each project root. Notes (one body, many
  * anchors) store one ReviewCommentRecord per anchor through the existing
  * guarded addComment path, so v1 submit semantics send them verbatim.
  *
  * No `vscode` imports here; the panel provider passes window facts (open
- * folder roots) in. Git use is status/diff/show only — no network transports.
+ * folder roots) in. Git use is status/diff/show only - no network transports.
  */
 
 import { execFile } from "node:child_process";
@@ -104,7 +104,7 @@ export class CodeReviewAppService {
 
   /**
    * Aggregated panel state for one task+scope. `openFolderRoots` are this
-   * window's file-scheme workspace folders — the uncommitted scope diffs them
+   * window's file-scheme workspace folders - the uncommitted scope diffs them
    * against HEAD; the other scopes ignore them.
    */
   async computeState(taskId: string, scope: CodeReviewScope, openFolderRoots: readonly string[]): Promise<CodeReviewPanelState> {
@@ -183,7 +183,7 @@ export class CodeReviewAppService {
       const repo = path.basename(root);
       const status = await runGit(root, ["status", "--porcelain=v1", "-z"]);
       if (status === null) {
-        notes.push(`${repo}: not a git repository (or git failed) — skipped in the uncommitted scope.`);
+        notes.push(`${repo}: not a git repository (or git failed) - skipped in the uncommitted scope.`);
         continue;
       }
       const stats = await this.numstat(root);
@@ -214,7 +214,7 @@ export class CodeReviewAppService {
               removed = 0;
             }
           } catch {
-            notes.push(`${repo}/${filePath}: unreadable — stats unavailable.`);
+            notes.push(`${repo}/${filePath}: unreadable - stats unavailable.`);
           }
         }
         if (stat?.binary === true && contentKind === "text") contentKind = "binary";
@@ -314,7 +314,7 @@ export class CodeReviewAppService {
     { kind: "ok"; oldBytes: Buffer | null; newBytes: Buffer | null } | { kind: "oversized"; diff: ReviewFileDiff }
   > {
     if (baselineId === undefined) {
-      return { kind: "oversized", diff: { kind: "oversized", reason: "No baseline backs this file (clone or stale entry) — open it in the owning session." } };
+      return { kind: "oversized", diff: { kind: "oversized", reason: "No baseline backs this file (clone or stale entry) - open it in the owning session." } };
     }
     const oldText = await this.options.diffs.readBaselineFileText(baselineId, filePath);
     const root = await this.options.diffs.baselineRootPath(baselineId);
@@ -327,10 +327,10 @@ export class CodeReviewAppService {
       }
     }
     if (newBytes !== null && newBytes.length > TEXT_SIZE_CAP && !isImagePath(filePath)) {
-      return { kind: "oversized", diff: { kind: "oversized", reason: "File exceeds the in-panel diff size cap — open it in the editor." } };
+      return { kind: "oversized", diff: { kind: "oversized", reason: "File exceeds the in-panel diff size cap - open it in the editor." } };
     }
     // Baseline blobs surface as text; image bytes for the before side are a
-    // recorded fast-follow (blob byte access) — the after side renders today.
+    // recorded fast-follow (blob byte access) - the after side renders today.
     const oldBytes = oldText === null ? null : Buffer.from(oldText, "utf8");
     return { kind: "ok", oldBytes: isImagePath(filePath) ? null : oldBytes, newBytes };
   }
@@ -350,7 +350,7 @@ export class CodeReviewAppService {
       newBytes = null;
     }
     if (newBytes !== null && newBytes.length > TEXT_SIZE_CAP && !isImagePath(filePath)) {
-      return { kind: "oversized", diff: { kind: "oversized", reason: "File exceeds the in-panel diff size cap — open it in the editor." } };
+      return { kind: "oversized", diff: { kind: "oversized", reason: "File exceeds the in-panel diff size cap - open it in the editor." } };
     }
     return { kind: "ok", oldBytes, newBytes };
   }
@@ -467,14 +467,14 @@ function myersDiff(oldLines: readonly string[], newLines: readonly string[]): nu
       }
     }
   }
-  return null; // too divergent for the d-cap — caller degrades to replace-all
+  return null; // too divergent for the d-cap - caller degrades to replace-all
 }
 
 export function computeTextDiff(oldText: string, newText: string, ignoreWhitespace: boolean): ReviewFileDiff {
   const oldLines = splitLines(oldText);
   const newLines = splitLines(newText);
   if (oldLines.length > MAX_DIFF_LINES || newLines.length > MAX_DIFF_LINES) {
-    return { kind: "oversized", reason: "File exceeds the in-panel diff line cap — open it in the editor." };
+    return { kind: "oversized", reason: "File exceeds the in-panel diff line cap - open it in the editor." };
   }
   const oldKeys = ignoreWhitespace ? oldLines.map(normalizeWs) : oldLines;
   const newKeys = ignoreWhitespace ? newLines.map(normalizeWs) : newLines;

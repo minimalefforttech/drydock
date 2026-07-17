@@ -101,7 +101,7 @@ test("extractMemoryCandidates takes bounded plain text and drops empties", () =>
     `\`\`\`memory-candidate\n${"x".repeat(2001)}\n\`\`\``
   ].join("\n");
   assert.deepEqual(extractMemoryCandidates(text), [
-    "asset_api integration tests need the fixture server on port 9021."
+    { content: "asset_api integration tests need the fixture server on port 9021." }
   ]);
 });
 
@@ -111,16 +111,35 @@ test("extractMemoryCandidates caps the number honored per text", () => {
   assert.equal(extractMemoryCandidates(text).length, 3);
 });
 
-test("buildSessionBriefing teaches the memory protocol and lists approved memories", () => {
+test("buildSessionBriefing teaches the memory protocol and lists scoped memory groups", () => {
   const briefing = buildSessionBriefing({
     mode: "implementation",
     mounts: [],
-    memories: ["Farm submits require the schema migration to run last.", "Use fixture server port 9021."]
+    memoryGroups: [
+      { label: "this task", notes: ["Farm submits require the schema migration to run last."] },
+      { label: "global", notes: ["Use fixture server port 9021."] }
+    ]
   });
   assert.match(briefing, /memory-candidate/);
-  assert.match(briefing, /Team memory/);
+  assert.match(briefing, /Team memory - this task/);
+  assert.match(briefing, /Team memory - global/);
   assert.match(briefing, /- Farm submits require the schema migration to run last\./);
   assert.match(briefing, /- Use fixture server port 9021\./);
+});
+
+test("extractMemoryCandidates accepts the structured JSON body with scope and tags", () => {
+  const text = [
+    "```memory-candidate",
+    '{"content": "Alembic exports must use the framerange guard", "scope": "workspace", "tags": ["Python", "maya", "python"]}',
+    "```",
+    "```memory-candidate",
+    '{"scope": "task"}',
+    "```"
+  ].join("\n");
+  // The second block LOOKS like JSON but has no content - dropped, not stored as noise.
+  assert.deepEqual(extractMemoryCandidates(text), [
+    { content: "Alembic exports must use the framerange guard", scope: "workspace", tags: ["python", "maya"] }
+  ]);
 });
 
 test("buildSessionBriefing appends the granted note after a restart", () => {

@@ -170,7 +170,7 @@ export class CodexAppServerTransport {
         } catch (error) {
           if (error instanceof NotificationTimeoutError) {
             // The app-server has gone quiet. A standoff is often recoverable, so
-            // we do NOT hard-fail the turn — we keep it alive and waiting. The UI
+            // we do NOT hard-fail the turn - we keep it alive and waiting. The UI
             // surfaces a "Give it a poke?" prompt that calls poke() (a soft
             // turn/interrupt) to try to break the standoff without killing the
             // container. Log so the silence is visible in diagnostics.
@@ -184,7 +184,7 @@ export class CodexAppServerTransport {
         }
         this.options.rawSink?.write(sessionId, `${JSON.stringify(notification)}\n`);
         if (notification.method === "turn/started") {
-          // Only the ROOT thread's turn id may drive turn/interrupt — collab
+          // Only the ROOT thread's turn id may drive turn/interrupt - collab
           // child threads start their own turns on this same connection
           // (verified against live app-server captures) and must not hijack the cancel target.
           const params = notification.params;
@@ -231,7 +231,7 @@ export class CodexAppServerTransport {
 
   /**
    * Soft nudge for a quiet turn ("Give it a poke?"): asks the app-server to
-   * interrupt the current turn but — unlike cancel() — does NOT abort our local
+   * interrupt the current turn but - unlike cancel() - does NOT abort our local
    * stream or mark the run cancelled. The app-server's response (usually a
    * graceful turn end, sometimes resumed output) then flows through streamEvents,
    * so a standoff is broken without killing the container or the session.

@@ -3,8 +3,8 @@
 The full planning workspace (ADR 0012): one editor-area panel that replaces
 the composer's old [Plan | Develop] switch and the per-session plan-docs
 surface. The user says what they're building, picks the angles that matter,
-mounts context read-only, and reviews what the agent drafts — documents,
-diagrams, images, and clickable HTML prototypes — with click-to-instruct
+mounts context read-only, and reviews what the agent drafts - documents,
+diagrams, images, and clickable HTML prototypes - with click-to-instruct
 feedback on every block, node, point, and region.
 
 ## The plan entity
@@ -22,7 +22,7 @@ create surface leads with a task picker (the Plan tab composer, the panel
 intake, and a "Plan" action on task cards that arrives with the task
 preselected); "no task (orphan)" stays available but is copy-discouraged. The
 owning task's title renders as a chip beside the plan title and in list metas,
-and on every session boot — new or reclaim — the plan's session is linked to
+and on every session boot - new or reclaim - the plan's session is linked to
 the task (`work_task_links`, idempotent), so the task's chats dropdown, board
 chips, and touch history see planning sessions like any other. `planner.create`
 takes `taskId?`; `planner.updateIntake` takes `taskId?` where `""` clears the
@@ -35,7 +35,7 @@ instructions, expected artifacts. The migration seeds ten (requirements,
 architecture, data model, APIs, UI/UX, testing, security, performance,
 rollout, operations); the panel's manager adds, edits, and archives rows, so a
 department grows its own angles. A repo may also carry a read-only pack in
-`.drydock/planner-aspects.json` — merged at read time, never persisted, and a
+`.drydock/planner-aspects.json` - merged at read time, never persisted, and a
 stored row wins an id collision. Aspect ids are slugs because they double as
 the `plan/<aspectId>/` collection subdirectory.
 
@@ -43,8 +43,8 @@ the `plan/<aspectId>/` collection subdirectory.
 
 The agent writes only under its workspace `plan/` directory. That workspace is
 a host directory bind-mounted into the microVM, so a sandbox crash mid-write
-loses nothing. Durability comes from **collection**: after every turn — and on
-panel open, which catches turns whose completion the host never saw — the host
+loses nothing. Durability comes from **collection**: after every turn - and on
+panel open, which catches turns whose completion the host never saw - the host
 reads `plan/` into the store. Text kinds (documents, diagrams, prototypes)
 land inline in SQLite; images go through the content-addressed blob store and
 keep only their digest. Revisions bump only on content change; deleting a file
@@ -74,16 +74,16 @@ in the VS Code sidebar remains the conversation surface.
   active document's **heading outline** (click scrolls to the block);
   non-document artifacts list their annotations there instead. Header aspect
   chips filter the tree.
-- **Viewer** (editor area): one `ArtifactProvider` per kind behind a common seam —
+- **Viewer** (editor area): one `ArtifactProvider` per kind behind a common seam -
   render plus `focusAnchor`. Documents render structural markdown in the
   design-doc language (kicker, tight headings, quiet rules) with hover ✎ on
   every block. Diagrams render through the shared lazy mermaid bundle with
   sanitized SVG adoption; a click on a `g[id]` node anchors `node:<id>`
   (render ids are deterministic per artifact so anchors survive re-renders),
   empty canvas anchors a point. Images and prototypes share a pin/region
-  overlay in normalized 0–1 coordinates. Prototypes render in a sandboxed
-  `iframe srcdoc` — never `allow-same-origin`; `allow-scripts` only via the
-  per-artifact toggle — with Preview (page gets the pointer) and Annotate
+  overlay in normalized 0-1 coordinates. Prototypes render in a sandboxed
+  `iframe srcdoc` - never `allow-same-origin`; `allow-scripts` only via the
+  per-artifact toggle - with Preview (page gets the pointer) and Annotate
   (overlay captures it) modes.
 - **Drydock Plan tab** (VS Code sidebar): the plan session's transcript,
   composer, Stop control, and recent-plan selector. It uses the shared chat
@@ -94,14 +94,14 @@ in the VS Code sidebar remains the conversation surface.
 
 ## The instruction loop
 
-Every provider emits annotations through one grammar — `block:<n>`,
-`node:<id>`, `point:<x>,<y>`, `region:<x>,<y>,<w>,<h>` — into one store
+Every provider emits annotations through one grammar - `block:<n>`,
+`node:<id>`, `point:<x>,<y>`, `region:<x>,<y>,<w>,<h>` - into one store
 (`planner_annotations`). States: open → delegated → resolved / reopened, with
 wont-fix for parking. "Send instructions" composes every open annotation into
 a single revision turn (artifact title, `plan/` path, human anchor, body),
 flips them to delegated stamped with the artifact revision they were written
 against, and fires the turn detached. When a later collection bumps that
-artifact's revision, the delegated card asks "addressed in rev N?" — resolve
+artifact's revision, the delegated card asks "addressed in rev N?" - resolve
 or reopen, never auto-closed. Regenerate re-sends the briefing for the whole
 plan or one aspect's subdirectory.
 
@@ -127,7 +127,7 @@ item already materialized, so the preview is currently the duplicate guard.
 The control panel's tab strip reads Tasks | **Plan** | **Edit** | System: the
 former Chat tab is now Edit (its sessions always run implementation mode),
 and the Plan tab IS the planning chat. With no plan underway, the first
-message typed becomes a new plan's brief — the host creates the plan, boots
+message typed becomes a new plan's brief - the host creates the plan, boots
 its session, and the Planner panel auto-opens on that plan while the
 conversation streams in the tab (the composed briefing rides inside the
 turn's collapsed host-briefing disclosure, so the transcript leads with the
@@ -141,14 +141,14 @@ every other rail; sends revive a dormant session automatically.
 Plan-targeted panel opens ride the `drydock.planner.open` command's optional
 planId: the provider queues it until the webview's first `planner.plans`
 fetch proves the document is listening, then delivers it as the
-`planner.showPlan` push — the same mechanism the `planner-session-started`
+`planner.showPlan` push - the same mechanism the `planner-session-started`
 auto-open uses, so the panel always lands on the plan that just began.
 
 ## Sessions and modes
 
 A planning session is an ordinary chat session started with the internal
 `plan` mode: context roots mount read-only, the workspace stays read-write,
-and neither agent adapter changes at all — read-only is container-enforced
+and neither agent adapter changes at all - read-only is container-enforced
 (ADR 0001), exactly like role spawns, which remain the mode's other producer.
 Slow host work (create, session boot) acks immediately and completes via the
 `planner.sessionReady` push (ADR 0011's lesson: sandbox boots outlive the
@@ -169,10 +169,10 @@ Unit: contract parse accept/reject per message, anchor grammar round-trips,
 store reopen durability, collector bounds/revisions/titles/aspects, hydrate →
 collect round-trips, briefing and instruction-turn composition, aspect
 registry rules, and literal-checklist materialization. Harness
-(`tools/webview-harness/planner.html`, rows V52–V56 and the materialization
+(`tools/webview-harness/planner.html`, rows V52-V56 and the materialization
 scenario):
 landing/intake, tree + splitter + outline, all four providers, the responsive
-outputs rail, and Plan-tab selection synchronization — plus the Plan and Edit
+outputs rail, and Plan-tab selection synchronization - plus the Plan and Edit
 tab transcript rows, which must not regress. Live checks that need a real window: the crash drill
 (kill the sandbox mid-turn; reopen collects everything written), `vscode.open`
 artifact jumps, and prototype frames under the real webview CSP.

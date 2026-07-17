@@ -23,7 +23,7 @@ const PROVIDER_NETWORK_RESOURCES: Readonly<Record<SandboxProvider, string>> = {
 };
 
 /**
- * Returns a copy of a template rebound to a different sandbox provider — swaps
+ * Returns a copy of a template rebound to a different sandbox provider - swaps
  * the sandbox agent image, the scoped egress allowlist, and the provider tags,
  * keeping every provider-agnostic field (mounts, workspace, mode) intact. Used
  * when a live session switches provider: the new agent must run in ITS OWN

@@ -54,7 +54,7 @@ export class RuntimeCleanupService {
       const remove = await this.options.runtimeAdapter.removeRuntime(handle, true);
       diagnostics.push(`remove exit: ${String(remove.exitCode)}`);
       // A remove that fails because the sandbox is ALREADY GONE is a success, not
-      // a quarantine — otherwise every cleanup of a sandbox that `sbx reset` (or a
+      // a quarantine - otherwise every cleanup of a sandbox that `sbx reset` (or a
       // prior removal) already deleted leaves a permanently quarantined row.
       if (remove.exitCode !== 0 && !isAlreadyGone(remove)) {
         throw new Error(remove.stderr || remove.error || remove.stdout || "remove failed");

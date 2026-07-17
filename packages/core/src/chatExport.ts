@@ -2,7 +2,7 @@
  * Chat session export builders.
  *
  * Projects a session's stored events into clipboard-ready text: a trimmed
- * chat log (the user/assistant dialogue plus files touched — no commands,
+ * chat log (the user/assistant dialogue plus files touched - no commands,
  * reasoning, or host briefing) and the fixed-structure prompt used to ask an
  * agent for an AI summary of that log. Pure functions over StoredEvent[];
  * no storage or vscode imports.
@@ -73,7 +73,7 @@ export const SUMMARY_TRANSCRIPT_MAX = 120_000;
 /**
  * The fixed-structure summarization prompt. The transcript is the trimmed
  * chat log from buildChatLog, so the model sees exactly what the user would
- * copy — nothing hidden, nothing extra.
+ * copy - nothing hidden, nothing extra.
  */
 export function buildSummaryPrompt(chatLog: string): string {
   return [
@@ -130,7 +130,19 @@ function collectDialogue(events: readonly StoredEvent[]): DialogueEntry[] {
       entries.push({ role: "Assistant", text: payload.text });
     }
   }
-  return entries;
+  // Merge consecutive same-role entries (a turn often lands as several final
+  // texts): one role header, texts separated by a blank line - the exported
+  // log reads cleaner and spends fewer tokens on repeated "Assistant:" blocks.
+  const merged: DialogueEntry[] = [];
+  for (const entry of entries) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && last.role === entry.role) {
+      merged[merged.length - 1] = { role: last.role, text: `${last.text}\n\n${entry.text}` };
+    } else {
+      merged.push(entry);
+    }
+  }
+  return merged;
 }
 
 function metaLine(session: ChatSessionRecord): string {
@@ -214,7 +226,7 @@ function resolveProject(
 /**
  * Net annotation across a file's edit sequence: a file created in this
  * session stays "new" through later updates; the last kind wins otherwise.
- * Plain updates carry no annotation — they are the common case and the list
+ * Plain updates carry no annotation - they are the common case and the list
  * should stay token-lean.
  */
 function annotationFor(firstKind: string, lastKind: string): string | undefined {

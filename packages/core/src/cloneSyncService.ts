@@ -25,13 +25,13 @@ import type {
 } from "@drydock/contracts";
 import { isPathWithin, normalizePathKey, sensitivePathMatch } from "./mountPolicy.js";
 
-/** Fixed committer identity for sync commits — never depend on host git config. */
+/** Fixed committer identity for sync commits - never depend on host git config. */
 const SYNC_AUTHOR = ["-c", "user.name=clone-sync", "-c", "user.email=clone-sync@localhost"] as const;
 
 /** Default timeout for individual git invocations. */
 const GIT_TIMEOUT_MS = 60_000;
 
-/** Refuse to move patches larger than this — a runaway diff should fail loudly. */
+/** Refuse to move patches larger than this - a runaway diff should fail loudly. */
 const MAX_PATCH_BYTES = 50 * 1024 * 1024;
 
 /** Cap for the bounded conflict-marker scan of a single working-tree file. */
@@ -93,7 +93,7 @@ export interface InitCloneInput {
   /**
    * Upstream changeset patches to 3-way apply into the fresh clone BEFORE the
    * sync base freezes (ADR 0014). Applying pre-base keeps the clone's own
-   * outbound delta scoped to work done IN this clone — a dependent's later
+   * outbound delta scoped to work done IN this clone - a dependent's later
    * changeset never re-carries its upstream's content. A conflicting seed
    * throws (honest failed start), naming the seed's label.
    */
@@ -317,7 +317,7 @@ export class CloneSyncService {
         await dirty.cleanup();
       }
 
-      // Copy untracked (but not ignored) files verbatim — copy-win, no merge.
+      // Copy untracked (but not ignored) files verbatim - copy-win, no merge.
       const untracked = await this.gitIn(
         localRepoPath,
         ["ls-files", "-o", "--exclude-standard", "-z"],
@@ -334,7 +334,7 @@ export class CloneSyncService {
 
     // Seed upstream changesets (ADR 0014): strict 3-way apply, one patch at a
     // time so a failure names its source. Runs BEFORE the base freeze so the
-    // seeded content becomes part of refs/sync/base — the clone's own outbound
+    // seeded content becomes part of refs/sync/base - the clone's own outbound
     // delta stays scoped to work done here, never re-carrying upstream output.
     for (const seed of input.seedPatches ?? []) {
       if (seed.patch.length === 0) continue;
@@ -424,7 +424,7 @@ export class CloneSyncService {
 
   /**
    * The clone's durable outbound patch (ADR 0014): commit agent progress,
-   * then `diff --binary refs/sync/base..HEAD` — byte-for-byte what a full
+   * then `diff --binary refs/sync/base..HEAD` - byte-for-byte what a full
    * pull would apply, so a captured changeset and a later manual Pull can
    * never disagree. Returns null when there is nothing to capture. Does NOT
    * advance the sync base (capture must not change pull semantics).
@@ -449,7 +449,7 @@ export class CloneSyncService {
   }
 
   /**
-   * Inbound — "pull the agent's work into my editor".
+   * Inbound - "pull the agent's work into my editor".
    *
    * Commits agent progress if the clone tree is dirty, builds
    * `diff --binary sync/base..HEAD` (optionally scoped to one file), and applies
@@ -530,14 +530,14 @@ export class CloneSyncService {
   }
 
   /**
-   * Outbound — "push my local edits to the VM".
+   * Outbound - "push my local edits to the VM".
    *
    * Commit agent progress, fetch the local repo's branch tip from the explicit
    * host path, 3-way apply the committed local delta
    * (`sync/base..FETCH_HEAD`) onto the clone tree, then 3-way apply the local
    * DIRTY delta and copy untracked files (copy-win, skipping identical
    * content). Commit `[sync] local`, advance `sync/base`. Conflicts land as
-   * markers in the CLONE — the agent resolves them.
+   * markers in the CLONE - the agent resolves them.
    */
   async outboundSync(
     clonePath: string,
@@ -659,7 +659,7 @@ export class CloneSyncService {
   /**
    * Discard one file's agent changes: restore it to its `refs/sync/base`
    * content. Files that did not exist at the base (added since) cannot be
-   * checked out from it — those are un-staged and removed from the working tree.
+   * checked out from it - those are un-staged and removed from the working tree.
    */
   async discardFile(clonePath: string, path: string): Promise<void> {
     const safePath = assertRepoRelativePath(path, "clone discard path");
@@ -716,7 +716,7 @@ export class CloneSyncService {
 
     for (const path of paths) {
       // If local already matches the clone's HEAD version, it was pulled before
-      // — a genuine no-op, so count it and move on without re-applying.
+      // - a genuine no-op, so count it and move on without re-applying.
       if (await this.localMatchesCloneHead(clonePath, localRepoPath, path)) {
         appliedFiles += 1;
         continue;
@@ -901,7 +901,7 @@ export class CloneSyncService {
   }
 
   private async runApplyFile(repoPath: string, patchFile: string, applyFlags: readonly string[]): Promise<CommandResult> {
-    // Patch is applied from a file, never stdin — Windows-safe and unbounded.
+    // Patch is applied from a file, never stdin - Windows-safe and unbounded.
     return this.runGit(["apply", ...applyFlags, patchFile], repoPath);
   }
 
@@ -1231,7 +1231,7 @@ function parseNumstatZ(value: string): Map<string, { added: number | null; remov
 /**
  * Extract touched paths from a diff file. Reads only the first slice of the
  * patch (headers appear before the bulk hunk bodies of large files, but binary
- * blobs can bury later headers — bounded to the same cap used elsewhere; the
+ * blobs can bury later headers - bounded to the same cap used elsewhere; the
  * outbound path set is best-effort for conflict reporting, not correctness).
  */
 async function patchPathsFromFile(patchFile: string): Promise<string[]> {
@@ -1344,7 +1344,7 @@ async function copyIfDifferent(src: string, dest: string): Promise<boolean> {
     const destBuf = await readFile(dest);
     if (srcBuf.equals(destBuf)) return false;
   } catch {
-    // dest missing — fall through to copy.
+    // dest missing - fall through to copy.
   }
   await mkdir(dirnameOf(dest), { recursive: true });
   await writeFile(dest, srcBuf);

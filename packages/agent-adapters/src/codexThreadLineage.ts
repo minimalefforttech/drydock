@@ -59,7 +59,7 @@ export class CodexThreadLineage {
     return this.lastUsage.get(threadId);
   }
 
-  /** True exactly once per child — the caller may emit its node_done. */
+  /** True exactly once per child - the caller may emit its node_done. */
   markTerminal(threadId: string): boolean {
     if (this.terminal.has(threadId)) return false;
     this.terminal.add(threadId);

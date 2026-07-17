@@ -4,7 +4,7 @@
  * Pure projection: joins sessions onto tasks (via task links, with unlinked
  * role children grafted under their nearest linked ancestor), collects the
  * leftovers into the orphan drawer, and carries the pending "waiting on you"
- * sets. No new storage, no ordering policy — ordering is presentation and
+ * sets. No new storage, no ordering policy - ordering is presentation and
  * lives in the webview, so this stays a dumb, deterministic join that unit
  * tests can pin exactly.
  */
@@ -52,7 +52,7 @@ export interface AgentsOverviewPorts {
 /**
  * Folds unlanded changeset rows into Landing rows: one per subtask, overlap
  * computed by path-set intersection across subtasks (rows without stored
- * paths make a pair's overlap UNKNOWN — flagged, never assumed disjoint).
+ * paths make a pair's overlap UNKNOWN - flagged, never assumed disjoint).
  * Disjoint-first ordering, oldest capture first within each class.
  */
 export function buildLandingItems(

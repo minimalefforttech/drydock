@@ -8,13 +8,14 @@
  * - Global event log: non-session lines (probe/run/runtime/cleanup) route here.
  * - Footer facts (state root, sbx path).
  *
- * SECURITY: dynamic strings render via textContent — never innerHTML. Lists
+ * SECURITY: dynamic strings render via textContent - never innerHTML. Lists
  * re-render with replaceChildren so stop-button handlers cannot leak.
  */
 
-import { type RuntimeStatsSummary, type RuntimeSummary } from "@drydock/contracts";
-import { badge, button, el, formatTime } from "../components.js";
+import { type McpServerSummary, type RuntimeStatsSummary, type RuntimeSummary } from "@drydock/contracts";
+import { badge, button, el, formatTime, inlineConfirmButton, textInput } from "../components.js";
 import { setHelpTooltip } from "../help.js";
+import { loadMcpState } from "../mcpControls.js";
 import { onPush, request } from "../messaging.js";
 import { currentSession, type DiagnosticEntry } from "../state.js";
 import type { SystemTabView, ViewContext } from "../viewContext.js";
@@ -32,6 +33,42 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
   const refreshButton = button("Refresh status", "small");
   const toolsRow = el("div", "button-row");
   toolsRow.append(probeButton, refreshButton);
+
+  // MCP Servers: the ONLY place servers are defined (everywhere else is
+  // toggles - workspace rows, task actions, the chat FileMap). Env values are
+  // write-only from here: the host stores them, rows show key names only.
+  const mcpHeading = el("h3");
+  mcpHeading.textContent = "MCP Servers";
+  const mcpIntro = el("div", "muted mcp-intro");
+  mcpIntro.textContent = "Defined once here; toggled per workspace, task, or chat. Servers run inside the sandbox under its network policy.";
+  const mcpList = el("div", "mcp-server-list");
+  const mcpAddButton = button("＋ Add server", "ghost small");
+  const mcpForm = el("div", "mcp-form hidden");
+  const mcpNameInput = textInput("Name (e.g. asset-db)");
+  const mcpCommandInput = textInput("Command (e.g. npx)");
+  const mcpArgsInput = textInput("Args, space-separated (e.g. -y @studio/asset-mcp)");
+  const mcpEnvInput = document.createElement("textarea");
+  mcpEnvInput.className = "mcp-env-input";
+  mcpEnvInput.rows = 2;
+  mcpEnvInput.placeholder = "Env, one KEY=value per line (stored host-side; never shown again)";
+  const mcpNotesInput = textInput("Notes (optional)");
+  const mcpDefaultLabel = el("label", "checkbox-row");
+  const mcpDefaultCheckbox = document.createElement("input");
+  mcpDefaultCheckbox.type = "checkbox";
+  const mcpDefaultText = el("span");
+  mcpDefaultText.textContent = "enabled by default";
+  mcpDefaultLabel.append(mcpDefaultCheckbox, mcpDefaultText);
+  const mcpSensitiveLabel = el("label", "checkbox-row");
+  const mcpSensitiveCheckbox = document.createElement("input");
+  mcpSensitiveCheckbox.type = "checkbox";
+  const mcpSensitiveText = el("span");
+  mcpSensitiveText.textContent = "sensitive (needs an explicit task/chat opt-in)";
+  mcpSensitiveLabel.append(mcpSensitiveCheckbox, mcpSensitiveText);
+  const mcpSaveButton = button("Save", "small primary");
+  const mcpCancelButton = button("Cancel", "ghost small");
+  const mcpFormButtons = el("div", "button-row");
+  mcpFormButtons.append(mcpSaveButton, mcpCancelButton);
+  mcpForm.append(mcpNameInput, mcpCommandInput, mcpArgsInput, mcpEnvInput, mcpNotesInput, mcpDefaultLabel, mcpSensitiveLabel, mcpFormButtons);
 
   const runtimesHeading = el("h3");
   runtimesHeading.textContent = "Runtimes";
@@ -63,6 +100,11 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
     banner,
     toolsHeading,
     toolsRow,
+    mcpHeading,
+    mcpIntro,
+    mcpList,
+    mcpAddButton,
+    mcpForm,
     runtimesHeading,
     runtimesControls,
     runtimesList,
@@ -117,9 +159,166 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // MCP registry manager
+  // ---------------------------------------------------------------------------
+  let mcpEditingId: string | null = null;
+
+  function resetMcpForm(): void {
+    mcpEditingId = null;
+    mcpNameInput.value = "";
+    mcpCommandInput.value = "";
+    mcpArgsInput.value = "";
+    mcpEnvInput.value = "";
+    mcpNotesInput.value = "";
+    mcpDefaultCheckbox.checked = true;
+    mcpSensitiveCheckbox.checked = false;
+    mcpForm.classList.add("hidden");
+  }
+
+  mcpAddButton.addEventListener("click", () => {
+    resetMcpForm();
+    mcpForm.classList.remove("hidden");
+    mcpNameInput.focus();
+  });
+  mcpCancelButton.addEventListener("click", resetMcpForm);
+
+  /** KEY=value lines → env record; blank/malformed lines are skipped. */
+  function parseEnvLines(text: string): Record<string, string> | undefined {
+    const env: Record<string, string> = {};
+    let any = false;
+    for (const line of text.split("\n")) {
+      const eq = line.indexOf("=");
+      if (eq <= 0) continue;
+      env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+      any = true;
+    }
+    return any ? env : undefined;
+  }
+
+  mcpSaveButton.addEventListener("click", () => {
+    const name = mcpNameInput.value.trim();
+    const command = mcpCommandInput.value.trim();
+    if (name.length === 0 || command.length === 0) {
+      logSystemLine("MCP server needs a name and a command.");
+      return;
+    }
+    const env = parseEnvLines(mcpEnvInput.value);
+    void request({
+      type: "mcp.save",
+      server: {
+        ...(mcpEditingId === null ? {} : { serverId: mcpEditingId }),
+        name,
+        command,
+        args: mcpArgsInput.value.trim().length === 0 ? [] : mcpArgsInput.value.trim().split(/\s+/),
+        // env is write-only: absent on update keeps stored values.
+        ...(env === undefined ? {} : { env }),
+        enabledByDefault: mcpDefaultCheckbox.checked,
+        sensitive: mcpSensitiveCheckbox.checked,
+        ...(mcpNotesInput.value.trim().length === 0 ? {} : { notes: mcpNotesInput.value.trim() })
+      }
+    }).then((response) => {
+      if (!response.ok) {
+        logSystemLine(`MCP save failed: ${response.error.message}`);
+        return;
+      }
+      if (response.payload.type === "mcp.save") {
+        state.mcpServers = [...response.payload.servers];
+        resetMcpForm();
+        renderMcpServers();
+      }
+    });
+  });
+
+  function beginMcpEdit(server: McpServerSummary): void {
+    mcpEditingId = server.serverId;
+    mcpNameInput.value = server.name;
+    mcpCommandInput.value = server.command;
+    mcpArgsInput.value = server.args.join(" ");
+    mcpEnvInput.value = "";
+    mcpEnvInput.placeholder = server.envKeys.length > 0
+      ? `Stored keys kept unless re-entered: ${server.envKeys.join(", ")}`
+      : "Env, one KEY=value per line (stored host-side; never shown again)";
+    mcpNotesInput.value = server.notes ?? "";
+    mcpDefaultCheckbox.checked = server.enabledByDefault;
+    mcpSensitiveCheckbox.checked = server.sensitive;
+    mcpForm.classList.remove("hidden");
+    mcpNameInput.focus();
+  }
+
+  function renderMcpServers(): void {
+    mcpList.replaceChildren();
+    if (state.mcpServers.length === 0) {
+      const empty = el("div", "empty");
+      empty.textContent = "No MCP servers registered.";
+      mcpList.append(empty);
+      return;
+    }
+    for (const server of state.mcpServers) {
+      const row = el("div", "mcp-server-row");
+      const defaultToggle = document.createElement("input");
+      defaultToggle.type = "checkbox";
+      defaultToggle.checked = server.enabledByDefault;
+      defaultToggle.title = "Enabled by default (workspace/task/chat toggles override)";
+      defaultToggle.disabled = server.source === "settings";
+      defaultToggle.addEventListener("change", () => {
+        void request({
+          type: "mcp.save",
+          server: {
+            serverId: server.serverId,
+            name: server.name,
+            command: server.command,
+            args: server.args,
+            enabledByDefault: defaultToggle.checked,
+            sensitive: server.sensitive,
+            ...(server.notes === undefined ? {} : { notes: server.notes })
+          }
+        }).then((response) => {
+          if (response.ok && response.payload.type === "mcp.save") {
+            state.mcpServers = [...response.payload.servers];
+            renderMcpServers();
+          }
+        });
+      });
+      const name = el("span", "mcp-server-name");
+      name.textContent = server.name;
+      const command = el("span", "mcp-server-command");
+      command.textContent = [server.command, ...server.args].join(" ");
+      command.title = server.envKeys.length > 0 ? `env: ${server.envKeys.join(", ")} (values hidden)` : "";
+      row.append(defaultToggle, name, command);
+      if (server.sensitive) row.append(badge("sensitive", "warn"));
+      if (server.source === "settings") {
+        const from = badge("from settings", "");
+        from.title = "Imported from drydock.mcp.configPath - edit that file to change it";
+        row.append(from);
+      } else {
+        const edit = button("✎", "icon-button mcp-server-edit");
+        edit.title = "Edit this server";
+        edit.addEventListener("click", () => beginMcpEdit(server));
+        const del = inlineConfirmButton("✕", "Delete?", () => {
+          void request({ type: "mcp.delete", serverId: server.serverId }).then((response) => {
+            if (!response.ok) {
+              logSystemLine(`MCP delete failed: ${response.error.message}`);
+              return;
+            }
+            if (response.payload.type === "mcp.delete") {
+              state.mcpServers = [...response.payload.servers];
+              renderMcpServers();
+            }
+          });
+        }, "icon-button danger");
+        row.append(edit, del);
+      }
+      mcpList.append(row);
+    }
+  }
+
+  // Boot-load the registry for this tab's manager list.
+  void loadMcpState(state).then(() => renderMcpServers());
+
   // Live per-sandbox CPU/mem/IO, measured host-side (each sandbox's nerdbox shim
-  // process tree) — one cheap snapshot covers every sandbox, so we show them all
-  // while the System tab is visible. Ephemeral — not persisted.
+  // process tree) - one cheap snapshot covers every sandbox, so we show them all
+  // while the System tab is visible. Ephemeral - not persisted.
   const statsByRuntime = new Map<string, RuntimeStatsSummary>();
   let statsInFlight = false;
   async function pollStats(): Promise<void> {
@@ -210,7 +409,7 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
       head.append(stop);
     }
     row.append(head);
-    // Live host-side resource line for running sandboxes — the "is it actually
+    // Live host-side resource line for running sandboxes - the "is it actually
     // doing anything?" signal (CPU / memory / I/O), refreshed by the stats poll.
     if (runtime.status === "running") {
       row.append(statsLine(statsByRuntime.get(runtime.runtimeId)));
@@ -230,7 +429,7 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
     }
     const parts = [
       `CPU ${stats.cpuPercent === null ? "…" : `${String(Math.round(stats.cpuPercent))}%`}`,
-      `mem ${stats.memBytes === null ? "—" : formatBytes(stats.memBytes)}`,
+      `mem ${stats.memBytes === null ? "-" : formatBytes(stats.memBytes)}`,
       `IO ↓${formatRate(stats.ioReadBytesPerSec)} ↑${formatRate(stats.ioWriteBytesPerSec)}`
     ];
     if (stats.loadAvg1 !== null) parts.push(`load ${stats.loadAvg1.toFixed(2)}`);
@@ -276,9 +475,9 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
     const session = currentSession(state);
     const iso = state.lastIsolation;
     const rows: [string, string][] = [
-      ["session id", session?.sessionId ?? "—"],
-      ["provider", session?.providerId ?? "—"],
-      ["model", session?.model ?? "—"]
+      ["session id", session?.sessionId ?? "-"],
+      ["provider", session?.providerId ?? "-"],
+      ["model", session?.model ?? "-"]
     ];
     if (iso) {
       rows.push(["runtime", iso.runtimeKind]);

@@ -6,8 +6,8 @@
  * view, and runs the boot loads (panel.init + session.list). Rendering logic
  * lives in the view modules; this file only orchestrates.
  *
- * SECURITY: every module renders dynamic strings via textContent — never
- * innerHTML — so agent output can never become markup. The versioned
+ * SECURITY: every module renders dynamic strings via textContent - never
+ * innerHTML - so agent output can never become markup. The versioned
  * request/response/push envelope protocol is unchanged.
  */
 

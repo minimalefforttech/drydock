@@ -8,6 +8,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import { RandomIdGenerator, type Clock } from "@drydock/core";
 import type {
+  MemoryCandidateEdits,
   MemoryCandidateId,
   MemoryCandidateRecord,
   MemoryCandidateStatus,
@@ -19,7 +20,7 @@ test("captureCandidates inserts pending records and dedupes on trimmed content",
   const store = new MemoryMemoryStore();
   const service = new MemoryService(options(store));
 
-  const first = await service.captureCandidates("session-1", ["run the linter", "  prefer async fs  "]);
+  const first = await service.captureCandidates("session-1", [{ content: "run the linter" }, { content: "  prefer async fs  " }]);
   assert.equal(first.length, 2);
   assert.equal(first[0]?.status, "pending");
   // Trimmed content is stored verbatim.
@@ -27,7 +28,7 @@ test("captureCandidates inserts pending records and dedupes on trimmed content",
 
   // A re-emitted note (matching a stored candidate of ANY status) is skipped,
   // as is a duplicate within the same batch.
-  const second = await service.captureCandidates("session-1", ["run the linter", "new note", "new note"]);
+  const second = await service.captureCandidates("session-1", [{ content: "run the linter" }, { content: "new note" }, { content: "new note" }]);
   assert.deepEqual(second.map((record) => record.content), ["new note"]);
   assert.equal((await service.listCandidates("pending")).length, 3);
 });
@@ -35,7 +36,7 @@ test("captureCandidates inserts pending records and dedupes on trimmed content",
 test("resolve approves/rejects once and lists approved contents newest-first", async () => {
   const store = new MemoryMemoryStore();
   const service = new MemoryService(options(store));
-  const created = await service.captureCandidates("session-1", ["first", "second", "third"]);
+  const created = await service.captureCandidates("session-1", [{ content: "first" }, { content: "second" }, { content: "third" }]);
   const [first, second, third] = created;
 
   const approvedFirst = await service.resolve(first!.memoryCandidateId, true);
@@ -59,7 +60,7 @@ test("resolve approves/rejects once and lists approved contents newest-first", a
 test("getCandidate fetches by id and returns null when unknown", async () => {
   const store = new MemoryMemoryStore();
   const service = new MemoryService(options(store));
-  const [created] = await service.captureCandidates("session-1", ["run the linter"]);
+  const [created] = await service.captureCandidates("session-1", [{ content: "run the linter" }]);
 
   const found = await service.getCandidate(created!.memoryCandidateId);
   assert.deepEqual(found, created);
@@ -110,6 +111,26 @@ class MemoryMemoryStore implements MemoryCandidateStore {
     if (existing !== undefined) {
       this.candidates[index] = { ...existing, status, resolvedAt };
     }
+    return Promise.resolve();
+  }
+
+  updateCandidateContent(memoryCandidateId: MemoryCandidateId, edits: MemoryCandidateEdits): Promise<void> {
+    const index = this.candidates.findIndex((record) => record.memoryCandidateId === memoryCandidateId);
+    const existing = this.candidates[index];
+    if (existing !== undefined) {
+      this.candidates[index] = {
+        ...existing,
+        content: edits.content ?? existing.content,
+        ...(edits.scope === undefined ? {} : { scope: edits.scope }),
+        ...(edits.tags === undefined ? {} : { tags: edits.tags })
+      };
+    }
+    return Promise.resolve();
+  }
+
+  deleteCandidate(memoryCandidateId: MemoryCandidateId): Promise<void> {
+    const index = this.candidates.findIndex((record) => record.memoryCandidateId === memoryCandidateId);
+    if (index !== -1) this.candidates.splice(index, 1);
     return Promise.resolve();
   }
 }

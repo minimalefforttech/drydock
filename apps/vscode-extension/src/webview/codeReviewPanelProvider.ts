@@ -1,5 +1,5 @@
 /**
- * Code Review editor panel host (in-panel PR-style review —
+ * Code Review editor panel host (in-panel PR-style review -
  * docs/design/code-review-panel.md).
  *
  * One editor-area WebviewPanel per task, same trust boundary as every other

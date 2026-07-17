@@ -4,8 +4,8 @@
  *
  * A Plan owns an intake (brief, aspect selection, read-only context roots,
  * pre-information), at most one planning chat session, and the artifacts the
- * agent writes into its workspace `plan/` directory. After every turn — and on
- * panel open — the host collects those files into durable rows: text kinds
+ * agent writes into its workspace `plan/` directory. After every turn - and on
+ * panel open - the host collects those files into durable rows: text kinds
  * (document/diagram/prototype) inline, images into the content-addressed blob
  * store. Reviewer feedback is a PlanAnnotation anchored by the grammar below;
  * open annotations compose into one revision turn.
@@ -46,7 +46,7 @@ export interface PlanRecord {
   readonly sessionId: SessionId | null;
   /**
    * The owning task (ADR 0006 doctrine: plans, like edits, generally belong to
-   * tasks). Null = an orphan plan — allowed, but the surfaces discourage it.
+   * tasks). Null = an orphan plan - allowed, but the surfaces discourage it.
    * The plan's session is auto-linked to this task on every boot.
    */
   readonly taskId: TaskId | null;
@@ -108,7 +108,7 @@ export interface PlanAspectRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Collection bounds (skip, never truncate — plan-docs precedent)
+// Collection bounds (skip, never truncate - plan-docs precedent)
 // ---------------------------------------------------------------------------
 
 export const PLANNER_MAX_FILES = 40;

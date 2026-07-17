@@ -3,7 +3,7 @@
  *
  * These exercise the real git plumbing end to end: every test builds real git
  * repositories in OS temp directories and drives them through the real
- * SpawnCommandRunner. No mocks — the sync protocol only means anything against
+ * SpawnCommandRunner. No mocks - the sync protocol only means anything against
  * actual git behavior (3-way apply, conflict markers, numstat, refs).
  */
 
@@ -613,7 +613,7 @@ test("inbound conflict: local edit to the same line surfaces markers, is reporte
     // Developer commits a divergent edit to line2 after init. `git apply --3way`
     // computes its merge against committed/index blobs (not the dirty working
     // tree), so a conflicting inbound patch only produces markers when the
-    // developer's divergence is committed — which is the real "edited the same
+    // developer's divergence is committed - which is the real "edited the same
     // lines since the last sync" case the design describes.
     await writeFile(join(localRepoPath, "a.txt"), "line1\nDEV EDIT\nline3\n", "utf8");
     await git(localRepoPath, "commit", "-am", "dev edits line2");
@@ -766,7 +766,7 @@ test("outbound lands local commit + dirty edit in clone; agent's parallel change
       name: "proj"
     });
 
-    // Agent edits c.txt in the clone (a different file — must survive outbound).
+    // Agent edits c.txt in the clone (a different file - must survive outbound).
     await writeFile(join(clonePath, "c.txt"), "c agent\n", "utf8");
 
     // Developer commits a change to a.txt and leaves b.txt dirty.

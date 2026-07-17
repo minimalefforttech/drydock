@@ -2,7 +2,7 @@
  * Seed-choice prompt (ADR 0014), the taskClonePolicyPrompt pattern: shown
  * before a MANUAL subtask start when the subtask has upstream dependencies
  * but no stored `seedMode` yet. The pick persists on the subtask, so later
- * manual starts AND auto-starts reuse it silently — automation never invents
+ * manual starts AND auto-starts reuse it silently - automation never invents
  * a choice. Cancelling declines the start (accepted:false, like declining
  * the clone-policy prompt). Bulk `task.start` never prompts: unset stays
  * `local` (the classic behavior) until the user chooses.
@@ -24,7 +24,7 @@ export async function promptAndSaveSubtaskSeedMode(backend: BackendReady, subtas
     .filter((edge) => edge.toSubtaskId === subtask.subtaskId)
     .map((edge) => edge.fromSubtaskId as string);
   if (upstreamIds.length === 0) {
-    return true; // nothing upstream — nothing to choose
+    return true; // nothing upstream - nothing to choose
   }
   const unlanded = await backend.changesets.unlandedSubtaskIds(upstreamIds);
   const pick = await vscode.window.showQuickPick(
@@ -46,7 +46,7 @@ export async function promptAndSaveSubtaskSeedMode(backend: BackendReady, subtas
     }
   );
   if (pick === undefined) {
-    return false; // user cancelled — decline the start
+    return false; // user cancelled - decline the start
   }
   await backend.subtasks.updateSubtask(subtaskId, { seedMode: pick.mode });
   return true;

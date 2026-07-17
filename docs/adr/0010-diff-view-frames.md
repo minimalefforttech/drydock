@@ -10,19 +10,19 @@ The Changes list diffed each session root against one mutable baseline. Accept
 rewrote that baseline in place, so the record of what a session changed was
 destroyed as it was reviewed, and resume/reclaim re-baselined the root, so the
 list silently reset mid-session. There was also no way to see only what the
-last agent turn touched — the most common review question.
+last agent turn touched - the most common review question.
 
 ## Decision
 
 An implementation session owns up to three baseline frames per root, and the
 Changes list toggles between them:
 
-- `session-start` — immutable snapshot taken once when the root is first
+- `session-start` - immutable snapshot taken once when the root is first
   baselined. Backs the **Full Session** view. Never advanced; rows whose
   content already matches the working frame render as accepted history.
-- `current-session` — the working frame behind the default **Session** view.
+- `current-session` - the working frame behind the default **Session** view.
   Accept advances it per file, exactly as before.
-- `turn` — recaptured immediately before each user turn is dispatched. Backs
+- `turn` - recaptured immediately before each user turn is dispatched. Backs
   the **This Turn** view ("changes since I sent the last message").
 
 Accepting a file advances the working AND turn frames together and never
@@ -34,7 +34,7 @@ of the newest existing frame with only the files that changed since it
 re-snapshotted; a clean diff writes nothing. Blobs are content-addressed and
 shared across frames, so copies cost rows, not file content.
 
-Clone sessions keep their sync surface (`refs/sync/base`) — the toggle applies
+Clone sessions keep their sync surface (`refs/sync/base`) - the toggle applies
 only to baseline-backed sessions.
 
 ## Consequences

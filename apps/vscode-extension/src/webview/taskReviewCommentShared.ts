@@ -23,7 +23,7 @@ export function commentAnchor(repo: string, relativePath: string): string {
 }
 
 /**
- * True when a stored comment's filePath anchors to this file — either the
+ * True when a stored comment's filePath anchors to this file - either the
  * qualified `<repo>:<path>` form (task-review convention) or the legacy plain
  * `<path>` form (Changes → Comments). Mirrors
  * taskReviewAppService.countFileComments exactly so gutter threads and per-file
@@ -60,7 +60,7 @@ export function rangeToStoredLines(startLine0: number, endLine0: number): { star
 
 /**
  * Thread statuses that materialize as gutter threads. Terminal `resolved` /
- * `wont-fix` threads do not appear — the gutter shows only still-actionable
+ * `wont-fix` threads do not appear - the gutter shows only still-actionable
  * review state.
  */
 export const GUTTER_VISIBLE_STATUSES: readonly ReviewThreadStatus[] = [

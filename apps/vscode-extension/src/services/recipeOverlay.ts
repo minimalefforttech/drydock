@@ -1,6 +1,6 @@
 /**
  * Workspace recipe packs (ADR 0007): `.drydock/recipes.json` in any open
- * workspace folder merges read-only into the recipe registry — the
+ * workspace folder merges read-only into the recipe registry - the
  * planner-aspects overlay pattern (plannerAspectOverlay.ts). Malformed
  * files/entries are skipped with structured diagnostics; RecipeService
  * prefixes overlay ids

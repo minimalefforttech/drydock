@@ -1,6 +1,6 @@
 /**
  * Shared normalizer preview caps. Event previews are display slices,
- * never full payloads — subagent results can be file-dump sized and the
+ * never full payloads - subagent results can be file-dump sized and the
  * event store must not become a blob store (design: subagent-workflows.md).
  */
 

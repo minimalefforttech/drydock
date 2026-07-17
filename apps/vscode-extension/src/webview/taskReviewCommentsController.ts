@@ -4,12 +4,12 @@
  * This file is the ONLY Comments-API surface in the extension. One
  * CommentController ("drydock.taskReview") backs every open Task Review
  * panel; gutter threads in the diff editor are two-way synced to the review
- * store through WorkspaceReviewAppService (never through panel messages —
+ * store through WorkspaceReviewAppService (never through panel messages -
  * comment traffic flows host-side here directly).
  *
  * Registry design. A per-task map of normalized absolute file paths → the
  * {sessionId, repo, relativePath} needed to anchor a comment is kept for every
- * baseline-backed file of every OPEN panel (clone files are never registered —
+ * baseline-backed file of every OPEN panel (clone files are never registered -
  * no on-disk path is theirs to comment on). A path may be registered by two
  * tasks, so registrations are stored per task and merged into one lookup; a
  * path stays commentable while any task still registers it. With no panels
@@ -19,7 +19,7 @@
  * ONLY for a `file`-scheme document whose normalized fsPath is in the merged
  * registry. The `drydock-baseline` (left) side of a diff is never `file`
  * scheme, so it never becomes commentable, and with the registry empty the
- * controller offers commenting NOWHERE — zero global editor noise.
+ * controller offers commenting NOWHERE - zero global editor noise.
  *
  * Line numbers. Stored comment ranges are 1-based inclusive; vscode.Range lines
  * are 0-based. The conversion is centralized in taskReviewCommentShared.ts
@@ -161,7 +161,7 @@ export class TaskReviewCommentsController {
 
   /**
    * Finds the registered file (of this session) whose anchor the comment's
-   * filePath matches — qualified `<repo>:<path>` or legacy plain path.
+   * filePath matches - qualified `<repo>:<path>` or legacy plain path.
    */
   private entryForComment(sessionId: string, filePath: string): RegistryEntry | undefined {
     for (const entry of this.merged.values()) {
@@ -239,7 +239,7 @@ export class TaskReviewCommentsController {
    * it from the gutter, since resolved is terminal). The commentId is read back
    * from the first comment's contextValue stash; the owning session comes from
    * the registry entry for the thread's file. The store refuses invalid
-   * transitions — surface the error, do not swallow it.
+   * transitions - surface the error, do not swallow it.
    */
   async resolveThread(thread: vscode.CommentThread): Promise<void> {
     const commentId = thread.comments[0]?.contextValue;

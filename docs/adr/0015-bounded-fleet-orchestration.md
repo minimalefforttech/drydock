@@ -17,7 +17,7 @@ answer rails without turning access approval into automation.
 
 - **Bound concurrent runs.** `drydock.orchestrator.maxConcurrentRuns` is the
   global slot budget. `0` derives a live default from cores and memory, clamped
-  to 1–8. At the budget, starts queue instead of overshooting it. Manual starts
+  to 1-8. At the budget, starts queue instead of overshooting it. Manual starts
   enter at the front (a repeat request promotes); cascade starts append. The
   drain awaits one start at a time under the current budget.
 - **Persist held intent.** `subtask_holds` stores at most one queued or parked
@@ -27,7 +27,7 @@ answer rails without turning access approval into automation.
   order, then drains. Every restored hold is revalidated against the current
   board; deleted cards, cleared prompts, and other stale intent are logged and
   skipped.
-- **Retry once, then park — automatic runs only.** A failed cascade run retries
+- **Retry once, then park - automatic runs only.** A failed cascade run retries
   once. A second failure parks the subtask, suppresses further cascade, and
   waits for a human Retry. Manual starts clear retry/park state and never
   auto-retry. Cancellation is a human gesture and never retries or parks.

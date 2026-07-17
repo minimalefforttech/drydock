@@ -216,7 +216,7 @@ Work-session rules:
 
 Workspace switching must be a backend operation, not a UI-only folder change.
 
-For the common case — replacing or appending a target's folders into the current window — activation applies live via `vscode.workspace.updateWorkspaceFolders`, adding and removing folders in place without a reload. A reload is only needed when the switch crosses the 1-root/many-root boundary in an untitled (no `.code-workspace` file) window; that case writes a temporary `.code-workspace` and opens it, optionally in a new window, so the current window's sessions keep running.
+For the common case - replacing or appending a target's folders into the current window - activation applies live via `vscode.workspace.updateWorkspaceFolders`, adding and removing folders in place without a reload. A reload is only needed when the switch crosses the 1-root/many-root boundary in an untitled (no `.code-workspace` file) window; that case writes a temporary `.code-workspace` and opens it, optionally in a new window, so the current window's sessions keep running.
 
 The fuller checkpoint flow below is the fallback path for switches that also change runtime mount policy (a different workspace set, not just a folder add/remove within the current one):
 

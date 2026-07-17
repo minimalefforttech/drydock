@@ -89,4 +89,4 @@ To resolve an omission block, remove the content from Git including reachable hi
 
 ## Assurance scope
 
-This policy provides a small, reviewable control surface and useful evidence for least privilege, project authorization, local isolation, and workstation allocation. It can support a studio's alignment with TPN or content-owner security requirements, but it is not TPN certification, a Disney approval, or a substitute for an assessment, endpoint hardening, identity controls, monitoring, incident response, and documented studio procedures.
+This policy provides a small, reviewable control surface and useful evidence for least privilege, project authorization, local isolation, and workstation allocation. It can support a studio's alignment with industry or content-owner security requirements, but it is not a certification or a content-owner approval, and it is not a substitute for an assessment, endpoint hardening, identity controls, monitoring, incident response, and documented studio procedures.

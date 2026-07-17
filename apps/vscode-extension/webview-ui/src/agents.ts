@@ -1,5 +1,5 @@
 /**
- * Agents editor panel webview (ADR 0013) — the fleet view.
+ * Agents editor panel webview (ADR 0013) - the fleet view.
  *
  * One scrollable scan list over every session across every task: task groups
  * (board-column chip, rollups, board/review jumps), session rows nesting role
@@ -12,11 +12,11 @@
  * Data plane: one agents.state snapshot, then hot pushes fold in place
  * (session.agentActivity / chat.turnStarted / chat.turnCompleted /
  * session.updated / session.deleted) while the coarse agents.changed push
- * schedules a debounced refetch — self-healing, never polling. Durations and
+ * schedules a debounced refetch - self-healing, never polling. Durations and
  * idle labels tick locally from timestamps.
  *
  * SECURITY: every dynamic string (task/session titles, agent labels, activity
- * previews, error messages) renders via textContent — NEVER innerHTML, no
+ * previews, error messages) renders via textContent - NEVER innerHTML, no
  * DOM-from-string of any kind. The panel's strict CSP has no 'unsafe-inline'
  * for styles, so depth/status/accent styling is by CLASS only, never style
  * attributes. This entry is self-contained (it does not import the
@@ -327,7 +327,7 @@ function applyPush(payload: PanelPushPayload): void {
     case "session.updated": {
       if (!replaceSession(payload.session)) {
         // A session we don't know (new chat, changed task membership): the
-        // snapshot's grouping is stale — coarse heal.
+        // snapshot's grouping is stale - coarse heal.
         scheduleRefetch();
         return;
       }
@@ -419,7 +419,7 @@ function tickerText(compute: () => string): Text {
 // ---------------------------------------------------------------------------
 
 function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "—";
+  if (!Number.isFinite(ms) || ms < 0) return "-";
   const totalSeconds = Math.floor(ms / 1000);
   if (totalSeconds < 60) return `${String(totalSeconds)}s`;
   const minutes = Math.floor(totalSeconds / 60);
@@ -455,7 +455,7 @@ function sessionVisible(session: ChatSessionSummary): boolean {
   if (filter === "active") {
     const active = session.live === true || session.runningElsewhere === true
       || turnRunning.has(session.sessionId) || needsAttention(session)
-      // ADR 0013: a booting resume/reclaim is active — hiding it would make
+      // ADR 0013: a booting resume/reclaim is active - hiding it would make
       // the session vanish exactly while the user waits on it.
       || session.status === "starting";
     if (!active) return false;
@@ -609,7 +609,7 @@ function renderToolbar(): HTMLElement {
   const idlePart = el("span", "rollup-idle", `${String(idleCount)} idle`);
   rollup.append(runningPart, el("span", "rollup-sep", "·"), waitingPart, el("span", "rollup-sep", "·"), idlePart);
   // Fleet cost line (ADR 0013): live token total across every session's fold.
-  // Honest scope: this window's live data — no durable ledger exists yet.
+  // Honest scope: this window's live data - no durable ledger exists yet.
   const fleetTokens = sessions.reduce((sum, session) => sum + (activityFor(session)?.root?.tokens ?? 0), 0);
   if (fleetTokens > 0) {
     rollup.append(el("span", "rollup-sep", "·"), el("span", "rollup-tokens", `Σ ${formatTokens(fleetTokens)}`));
@@ -643,7 +643,7 @@ function renderToolbar(): HTMLElement {
     segButton.className = detailLevel() === level ? "seg-item on" : "seg-item";
     segButton.textContent = DETAIL_SHORT[level];
     segButton.setAttribute("aria-pressed", String(detailLevel() === level));
-    segButton.title = `Detail: ${level}${level === "minimal" ? " — one state chip per row; hover a row for the rest" : ""}`;
+    segButton.title = `Detail: ${level}${level === "minimal" ? " - one state chip per row; hover a row for the rest" : ""}`;
     segButton.addEventListener("click", () => {
       cardDetailChoice = level;
       persist();
@@ -763,7 +763,7 @@ function appendSessionNode(target: HTMLElement, node: SessionNode, depth: number
 function sessionDotClass(session: ChatSessionSummary): string {
   if (session.status === "failed" || failedTurn.has(session.sessionId)) return "dot dot-fail";
   if (session.runningElsewhere === true) return "dot dot-half";
-  // ADR 0013: a reclaimed/resumed session is BOOTING — not idle, not ended.
+  // ADR 0013: a reclaimed/resumed session is BOOTING - not idle, not ended.
   if (session.status === "starting") return "dot dot-boot";
   if (turnRunning.has(session.sessionId)) return "dot dot-run";
   if (session.live === true) return "dot dot-idle";
@@ -798,7 +798,7 @@ function renderSessionRow(session: ChatSessionSummary, depth: number, dimmed: bo
 
   if (level === "minimal") {
     // One-chip rule (ADR 0013): waiting-on-you beats failed beats everything;
-    // "running" needs no chip — the dot and the live duration already say it.
+    // "running" needs no chip - the dot and the live duration already say it.
     if (questions.length > 0) row.append(chip(questions.length === 1 ? "? question" : `? ${String(questions.length)} questions`, "chip-q"));
     else if (access.length > 0) row.append(chip(access.length === 1 ? "⚠ access" : `⚠ ${String(access.length)} access`, "chip-a"));
     else if (turnFailed) row.append(chip("✗ failed", "chip-x"));
@@ -836,14 +836,14 @@ function renderSessionActivityLine(
   const line = el("span", "act");
   if (session.runningElsewhere === true) {
     line.classList.add("note");
-    line.textContent = "running in another window — view only";
+    line.textContent = "running in another window - view only";
     return line;
   }
   if (session.status === "starting") {
     // ADR 0013: honest boot state while a resume/reclaim recreates the
-    // runtime and clones — neither idle nor running a turn yet.
+    // runtime and clones - neither idle nor running a turn yet.
     line.classList.add("note");
-    line.textContent = "resuming — recreating the runtime and clones";
+    line.textContent = "resuming - recreating the runtime and clones";
     return line;
   }
   const firstQuestion = questions[0];
@@ -853,7 +853,7 @@ function renderSessionActivityLine(
   }
   const root = activity?.root;
   if (root !== undefined && (root.lastActivity !== undefined || root.lastCommand !== undefined)) {
-    const command = root.lastCommand === undefined ? "" : `$ ${root.lastCommand} — `;
+    const command = root.lastCommand === undefined ? "" : `$ ${root.lastCommand} - `;
     line.textContent = `${command}${root.lastActivity ?? ""}`;
     return line;
   }
@@ -871,7 +871,7 @@ function renderSessionMeta(session: ChatSessionSummary, activity: AgentActivityS
   const running = turnRunning.has(session.sessionId);
 
   if (session.runningElsewhere === true) {
-    meta.append(el("span", "rmeta-part", "—"));
+    meta.append(el("span", "rmeta-part", "-"));
     return meta;
   }
   if (running && root?.startedAt !== undefined) {
@@ -923,7 +923,7 @@ function appendSubagentRows(
   const tier = subagentReportingForTransport(session.transport ?? "");
   const agents = activity?.agents ?? [];
   if (agents.length === 0) {
-    // Honest tiers: a silent tree must say WHY it is silent — but only while
+    // Honest tiers: a silent tree must say WHY it is silent - but only while
     // work is live (ended rows carry their history in the transcript).
     if (tier === "none" && turnRunning.has(session.sessionId)) {
       target.append(el("div", `row row-note depth-${String(Math.min(depth, MAX_NEST_DEPTH))}`, "no subagent signal for this transport"));
@@ -948,7 +948,7 @@ function appendSubagentRows(
   };
   appendLevel("root", depth);
   if (tier === "lifecycle") {
-    target.append(el("div", `row row-note depth-${String(Math.min(depth, MAX_NEST_DEPTH))}`, "this transport reports lifecycle only — no per-agent feed"));
+    target.append(el("div", `row row-note depth-${String(Math.min(depth, MAX_NEST_DEPTH))}`, "this transport reports lifecycle only - no per-agent feed"));
   }
 }
 
@@ -973,7 +973,7 @@ function renderSubagentRow(session: ChatSessionSummary, agent: AgentActivityItem
   if (agent.status === "unknown") row.append(chip("unknown", "chip-mode"));
 
   const line = el("span", "act");
-  const command = agent.lastCommand === undefined ? "" : `${agent.lastCommand} — `;
+  const command = agent.lastCommand === undefined ? "" : `${agent.lastCommand} - `;
   line.textContent = `${command}${agent.lastActivity ?? ""}`;
   row.append(line);
 
@@ -1010,7 +1010,7 @@ function renderSubagentRow(session: ChatSessionSummary, agent: AgentActivityItem
 
 /**
  * The consolidated hover card (ADR 0013): ONE popover per row carrying
- * everything the current detail level hides — never per-chip tooltips.
+ * everything the current detail level hides - never per-chip tooltips.
  * Pure CSS reveal on row :hover/:focus-within; pointer-events stay off so
  * it never intercepts row clicks.
  */
@@ -1049,7 +1049,7 @@ function buildSessionHoverCard(
  * Landing drawer (ADR 0014): subtasks with unlanded changesets, disjoint
  * first. Pull = the same full clone pull as the Changes tray (two-click),
  * after which the landed rows leave the drawer on the refetch. Overlap chips
- * never hide — they are exactly the thing to look at before pulling.
+ * never hide - they are exactly the thing to look at before pulling.
  */
 function renderLandingDrawer(items: readonly LandingItem[]): HTMLElement {
   const section = el("section", "group drawer landing");
@@ -1153,7 +1153,7 @@ function renderEmptyState(): HTMLElement {
   if (filter === "active" && allSessions().length > 0) {
     return el("div", "empty", "No agents are active right now. Switch to All to see finished sessions.");
   }
-  return el("div", "empty", "No sessions yet — start a chat from a task, and the fleet shows up here.");
+  return el("div", "empty", "No sessions yet - start a chat from a task, and the fleet shows up here.");
 }
 
 // ---------------------------------------------------------------------------

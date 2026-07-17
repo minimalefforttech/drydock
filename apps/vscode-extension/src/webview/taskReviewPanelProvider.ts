@@ -11,7 +11,7 @@
  * The panel serves the aggregated task-review state (taskReview.state), submits
  * the reviewer's comments back to the owning sessions as revision turns
  * (taskReview.submit, resuming a dead session with an auto workspace context),
- * and — because it spans sessions — requires an explicit sessionId on the
+ * and - because it spans sessions - requires an explicit sessionId on the
  * per-session review passthroughs (review.state/addComment). A linked session
  * starting or completing a turn (or a session deletion) fires the panel-scoped
  * taskReview.updated push so an open panel refetches; content never rides it.
@@ -98,7 +98,7 @@ export class TaskReviewPanelProvider {
 
   /**
    * Builds the gutter-registration list from a computed state: one entry per
-   * baseline-backed file (clone files are excluded — no on-disk path is theirs).
+   * baseline-backed file (clone files are excluded - no on-disk path is theirs).
    * The baseline root is resolved once per unique baselineId within the call;
    * files whose baseline root resolves null are skipped with a warning.
    */

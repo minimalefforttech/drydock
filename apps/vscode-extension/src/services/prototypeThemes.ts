@@ -8,9 +8,9 @@
  * `drydock.prototypeThemes` setting ({name, cssPath} entries, loaded at
  * activation and pushed alongside the built-ins).
  *
- * Each pack styles the same small vocabulary — body, headings, buttons,
+ * Each pack styles the same small vocabulary - body, headings, buttons,
  * inputs, selects, panels (.panel), toolbars (.toolbar), tabs (.tab/.active),
- * lists (.row/.selected), labels (.label) — so an agent can swap themes
+ * lists (.row/.selected), labels (.label) - so an agent can swap themes
  * without rewriting markup.
  */
 
@@ -33,7 +33,7 @@ button, input, select { font: inherit; }
 
 export const BUILT_IN_PROTOTYPE_THEMES: readonly PrototypeTheme[] = [
   {
-    // Qt Fusion dark — the Maya/Houdini/DCC feel: mid-grey chrome, dense
+    // Qt Fusion dark - the Maya/Houdini/DCC feel: mid-grey chrome, dense
     // spacing, subtle 2px radii, steel-blue selection.
     name: "qt-dark",
     css: `${SHARED}
@@ -53,7 +53,7 @@ input, select { background: #383838; color: #dddddd; border: 1px solid #2e2e2e; 
 `
   },
   {
-    // Slate (Unreal Editor) dark — near-black, sharp corners, thin hairlines,
+    // Slate (Unreal Editor) dark - near-black, sharp corners, thin hairlines,
     // uppercase micro-labels, Unreal-blue accents.
     name: "slate-dark",
     css: `${SHARED}
@@ -75,7 +75,7 @@ input, select { background: #0f0f0f; color: #cccccc; border: 1px solid #383838; 
 `
   },
   {
-    // VS Code dark — for tool-panel prototypes meant to live in the editor.
+    // VS Code dark - for tool-panel prototypes meant to live in the editor.
     name: "vscode-dark",
     css: `${SHARED}
 body { background: #1e1e1e; color: #cccccc; font: 13px "Segoe UI", sans-serif; }
@@ -94,7 +94,7 @@ input, select { background: #3c3c3c; color: #cccccc; border: 1px solid #3c3c3c; 
 `
   },
   {
-    // Clean light — neutral product-mockup default.
+    // Clean light - neutral product-mockup default.
     name: "clean-light",
     css: `${SHARED}
 body { background: #f5f6f8; color: #1f2328; font: 14px "Segoe UI", system-ui, sans-serif; }

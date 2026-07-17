@@ -6,9 +6,9 @@
  * queue on the right. Plan creation, selection, aspect management, and the
  * planning conversation stay in the Drydock Plan tab in the VS Code sidebar.
  * Both rails collapse at narrower editor widths; layout preferences persist
- * via webview state (UI-local only — domain data is always refetched).
+ * via webview state (UI-local only - domain data is always refetched).
  *
- * SECURITY: every dynamic string renders via textContent — NEVER innerHTML.
+ * SECURITY: every dynamic string renders via textContent - NEVER innerHTML.
  * This entry is self-contained (it does not import the control-panel bundle).
  */
 
@@ -145,7 +145,7 @@ let rightCollapsed = false;
 let splitRatio = 0.55;
 /**
  * Narrow windows auto-collapse both rails to strips; tapping a strip flies the
- * rail out as an overlay. This is transient presentation state — it never
+ * rail out as an overlay. This is transient presentation state - it never
  * touches the persisted collapse preferences.
  */
 let narrowOverlay: "outputs" | "notes" | null = null;
@@ -478,7 +478,7 @@ let activeProvider: ArtifactProvider | null = null;
 let noteNodes = new Map<string, HTMLElement>();
 
 // ---------------------------------------------------------------------------
-// Rendering — top level
+// Rendering - top level
 // ---------------------------------------------------------------------------
 
 function render(): void {
@@ -575,7 +575,7 @@ document.addEventListener("keydown", (event) => {
 
 /**
  * The materialization dialog: the plan's checkbox items, each toggleable,
- * created as subtasks on the owning task. Creates, NEVER starts — starting
+ * created as subtasks on the owning task. Creates, NEVER starts - starting
  * stays a board/human act (0007 discipline).
  */
 function renderMaterializeOverlay(draft: MaterializeDraft): HTMLElement {
@@ -599,7 +599,7 @@ function renderMaterializeOverlay(draft: MaterializeDraft): HTMLElement {
   hint.id = "pl-mat-hint";
   hint.textContent = draft.taskTitle !== undefined
     ? `Creates the selected items as subtasks on "${draft.taskTitle}". This action does not start an agent.`
-    : "This plan has no owning task — assign one from the Drydock Plan tab first.";
+    : "This plan has no owning task - assign one from the Drydock Plan tab first.";
   modal.append(hint);
 
   if (draft.candidates === null) {
@@ -827,7 +827,7 @@ function sessionStatus(): HTMLElement {
     wrap.append(statusDot("state-live", "live"), textSpan("session live"));
     return wrap;
   }
-  wrap.append(statusDot("state-offline", "offline"), textSpan("offline — send to reconnect"));
+  wrap.append(statusDot("state-offline", "offline"), textSpan("offline - send to reconnect"));
   return wrap;
 }
 
@@ -906,7 +906,7 @@ function renderTree(host: HTMLElement, state: PlannerStateDetail): void {
   if (state.artifacts.length === 0) {
     const empty = el("div", "pl-empty");
     empty.textContent = booting || turnActive
-      ? "The agent is drafting — artifacts appear here after its first turn."
+      ? "The agent is drafting - artifacts appear here after its first turn."
       : "No artifacts collected yet.";
     host.append(empty);
     return;
@@ -1018,7 +1018,7 @@ function renderOutline(host: HTMLElement, state: PlannerStateDetail): void {
   }
   for (const annotation of mine) {
     const entry = el("button", "pl-outline-item level-2");
-    entry.textContent = `${annotation.anchor} — ${annotation.body.slice(0, 40)}`;
+    entry.textContent = `${annotation.anchor} - ${annotation.body.slice(0, 40)}`;
     entry.addEventListener("click", () => activeProvider?.focusAnchor(annotation.anchor));
     host.append(entry);
   }

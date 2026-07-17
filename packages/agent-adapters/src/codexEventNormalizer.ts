@@ -56,7 +56,7 @@ export class CodexEventNormalizer {
     }
 
     // Lifecycle-tier subagent visibility: exec --json surfaces the
-    // parent's collab tool calls only — spawn edges + per-child status/result
+    // parent's collab tool calls only - spawn edges + per-child status/result
     // via agents_states, never per-child feeds (probe 2026-07-05).
     if (type === "item.completed" && stringValue(item?.["type"]) === "collab_tool_call") {
       return this.collabEvents(context, item as JsonObject, raw);
@@ -122,7 +122,7 @@ export class CodexEventNormalizer {
    * wait/close completions carry agents_states {threadId → {status, message}}.
    * Everything is emitted by the ROOT agent (depth-1 on this transport), so
    * spawn/node_done events carry no agentPath and node parents default to
-   * root. Terminal states are deduped per child within one parse pass — the
+   * root. Terminal states are deduped per child within one parse pass - the
    * same child appears in wait AND close_agent states (probe fact).
    */
   private readonly terminalChildIds = new Set<string>();

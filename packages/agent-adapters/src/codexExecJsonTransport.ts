@@ -49,7 +49,7 @@ export class CodexExecJsonTransport {
   /**
    * Exec runs are stateless (a fresh `codex exec` per turn), so restored
    * history is buffered and prepended to the next prompt as a plain-text
-   * preamble — the same strategy the Claude adapter uses.
+   * preamble - the same strategy the Claude adapter uses.
    */
   async restoreContext(connection: AgentConnection, messages: readonly AgentContextMessage[]): Promise<void> {
     if (messages.length > 0) {
