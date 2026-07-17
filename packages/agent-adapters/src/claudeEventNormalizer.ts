@@ -9,8 +9,8 @@
  * Subagent lineage (see docs/adr/0002-product-owned-orchestration.md): Task tool_use blocks spawn subagents; the sidechain
  * lines those subagents emit carry a top-level `parent_tool_use_id` naming
  * the spawning Task call. A per-run registry maps those ids to `agentPath`s
- * (depth-N: a sidechain Task spawn nests under its own path). `user` lines —
- * previously dropped — are parsed for tool_result blocks: a Task result is
+ * (depth-N: a sidechain Task spawn nests under its own path). `user` lines -
+ * previously dropped - are parsed for tool_result blocks: a Task result is
  * the child's `agent.node_done`; other results complete their tracked
  * command/tool call with a capped output preview.
  *

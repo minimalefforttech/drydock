@@ -4,16 +4,16 @@
  * A SINGLE editor-area WebviewPanel for the selected plan's files, outline,
  * artifact viewer, and plan-wide notes queue. Plan creation, selection,
  * aspects, and planning chat remain in the Drydock Plan tab in the VS Code
- * sidebar. Same trust boundary as every panel — parsePanelRequest gates every
+ * sidebar. Same trust boundary as every panel - parsePanelRequest gates every
  * inbound message and the webview only sees display-safe projections from
  * PlannerAppService.
  *
  * Pushes: the coarse `planner.changed` (debounced; the webview refetches
  * planner.state), `planner.sessionReady` (terminal result of a detached
- * session boot — boots outlive the webview request timeout), plus turn and
+ * session boot - boots outlive the webview request timeout), plus turn and
  * session state for the compact status shown in the panel header.
  *
- * CSP: mirrors the plan-docs panel, including its one deviation — mermaid's
+ * CSP: mirrors the plan-docs panel, including its one deviation - mermaid's
  * render path injects <style> nodes with no nonce API, so style-src carries
  * 'unsafe-inline' here (owner-approved 2026-07-10 with the ADR 0012 build
  * sign-off; input-side mitigations are identical: securityLevel strict,
@@ -315,7 +315,7 @@ export class PlannerPanelProvider {
       }
       case "planner.subtaskCandidates": {
         // Plan → board (ADR 0012): checkbox items across the plan's document
-        // artifacts, proposed verbatim — the dialog shows exactly what the
+        // artifacts, proposed verbatim - the dialog shows exactly what the
         // plan lists as work, nothing inferred.
         const state = await backend.planner.getPlanState(payload.planId);
         const candidates = extractSubtaskCandidates(state.artifacts);
@@ -334,7 +334,7 @@ export class PlannerPanelProvider {
         const state = await backend.planner.getPlanState(payload.planId);
         const taskId = state.plan.taskId;
         if (taskId === null) {
-          this.respondError(request.requestId, "This plan has no owning task — assign one from the Drydock Plan tab first.");
+          this.respondError(request.requestId, "This plan has no owning task - assign one from the Drydock Plan tab first.");
           return;
         }
         let createdCount = 0;
@@ -358,7 +358,7 @@ export class PlannerPanelProvider {
       case "planner.openArtifact": {
         const hostPath = await backend.planner.artifactHostPath(payload.artifactId);
         if (hostPath === null) {
-          throw new Error("The artifact has no workspace file right now — start the plan's session first.");
+          throw new Error("The artifact has no workspace file right now - start the plan's session first.");
         }
         await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(hostPath));
         this.respond(request.requestId, { type: "planner.openArtifact", accepted: true });
@@ -464,7 +464,7 @@ export class PlannerPanelProvider {
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "planner.css"));
     // CSP deviation, THIS PANEL ONLY (owner-approved 2026-07-10, ADR 0012):
     // mermaid injects <style> nodes with no nonce API, so style-src needs
-    // 'unsafe-inline' — identical to the plan-docs precedent, with identical
+    // 'unsafe-inline' - identical to the plan-docs precedent, with identical
     // input-side mitigations in the webview. Scripts stay nonce-gated; the
     // mermaid bundle URI + nonce travel as data attributes for lazy injection.
     return `<!DOCTYPE html>

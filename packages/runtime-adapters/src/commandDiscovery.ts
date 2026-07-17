@@ -3,7 +3,7 @@
  *
  * Discovery prefers known standalone installs before PATH aliases that may be
  * unspawnable on Windows. Only native executables are eligible: batch shims
- * (.cmd/.bat) are skipped because the command runner refuses them — cmd.exe
+ * (.cmd/.bat) are skipped because the command runner refuses them - cmd.exe
  * argument parsing is not injection-safe for untrusted argv.
  */
 

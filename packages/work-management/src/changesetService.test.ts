@@ -115,7 +115,7 @@ test("capture stores one row per repo, skips empty patches, and replaces the pri
   assert.equal(store.rows.length, 1);
   assert.equal(await blobs.readText(store.rows[0]?.patchSha256 ?? ""), "diff-api-v2");
 
-  // Empty capture clears — a re-done subtask with no changes stops seeding.
+  // Empty capture clears - a re-done subtask with no changes stops seeding.
   await service.captureForSubtask({ ...CAPTURE, patches: [] });
   assert.equal(store.rows.length, 0);
 });

@@ -9,7 +9,7 @@
  * The transcript renders through the SAME shared components as the Edit tab
  * and the panel rail (chat/transcriptModel + messageRow).
  *
- * SECURITY: every dynamic string renders via textContent — never innerHTML.
+ * SECURITY: every dynamic string renders via textContent - never innerHTML.
  */
 
 import type { PlanAspectSummary, PlanSummary } from "@drydock/contracts";
@@ -223,14 +223,16 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
       return statusDot("state-working", "planning in progress");
     }
     if (plan.sessionId !== null) {
-      return statusDot("state-offline", "session offline — reconnects on send");
+      return statusDot("state-offline", "session offline - reconnects on send");
     }
     return statusDot("state-none", "no session yet");
   }
 
   function startNewPlan(taskId = ""): void {
     composeNew = true;
-    pendingTaskId = taskId;
+    // No explicit task → default to the shared current task, so a plan
+    // started from the composer lands on the task you're already working.
+    pendingTaskId = taskId !== "" ? taskId : (state.activeTaskId ?? "");
     intake.brief = "";
     intake.notes = "";
     intake.selectedAspects.clear();
@@ -293,6 +295,12 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
     taskSelect.value = pendingTaskId;
     taskSelect.addEventListener("change", () => {
       pendingTaskId = taskSelect.value;
+      // Picking a task here IS choosing the current task - keep Tasks/Edit in sync.
+      if (taskSelect.value !== "" && state.activeTaskId !== taskSelect.value) {
+        state.activeTaskId = taskSelect.value;
+        ctx.bridge.work.render();
+        ctx.persist();
+      }
     });
     main.append(taskSelect);
 
@@ -576,12 +584,12 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
     titleText.textContent = plan === undefined ? "New plan" : plan.title;
     currentLabel.append(titleText);
     if (plan !== undefined) {
-      // The owning task, surfaced right where the plan is named — an orphan
+      // The owning task, surfaced right where the plan is named - an orphan
       // reads as the exception it should be.
       const chip = el("span", plan.taskId === null ? "plan-tab-task-chip orphan" : "plan-tab-task-chip");
       chip.textContent = plan.taskId === null ? "no task" : (plan.taskTitle ?? "task");
       chip.title = plan.taskId === null
-        ? "Orphan plan — planning from a task is recommended"
+        ? "Orphan plan - planning from a task is recommended"
         : `Belongs to task: ${plan.taskTitle ?? plan.taskId}`;
       currentLabel.append(chip);
     }
@@ -596,7 +604,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
     statusRow.replaceChildren();
     if (plan !== undefined) {
       let stateClass = "state-none";
-      let label = "no session yet — send a message to start planning";
+      let label = "no session yet - send a message to start planning";
       if (booting) {
         stateClass = "state-starting";
         label = "starting the planning session…";
@@ -608,7 +616,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
         label = "session live";
       } else if (plan.sessionId !== null) {
         stateClass = "state-offline";
-        label = "offline — send a message to reconnect";
+        label = "offline - send a message to reconnect";
       }
       const dot = statusDot(stateClass, label);
       const text = el("span", "plan-tab-status-text");
@@ -638,7 +646,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
     promptInput.disabled = !allocated;
     sendButton.disabled = !allocated;
     promptInput.placeholder = demo
-      ? "Demo data — planning input is disconnected. Switch to Live data to contact an agent."
+      ? "Demo data - planning input is disconnected. Switch to Live data to contact an agent."
       : allocated
       ? "Ask a planning question or request a broader change…"
       : planAllocationMessage();
@@ -669,7 +677,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
       const lead = el("div", "chat-empty-lead");
       lead.textContent = "Plan something.";
       const hint = el("div", "chat-empty-modes");
-      hint.textContent = "Your first message becomes the plan's brief — the Planner opens with the drafts as they land.";
+      hint.textContent = "Your first message becomes the plan's brief - the Planner opens with the drafts as they land.";
       empty.append(lead, hint);
       log.append(empty);
       return;
@@ -731,7 +739,7 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
     folder.clearLiveState();
   }
 
-  /** Incremental timeline pull — the same replay mechanism every rail uses. */
+  /** Incremental timeline pull - the same replay mechanism every rail uses. */
   async function syncRail(): Promise<void> {
     const sessionId = activePlan()?.sessionId ?? null;
     if (sessionId === null) {
@@ -840,6 +848,11 @@ export function createPlanTab(ctx: ViewContext): PlanTabView {
   }
 
   function startForTask(taskId: string): void {
+    // An explicit "Plan for this task" gesture also sets the current task.
+    if (state.activeTaskId !== taskId) {
+      state.activeTaskId = taskId;
+      ctx.persist();
+    }
     void refreshTasks().then(() => startNewPlan(taskId));
   }
 

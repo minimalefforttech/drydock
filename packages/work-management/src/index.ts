@@ -4,6 +4,7 @@
 
 export * from "./boardService.js";
 export * from "./changesetService.js";
+export * from "./mcpRegistryService.js";
 export * from "./memoryService.js";
 export * from "./projectCatalogService.js";
 export * from "./recipeService.js";

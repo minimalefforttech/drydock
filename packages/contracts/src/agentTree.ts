@@ -2,7 +2,7 @@
  * Subagent lineage projection.
  *
  * ONE pure reducer turns a session's ordered event stream into the agent
- * tree the UI renders — consumed by the webview Agents lens (over
+ * tree the UI renders - consumed by the webview Agents lens (over
  * TranscriptLines it already holds) and by the host (over AgentEvents, for
  * session-summary chip counters). Derivable state only: nothing here is a
  * second source of truth, and sessions without lineage data reduce to a
@@ -16,7 +16,7 @@ import type { JsonObject } from "./json.js";
  * What a transport can report about delegated agents. "full" = per-child
  * event feeds (codex app-server child threads; claude sidechains);
  * "lifecycle" = spawn/status/result only, no child feed (codex exec-json
- * collab_tool_call items); "none" = no signal — the UI must say so rather
+ * collab_tool_call items); "none" = no signal - the UI must say so rather
  * than render an all-quiet tree.
  */
 export type SubagentReportingTier = "full" | "lifecycle" | "none";
@@ -71,7 +71,7 @@ export interface SessionAgentTree {
 }
 
 /**
- * Minimal projection the reducer folds — extractable from BOTH input shapes
+ * Minimal projection the reducer folds - extractable from BOTH input shapes
  * so the tree logic exists exactly once.
  */
 export interface AgentTreeSource {
@@ -154,7 +154,7 @@ export function treeSourceFromLine(line: TranscriptLine): AgentTreeSource {
     ...(line.toolStatus === undefined ? {} : { toolStatus: line.toolStatus }),
     ...(line.commandName === undefined ? {} : { commandName: line.commandName }),
     // Line `detail` is the spawn prompt on agent.spawn and the result on
-    // agent.node_done — route it back to the field the reducer expects.
+    // agent.node_done - route it back to the field the reducer expects.
     ...(line.eventType === "agent.spawn" && line.detail !== undefined ? { promptPreview: line.detail } : {}),
     ...(line.eventType === "agent.node_done" && line.detail !== undefined ? { resultPreview: line.detail } : {}),
     ...(line.usage === undefined ? {} : { usage: line.usage }),
@@ -191,7 +191,7 @@ interface MutableNode {
  * on a never-spawned path synthesizes placeholder nodes (ancestors included)
  * rather than dropping or misattributing; duplicate spawns merge; a terminal
  * node status never downgrades. When the ROOT is terminal, children still
- * "running" are reported "unknown" — the stream ended without telling us.
+ * "running" are reported "unknown" - the stream ended without telling us.
  */
 export function reduceAgentTree(sources: Iterable<AgentTreeSource>): SessionAgentTree {
   const nodes = new Map<string, MutableNode>();
@@ -322,7 +322,7 @@ export function reduceAgentTree(sources: Iterable<AgentTreeSource>): SessionAgen
 /**
  * Total token count from a provider-reported usage object, or null when the
  * shape is unrecognized. Providers report either `{totalTokens}` (codex
- * per-thread totals) or `{total: {totalTokens}}` (turn-final usage) — ONE
+ * per-thread totals) or `{total: {totalTokens}}` (turn-final usage) - ONE
  * reader here so every surface prices a node identically.
  */
 export function usageTokens(usage: unknown): number | null {

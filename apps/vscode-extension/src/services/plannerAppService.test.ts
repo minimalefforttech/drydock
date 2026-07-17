@@ -210,7 +210,7 @@ test("create → start boots a plan-mode session, hydrates, and sends the briefi
     assert.equal(stored.status, "active");
     assert.equal(stored.sessionId, "session-1");
 
-    // Plan mode, explicit context roots — the container mount is the boundary.
+    // Plan mode, explicit context roots - the container mount is the boundary.
     const workspace = harness.sessions.startedWorkspaces[0];
     assert.ok(workspace);
     assert.equal(workspace.mode, "plan");

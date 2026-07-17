@@ -4,7 +4,7 @@
  * This is the trust boundary between the webview (untrusted renderer) and the
  * backend services: every inbound message passes through parsePanelRequest,
  * every outbound message is a typed envelope, and the webview only ever
- * receives display-safe projections — never runtime handles, secrets, or
+ * receives display-safe projections - never runtime handles, secrets, or
  * process APIs. The panel renders a degraded state instead of disappearing
  * when the isolated runtime tooling is missing.
  */
@@ -34,8 +34,13 @@ import {
   type ChatSessionSummary,
   type ChatWorkspaceSelection,
   type HostToWebviewMessage,
+  type McpServerRecord,
+  type McpServerSummary,
+  type MemoryCandidateEdits,
   type MemoryCandidateRecord,
   type MemoryCandidateSummary,
+  type MemoryEditsInput,
+  type MemoryScope,
   type PanelInitState,
   type PanelPushPayload,
   type PanelRequest,
@@ -46,7 +51,7 @@ import {
   type WorkTaskSummary
 } from "@drydock/contracts";
 import { normalizePathKey, sandboxRuntimePath, type AgentQuestionService, type Logger, type ProductBusEvent } from "@drydock/core";
-import type { BoardService, MemoryService, SubtaskService, TaskService } from "@drydock/work-management";
+import type { BoardService, McpRegistryService, MemoryService, SubtaskService, TaskService } from "@drydock/work-management";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import type { PlannerAppService } from "../services/plannerAppService.js";
 import { buildBoardState, decorateTaskSummary, joinOpenCommentCounts, reconcileColumns } from "./boardShared.js";
@@ -118,14 +123,45 @@ function toFreshWorkTaskSummary(record: WorkTaskRecord): WorkTaskSummary {
   };
 }
 
-/** Display-safe projection of a memory candidate; resolvedAt is host-only. */
-function toMemoryCandidateSummary(record: MemoryCandidateRecord): MemoryCandidateSummary {
+/**
+ * Display-safe projection of a memory; resolvedAt and workspace root PATHS are
+ * host-only (the label carries folder basenames, not locations).
+ */
+function toMemoryCandidateSummary(record: MemoryCandidateRecord, taskTitles?: ReadonlyMap<string, string>): MemoryCandidateSummary {
+  const scope = record.scope ?? "global";
+  let scopeLabel: string | undefined;
+  if (scope === "task" && record.scopeTaskId !== undefined) {
+    scopeLabel = taskTitles?.get(record.scopeTaskId) ?? record.scopeTaskId;
+  } else if (scope === "workspace" && record.scopeRoots !== undefined && record.scopeRoots.length > 0) {
+    scopeLabel = record.scopeRoots
+      .map((root) => root.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? root)
+      .join(", ");
+  }
   return {
     memoryCandidateId: record.memoryCandidateId,
     sessionId: record.sessionId,
     content: record.content,
     status: record.status,
-    createdAt: record.createdAt
+    createdAt: record.createdAt,
+    scope,
+    ...(scopeLabel === undefined ? {} : { scopeLabel }),
+    tags: record.tags ?? [],
+    origin: record.origin ?? "agent"
+  };
+}
+
+/** Display-safe registry row: env values NEVER cross to the webview - key names only. */
+function toMcpServerSummary(record: McpServerRecord): McpServerSummary {
+  return {
+    serverId: record.serverId,
+    name: record.name,
+    command: record.command,
+    args: record.args,
+    envKeys: Object.keys(record.env),
+    enabledByDefault: record.enabledByDefault,
+    sensitive: record.sensitive,
+    ...(record.notes === undefined ? {} : { notes: record.notes }),
+    source: record.source
   };
 }
 
@@ -570,7 +606,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "chat.reclaim": {
         const appService = this.requireBackend();
         if (appService.isChatSessionLive(payload.sessionId)) {
-          // Already ours in this window — nothing to take over.
+          // Already ours in this window - nothing to take over.
           throw new Error("This session is already live in this window.");
         }
         const approvedRoots = await this.requireWorkspaceReview().approvedAccessRoots(payload.sessionId);
@@ -606,7 +642,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       }
       case "chat.poke": {
         const appService = this.requireBackend();
-        // Soft nudge for a quiet turn — a graceful turn/interrupt that keeps the
+        // Soft nudge for a quiet turn - a graceful turn/interrupt that keeps the
         // session/container alive. `poked` is false when there's nothing to poke.
         const poked = await appService.pokeChatTurn(payload.sessionId);
         this.respond(request.requestId, { type: "chat.poke", poked });
@@ -882,7 +918,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       case "question.answer": {
         const service = this.requireQuestions();
         const record = await service.answer(asId<"AgentQuestionId">(payload.questionId), payload.answer);
-        // The answer returns to the agent as a host-authored follow-up turn —
+        // The answer returns to the agent as a host-authored follow-up turn -
         // possible only when the session is live in this window and idle.
         // Otherwise the answer is recorded and the card says so; it still
         // reaches the agent verbatim if the user pastes/asks later.
@@ -930,13 +966,72 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "memory.list": {
-        const candidates = (await this.requireMemory().listCandidates()).map(toMemoryCandidateSummary);
-        this.respond(request.requestId, { type: "memory.list", candidates });
+        const titles = await this.taskTitleMap();
+        const candidates = (await this.requireMemory().listCandidates()).map((record) => toMemoryCandidateSummary(record, titles));
+        // Suggestion chips for quick-add: tags detected in the open folders.
+        const detectedTags = await this.requireBackend().tagsForRoots(this.openFolderRoots()).catch(() => [] as string[]);
+        this.respond(request.requestId, { type: "memory.list", candidates, detectedTags });
         return;
       }
       case "memory.resolve": {
-        const record = await this.requireMemory().resolve(payload.memoryCandidateId, payload.approve);
-        this.respond(request.requestId, { type: "memory.resolve", candidate: toMemoryCandidateSummary(record) });
+        const edits = await this.resolveMemoryEdits(payload.memoryCandidateId, payload.edits);
+        const record = await this.requireMemory().resolve(payload.memoryCandidateId, payload.approve, edits);
+        this.respond(request.requestId, { type: "memory.resolve", candidate: toMemoryCandidateSummary(record, await this.taskTitleMap()) });
+        return;
+      }
+      case "memory.add": {
+        const record = await this.requireMemory().addUserMemory({
+          content: payload.content,
+          scope: payload.scope,
+          ...(payload.taskId === undefined ? {} : { taskId: payload.taskId }),
+          roots: this.openFolderRoots(),
+          ...(payload.tags === undefined ? {} : { tags: payload.tags })
+        });
+        this.respond(request.requestId, { type: "memory.add", candidate: toMemoryCandidateSummary(record, await this.taskTitleMap()) });
+        return;
+      }
+      case "memory.delete": {
+        await this.requireMemory().deleteMemory(payload.memoryCandidateId);
+        this.respond(request.requestId, { type: "memory.delete", memoryCandidateId: payload.memoryCandidateId });
+        return;
+      }
+      case "mcp.list": {
+        const servers = (await this.requireMcp().listServers()).map(toMcpServerSummary);
+        const overrides = await this.requireMcp().listOverrides();
+        this.respond(request.requestId, { type: "mcp.list", servers, overrides });
+        return;
+      }
+      case "mcp.save": {
+        await this.requireMcp().saveServer(payload.server);
+        const servers = (await this.requireMcp().listServers()).map(toMcpServerSummary);
+        this.respond(request.requestId, { type: "mcp.save", servers });
+        void this.requireBackend().refreshMcpConfigForLiveSessions();
+        return;
+      }
+      case "mcp.delete": {
+        await this.requireMcp().deleteServer(payload.serverId);
+        const servers = (await this.requireMcp().listServers()).map(toMcpServerSummary);
+        this.respond(request.requestId, { type: "mcp.delete", servers });
+        void this.requireBackend().refreshMcpConfigForLiveSessions();
+        return;
+      }
+      case "mcp.setOverride": {
+        await this.requireMcp().setOverride(payload.scope, payload.refId, payload.serverId, payload.state);
+        const overrides = await this.requireMcp().listOverrides();
+        this.respond(request.requestId, { type: "mcp.setOverride", overrides });
+        // A session toggle refreshes just that sandbox; broader scopes sweep live ones.
+        if (payload.scope === "session") {
+          void this.requireBackend().refreshMcpConfig(payload.refId);
+        } else {
+          void this.requireBackend().refreshMcpConfigForLiveSessions();
+        }
+        return;
+      }
+      case "chat.contextDebug": {
+        const markdown = await this.requireBackend().composeContextDebug(payload.sessionId);
+        const document = await vscode.workspace.openTextDocument({ language: "markdown", content: markdown });
+        await vscode.window.showTextDocument(document, { preview: false });
+        this.respond(request.requestId, { type: "chat.contextDebug", accepted: true });
         return;
       }
       case "memory.open": {
@@ -1078,7 +1173,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         const result = await appService.clonePull(payload.sessionId, payload.repo, payload.path);
         // Landing (ADR 0014): a full pull moved this session's captured output
         // into local HEAD, so its changesets stop seeding dependents. Per-file
-        // pulls never land (the sync base did not advance). Bookkeeping only —
+        // pulls never land (the sync base did not advance). Bookkeeping only -
         // a failure logs and never un-pulls.
         if (payload.path === undefined && this.backend.available) {
           void this.backend.changesets.markLandedBySession(payload.sessionId, payload.repo).catch((error: unknown) => {
@@ -1126,7 +1221,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         if (!this.previewNoticeShown.has(preview.previewId)) {
           this.previewNoticeShown.add(preview.previewId);
           void vscode.window.showInformationMessage(
-            `Opening "${preview.title}" — this page is served by the agent's sandbox. Treat it as untrusted content.`
+            `Opening "${preview.title}" - this page is served by the agent's sandbox. Treat it as untrusted content.`
           );
         }
         if (payload.external === true) {
@@ -1139,6 +1234,12 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       }
       case "preview.stop": {
         this.respond(request.requestId, { type: "preview.stop", previews: this.requireBackend().stopPreview(payload.previewId) });
+        return;
+      }
+      case "terminal.attach": {
+        this.requireBackend();
+        await vscode.commands.executeCommand("drydock.session.attachTerminal", payload.sessionId);
+        this.respond(request.requestId, { type: "terminal.attach", accepted: true });
         return;
       }
       case "clone.exportPatch": {
@@ -1156,7 +1257,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
             savedPaths: [],
             message: patches === null
               ? "This session's clone state is not available in this window."
-              : "Nothing to export — the clone has no captured changes."
+              : "Nothing to export - the clone has no captured changes."
           });
           return;
         }
@@ -1710,7 +1811,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
 
   /**
    * VS Code reloads an untitled (no workspaceFile) window when its folder count
-   * crosses the single-folder ↔ multi-root boundary — i.e. 1→many, many→1, or
+   * crosses the single-folder ↔ multi-root boundary - i.e. 1→many, many→1, or
    * a 1→1 replacement of the sole root. Both counts on the same side of the
    * boundary (0/1 stays single-ish; ≥2 stays multi-root) are in-place.
    */
@@ -1777,7 +1878,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   private runTurnDetached(appService: IsolatedRunService, sessionId: string, prompt: string, model?: ChatModelSelection): void {
     void (async () => {
       // "This Turn" frame: snapshot the send moment BEFORE the agent can edit.
-      // Best-effort like session baselining — a capture failure must not block
+      // Best-effort like session baselining - a capture failure must not block
       // the turn (the view then falls back to its previous frame). No-op for
       // sessions without diff baselines (clone/plan).
       try {
@@ -1863,8 +1964,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
 
   /**
    * Adds an attention reason to a session and surfaces it: pushes the session's
-   * current reasons, refreshes the badge, and — only on the transition from
-   * no-attention to attention for that session — shows a hidden-panel toast.
+   * current reasons, refreshes the badge, and - only on the transition from
+   * no-attention to attention for that session - shows a hidden-panel toast.
    * The toast fires once per attention episode so consecutive flags on an
    * already-waiting session don't spam the user.
    */
@@ -2076,6 +2177,65 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       throw new Error(this.backend.reason);
     }
     return this.backend.memory;
+  }
+
+  private requireMcp(): McpRegistryService {
+    if (!this.backend.available) {
+      throw new Error(this.backend.reason);
+    }
+    return this.backend.mcp;
+  }
+
+  /** taskId → title, for memory scope labels. Best-effort: empty map on failure. */
+  private async taskTitleMap(): Promise<ReadonlyMap<string, string>> {
+    try {
+      const tasks = await this.requireTasks().listTasks();
+      return new Map(tasks.map((task) => [task.taskId as string, task.title]));
+    } catch {
+      return new Map();
+    }
+  }
+
+  /**
+   * Resolves webview-side approval edits (scope kind + tags + content) into
+   * store-level edits with real anchors: task scope anchors to the source
+   * session's linked task, workspace scope to the source session's mounted
+   * roots (falling back to this window's open folders).
+   */
+  private async resolveMemoryEdits(
+    memoryCandidateId: string,
+    edits: MemoryEditsInput | undefined
+  ): Promise<MemoryCandidateEdits | undefined> {
+    if (edits === undefined) return undefined;
+    const resolved: {
+      content?: string;
+      scope?: MemoryScope;
+      scopeTaskId?: string;
+      scopeRoots?: readonly string[];
+      tags?: readonly string[];
+    } = {
+      ...(edits.content === undefined ? {} : { content: edits.content }),
+      ...(edits.tags === undefined ? {} : { tags: edits.tags })
+    };
+    if (edits.scope !== undefined) {
+      resolved.scope = edits.scope;
+      const existing = await this.requireMemory().getCandidate(memoryCandidateId);
+      const sourceSessionId = existing?.sessionId;
+      if (edits.scope === "task" && sourceSessionId !== undefined) {
+        const tasks = await this.requireTasks().listTaskSummaries();
+        const owner = tasks.find((task) => task.linkedSessionIds.includes(sourceSessionId));
+        if (owner !== undefined) resolved.scopeTaskId = owner.taskId;
+      } else if (edits.scope === "workspace") {
+        const stored = sourceSessionId === undefined || sourceSessionId === "user"
+          ? null
+          : await this.requireBackend().getChatSession(sourceSessionId).catch(() => null);
+        const roots = stored?.workspaceRoots !== undefined && stored.workspaceRoots.length > 0
+          ? stored.workspaceRoots
+          : this.openFolderRoots();
+        if (roots.length > 0) resolved.scopeRoots = roots;
+      }
+    }
+    return resolved;
   }
 
   private requireWorkInsights(): WorkInsightsAppService {

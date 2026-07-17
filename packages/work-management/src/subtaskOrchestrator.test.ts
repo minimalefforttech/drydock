@@ -463,7 +463,7 @@ test("manually dragging a subtask into a done column triggers dependent evaluati
 
   // Simulate a manual drag exactly like SubtaskService.moveCard: the card
   // moves into the done column FIRST, then card-entered-done fires (the fake
-  // moveCard publishes it, matching the real service's ordering — the
+  // moveCard publishes it, matching the real service's ordering - the
   // orchestrator reads the moved state when it evaluates dependents).
   await h.subtasks.moveCard({ subtaskId: "a" }, "col-review");
   await flush();
@@ -585,7 +585,7 @@ test("re-entrancy guard: cascade evaluation for the same subtask does not double
   // Upstream a is done (state precedes the event, as in the real service)...
   h.subtasks.update("a", { columnId: asId<"ColumnId">("col-review"), doneAt: NOW });
   // ...then evaluateDependents("a") fires twice concurrently (as a
-  // synchronous bus delivering duplicate card-entered-done events would) —
+  // synchronous bus delivering duplicate card-entered-done events would) -
   // b must only be started once.
   await Promise.all([h.orchestrator.evaluateDependents("a"), h.orchestrator.evaluateDependents("a")]);
   await flush();
@@ -687,7 +687,7 @@ test("auto runs retry once on failure, then park; manual ↻ clears the park", a
   assert.equal(h.startCalls.length, 2);
   assert.equal(h.orchestrator.isParked("sub-auto"), false);
 
-  // Second failure: parked — automation gives up, no third start.
+  // Second failure: parked - automation gives up, no third start.
   await completeRun(h, "session-2", "failed");
   assert.equal(h.startCalls.length, 2);
   assert.equal(h.orchestrator.isParked("sub-auto"), true);
@@ -819,7 +819,7 @@ test("restore reloads holds after a reload: parked stays, queued drains under th
   await holds.upsertHold({ subtaskId: "sub-q", kind: "queued", origin: "auto", force: false, heldAt: "2026-07-12T00:00:01.000Z" });
   await holds.upsertHold({ subtaskId: "sub-p", kind: "parked", origin: "auto", force: false, heldAt: "2026-07-12T00:00:02.000Z" });
 
-  // A fresh process (new orchestrator, same store) — like a window reload.
+  // A fresh process (new orchestrator, same store) - like a window reload.
   const h = holdsHarness(holds);
   h.subtasks.add(subtask({ subtaskId: "sub-q", taskId: "task-1", columnId: "col-todo", prompt: "q" }));
   h.subtasks.add(subtask({ subtaskId: "sub-p", taskId: "task-1", columnId: "col-todo", prompt: "p" }));

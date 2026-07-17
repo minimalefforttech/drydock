@@ -1,6 +1,6 @@
 /**
  * SQLite-backed orchestrator hold store (ADR 0015): queued/parked starts
- * that must survive a window reload. One row per subtask — an upsert
+ * that must survive a window reload. One row per subtask - an upsert
  * replaces the prior hold (a park supersedes a queue entry).
  */
 

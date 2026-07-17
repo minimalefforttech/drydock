@@ -4,7 +4,7 @@
  * Serves the harness shell (index.html + harness.js) plus the REAL bundled
  * webview assets from apps/vscode-extension/dist/webview under /assets/*, so
  * what renders in a browser is byte-identical to what ships in the VSIX. The
- * harness mocks only the host side of the message protocol — never the UI.
+ * harness mocks only the host side of the message protocol - never the UI.
  * Run `npm run bundle` in apps/vscode-extension before starting.
  */
 

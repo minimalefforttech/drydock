@@ -6,8 +6,8 @@
  * agent a sentinel format: a fenced block whose info string is
  * `access-request` containing a single JSON object. The host parses final
  * agent text for these blocks and turns each into a pending AccessRequest for
- * human approval. Parsing is deliberately strict — a malformed block is
- * dropped, never guessed at — because every parsed request becomes a
+ * human approval. Parsing is deliberately strict - a malformed block is
+ * dropped, never guessed at - because every parsed request becomes a
  * human-facing approval prompt for a host mount.
  */
 
@@ -33,22 +33,68 @@ export const MEMORY_CANDIDATE_FENCE = "memory-candidate";
 const MEMORY_FENCE_PATTERN = /```memory-candidate[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;
 const MAX_MEMORY_CONTENT_LENGTH = 2_000;
 const MAX_MEMORY_PER_TEXT = 3;
+const MAX_MEMORY_TAGS = 8;
+const MAX_MEMORY_TAG_LENGTH = 32;
+
+/** One agent-proposed memory: content plus an optional suggested scope/tags. */
+export interface ParsedMemoryCandidate {
+  readonly content: string;
+  /** Suggested only - the human edits scope and tags before approval. */
+  readonly scope?: "global" | "workspace" | "task";
+  readonly tags?: readonly string[];
+}
 
 /**
- * Extracts plain-text memory candidates from an agent's final text. The body
- * is free text, not JSON: trimmed, non-empty, bounded. Anything else is
- * dropped — every parsed candidate becomes a human review item, never
- * persistent context on its own.
+ * Extracts memory candidates from an agent's final text. The body is either
+ * plain text (the original form, still valid - defaults to workspace scope at
+ * capture) or one JSON object {"content", "scope"?, "tags"?}. Malformed JSON
+ * that still LOOKS like JSON is dropped rather than stored as noise; anything
+ * else is treated as plain text. Every parsed candidate becomes a human
+ * review item, never persistent context on its own.
  */
-export function extractMemoryCandidates(text: string): string[] {
-  const candidates: string[] = [];
+export function extractMemoryCandidates(text: string): ParsedMemoryCandidate[] {
+  const candidates: ParsedMemoryCandidate[] = [];
   for (const match of text.matchAll(MEMORY_FENCE_PATTERN)) {
     if (candidates.length >= MAX_MEMORY_PER_TEXT) break;
-    const content = (match[1] ?? "").trim();
-    if (content.length === 0 || content.length > MAX_MEMORY_CONTENT_LENGTH) continue;
-    candidates.push(content);
+    const body = (match[1] ?? "").trim();
+    if (body.length === 0 || body.length > MAX_MEMORY_CONTENT_LENGTH) continue;
+    if (body.startsWith("{")) {
+      const parsed = parseMemoryBody(body);
+      if (parsed !== null) candidates.push(parsed);
+      continue;
+    }
+    candidates.push({ content: body });
   }
   return candidates;
+}
+
+function parseMemoryBody(body: string): ParsedMemoryCandidate | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const content = typeof record["content"] === "string" ? record["content"].trim() : "";
+  if (content.length === 0 || content.length > MAX_MEMORY_CONTENT_LENGTH) return null;
+  const rawScope = record["scope"];
+  const scope = rawScope === "global" || rawScope === "workspace" || rawScope === "task" ? rawScope : undefined;
+  const rawTags = record["tags"];
+  const tags: string[] = [];
+  for (const candidate of Array.isArray(rawTags) ? rawTags : []) {
+    if (tags.length >= MAX_MEMORY_TAGS) break;
+    if (typeof candidate !== "string") continue;
+    const tag = candidate.trim().toLowerCase();
+    if (tag.length === 0 || tag.length > MAX_MEMORY_TAG_LENGTH || tags.includes(tag)) continue;
+    tags.push(tag);
+  }
+  return {
+    content,
+    ...(scope === undefined ? {} : { scope }),
+    ...(tags.length === 0 ? {} : { tags })
+  };
 }
 
 export const PREVIEW_FENCE = "preview";
@@ -129,7 +175,7 @@ export interface ParsedAgentQuestion {
   readonly subtaskId?: string;
 }
 
-/** Accepts only absolute in-sandbox image paths — never host paths. */
+/** Accepts only absolute in-sandbox image paths - never host paths. */
 function isRuntimeImagePath(candidate: unknown): candidate is string {
   return typeof candidate === "string"
     && candidate.length <= MAX_QUESTION_IMAGE_PATH_LENGTH
@@ -141,7 +187,7 @@ function isRuntimeImagePath(candidate: unknown): candidate is string {
 /**
  * Extracts well-formed agent questions from final text. Strict like the
  * access parser: malformed or out-of-bounds blocks are dropped, never guessed
- * at — every parsed question becomes a human-facing prompt. Options are
+ * at - every parsed question becomes a human-facing prompt. Options are
  * optional, deduplicated, and bounded; the first option is presented as the
  * agent's recommendation.
  */
@@ -182,7 +228,7 @@ function parseQuestionBody(body: string): ParsedAgentQuestion | null {
     options.push(option);
   }
 
-  // ADR 0016 extensions — every field optional, bounded, dropped when malformed
+  // ADR 0016 extensions - every field optional, bounded, dropped when malformed
   // (the base question still stands; extras never make a block unparseable).
   const kind = record["kind"] === "manual-check" ? ("manual-check" as const) : undefined;
   const steps: ParsedQuestionStep[] = [];
@@ -227,7 +273,7 @@ function parseQuestionBody(body: string): ParsedAgentQuestion | null {
 /**
  * Extracts well-formed access requests from an agent's final text. Malformed
  * or out-of-bounds blocks are skipped; at most MAX_ACCESS_REQUESTS_PER_TEXT
- * are returned. Path absoluteness is NOT checked here — that stays with
+ * are returned. Path absoluteness is NOT checked here - that stays with
  * AccessRequestService.createRequest so there is exactly one validation gate.
  */
 export function extractAccessRequests(text: string): ParsedAccessRequest[] {
@@ -278,8 +324,18 @@ export interface SessionBriefingInput {
   readonly cloneRepos?: readonly string[];
   /** Present after an approval restart: tells the agent what was granted. */
   readonly grantedNote?: string;
-  /** Human-approved team memory, newest first, already capped by the caller. */
-  readonly memories?: readonly string[];
+  /**
+   * Human-approved team memory, grouped by scope (most specific first) and
+   * already tag-filtered + capped by the caller. Labels read like
+   * "this task" / "this workspace" / "global".
+   */
+  readonly memoryGroups?: readonly { readonly label: string; readonly notes: readonly string[] }[];
+  /** Runtime paths of repo instruction files found in the mounts (CLAUDE.md / AGENTS.md). */
+  readonly instructionFiles?: readonly string[];
+  /** Studio-level standing instructions (drydock.teamInstructionsPath), host-provided. */
+  readonly teamInstructions?: string;
+  /** True when the host wrote an MCP config into the workspace (/.mcp.json). */
+  readonly mcpConfigured?: boolean;
 }
 
 /**
@@ -309,7 +365,7 @@ export function buildSessionBriefing(input: SessionBriefingInput): string {
   if (input.mode === "plan") {
     lines.push(
       "Mode: PLAN. Workspace mounts are read-only; produce analysis and plan documents rather than code edits. " +
-      "Write plan documents into the `plan/` directory of your workspace as Markdown (`.md`) files — one file per " +
+      "Write plan documents into the `plan/` directory of your workspace as Markdown (`.md`) files - one file per " +
       "document (e.g. plan/product-plan.md, plan/architecture.md); put diagrams in ```mermaid fenced blocks or `.mmd` " +
       "files. The host collects `plan/` after each of your turns for human review, and reviewer comments come back " +
       "as follow-up messages."
@@ -319,10 +375,10 @@ export function buildSessionBriefing(input: SessionBriefingInput): string {
     lines.push(
       "Mode: CLONE. You are working on disposable git clones of the developer's repositories" +
       (repoList.length > 0 ? ` (${repoList} in your workspace)` : "") +
-      " — NOT the live folders. Edit files normally; do not run git push, change git remotes, or expect network access. " +
+      " - NOT the live folders. Edit files normally; do not run git push, change git remotes, or expect network access. " +
       "Git metadata is kept by the host, so use the product's sync controls instead of Git commands. " +
       "Your changes reach the developer only when they pull a patch from this clone, and their local edits arrive as " +
-      "sync commits. If a sync leaves conflict markers (<<<<<<<) in files, resolving those markers is your job — " +
+      "sync commits. If a sync leaves conflict markers (<<<<<<<) in files, resolving those markers is your job - " +
       "do it before continuing other work."
     );
   } else {
@@ -334,7 +390,7 @@ export function buildSessionBriefing(input: SessionBriefingInput): string {
     lines.push("Mounts:");
     for (const mount of input.mounts) {
       // The `= host <path>` suffix only earns its place when the sandbox path is
-      // NOT just the direct drive-mirror of the host path — for a direct mount the
+      // NOT just the direct drive-mirror of the host path - for a direct mount the
       // runtime path already encodes the host location, so the remap is noise.
       const isDirectMirror = mount.hostDisplayPath !== undefined
         && sandboxRuntimePath(mount.hostDisplayPath) === mount.runtimePath;
@@ -349,9 +405,12 @@ export function buildSessionBriefing(input: SessionBriefingInput): string {
     "Then stop and wait; a human approves or denies it, your backend restarts with the mount, and the conversation resumes with the outcome."
   );
   lines.push(
-    "To propose a durable insight for future sessions (a convention, gotcha, or decision worth remembering), emit a " +
-    `fenced block with the info string \`${MEMORY_CANDIDATE_FENCE}\` containing one short plain-text note. ` +
-    "A human reviews it; only approved notes persist."
+    "When the developer asks you to remember something, or you learn a durable convention worth keeping, propose it by " +
+    `emitting a fenced block with the info string \`${MEMORY_CANDIDATE_FENCE}\` containing one JSON object: ` +
+    '{"content": "<one short, durable sentence>", "scope": "task" | "workspace" | "global", "tags": ["python", ...]}. ' +
+    "Keep content tight - a human edits and approves it before it persists; only approved notes reach future sessions. " +
+    "Scope and tags are suggestions: task = this task only, workspace = these folders, global = everywhere; tags narrow " +
+    "to matching workspaces (e.g. python, node, maya). A bare plain-text body is also accepted."
   );
   lines.push(
     "If a decision is genuinely the developer's to make (a choice you cannot resolve from the code or the request), " +
@@ -362,19 +421,35 @@ export function buildSessionBriefing(input: SessionBriefingInput): string {
     'Optional fields: "images": ["/workspace/<path>.png", ...] attaches up to 3 images you produced (screenshots, renders, diagrams) ' +
     'so the developer sees what you see. For checks that need a human to run steps outside the sandbox, add ' +
     '"kind": "manual-check" with "steps": ["<step 1>", {"text": "<step 2>", "image": "/workspace/<path>.png"}, ...] ' +
-    '(≤10 steps) and, when the check gates a subtask, its "subtaskId" — the developer can stamp it Verified from the answer.'
+    '(≤10 steps) and, when the check gates a subtask, its "subtaskId" - the developer can stamp it Verified from the answer.'
   );
   lines.push(
     "UI/UX PROTOTYPING IS WEB-ONLY, even when the real target is Qt, Slate (Unreal), or another native toolkit: " +
     "build the prototype as HTML/CSS/JS, start a plain HTTP server on any localhost port inside your sandbox, and announce it by emitting a fenced block " +
     `with the info string \`${PREVIEW_FENCE}\` containing one JSON object: {"port": <port>, "path": "/", "title": "<short name>"}. ` +
     "The developer gets a live, clickable proxy of your server. Theme stylesheets that make a web prototype feel like the target application are provided at " +
-    "/workspace/.drydock-themes/ (qt-dark.css, slate-dark.css, vscode-dark.css, clean-light.css, plus any studio-registered themes) — copy one next to your " +
+    "/workspace/.drydock-themes/ (qt-dark.css, slate-dark.css, vscode-dark.css, clean-light.css, plus any studio-registered themes) - copy one next to your " +
     "prototype and link it instead of hand-rolling native-looking chrome. Do not attempt native GUI toolkits in the sandbox; there is no display."
   );
-  if (input.memories !== undefined && input.memories.length > 0) {
-    lines.push("Team memory (human-approved notes from earlier work):");
-    for (const memory of input.memories) {
+  if (input.instructionFiles !== undefined && input.instructionFiles.length > 0) {
+    lines.push(
+      `Repository instruction files are present - read and honor them before working: ${input.instructionFiles.join(", ")}.`
+    );
+  }
+  if (input.teamInstructions !== undefined && input.teamInstructions.trim().length > 0) {
+    lines.push("Team instructions (studio-level, host-provided):");
+    lines.push(input.teamInstructions.trim());
+  }
+  if (input.mcpConfigured === true) {
+    lines.push(
+      "MCP servers are configured at /workspace/.mcp.json (host-provided). Claude transports load it per turn; " +
+      "treat those tools as part of your environment."
+    );
+  }
+  for (const group of input.memoryGroups ?? []) {
+    if (group.notes.length === 0) continue;
+    lines.push(`Team memory - ${group.label} (human-approved notes from earlier work):`);
+    for (const memory of group.notes) {
       lines.push(`- ${memory}`);
     }
   }

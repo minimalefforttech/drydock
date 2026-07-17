@@ -1,9 +1,9 @@
 /*
  * Shared chat transcript styles (ADR 0012, P3 extraction).
  *
- * The rules behind chat/messageRow.ts's DOM — message rows, structural
+ * The rules behind chat/messageRow.ts's DOM - message rows, structural
  * markdown, command lines, subagent groups, and the working/thinking
- * indicators — moved verbatim from styles.css so the control panel and the
+ * indicators - moved verbatim from styles.css so the control panel and the
  * Planner bundle style the SAME renderer identically. Imported by both
  * styles.css and planner.css; edit here, never fork.
  */
@@ -479,7 +479,7 @@ h4.md-heading { font-size: 1em; }
 }
 
 /* FIX 4: "Assistant is working…" activity indicator at the bottom of the
-   transcript for the duration of a running turn — fills the gap between
+   transcript for the duration of a running turn - fills the gap between
    turnStarted and the first streamed output. Shown only when the turn has
    produced no agent.reasoning yet; once reasoning arrives, .chat-reasoning
    (below) takes over as the live indicator instead. */
@@ -522,7 +522,7 @@ h4.md-heading { font-size: 1em; }
 }
 
 /* Reasoning follow-up to FIX 4: live "Thinking" disclosure that replaces
-   .chat-working once the turn has produced agent.reasoning text — fills the
+   .chat-working once the turn has produced agent.reasoning text - fills the
    same working-indicator slot but lets the user expand into the actual
    reasoning stream instead of a generic "working…" label. Collapsed by
    default (muted, monospace-ish body) so it never dominates the transcript;

@@ -356,13 +356,13 @@ test("submitReview sends a revision turn to a live idle session and skips a comm
     assert.deepEqual(result.errors, []);
 
     // Only session-a received a turn; the prompt carries the header and the
-    // `repo:path:line — body` / range styles.
+    // `repo:path:line - body` / range styles.
     assert.equal(harness.sessions.sentTurns.length, 1);
     const sent = harness.sessions.sentTurns[0];
     assert.equal(sent?.sessionId, "session-a");
     assert.match(sent?.prompt ?? "", /address each comment and revise the files/);
-    assert.match(sent?.prompt ?? "", /- repo:src\/x\.ts:12 — Fix the guard\./);
-    assert.match(sent?.prompt ?? "", /- repo:src\/y\.ts:3-7 — Extract this\./);
+    assert.match(sent?.prompt ?? "", /- repo:src\/x\.ts:12 - Fix the guard\./);
+    assert.match(sent?.prompt ?? "", /- repo:src\/y\.ts:3-7 - Extract this\./);
 
     // session-a's comments are now delegated.
     assert.equal(

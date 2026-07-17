@@ -3,7 +3,7 @@
  *
  * Mounts derive from workspace roots plus a session mode: plan mode is
  * read-only, implementation mode is read-write, clone mode never mounts live
- * roots. Denied paths are excluded in both containment directions — a denied
+ * roots. Denied paths are excluded in both containment directions - a denied
  * path can neither be mounted nor be exposed inside a mounted root.
  */
 
@@ -17,7 +17,7 @@ export interface BuildMountPolicyRequest {
   readonly mode: SessionMode;
   readonly workspaceRoots: readonly string[];
   /**
-   * Workspace roots that must mount read-only even in implementation mode — the
+   * Workspace roots that must mount read-only even in implementation mode - the
    * per-member read-only flag from a workspace set. Matched by normalized path
    * key. Plan mode is read-only regardless.
    */
@@ -164,7 +164,7 @@ export function buildMountPolicy(request: BuildMountPolicyRequest, ids: IdGenera
  * The in-container path where the Docker Sandbox runtime mounts a host folder:
  * a drive-letter mirror on Windows (`H:\pipeline\work` → `/h/pipeline/work`),
  * otherwise the resolved POSIX path. sbx derives the mount point from the host
- * path — it is NOT caller-assignable — so this is the ONE true location, and
+ * path - it is NOT caller-assignable - so this is the ONE true location, and
  * every mount briefing, UI label, and grant note must advertise it. An agent
  * told a different path (e.g. a synthetic `/workspace/root-1`) writes into an
  * unmounted container overlay and its edits never reach the host.
@@ -184,7 +184,7 @@ export function sandboxRuntimePath(hostPath: string): string {
  * parent mount, and read-write requires the covering parent mount to be
  * read-write. Applies at spawn AND at every later mount expansion. The
  * child's own disposable workspace is the caller's concern (it is product
- * scratch, not host reach) — pass only host-reach mounts here.
+ * scratch, not host reach) - pass only host-reach mounts here.
  */
 export function assertChildMountsWithinParent(
   childMounts: readonly MountPolicy[],
@@ -249,7 +249,7 @@ export function isPathDenied(hostPath: string, deniedPaths: readonly string[], c
  * Refuses mounts that intersect a denied path in either direction: mounting a
  * parent of a denied path would expose it, mounting inside one is direct
  * access. Also refuses a filesystem root outright (a drive root like `C:\` or
- * `/`, or a bare UNC share root `\\server\share`) — mounting an entire volume
+ * `/`, or a bare UNC share root `\\server\share`) - mounting an entire volume
  * is never intentional and defeats the blast-radius bound. Throws a
  * user-visible error instead of silently skipping.
  */
@@ -329,7 +329,7 @@ export interface SensitivePathMatch {
  * The credential/secret trigger for a candidate path, or null when none: the
  * first path segment matching a sensitive directory name (case-insensitive),
  * else a basename matching a sensitive-file pattern. Pure and separator-
- * agnostic — accepts Windows or POSIX separators. Drives the risk-tiered
+ * agnostic - accepts Windows or POSIX separators. Drives the risk-tiered
  * approval card and its "why this escalated" wording.
  */
 export function sensitivePathMatch(candidatePath: string): SensitivePathMatch | null {

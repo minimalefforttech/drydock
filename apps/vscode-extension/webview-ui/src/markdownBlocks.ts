@@ -2,7 +2,7 @@
  * Structural markdown block splitter, shared by the plan-docs panel and the
  * chat dev-log transcript.
  *
- * This is a STRUCTURAL classifier only — it groups source lines into headings,
+ * This is a STRUCTURAL classifier only - it groups source lines into headings,
  * paragraphs, lists, fenced code, and mermaid blocks. It never parses inline
  * markdown and never produces markup: callers build DOM nodes and assign every
  * text leaf via textContent, so raw HTML inside the source stays literal.

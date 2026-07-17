@@ -1,7 +1,7 @@
 /**
  * SQLite-backed task-changeset store (chain changesets, ADR 0014).
  *
- * One row per (subtask, repo) — `replaceForSubtask` swaps a subtask's whole
+ * One row per (subtask, repo) - `replaceForSubtask` swaps a subtask's whole
  * capture set atomically, so the table always holds only the LATEST capture
  * per subtask. Patch bytes never live here: rows carry the sha256 of a blob
  * in the content-addressed store (the planner_artifacts pattern).

@@ -10,7 +10,7 @@
  * their (mount-relative) paths into the composer.
  *
  * SECURITY: all dynamic strings (agent output, titles, mounts, model names, file
- * paths) are assigned via textContent — never innerHTML — so nothing
+ * paths) are assigned via textContent - never innerHTML - so nothing
  * agent-authored can become markup. Markdown is rendered STRUCTURALLY: the
  * splitter classifies blocks and each block is built from DOM nodes whose text
  * leaves are set with textContent, so raw HTML in output stays literal. Mermaid
@@ -54,6 +54,7 @@ import {
   statusDot
 } from "../components.js";
 import { setHelpTooltip } from "../help.js";
+import { buildMcpTogglePanel, enabledMcpCount } from "../mcpControls.js";
 import { splitBlocks, type DocBlock } from "../markdownBlocks.js";
 import { onPush, request } from "../messaging.js";
 import {
@@ -194,14 +195,14 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // The last prompt actually submitted, for the Retry button on error notices.
   let lastSentPrompt: string | null = null;
   // Set by a caller (e.g. workTab's "Create and start chat") right after it
-  // switches to this tab, BEFORE chat.startSession has resolved — there is no
+  // switches to this tab, BEFORE chat.startSession has resolved - there is no
   // session yet to select. Drives a transcript placeholder distinct from
   // `starting` (the lazy first-send spin-up on an already-selected new chat).
   let pendingSessionStart = false;
   // FIX 4: when the current turn started (for the elapsed-seconds counter on
   // the "Assistant is working…" indicator); undefined while no turn is active.
   let turnStartedAt: number | undefined;
-  // When the selected session last produced any streamed output — drives the
+  // When the selected session last produced any streamed output - drives the
   // "seconds since last response" running indicator (a growing value flags a
   // stuck turn). Reset at turn start, bumped on each transcript push.
   let lastActivityAt: number | undefined;
@@ -245,7 +246,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const expandedGroups = new Set<string>();
   let diffChanges: readonly DiffFileSummary[] = [];
   // Which frame the Changes list diffs against (This Turn / Session / Full
-  // Session). Panel-local UX state — sticky across session switches, reset on
+  // Session). Panel-local UX state - sticky across session switches, reset on
   // reload. Clone sessions ignore it (their tray is the sync surface).
   let diffView: DiffViewMode = "session";
   // Trailing debounce for mid-turn diff refreshes driven by agent.file_edit
@@ -253,7 +254,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   let diffRefreshTimer: number | undefined;
   // True once the selected session has shown ANY diff rows this panel session.
   // Keeps the tray (and its view toggle) reachable after everything is
-  // accepted — Session view is then empty but Full Session still has history.
+  // accepted - Session view is then empty but Full Session still has history.
   // Reset on session switch; a panel reload starts false again, so a fully
   // accepted session hides its tray after reload (matches pre-frame behaviour).
   let sessionHadDiffRows = false;
@@ -266,7 +267,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // switched or the next turn persists it.
   let manualModelSessionId: string | null = null;
   // Files whose diff was opened this panel session (via diff.openFile). In-memory
-  // only (not persisted) and scoped to the current selected session — cleared on
+  // only (not persisted) and scoped to the current selected session - cleared on
   // every session switch. Drives the "unreviewed" marker + Accept-all exposure.
   let openedDiffKeys = new Set<string>();
 
@@ -302,7 +303,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   setHelpTooltip(infoButton, "Show this session's runtime, workspace mounts, network policy, and write access.");
   const infoPopover = popover(infoButton, (content) => buildIsolationPopover(content));
 
-  // Summarize: copies a session digest to the clipboard — the trimmed chat
+  // Summarize: copies a session digest to the clipboard - the trimmed chat
   // log, or an AI summary generated out-of-band. Never posted into the chat.
   const summarizeButton = iconButton("⧉", "Summarize chat to clipboard", "chat-summarize-button");
   const summarizePopover = popover(summarizeButton, (content, close) => buildSummarizeMenu(content, close));
@@ -313,7 +314,30 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const overflowButton = iconButton("⋯", "More actions");
   const overflowPopover = popover(overflowButton, (content) => buildOverflowMenu(content));
 
-  header.append(backButton, titleWrap, el("span", "chat-header-spacer"), notesPopover, infoPopover, summarizePopover, overflowPopover);
+  // Dedicated new-chat button: starts a fresh chat AGAINST THE CURRENT TASK
+  // (the task owning the selected session) - the new session auto-links to it
+  // on start instead of landing as an orphan in the same workspace.
+  const newChatButton = button("＋ New chat", "ghost small chat-new-button");
+  newChatButton.title = "Start a new chat on this task";
+  newChatButton.addEventListener("click", () => {
+    newChatTaskId = currentTaskIdForNewChat();
+    resetToNewChat();
+  });
+
+  header.append(backButton, titleWrap, el("span", "chat-header-spacer"), newChatButton, notesPopover, infoPopover, summarizePopover, overflowPopover);
+
+  /** Task to auto-link the next started chat to (carried across resetToNewChat). */
+  let newChatTaskId: string | null = null;
+  function currentTaskIdForNewChat(): string | null {
+    // The shared current task (kept in sync by session selection, the Tasks
+    // tab, and the Plan picker) wins; else derive from the selected session.
+    if (state.activeTaskId !== null && state.tasks.some((task) => task.taskId === state.activeTaskId)) {
+      return state.activeTaskId;
+    }
+    const sessionId = state.selectedSessionId;
+    if (sessionId === null) return null;
+    return state.tasks.find((task) => task.linkedSessionIds.includes(sessionId))?.taskId ?? null;
+  }
 
   // --- context strip ----------------------------------------------------------
   // Runtime context stays in the scrollable body; send-time controls live in
@@ -334,6 +358,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   mountsSummary.className = "context-mounts-summary";
   const mountsBody = el("div", "context-mounts-body");
   mounts.append(mountsSummary, mountsBody);
+  // The sandbox dropdown lives INSIDE the header as its second row, above the
+  // header's bottom separator (the header wraps; this row takes full width).
+  header.append(mounts);
 
   // Debug: the raw agent stream for the current/last turn, fetched on demand.
   // Collapsed by default; opening it starts a 1s poll, closing it stops it.
@@ -354,7 +381,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   });
 
-  contextStrip.append(mounts, rawStream);
+  // The mounts dropdown is its own pinned section under the header (outside
+  // the scroll area, collapsed by default). The raw agent stream disclosure
+  // is retired from the Edit tab - debugging output belongs to System.
 
   providerSelect.addEventListener("change", () => {
     manualModelSessionId = null;
@@ -385,8 +414,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   authBanner.append(authBannerText, loginButton, recheckAuthButton);
 
   // Reclaim banner: a session marked "running in another window" is read-only
-  // here. Most often it's THIS window right after a reload — the old instance's
-  // heartbeat has not gone stale yet — so "Take over here" reclaims + revives it
+  // here. Most often it's THIS window right after a reload - the old instance's
+  // heartbeat has not gone stale yet - so "Take over here" reclaims + revives it
   // in this window (transcript replayed). If it really is another live window,
   // this takes control here regardless.
   const reclaimBanner = el("div", "reclaim-banner hidden");
@@ -499,7 +528,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       }
       if (response.payload.type === "chat.spawnRole") {
         upsertSession(state, response.payload.session);
-        logChat(`spawned ${role} session "${response.payload.session.title}" — its mounts are a subset of this session's`);
+        logChat(`spawned ${role} session "${response.payload.session.title}" - its mounts are a subset of this session's`);
         ctx.persist();
         ctx.bridge.work.render();
         renderAgentsLens();
@@ -523,7 +552,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const promptInput = document.createElement("textarea");
   promptInput.className = "prompt-input";
   promptInput.rows = 3;
-  promptInput.placeholder = "Ask the isolated agent…";
+  promptInput.placeholder = "Ask the agent…";
   promptInput.value = state.promptDraft;
   promptInput.addEventListener("input", () => {
     state.promptDraft = promptInput.value;
@@ -594,7 +623,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const attachments: ComposerAttachment[] = [];
 
   // Upload path (pasted screenshots + picked images/documents): bytes go into
-  // the live session's container at /workspace/attachments/… — no mounts
+  // the live session's container at /workspace/attachments/… - no mounts
   // change, no restart, and remote runtimes receive them over their own
   // transport. The chip's [file:…] token then points at the runtime path.
   const attachFileInput = document.createElement("input");
@@ -614,7 +643,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (files.length === 0) return;
     const sessionId = state.selectedSessionId;
     if (sessionId === null) {
-      logChat("Select or start a chat first — attachments upload into its running sandbox.");
+      logChat("Select or start a chat first - attachments upload into its running sandbox.");
       return;
     }
     for (const [index, file] of files.entries()) {
@@ -639,12 +668,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const composer = el("div", "composer");
   composer.append(attachmentsRow, promptInput, composerActions);
 
-  // Live sandbox usage for the selected chat, pinned just below the transcript —
+  // Live sandbox usage for the selected chat, pinned just below the transcript -
   // the "is this agent actually working" signal right where you're watching it.
   const sandboxStatsBar = el("div", "sandbox-stats hidden");
 
   // Sandbox preview servers (ADR 0017): a pinned strip of agent-announced
-  // preview proxies for the selected session — dot, title, Open (Simple
+  // preview proxies for the selected session - dot, title, Open (Simple
   // Browser), ↗ (external browser), ✕ stop. Previews arrive via the
   // preview.available push and are refetched per selected session.
   const previewStrip = el("div", "preview-strip hidden");
@@ -671,7 +700,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       chipEl.append(statusDot("state-live", "preview server running"));
       const title = el("span", "preview-chip-title");
       title.textContent = preview.title;
-      title.title = `${preview.url} (container port ${String(preview.containerPort)}) — agent-served content`;
+      title.title = `${preview.url} (container port ${String(preview.containerPort)}) - agent-served content`;
       chipEl.append(title);
       const open = button("Open", "ghost small preview-open");
       open.addEventListener("click", () => {
@@ -762,8 +791,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // explains the vocabulary shift (pull/push vs accept/discard). Shown only for
   // a clone session; hidden on the diff path.
   const cloneCaption = el("div", "clone-caption hidden");
-  cloneCaption.textContent = "Clone sync — changes move by pull/push, not accept/discard";
-  // View toggle: which frame the list diffs against. Session sessions only —
+  cloneCaption.textContent = "Clone sync - changes move by pull/push, not accept/discard";
+  // View toggle: which frame the list diffs against. Session sessions only -
   // hidden for clone sessions (sync surface) and the no-session workspace scope.
   const DIFF_VIEWS: readonly { readonly id: DiffViewMode; readonly label: string; readonly hint: string }[] = [
     { id: "turn", label: "This Turn", hint: "Changes since your last message" },
@@ -825,19 +854,31 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // Owner order: pinned top bar → scrollable chat body → docked composer. The
   // header sits OUTSIDE chat-scroll so it stays pinned while the transcript
   // scrolls under it. The Changes tray (changes.details) is docked directly
-  // above the composer — collapsed by default, hidden entirely when empty.
+  // above the composer - collapsed by default, hidden entirely when empty.
   const chatScroll = el("div", "chat-scroll");
   chatScroll.append(
     contextStrip,
     authBanner,
-    reclaimBanner,
     transcriptRegion,
     questionCardsWrap
   );
   changes.details.classList.add("changes-tray");
   const composerDock = el("div", "composer-dock");
   composerDock.append(changes.details, composer);
-  root.append(header, chatScroll, previewStrip, sandboxStatsBar, composerDock);
+  // Busy line: an explicit spinner for the slow host phases (sandbox boot,
+  // history load) so the panel never looks idle while it is working.
+  const busyLine = el("div", "chat-busy-line hidden");
+  const busySpinner = el("span", "spinner");
+  const busyText = el("span", "chat-busy-text");
+  busyLine.append(busySpinner, busyText);
+  function setBusyLine(text: string | null): void {
+    busyLine.classList.toggle("hidden", text === null);
+    if (text !== null) busyText.textContent = text;
+  }
+
+  // The reclaim banner ("running in another window - take over here") is
+  // pinned OUTSIDE the scroll area so the action never hides below the fold.
+  root.append(header, busyLine, reclaimBanner, chatScroll, previewStrip, sandboxStatsBar, composerDock);
 
   // --- drag-drop: file paths from the explorer/OS into the composer -----------
   wireComposerDropTarget();
@@ -891,7 +932,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       if (payload.status === "cancelled") {
         appendSystemMessage("You stopped this turn. Send another message to continue, or End the session to shut the agent down.");
       } else if (payload.status === "completed" && !folder.sawAssistantTextThisTurn) {
-        appendSystemMessage("The agent finished this turn without producing any output. If this keeps happening, check the Launch command in the session menu and the System tab — the backend may not be running correctly.", "info", true);
+        appendSystemMessage("The agent finished this turn without producing any output. If this keeps happening, check the Launch command in the session menu and the System tab - the backend may not be running correctly.", "info", true);
       }
       // SEEN SIGNAL: the user is watching this session, so pull any lines we
       // missed AND tell the host we've seen the completed turn (a timeline
@@ -910,7 +951,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   });
   onPush("run.failed", (payload) => {
-    logChat(`failed — ${payload.message}`);
+    logChat(`failed - ${payload.message}`);
     setTurnActive(false);
     starting = false;
     refreshControls();
@@ -957,7 +998,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     setTranscriptView(payload.nodeId === undefined ? "log" : "agents");
   });
   onPush("session.summaryReady", (payload) => {
-    // Match the summary's own session, not the current selection — the user
+    // Match the summary's own session, not the current selection - the user
     // may have switched chats while the model was writing.
     if (summarizeBusySessionId !== null && payload.sessionId !== summarizeBusySessionId) return;
     setSummarizePending(null);
@@ -1005,9 +1046,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const basePrompt = promptInput.value.trim();
     if (!basePrompt || starting || backendBusy) return;
     if (turnActive) {
-      // A turn is still running — don't silently swallow the message (the old
+      // A turn is still running - don't silently swallow the message (the old
       // behaviour, which made the chat look dead after a Stop that didn't take).
-      appendSystemMessage("A turn is still running. Press Stop to interrupt it — or End the session to shut the agent down — then send again.");
+      appendSystemMessage("A turn is still running. Press Stop to interrupt it - or End the session to shut the agent down - then send again.");
       return;
     }
     const model = currentModelSelection();
@@ -1021,7 +1062,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     lastSentPrompt = prompt;
     ctx.persist();
 
-    // Send to the selected session whenever it is live in this window — even if
+    // Send to the selected session whenever it is live in this window - even if
     // the composer's provider dropdown differs (the host surfaces a genuine
     // provider mismatch as a visible error). Previously a mismatch fell through
     // and silently started a BRAND-NEW chat, which looked like "nothing happened".
@@ -1045,7 +1086,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
 
     // A SELECTED but offline session (ended/failed, or its backend was lost on
-    // reload) is REVIVED, not replaced — its durable transcript + context survive
+    // reload) is REVIVED, not replaced - its durable transcript + context survive
     // the new backend. Only a brand-new chat (nothing selected) clears the log.
     if (selected !== undefined) {
       await reviveAndSend(selected, prompt, model);
@@ -1064,13 +1105,15 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         ? ` · set (${workspace.mode})`
         : ` · auto (${workspace.mode})`
       : "";
-    logChat(`starting isolated micro-VM for ${model.providerId}${model.model ? `/${model.model}` : ""}${workspaceNote} (takes a few seconds)…`);
+    logChat(`starting micro-VM for ${model.providerId}${model.model ? `/${model.model}` : ""}${workspaceNote} (takes a few seconds)…`);
+    setBusyLine("Starting the sandbox and agent - this takes a few seconds…");
     const response = await request({
       type: "chat.start",
       prompt,
       model,
       ...(workspace ? { workspace } : {})
     });
+    setBusyLine(null);
     starting = false;
     if (!response.ok) {
       appendSystemMessage(`Couldn't start the chat backend: ${response.error.message}`, "error", true);
@@ -1080,6 +1123,18 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (response.payload.type === "chat.start") {
       upsertSession(state, response.payload.session);
       state.selectedSessionId = response.payload.session.sessionId;
+      if (newChatTaskId !== null) {
+        const linkTaskId = newChatTaskId;
+        newChatTaskId = null;
+        void request({ type: "task.link", taskId: linkTaskId, sessionId: response.payload.session.sessionId }).then((linkResponse) => {
+          if (!linkResponse.ok) {
+            logChat(`link to task failed: ${linkResponse.error.message}`);
+          } else {
+            logChat("chat linked to the current task");
+            ctx.bridge.work.refresh();
+          }
+        });
+      }
       manualModelSessionId = null;
       state.lastSequence = 0;
       state.chatMessages = [];
@@ -1102,9 +1157,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   /**
-   * Revives an offline session HERE — replaying its durable transcript so the
+   * Revives an offline session HERE - replaying its durable transcript so the
    * chat history + context survive the new backend (restarting the container is
-   * fine) — then sends the queued prompt. An `active`/`starting` row (backend
+   * fine) - then sends the queued prompt. An `active`/`starting` row (backend
    * lost on reload, or "owned" by another window) is force-reclaimed; an
    * ended/failed row resumes normally, re-mounting the open folders.
    */
@@ -1129,7 +1184,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const providerChanged = normalizeProviderId(session.providerId) !== model.providerId;
     const isActive = session.status === "active" || session.status === "starting";
     // Force-switching a session that's still running (active) destroys its live
-    // container — confirm first. Ended/failed sessions are already down, so a
+    // container - confirm first. Ended/failed sessions are already down, so a
     // provider change on revive needs no prompt.
     if (providerChanged && isActive) {
       if (!(await confirmProviderSwitch(session.providerId, model.providerId))) {
@@ -1147,8 +1202,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     setWorkingIndicatorTicking(true);
     refreshControls();
     appendSystemMessage(providerChanged
-      ? `Switching this chat to ${providerLabel(model.providerId)} — restarting the backend and replaying context…`
-      : "Reconnecting the chat — history, context, and project mounts are kept…");
+      ? `Switching this chat to ${providerLabel(model.providerId)} - restarting the backend and replaying context…`
+      : "Reconnecting the chat - history, context, and project mounts are kept…");
     // Send the composer model so a provider switch rebuilds the sandbox for the
     // NEW agent (resuming without it booted the OLD provider, then the turn failed
     // with a provider mismatch). Send NO workspace: the host re-mounts the
@@ -1197,7 +1252,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (!session) return;
     const selection = currentModelSelection();
     const providerChanged = normalizeProviderId(session.providerId) !== selection.providerId;
-    // A model-only change (same provider) needs no restart — it rides the next
+    // A model-only change (same provider) needs no restart - it rides the next
     // turn. Only a provider change reboots the container, so confirm that first.
     if (!providerChanged) return;
     if (!(await confirmProviderSwitch(session.providerId, selection.providerId))) {
@@ -1212,7 +1267,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     reconnectLabel = `Switching to ${providerLabel(selection.providerId)}…`;
     setWorkingIndicatorTicking(true);
     refreshControls();
-    appendSystemMessage(`Switching this chat to ${providerLabel(selection.providerId)} — restarting the backend and replaying context…`);
+    appendSystemMessage(`Switching this chat to ${providerLabel(selection.providerId)} - restarting the backend and replaying context…`);
     const response = await request({ type: "chat.restartBackend", sessionId: state.selectedSessionId, model: selection });
     backendBusy = false;
     reconnecting = false;
@@ -1346,7 +1401,29 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function buildOverflowMenu(content: HTMLElement): void {
-    const newChat = menuItem("New chat", () => resetToNewChat());
+    const sandboxTerminal = menuItem("Open sandbox terminal", () => {
+      if (state.selectedSessionId === null) return;
+      void request({ type: "terminal.attach", sessionId: state.selectedSessionId }).then((response) => {
+        if (!response.ok) logChat(`open terminal failed: ${response.error.message}`);
+      });
+    });
+    content.append(sandboxTerminal);
+    // Context debug: an untitled markdown doc composing everything this chat's
+    // briefing carries (mounts, memories, MCP, instructions), each section
+    // annotated with where it came from.
+    const contextDebug = menuItem("Context debug", () => {
+      if (state.selectedSessionId === null) return;
+      void request({ type: "chat.contextDebug", sessionId: state.selectedSessionId }).then((response) => {
+        if (!response.ok) logChat(`context debug failed: ${response.error.message}`);
+      });
+    });
+    content.append(contextDebug);
+    const newChat = menuItem("New chat", () => {
+      // Menu path carries the current task too - a new chat from an existing
+      // session's menu belongs to that session's task, not to limbo.
+      newChatTaskId = currentTaskIdForNewChat();
+      resetToNewChat();
+    });
     // A session running elsewhere is owned by another window: Restart/End/Delete
     // are refused. "Take over here" reclaims it into this window; New chat too.
     if (selectedRunsElsewhere()) {
@@ -1414,7 +1491,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       close();
       void summarizeAction("log");
     });
-    log.title = "The conversation plus files touched — commands, thinking, and host preamble trimmed.";
+    log.title = "The conversation plus files touched - commands, thinking, and host preamble trimmed.";
     const ai = menuItem("Copy AI summary", () => {
       close();
       void summarizeAction("ai");
@@ -1427,7 +1504,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       // The chat log reads durable rows and works for any session; the AI
       // summary rides the session's live backend in THIS window.
       ai.classList.add("disabled");
-      ai.title = "AI summary needs the session's backend live in this window — resume it first.";
+      ai.title = "AI summary needs the session's backend live in this window - resume it first.";
     }
     if (!hasNetworkedAiAllocation()) {
       ai.classList.add("disabled");
@@ -1454,7 +1531,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       return;
     }
     // AI mode is only STARTED here; completion arrives as session.summaryReady.
-    logChat("AI summary started — it will land on the clipboard when ready");
+    logChat("AI summary started - it will land on the clipboard when ready");
   }
 
   function setSummarizePending(sessionId: string | null): void {
@@ -1471,7 +1548,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       summarizeSafetyTimer = window.setTimeout(() => {
         setSummarizePending(null);
         markSummarizeButton("!");
-        logChat("AI summary is taking too long — the clipboard will still update if it completes");
+        logChat("AI summary is taking too long - the clipboard will still update if it completes");
       }, 300_000);
     }
   }
@@ -1489,7 +1566,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     backendBusy = true;
     refreshControls();
     const selection = currentModelSelection();
-    logChat(`restarting backend with ${selection.providerId}${selection.model ? `/${selection.model}` : ""} — context is replayed`);
+    logChat(`restarting backend with ${selection.providerId}${selection.model ? `/${selection.model}` : ""} - context is replayed`);
     const response = await request({ type: "chat.restartBackend", sessionId: state.selectedSessionId, model: selection });
     backendBusy = false;
     if (!response.ok) {
@@ -1518,7 +1595,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (backendBusy || starting || turnActive) return;
     backendBusy = true;
     refreshControls();
-    logChat("resuming backend on a fresh runtime — context + original project mounts are replayed (takes a few seconds)…");
+    logChat("resuming backend on a fresh runtime - context + original project mounts are replayed (takes a few seconds)…");
     const response = await request({
       type: "chat.resumeSession",
       sessionId: session.sessionId
@@ -1529,7 +1606,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     } else if (response.payload.type === "chat.resumeSession") {
       upsertSession(state, response.payload.session);
       state.providerCatalogs = [...response.payload.providerCatalogs];
-      logChat("session resumed on a fresh backend — context replayed");
+      logChat("session resumed on a fresh backend - context replayed");
       renderHeader();
       renderProviderControls();
       renderFacts();
@@ -1573,7 +1650,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // Loaders
   // ---------------------------------------------------------------------------
   async function loadTimeline(sessionId: string): Promise<void> {
+    setBusyLine("Loading chat history…");
     const response = await request({ type: "session.timeline", sessionId });
+    setBusyLine(null);
     if (!response.ok || response.payload.type !== "session.timeline") return;
     if (state.selectedSessionId !== sessionId) return;
     state.chatMessages = [];
@@ -1603,7 +1682,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   /**
    * Incremental timeline sync + SEEN SIGNAL. Requests only lines past
    * `lastSequence` (`fromSequence`), APPENDS them through the normal transcript
-   * path (no transcript reset), and — as a side effect the host relies on — the
+   * path (no transcript reset), and - as a side effect the host relies on - the
    * very act of requesting this session's timeline clears its turn attention, so
    * the activity-bar badge clears while the user watches. The tail is usually
    * empty; this stays cheap.
@@ -1717,7 +1796,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   /** Logs one diagnostics line from a sync result: its message + any conflicts. */
   function logCloneResult(result: CloneSyncResult): void {
     const conflicts = result.conflictedFiles.length > 0
-      ? ` — conflicts: ${result.conflictedFiles.join(", ")}`
+      ? ` - conflicts: ${result.conflictedFiles.join(", ")}`
       : "";
     logChat(`${result.message}${conflicts}`);
   }
@@ -1740,7 +1819,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   /**
    * Accumulates streamed agent.reasoning text into the live "Thinking"
    * disclosure (see workingIndicatorRow). Not persisted into
-   * state.chatMessages — it is a live-turn affordance only, so a reload
+   * state.chatMessages - it is a live-turn affordance only, so a reload
    * loses in-flight reasoning the same way it already loses the working
    * indicator itself; the shouldPersist param is accepted for symmetry with
    * the other appendX functions (replay calls it with false).
@@ -1758,7 +1837,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   /**
    * A visible in-transcript notice. Turn errors, stopped/empty turns, and send
-   * failures used to land only in the hidden Diagnostics feed — so a chat that
+   * failures used to land only in the hidden Diagnostics feed - so a chat that
    * did nothing looked stuck with no explanation. This surfaces them inline.
    */
   function appendSystemMessage(text: string, tone: "error" | "info" = "info", retry = false): void {
@@ -1766,8 +1845,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const canRetry = retry && lastSentPrompt !== null;
     // A Docker Sandbox (host session) auth failure gets a one-click sbx sign-in.
     const signIn = /sbx login|not authenticated|Docker Sandbox session|no valid user session|secret not found/i.test(text);
-    // A PROVIDER auth failure — the agent itself isn't signed in for the sandbox
-    // (Claude "Not logged in · Please run /login", Codex 401) — gets a one-click
+    // A PROVIDER auth failure - the agent itself isn't signed in for the sandbox
+    // (Claude "Not logged in · Please run /login", Codex 401) - gets a one-click
     // "Authenticate <provider>" button that runs the provider's sbx-secret login.
     const providerAuth = !signIn && /not logged in|please run \/login|authentication_failed|apikeysource\W+none|invalid api key|401 unauthorized|needs[- ]login/i.test(text);
     const authProviderId = providerAuth ? selectedProviderId() : undefined;
@@ -1815,6 +1894,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const changed = turnActive !== next;
     turnActive = next;
     turnStartedAt = next ? Date.now() : undefined;
+    // No live turn → nothing may blink: clear stale streaming flags so the
+    // stream cursor never pulses on an idle/dead session (it reads as "working").
+    if (!next && state.chatMessages.some((message) => message.streaming === true)) {
+      state.chatMessages = state.chatMessages.map((message) =>
+        message.streaming === true ? { ...message, streaming: false } : message);
+    }
     // Seed last-activity to turn start; transcript pushes bump it as output arrives.
     if (next) lastActivityAt = Date.now();
     setWorkingIndicatorTicking(next);
@@ -1841,7 +1926,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     // Hierarchy: a small muted line above the title naming the parent task,
     // shown only when the selected session belongs to a subtask (the main
     // title already shows the subtask's own name via session.title). A
-    // session linked directly to a task (no subtask) shows no parent line —
+    // session linked directly to a task (no subtask) shows no parent line -
     // the title already names it.
     const parentTitle = pendingSessionStart ? undefined : subtaskParentTitleForSelectedSession();
     titleParentLabel.textContent = parentTitle ?? "";
@@ -1857,9 +1942,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       else { stateClass = "state-live"; label = "live"; }
     } else if (session !== undefined) {
       // Selected but its backend is not live here (ended, or lost on reload).
-      // Not a lock — sending a message reconnects it with its context.
+      // Not a lock - sending a message reconnects it with its context.
       stateClass = "state-offline";
-      label = "offline — send a message to reconnect";
+      label = "offline - send a message to reconnect";
     }
     statusDotEl.className = `status-dot ${stateClass}`;
     statusDotEl.title = label;
@@ -1897,11 +1982,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     mountsBody.replaceChildren();
     const iso = state.lastIsolation;
     const live = state.selectedSessionId !== null && isSessionLiveish(state, state.selectedSessionId);
-    // Clone session: no live root mounts — the mounts details lists the clones
+    // Clone session: no live root mounts - the mounts details lists the clones
     // (`clone: <name>@<branch>`) plus a "no live mounts" note. Reuses cloneRepos
     // from the clone.state fetch the Changes section already drives.
     if (isCloneSelected()) {
-      mountsSummary.textContent = `${String(cloneRepos.length)} clone${cloneRepos.length === 1 ? "" : "s"} · no live mounts`;
+      mountsSummary.textContent = `FileMap: ${String(cloneRepos.length)} clone${cloneRepos.length === 1 ? "" : "s"}, no live mounts`;
       for (const repo of cloneRepos) {
         const row = el("div", "context-mount-row");
         const chipEl = el("span", "chip mode-clone");
@@ -1912,13 +1997,16 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         mountsBody.append(row);
       }
       const note = el("div", "empty");
-      note.textContent = "no live mounts — changes reach you through sync";
+      note.textContent = "no live mounts - changes reach you through sync";
       mountsBody.append(note);
       return;
     }
     if (live && iso !== null) {
       const rw = iso.mounts.some((m) => m.mode === "read-write");
-      mountsSummary.textContent = `${String(iso.mounts.length)} mount${iso.mounts.length === 1 ? "" : "s"} · ${rw ? "rw" : "ro"}`;
+      const mcpSuffix = state.mcpServers.length > 0
+        ? ` · MCP: ${String(enabledMcpCount(state, sessionMcpContext() ?? { scope: "session", refId: "" }))} on`
+        : "";
+      mountsSummary.textContent = `FileMap: ${String(iso.mounts.length)} mount${iso.mounts.length === 1 ? "" : "s"} · ${rw ? "rw" : "ro"}${mcpSuffix}`;
       if (iso.mounts.length === 0) {
         const empty = el("div", "empty");
         empty.textContent = "No mounts.";
@@ -1926,17 +2014,19 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         return;
       }
       appendMountRows(iso.mounts);
+      appendGrantAndSpecialRows();
+      appendMcpRows();
       return;
     }
     // Before a session starts: the summary shows the upcoming context.
     const plannedMounts = plannedWorkspaceMounts();
     if (state.selectedWorkspaceSetId) {
       const set = state.workspacePolicy?.workspaceSets.find((s) => s.workspaceSetId === state.selectedWorkspaceSetId);
-      mountsSummary.textContent = set ? `Set: ${set.name}` : "Set selected";
+      mountsSummary.textContent = set ? `FileMap: set ${set.name}` : "FileMap: set selected";
     } else if (state.openFolderNames.length > 0) {
-      mountsSummary.textContent = `Auto: ${state.openFolderNames.join(", ")}`;
+      mountsSummary.textContent = `FileMap: ${state.openFolderNames.join(", ")}`;
     } else {
-      mountsSummary.textContent = "No mounts";
+      mountsSummary.textContent = "FileMap: none yet";
     }
     if (plannedMounts.length === 0) {
       const empty = el("div", "empty");
@@ -1955,12 +2045,84 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       const modeChip = el("span", `chip mode-${mount.mode === "read-write" ? "read-write" : "read-only"}`);
       modeChip.textContent = mount.mode === "read-write" ? "rw" : "ro";
       const path = el("span", "context-mount-path");
-      const { text, title } = mountPathText(mount, prefix);
-      path.textContent = text;
-      if (title) path.title = title;
+      path.textContent = `${prefix ? `${prefix} · ` : ""}${mount.runtimePath}`;
       row.append(modeChip, path);
+      // The host↔sandbox mapping renders INLINE (dim second line), never as a
+      // hover tooltip - the dropdown is the one place to read the full map.
+      if (mount.hostDisplayPath !== undefined && !mountIsDirectlyAvailable(mount)) {
+        const host = el("span", "context-mount-host");
+        host.textContent = `← ${mount.hostDisplayPath}`;
+        row.append(host);
+      }
       mountsBody.append(row);
     }
+  }
+
+  /**
+   * Granted directories + host-managed sandbox dirs (uploads, prototype
+   * themes) for the live session's mounts dropdown - everything the agent can
+   * reach, in one list, no tooltips required.
+   */
+  function appendGrantAndSpecialRows(): void {
+    const sessionId = state.selectedSessionId;
+    if (sessionId === null) return;
+    const grants = (state.workspacePolicy?.accessRequests ?? [])
+      .filter((candidate) => candidate.sessionId === sessionId && candidate.status === "approved");
+    for (const grant of grants) {
+      const row = el("div", "context-mount-row");
+      const modeChip = el("span", `chip mode-${grant.mode === "read-write" ? "read-write" : "read-only"}`);
+      modeChip.textContent = grant.mode === "read-write" ? "rw" : "ro";
+      const path = el("span", "context-mount-path");
+      path.textContent = grant.displayPath;
+      const tag = el("span", "context-mount-tag");
+      tag.textContent = "granted";
+      row.append(modeChip, path, tag);
+      mountsBody.append(row);
+    }
+    for (const special of [
+      { path: "/workspace/attachments", note: "your uploads land here" },
+      { path: "/workspace/.drydock-themes", note: "prototype theme packs" }
+    ]) {
+      const row = el("div", "context-mount-row context-mount-special");
+      const modeChip = el("span", "chip mode-read-write");
+      modeChip.textContent = "rw";
+      const path = el("span", "context-mount-path");
+      path.textContent = special.path;
+      const note = el("span", "context-mount-host");
+      note.textContent = special.note;
+      row.append(modeChip, path, note);
+      mountsBody.append(row);
+    }
+  }
+
+  /** The selected session's MCP scope context (task + workspace inheritance from its owning tasks). */
+  function sessionMcpContext(): { scope: "session"; refId: string; taskIds: string[]; workspaceSetIds: string[] } | null {
+    const sessionId = state.selectedSessionId;
+    if (sessionId === null) return null;
+    const owningTasks = state.tasks.filter((task) => task.linkedSessionIds.includes(sessionId));
+    return {
+      scope: "session",
+      refId: sessionId,
+      taskIds: owningTasks.map((task) => task.taskId),
+      workspaceSetIds: owningTasks.flatMap((task) => task.linkedWorkspaceSetIds)
+    };
+  }
+
+  /**
+   * Per-chat MCP toggles inside the FileMap dropdown: the effective server
+   * list with tri-state rows and an "inherited from …" note per row. One
+   * click flips a server for THIS chat only; applies next turn.
+   */
+  function appendMcpRows(): void {
+    const context = sessionMcpContext();
+    if (context === null || state.mcpServers.length === 0) return;
+    const wrap = el("div", "context-mcp");
+    const rerender = (): void => {
+      wrap.replaceChildren();
+      buildMcpTogglePanel(wrap, state, context, rerender);
+    };
+    rerender();
+    mountsBody.append(wrap);
   }
 
   function plannedWorkspaceMounts(): DisplayMount[] {
@@ -1994,7 +2156,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   /**
    * FIX 2: true when a mount's runtime path IS the sandbox mirror of its host
-   * path — i.e. "directly available" at the location a user would expect from
+   * path - i.e. "directly available" at the location a user would expect from
    * the host path, so the `← hostDisplayPath` arrow would be pure noise. This
    * is the common case (auto-mounted project roots); only an approved mount
    * placed somewhere else in the sandbox genuinely needs the arrow.
@@ -2004,7 +2166,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   /**
-   * FIX 2: the mount-line text (mode chip aside) — `<runtimePath>` alone when
+   * FIX 2: the mount-line text (mode chip aside) - `<runtimePath>` alone when
    * directly available (with a "direct" marker via title/suffix), else
    * `<runtimePath> ← <hostDisplayPath>` when they genuinely differ.
    */
@@ -2131,7 +2293,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   /**
    * Applies a (provider, model) pick from the model tree by driving the hidden
-   * selects and reusing their change handlers — a provider change fires the
+   * selects and reusing their change handlers - a provider change fires the
    * confirm-and-restart flow (onSelectionChange), a same-provider change just
    * records the model for the next turn.
    */
@@ -2236,11 +2398,19 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function renderChat(pinToBottom = true): void {
+    // Idle sessions must never blink: timeline replays can leave the LAST
+    // assistant message flagged streaming (no terminal event in old
+    // transcripts), so strip stale flags at render time whenever no turn is
+    // actually running - this covers every path (replay, resume, reload).
+    if (!turnActive && state.chatMessages.some((message) => message.streaming === true)) {
+      state.chatMessages = state.chatMessages.map((message) =>
+        message.streaming === true ? { ...message, streaming: false } : message);
+    }
     // The lens strip appears once a session is selected; the spawn-role
     // control only for live-in-this-window sessions (a child needs a live
     // parent to inherit mounts from).
     const session = currentSession(state);
-    // pendingSessionStart wins outright — see renderHeader for why a stale
+    // pendingSessionStart wins outright - see renderHeader for why a stale
     // previously-selected session must not show through here either.
     lensStrip.classList.toggle("hidden", pendingSessionStart || session === undefined);
     spawnRoleSelect.classList.add("hidden");
@@ -2256,7 +2426,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       // detail for clone sessions, not a first-run chat mode.
       const empty = el("div", "chat-empty");
       const lead = el("div", "chat-empty-lead");
-      lead.textContent = "Ask the isolated agent to start.";
+      lead.textContent = "Ask the agent to start.";
       const modes = el("div", "chat-empty-modes");
       modes.textContent = "Edit sessions change your mounted files · planning lives in the Plan tab";
       empty.append(lead, modes);
@@ -2268,7 +2438,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
     // FIX 4: while a turn is running, a bottom-of-transcript activity
     // indicator fills the gap between turnStarted and the first streamed
-    // output (previously blank — looked stuck). Removed as soon as the turn
+    // output (previously blank - looked stuck). Removed as soon as the turn
     // ends (setTurnActive(false) re-renders without it) UNLESS reasoning was
     // captured this turn, in which case its disclosure persists (collapsed,
     // relabeled "Thought for Ns") until the next turn starts.
@@ -2298,7 +2468,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * FIX 4 (+ reasoning follow-up): activity indicator appended at the bottom
    * of the transcript for the duration of a running turn, filling the gap
    * between turnStarted and the first streamed output. Reasoning (agent.text
-   * "thinking" — Claude thinking blocks, Codex reasoning items) is now
+   * "thinking" - Claude thinking blocks, Codex reasoning items) is now
    * captured as agent.reasoning events (see applyTranscriptLine/
    * appendReasoning above); when any has arrived this turn, the indicator
    * becomes the live "Thinking" disclosure instead of the generic dots row,
@@ -2317,10 +2487,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     });
   }
 
-  /** "Give it a poke?" — a soft turn/interrupt to try to break a quiet standoff. */
+  /** "Give it a poke?" - a soft turn/interrupt to try to break a quiet standoff. */
   function pokeButton(): HTMLElement {
     const btn = button("Give it a poke?", "small chat-poke");
-    btn.title = "Nudge the agent with a graceful interrupt to try to break a standoff — the session and container stay alive.";
+    btn.title = "Nudge the agent with a graceful interrupt to try to break a standoff - the session and container stay alive.";
     btn.addEventListener("click", () => {
       const sessionId = state.selectedSessionId;
       if (!sessionId) return;
@@ -2334,9 +2504,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
           return;
         }
         if (response.payload.type === "chat.poke" && response.payload.poked) {
-          appendSystemMessage("Poked the agent — asked it to wrap up the current step. Give it a moment; if nothing changes, Stop the turn or End the session.");
+          appendSystemMessage("Poked the agent - asked it to wrap up the current step. Give it a moment; if nothing changes, Stop the turn or End the session.");
         } else {
-          appendSystemMessage("Nothing to poke here — the turn isn't live in this window. Try Stop, or send again to reconnect.");
+          appendSystemMessage("Nothing to poke here - the turn isn't live in this window. Try Stop, or send again to reconnect.");
         }
       });
     });
@@ -2348,7 +2518,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * text as it arrives, collapsed by default so it never dominates the
    * transcript (the user opts in to reading it). `live` selects the summary
    * label ("Thinking… (Ns)" while the turn runs vs. "Thought for Ns" once it
-   * ends) and whether the pulsing dots render — CSS handles the
+   * ends) and whether the pulsing dots render - CSS handles the
    * prefers-reduced-motion fallback the same way workingIndicatorRow does.
    * Content renders via textContent only (CSP): no markdown, just the raw
    * reasoning stream.
@@ -2391,7 +2561,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const { text, lastChunkAt } = response.payload;
     const atBottom = rawStreamBody.scrollHeight - rawStreamBody.scrollTop - rawStreamBody.clientHeight < 40;
     rawStreamBody.textContent = text.length === 0
-      ? "No raw output captured yet — send a message to start a turn."
+      ? "No raw output captured yet - send a message to start a turn."
       : text;
     if (atBottom) rawStreamBody.scrollTop = rawStreamBody.scrollHeight;
     rawStreamMeta.textContent = lastChunkAt === null ? "" : `· ${String(secondsSince(lastChunkAt))}s since last output`;
@@ -2422,12 +2592,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const value = el("span", "sandbox-stats-value");
     if (!stats.available) {
       // Running, but the host couldn't measure it (non-Windows, or the probe
-      // failed) — show the bar so it's visible rather than silently absent.
+      // failed) - show the bar so it's visible rather than silently absent.
       value.textContent = "usage unavailable";
     } else {
       const parts = [
         `CPU ${stats.cpuPercent === null ? "…" : `${String(Math.round(stats.cpuPercent))}%`}`,
-        `mem ${stats.memBytes === null ? "—" : formatStatBytes(stats.memBytes)}`,
+        `mem ${stats.memBytes === null ? "-" : formatStatBytes(stats.memBytes)}`,
         `IO ↓${formatStatRate(stats.ioReadBytesPerSec)} ↑${formatStatRate(stats.ioWriteBytesPerSec)}`
       ];
       if (stats.threads !== null) parts.push(`${String(stats.threads)} thr`);
@@ -2441,7 +2611,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const sessionId = state.selectedSessionId;
     // Only gate on being on the Chat tab with a session selected; the backend
     // returns null when there's no running sandbox, which hides the bar. (Do NOT
-    // gate on isSessionLiveish — a running runtime can exist even when the
+    // gate on isSessionLiveish - a running runtime can exist even when the
     // window's `live` flag is momentarily stale, which was hiding the bar.)
     if (state.activeTab !== "chat" || !sessionId) {
       renderSandboxStats(null);
@@ -2496,6 +2666,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   /** Surface-specific hooks for the shared row renderer (chat/messageRow.ts). */
   const messageRowContext: MessageRowContext = {
     authorLabel: () => authorLabel(),
+    turnActive: () => turnActive,
     openLink: (href) => {
       void request({ type: "chat.openFile", path: href });
     },
@@ -2628,7 +2799,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   /**
-   * One subagent's collapsible group block. Collapsed by default —
+   * One subagent's collapsible group block. Collapsed by default -
    * the header ticks live (status, counts, last activity) so a resting log
    * stays scannable; expanding reveals the child's own dev-log, nested child
    * groups (depth-N), the prompt it was given, and its result. All dynamic
@@ -2695,7 +2866,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
     if (group.entries.length === 0 && sessionSubagentTier() === "lifecycle") {
       const note = el("div", "agent-group-note");
-      note.textContent = "This transport reports subagent lifecycle only — no per-agent feed.";
+      note.textContent = "This transport reports subagent lifecycle only - no per-agent feed.";
       body.append(note);
     }
     for (const entry of group.entries) {
@@ -2806,7 +2977,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       agentsLens.append(empty);
     } else if (tier === "lifecycle") {
       const note = el("div", "agents-lens-empty");
-      note.textContent = "Lifecycle-tier transport: spawn, status and result are tracked — per-agent feeds are not reported.";
+      note.textContent = "Lifecycle-tier transport: spawn, status and result are tracked - per-agent feeds are not reported.";
       agentsLens.append(note);
     }
   }
@@ -3139,8 +3310,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       access: {
         onResolved: (approve) => {
           logChat(approve
-            ? "access approved — backend restarts with the new mount; the agent continues automatically"
-            : "access denied — the agent is told to continue without it");
+            ? "access approved - backend restarts with the new mount; the agent continues automatically"
+            : "access denied - the agent is told to continue without it");
           void loadWorkspaceStateAndReconcile();
         },
         onError: (message) => {
@@ -3220,7 +3391,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    */
   function renderChangedFiles(): void {
     // Clone session: the Changes section becomes the sync surface. This is a
-    // clean toggle — clone rows come from cloneRepos, never from diffChanges — so
+    // clean toggle - clone rows come from cloneRepos, never from diffChanges - so
     // the diff and clone data sources never tangle.
     if (isCloneSelected()) {
       renderCloneChanges();
@@ -3249,7 +3420,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     autoExpandChangesOnGrowth(count);
     if (diffChanges.length > 0) sessionHadDiffRows = true;
     // Empty-hide: a session that never showed a diff row hides the tray
-    // entirely, but ONLY in the default Session view — in This Turn / Full
+    // entirely, but ONLY in the default Session view - in This Turn / Full
     // Session an empty list is an answer ("nothing this turn"), and once rows
     // existed the tray must stay reachable or accepting everything would
     // strand the toggle away from the Full Session history. The no-session
@@ -3323,9 +3494,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     cloneActions.classList.remove("hidden");
     cloneCaption.classList.remove("hidden");
     snapshotButton.classList.add("hidden");
-    // The clone tray is a sync surface, not a review frame — no view toggle.
+    // The clone tray is a sync surface, not a review frame - no view toggle.
     diffViewToggle.classList.add("hidden");
-    // Clone sessions use the tray as the sync surface — always shown, never
+    // Clone sessions use the tray as the sync surface - always shown, never
     // empty-hidden (the empty state explains where the agent's changes land).
     changes.details.classList.remove("hidden");
     const total = cloneRepos.reduce((sum, repo) => sum + repo.files.length, 0);
@@ -3362,11 +3533,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     glyph.title = file.changeKind;
 
     // Conflicted rows carry a ⚠ marker plus a small `conflict` chip, so the
-    // state is named as a word, not glyph-only — same pill idiom as the CLONE chip.
+    // state is named as a word, not glyph-only - same pill idiom as the CLONE chip.
     if (file.conflicted === true) {
       const warn = el("span", "conflict-marker");
       warn.textContent = "⚠";
-      warn.title = "Conflict markers present — resolve in the editor";
+      warn.title = "Conflict markers present - resolve in the editor";
       warn.setAttribute("aria-label", "conflicted");
       const conflictChip = el("span", "chip chip-conflict");
       conflictChip.textContent = "conflict";
@@ -3418,7 +3589,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   /**
-   * Writes the docked tray's summary label — "<n> file(s) changed  +A  −R",
+   * Writes the docked tray's summary label - "<n> file(s) changed  +A  −R",
    * colouring the added/removed counts. Line stats are omitted (null) for the
    * legacy in-memory fallback and for clone sync, which have no per-file diff.
    */
@@ -3438,7 +3609,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   /**
    * Opens the (collapsed) Changes section when the changed-file count grows
-   * within the SAME session — so a new edit surfaces without a click. A session
+   * within the SAME session - so a new edit surfaces without a click. A session
    * switch only re-baselines the count (no auto-open on selecting an old chat).
    */
   function autoExpandChangesOnGrowth(count: number): void {
@@ -3465,11 +3636,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     glyph.title = change.changeKind;
 
     // Full Session history rows: name the state as a word (same pill idiom as
-    // the clone `conflict` chip) — the row is kept for the record, not for action.
+    // the clone `conflict` chip) - the row is kept for the record, not for action.
     if (accepted) {
       const acceptedChip = el("span", "chip chip-accepted");
       acceptedChip.textContent = "accepted";
-      acceptedChip.title = "Already accepted — its current state is the Session baseline";
+      acceptedChip.title = "Already accepted - its current state is the Session baseline";
       row.append(acceptedChip);
     }
 
@@ -3478,7 +3649,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (!reviewed) {
       const unreviewed = el("span", "unreviewed-dot");
       unreviewed.textContent = "•";
-      unreviewed.title = "Unreviewed — diff not opened this session";
+      unreviewed.title = "Unreviewed - diff not opened this session";
       unreviewed.setAttribute("aria-label", "unreviewed");
       row.append(unreviewed);
     }
@@ -3512,7 +3683,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
     // Irreversibility is stated inline: a row whose discard is unsupported
     // gets a dim `no rollback` tag next to the stats, carrying the same size-cap
-    // tooltip as the disabled ✕ — the blast-radius fact isn't hover-only.
+    // tooltip as the disabled ✕ - the blast-radius fact isn't hover-only.
     if (!change.revertSupported) {
       const noRollback = el("span", "no-rollback-tag");
       noRollback.textContent = "no rollback";
@@ -3521,7 +3692,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
 
     const actions = el("span", "working-set-row-actions");
-    const accept = iconButton("✓", "Accept — resets this file's baseline", "row-accept");
+    const accept = iconButton("✓", "Accept - resets this file's baseline", "row-accept");
     accept.addEventListener("click", (event) => {
       event.stopPropagation();
       accept.disabled = true;
@@ -3530,19 +3701,19 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       });
     });
     // Discard is inline-confirm: first click arms it, second sends revertFile.
-    const discard = iconButton("✕", "Discard — rolls back this change", "row-discard");
+    const discard = iconButton("✕", "Discard - rolls back this change", "row-discard");
     if (accepted) {
       // History row: both verbs would be no-ops (or worse, surprise-rollbacks
-      // of accepted work) — state why instead of offering them.
+      // of accepted work) - state why instead of offering them.
       accept.disabled = true;
       accept.title = "Already accepted";
       discard.disabled = true;
-      discard.title = "Already accepted — switch to Session view to act on pending changes";
+      discard.title = "Already accepted - switch to Session view to act on pending changes";
     } else if (!change.revertSupported) {
       discard.disabled = true;
       discard.title = change.reason ?? "revert unsupported";
     } else {
-      wireInlineConfirmIcon(discard, "✕", "?", "Discard — rolls back this change", () => {
+      wireInlineConfirmIcon(discard, "✕", "?", "Discard - rolls back this change", () => {
         discard.disabled = true;
         void request({ type: "diff.revertFile", baselineId: change.baselineId, path: change.path, view: diffView }).then((response) => {
           applyDiffActionResponse(response, `discarded ${change.path}`);
@@ -3742,8 +3913,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     notesBadge.classList.toggle("hidden", count === 0);
     const scope = selectedSubtaskIdForNotes() !== undefined ? "subtask" : "task";
     notesButton.title = task === undefined
-      ? "Notes — no linked task"
-      : count > 0 ? `Notes (${String(count)}) — this ${scope}` : `Notes — this ${scope}`;
+      ? "Notes - no linked task"
+      : count > 0 ? `Notes (${String(count)}) - this ${scope}` : `Notes - this ${scope}`;
   }
 
   /**
@@ -3841,7 +4012,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const elsewhere = selectedRunsElsewhere();
     if (ctx.isDemo()) {
       promptInput.disabled = true;
-      promptInput.placeholder = "Demo data — chat input is disconnected. Switch to Live data to contact an agent.";
+      promptInput.placeholder = "Demo data - chat input is disconnected. Switch to Live data to contact an agent.";
       sendButton.disabled = true;
       cancelButton.classList.add("hidden");
       providerSelect.disabled = true;
@@ -3865,7 +4036,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
     if (elsewhere) {
       promptInput.disabled = true;
-      promptInput.placeholder = "Read-only — this chat is owned by another VS Code window. Use “Take over here” to reclaim it.";
+      promptInput.placeholder = "Read-only - this chat is owned by another VS Code window. Use “Take over here” to reclaim it.";
       sendButton.disabled = true;
       cancelButton.classList.add("hidden");
       providerSelect.disabled = true;
@@ -3878,7 +4049,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
     reclaimBanner.classList.add("hidden");
     promptInput.disabled = false;
-    promptInput.placeholder = "Ask the isolated agent…";
+    promptInput.placeholder = "Ask the agent…";
     const disabled = starting || backendBusy;
     sendButton.disabled = disabled || turnActive;
     cancelButton.classList.toggle("hidden", !turnActive);
@@ -3901,7 +4072,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * CH·6: `dragover` already called `preventDefault()` (required for `drop` to
    * fire at all) and set `dropEffect`, so that half was not the bug. The gap
    * was in `droppedPaths` below, which only read `text/uri-list`/`text/plain`
-   * — VS Code explorer drops into a webview do not reliably populate
+   * - VS Code explorer drops into a webview do not reliably populate
    * `text/uri-list`; see `droppedPaths` for the format list now covered.
    */
   function wireComposerDropTarget(): void {
@@ -3942,7 +4113,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (attachments.some((a) => normalizeComparablePath(a.hostPath).toLowerCase() === normalized)) return;
     const runtimePath = hostPathToRuntimePath(hostPath);
     const name = hostPath.split(/[\\/]/).filter((part) => part.length > 0).pop() ?? hostPath;
-    if (runtimePath === null) logChat(`note: ${hostPath} is not mounted — the agent can request access to it`);
+    if (runtimePath === null) logChat(`note: ${hostPath} is not mounted - the agent can request access to it`);
     attachments.push({ hostPath, runtimePath, name });
     renderAttachments();
   }
@@ -4008,7 +4179,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   /**
    * CH·6: VS Code explorer drags do not reliably populate the standard
-   * `text/uri-list` format the way an OS file drop does — a webview drop from
+   * `text/uri-list` format the way an OS file drop does - a webview drop from
    * the explorer typically carries `application/vnd.code.uri-list` (VS Code's
    * own webview-drop format, newline-separated `file://` URIs) and/or
    * `resourceurls` (a JSON-encoded array of URI strings; used by older/some
@@ -4149,6 +4320,16 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   function selectSession(sessionId: string | null): void {
     pendingSessionStart = false;
     state.selectedSessionId = sessionId;
+    // Selecting a session ADOPTS its owning task as the shared current task
+    // (Plan picker + new-chat linking follow along). Orphan sessions leave
+    // the current task untouched.
+    if (sessionId !== null) {
+      const owner = state.tasks.find((task) => task.linkedSessionIds.includes(sessionId));
+      if (owner !== undefined && state.activeTaskId !== owner.taskId) {
+        state.activeTaskId = owner.taskId;
+        ctx.bridge.work.render();
+      }
+    }
     // Selection uses selective renderers (not the full render()), so refresh
     // the preview strip for the newly selected session explicitly.
     renderPreviews();

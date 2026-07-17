@@ -7,7 +7,7 @@
  *   [{ "aspectId": "brand-review", "label": "Brand review",
  *      "instructions": "…", "expectedArtifacts": ["Brand notes (document)"] }]
  *
- * Anything malformed is skipped quietly — an overlay must never break the
+ * Anything malformed is skipped quietly - an overlay must never break the
  * panel. Ids are slugs (they double as plan/<aspectId>/ directories); a SQLite
  * row with the same id wins the merge (enforced by PlannerAppService).
  */

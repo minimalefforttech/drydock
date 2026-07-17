@@ -21,7 +21,7 @@ export interface AgentEventBase {
    * Lineage of the EMITTING agent inside the session. Absent/empty =
    * the session's root agent; ["n1","n2"] = sub-subagent n2 under subagent
    * n1. Node ids are transport-scoped (codex: child thread id; claude: the
-   * spawning Task tool_use id) — opaque here, unique within the session.
+   * spawning Task tool_use id) - opaque here, unique within the session.
    */
   readonly agentPath?: readonly string[];
   readonly raw?: JsonObject;
@@ -36,7 +36,7 @@ export interface AgentTextEvent extends AgentEventBase {
 /**
  * The agent's reasoning/thinking, distinct from its final-answer text
  * (AgentTextEvent). DISPLAY-ONLY: never replayed as conversation context
- * (see chatSessionService.contextMessages) — it is the agent's own scratch
+ * (see chatSessionService.contextMessages) - it is the agent's own scratch
  * thoughts, not user/assistant dialogue.
  */
 export interface AgentReasoningEvent extends AgentEventBase {
@@ -94,7 +94,7 @@ export interface AgentDoneEvent extends AgentEventBase {
 /**
  * A recognized delegation: the emitting agent (base.agentPath) spawned a
  * child agent. The child's own events carry agentPath = [...parent, nodeId].
- * Previews are normalizer-capped (prompt ≤ 500 chars) — never full payloads.
+ * Previews are normalizer-capped (prompt ≤ 500 chars) - never full payloads.
  */
 export interface AgentSpawnEvent extends AgentEventBase {
   readonly type: "agent.spawn";
@@ -184,10 +184,13 @@ const TRANSCRIPT_SUMMARY_MAX = 400;
 export function summarizeAgentEvent(event: AgentEvent): TranscriptLine {
   switch (event.type) {
     case "agent.text":
-      return transcriptLine(event, event.text);
+      // The assistant's prose is CONTENT, not a summary - clipping it at the
+      // summary cap truncated the final sentence of replayed messages. It
+      // renders verbatim, like the user's own messages.
+      return { ...transcriptLine(event, ""), summary: event.text };
     case "agent.reasoning":
       // Reasoning CAN be clipped (unlike the user's own message in
-      // summarizeStoredEvent) — it's the agent's scratch thinking, not
+      // summarizeStoredEvent) - it's the agent's scratch thinking, not
       // content the user needs verbatim.
       return transcriptLine(event, event.text);
     case "agent.tool_call":
@@ -250,7 +253,7 @@ export function summarizeAgentEvent(event: AgentEvent): TranscriptLine {
 export function summarizeStoredEvent(event: StoredEvent): TranscriptLine {
   if (event.eventType === "user.message") {
     const text = event.payload["text"];
-    // The user's own message is rendered in full, NOT clipped — matching the
+    // The user's own message is rendered in full, NOT clipped - matching the
     // live transcript-line path (chatSessionService.appendUserMessage). Clipping
     // it on replay truncated long prompts and, worse, cut the closing
     // `[end host briefing]` delimiter off the first message so the host-briefing

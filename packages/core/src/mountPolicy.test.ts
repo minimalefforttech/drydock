@@ -179,7 +179,7 @@ test("denied paths block mounts in both containment directions", () => {
   }, new RandomIdGenerator()), /denied path/);
 
   // A non-root parent that would expose the denied path is refused as a denied
-  // intersection (a drive root would trip the filesystem-root refusal first —
+  // intersection (a drive root would trip the filesystem-root refusal first -
   // see the dedicated test below).
   assert.throws(() => buildMountPolicy({
     mode: "plan",

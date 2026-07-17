@@ -37,7 +37,7 @@ await bundle(
   path.join(distRoot, "webview", "main.css")
 );
 
-// Task-review panel: browser IIFE + styles — a standalone editor-panel
+// Task-review panel: browser IIFE + styles - a standalone editor-panel
 // entry, contracts bundled in.
 await bundle(
   path.join(extensionRoot, "webview-ui", "src", "taskReview.ts"),
@@ -49,7 +49,7 @@ await bundle(
   path.join(distRoot, "webview", "taskReview.css")
 );
 
-// Code-review panel (in-panel PR-style review): browser IIFE + styles — a
+// Code-review panel (in-panel PR-style review): browser IIFE + styles - a
 // standalone editor-panel entry, contracts bundled in.
 await bundle(
   path.join(extensionRoot, "webview-ui", "src", "codeReview.ts"),
@@ -62,7 +62,7 @@ await bundle(
 );
 
 // Task-board panel: browser IIFE + styles. Same shape as the plan-docs
-// pair — a standalone editor-panel entry, contracts bundled in.
+// pair - a standalone editor-panel entry, contracts bundled in.
 await bundle(
   path.join(extensionRoot, "webview-ui", "src", "taskBoard.ts"),
   path.join(distRoot, "webview", "taskBoard.js"),
@@ -73,7 +73,7 @@ await bundle(
   path.join(distRoot, "webview", "taskBoard.css")
 );
 
-// Planner panel: browser IIFE + styles. Same shape as the plan-docs pair —
+// Planner panel: browser IIFE + styles. Same shape as the plan-docs pair -
 // a standalone editor-panel entry, contracts bundled in.
 await bundle(
   path.join(extensionRoot, "webview-ui", "src", "planner.ts"),
@@ -98,7 +98,7 @@ await bundle(
 );
 
 // Mermaid renderer: a separate, minified bundle the plan-docs webview injects
-// lazily (nonce via data attribute) only when a document contains a diagram —
+// lazily (nonce via data attribute) only when a document contains a diagram -
 // keeping the ~MB parse cost out of every panel open.
 await bundle(
   path.join(extensionRoot, "webview-ui", "src", "planDocsMermaid.ts"),

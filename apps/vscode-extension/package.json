@@ -2,7 +2,8 @@
   "name": "drydock",
   "displayName": "Drydock",
   "description": "Drydock \u2014 the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
-  "version": "0.10.0",
+  "version": "0.12.3",
+  "license": "MIT",
   "publisher": "local",
   "private": true,
   "type": "module",
@@ -80,6 +81,10 @@
       {
         "command": "drydock.clone.applyPatch",
         "title": "Drydock: Apply Patch to Folder…"
+      },
+      {
+        "command": "drydock.session.attachTerminal",
+        "title": "Drydock: Attach Terminal to Sandbox (experimental)"
       },
       {
         "command": "drydock.taskBoard.open",
@@ -240,13 +245,39 @@
           "default": 0,
           "minimum": 0,
           "maximum": 64,
-          "markdownDescription": "Maximum agent runs in flight at once. Further starts wait in a visible queue (manual starts jump to the front). `0` = **auto** — derived from this machine's cores and RAM (clamped 1–8)."
+          "markdownDescription": "Maximum agent runs in flight at once. Further starts wait in a visible queue (manual starts jump to the front). `0` = **auto** - derived from this machine's cores and RAM (clamped 1-8)."
         },
         "drydock.autoAnswer.questions": {
           "type": "boolean",
           "scope": "machine",
           "default": true,
           "markdownDescription": "Master switch for task-FAQ auto-answering of agent questions. Each task ALSO has its own toggle (off by default), so nothing auto-answers until a task opts in. Every auto-answer lands in the transcript as a `[host]` receipt. Access requests are never auto-answered."
+        },
+        "drydock.mcp.configPath": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "markdownDescription": "Host path of an `.mcp.json` (Claude Code project-scope format: `{\"mcpServers\": {…}}`). Entries are IMPORTED into the MCP registry (System tab) tagged *from settings* - editable only by editing this file. Servers run INSIDE the no-egress sandbox. Claude transports only in this iteration."
+        },
+        "drydock.memory.tagRules": {
+          "type": "array",
+          "scope": "machine",
+          "default": [],
+          "items": {
+            "type": "object",
+            "required": ["globs", "tag"],
+            "properties": {
+              "globs": { "type": "array", "items": { "type": "string" }, "description": "Basename globs, e.g. \"package.py\" or \"*.usd\"." },
+              "tag": { "type": "string", "description": "Tag applied when any glob matches, e.g. \"rez\"." }
+            }
+          },
+          "markdownDescription": "Extra glob→tag rules EXTENDING the built-in table (`package.py`→rez, `pyproject.toml`→pip, `*.py`→python, `*.h`/`*.hh`→cpp, `*.ma`→maya, …). Tags are detected per mounted root at mount time (fast top-level scan) and select which tagged team memories a session briefing carries. Example: `[{ \"globs\": [\"*.usd\", \"*.usda\"], \"tag\": \"usd\" }]`."
+        },
+        "drydock.teamInstructionsPath": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "markdownDescription": "Host path of a markdown file with studio-level standing instructions, appended to every session's host briefing (capped at 8 KB). Repo-level `CLAUDE.md`/`AGENTS.md` files are detected automatically and pointed at in the briefing."
         },
         "drydock.prototypeThemes": {
           "type": "array",

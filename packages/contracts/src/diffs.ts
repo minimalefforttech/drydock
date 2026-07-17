@@ -12,7 +12,7 @@ import type { BaselineId, ReviewCommentId, ReviewSessionId, SessionId } from "./
 /**
  * What a baseline (and its review) covers. A session owns up to three scopes
  * per root: `session-start` is the immutable snapshot taken when the session
- * began (never advanced — backs the Full Session view), `current-session` is
+ * began (never advanced - backs the Full Session view), `current-session` is
  * the working baseline that accept advances per file (the Session view), and
  * `turn` is re-captured at each user message send (the This Turn view).
  */
@@ -60,7 +60,7 @@ export interface DiffFileChange {
   readonly baselineSha256?: string;
   readonly currentSha256?: string;
   readonly currentSize?: number;
-  /** Live file mtime (ms) — lets callers attribute changes to agent turn windows. */
+  /** Live file mtime (ms) - lets callers attribute changes to agent turn windows. */
   readonly currentMtimeMs?: number;
   /** Line-diff stats vs the baseline; absent for binary/oversized files. */
   readonly addedLines?: number;

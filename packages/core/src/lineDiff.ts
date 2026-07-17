@@ -5,7 +5,7 @@
  * LCS-based Myers O(ND) diff: unchanged lines cost nothing, an inserted line
  * is +1 added, a deleted line is +1 removed, and a modified line is one
  * delete plus one insert (+1/+1). This is a true edit distance, not a length
- * delta — reordering or a same-length rewrite still reports real churn.
+ * delta - reordering or a same-length rewrite still reports real churn.
  */
 
 /**
@@ -21,7 +21,7 @@ const MAX_DIFF_LINES = 20_000;
  * steps even under the line cap. Past this many edits the exact split stops
  * being informative ("basically rewritten"), so the search bails and the
  * caller falls back to the net-delta approximation. ~5k edits keeps the worst
- * case around 12M steps — well under a frame of extension-host time.
+ * case around 12M steps - well under a frame of extension-host time.
  */
 const MAX_EDIT_DISTANCE = 5_000;
 

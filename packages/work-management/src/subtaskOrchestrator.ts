@@ -5,7 +5,7 @@
  *
  * - Manual start (`startSubtask`) NEVER starts dependencies; it is refused
  *   while any upstream is unfinished unless `force` is passed (force is
- *   manual-only — automation never passes it).
+ *   manual-only - automation never passes it).
  * - A successful start prepares a chat session (via the injected `startRun`
  *   callback), links it to the subtask, moves the card to the first
  *   `in-progress` column, and only then dispatches the first turn.
@@ -99,7 +99,7 @@ export interface SubtaskOrchestratorOptions {
   readonly logger: Logger;
   /**
    * Awaited when a subtask card enters a done-category column, BEFORE its
-   * dependents are evaluated — the ADR 0014 changeset-capture seam. Running
+   * dependents are evaluated - the ADR 0014 changeset-capture seam. Running
    * it inside the cascade ordering (not as a racing bus subscriber) means an
    * auto-started dependent with `upstream` seeding reads a store the capture
    * has already written. A rejected hook blocks this cascade attempt: starting
@@ -154,7 +154,7 @@ export interface StartTaskResult {
 /**
  * Coordinates dependency-driven auto-start. Holds two in-memory sets: which
  * subtasks are currently running (survives across calls in this process only)
- * and which dependent evaluations are currently in flight (re-entrancy guard —
+ * and which dependent evaluations are currently in flight (re-entrancy guard -
  * the bus is synchronous, so a moveCard performed inside a "turn-completed" or
  * "card-entered-done" handler can re-fire events before the outer call
  * returns; the guard makes that safe instead of double-starting a dependent).
@@ -177,7 +177,7 @@ export class SubtaskOrchestrator {
   private readonly doneEntryHookOutcomes = new Map<SubtaskId, Promise<boolean>>();
   /** Starts held back by the run-slot budget (ADR 0015); mirrored durably when a hold store is configured. */
   private readonly queue: { readonly subtaskId: SubtaskId; readonly force: boolean; readonly origin: "manual" | "auto" }[] = [];
-  /** Auto runs that failed twice — automation gives up until a manual start clears it. */
+  /** Auto runs that failed twice - automation gives up until a manual start clears it. */
   private readonly parked = new Set<SubtaskId>();
   /** Auto runs already retried once (cleared by success or a manual start). */
   private readonly retried = new Set<SubtaskId>();
@@ -278,7 +278,7 @@ export class SubtaskOrchestrator {
   /**
    * Manual (or cascade-driven, with force=false) start of one subtask.
    * Refuses BLOCKED (any upstream not done) unless `force` is set; force is a
-   * manual-only override — evaluateDependents never passes it.
+   * manual-only override - evaluateDependents never passes it.
    */
   async startSubtask(subtaskId: string, options: StartSubtaskOptions = {}): Promise<SubtaskRecord> {
     const id = asId<"SubtaskId">(subtaskId);
@@ -398,7 +398,7 @@ export class SubtaskOrchestrator {
 
   /**
    * Starts queued entries while the budget has room, strictly one at a time
-   * (each start is awaited so `running` grows before the next budget check —
+   * (each start is awaited so `running` grows before the next budget check -
    * never overshooting the slot count). A queued entry that no longer
    * qualifies (moved to done, deleted, prompt cleared) is skipped with a log
    * line and the drain continues.
@@ -589,7 +589,7 @@ export class SubtaskOrchestrator {
   private async onTurnCompleted(sessionId: string, status: "completed" | "failed" | "cancelled"): Promise<void> {
     const subtaskId = await this.resolveSubtaskForSession(sessionId);
     if (subtaskId === undefined) {
-      // Unknown session (not a subtask-linked run, e.g. a plain chat) — ignore.
+      // Unknown session (not a subtask-linked run, e.g. a plain chat) - ignore.
       return;
     }
     this.running.delete(subtaskId);
@@ -598,7 +598,7 @@ export class SubtaskOrchestrator {
     if (status !== "completed") {
       this.failures.set(subtaskId, { at: new Date().toISOString() });
       // Retry-then-park (ADR 0015), auto runs only: one automatic retry,
-      // then automation gives up and parks — the ↻ (a manual start) resumes.
+      // then automation gives up and parks - the ↻ (a manual start) resumes.
       // A CANCELLED run is a human gesture, never retried or parked.
       if (status === "failed" && origin === "auto") {
         if (!this.retried.has(subtaskId)) {
@@ -624,7 +624,7 @@ export class SubtaskOrchestrator {
     if (this.parked.delete(subtaskId)) this.clearHold(subtaskId);
     const doneColumn = await this.options.board.firstColumnOf("done");
     // moveCard stamps doneAt and (since the destination is a done-category
-    // column) fires "card-entered-done" itself, which drives the cascade —
+    // column) fires "card-entered-done" itself, which drives the cascade -
     // this handler does not call evaluateDependents directly.
     await this.options.subtasks.moveCard({ subtaskId }, doneColumn.columnId);
     this.options.bus.publish({ kind: "board-changed" });

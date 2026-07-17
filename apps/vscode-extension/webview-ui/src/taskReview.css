@@ -1,6 +1,6 @@
 @import "./help.css";
 
-/* Task Review panel styles — VS Code theme variables only, no remote assets.
+/* Task Review panel styles - VS Code theme variables only, no remote assets.
    Modeled on planDocs.css (font/scrollbar/dock-layout conventions). */
 
 body {
@@ -49,7 +49,7 @@ body {
 
 /* Dim decaying stamp next to ↻ announcing a meaningful refetch (R11). Visibility
    is driven by the `.tr-stamp-visible` modifier (JS toggles it on announce, and a
-   ~5s timer removes it — re-armed on a newer update) so the opacity transition
+   ~5s timer removes it - re-armed on a newer update) so the opacity transition
    actually renders a soft fade. At rest it is transparent AND out of the a11y
    tree (visibility:hidden), taking no interactive space. */
 .tr-updated-stamp {

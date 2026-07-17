@@ -5,9 +5,9 @@
  * One interface renders every artifact kind; P2 ships the document provider
  * (structural markdown blocks in the design-doc theme, click-to-instruct on
  * every block); the diagram/image/prototype providers land in P4/P5 behind the
- * same seam — until then those kinds fall back to a source/placeholder view.
+ * same seam - until then those kinds fall back to a source/placeholder view.
  *
- * SECURITY: every dynamic string renders via textContent — NEVER innerHTML.
+ * SECURITY: every dynamic string renders via textContent - NEVER innerHTML.
  * Markdown renders STRUCTURALLY through splitBlocks; raw HTML in agent output
  * stays literal text.
  */
@@ -17,7 +17,7 @@ import { badge, button, el } from "./components.js";
 import { splitBlocks, type DocBlock } from "./markdownBlocks.js";
 import { adoptSanitizedSvg } from "./svgAdopt.js";
 // TYPE-ONLY import: the mermaid runtime bundle (~3.3 MB) is NEVER imported here
-// — it is script-injected lazily by loadMermaid(), exactly as the plan-docs
+// - it is script-injected lazily by loadMermaid(), exactly as the plan-docs
 // panel does. Importing the type erases at compile time.
 import type { PlanDocsMermaidApi } from "./planDocsMermaid.js";
 
@@ -213,7 +213,7 @@ function mermaidRenderId(relPath: string): string {
 
 // ---------------------------------------------------------------------------
 // Annotation surface: the pin/region overlay shared by images, rendered
-// diagrams, and (P5) prototypes. Normalized 0–1 coordinates over the target.
+// diagrams, and (P5) prototypes. Normalized 0-1 coordinates over the target.
 // ---------------------------------------------------------------------------
 
 export interface AnnotationSurface {
@@ -488,7 +488,7 @@ export class ImageProvider implements ArtifactProvider {
     if (artifact.imageDataUri === undefined) {
       const note = el("div", "pl-fallback-note");
       note.textContent = artifact.oversizedImage === true
-        ? "This image is too large to preview inline — use \"open file\" above."
+        ? "This image is too large to preview inline - use \"open file\" above."
         : "This image has no inline preview yet.";
       host.append(note);
       return;
@@ -520,7 +520,7 @@ export class ImageProvider implements ArtifactProvider {
 // frame. Preview mode hands the pointer to the page (buttons actually click);
 // Annotate mode raises the same point/region surface images use. Scripts are
 // per-artifact opt-in: `allow-scripts` only when toggled on, and NEVER
-// `allow-same-origin` — the frame cannot reach the panel's DOM, state, or
+// `allow-same-origin` - the frame cannot reach the panel's DOM, state, or
 // message bridge either way.
 // ---------------------------------------------------------------------------
 
@@ -535,7 +535,7 @@ export class PrototypeProvider implements ArtifactProvider {
     this.surface = null;
     if (artifact.content === undefined) {
       const note = el("div", "pl-fallback-note");
-      note.textContent = "This prototype has no inline content — use \"open file\" above.";
+      note.textContent = "This prototype has no inline content - use \"open file\" above.";
       host.append(note);
       return;
     }
@@ -625,7 +625,7 @@ export class FallbackProvider implements ArtifactProvider {
     }
     if (artifact.oversizedImage === true) {
       const oversize = el("div", "pl-fallback-note");
-      oversize.textContent = "This image is too large to preview inline — use \"open file\" above.";
+      oversize.textContent = "This image is too large to preview inline - use \"open file\" above.";
       host.append(oversize);
     }
   }
@@ -657,7 +657,7 @@ export function renderAnnotationDock(
   const mine = annotations.filter((annotation) => annotation.artifactId === artifact.artifactId);
   if (mine.length === 0) {
     const empty = el("div", "pl-dock-empty");
-    empty.textContent = "No instructions on this artifact yet — click any block, node, or region to add one.";
+    empty.textContent = "No instructions on this artifact yet - click any block, node, or region to add one.";
     host.append(empty);
     return nodes;
   }

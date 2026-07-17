@@ -2,7 +2,7 @@
  * SQLite-backed task-recipe store (ADR 0007). Steps ride as validated JSON
  * (`subtasks_json`); malformed rows surface as empty step lists rather than
  * crashing list views. Overlay recipes (.drydock/recipes.json) never touch
- * this store — RecipeService merges them read-only at list time.
+ * this store - RecipeService merges them read-only at list time.
  */
 
 import type { SubtaskModelSelection, SubtaskSeedMode, TaskRecipeRecord, TaskRecipeStore, TaskRecipeSubtask } from "@drydock/contracts";

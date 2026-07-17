@@ -2,7 +2,7 @@
  * Plan → board materialization (ADR 0012): candidate extraction.
  *
  * Candidates are MARKDOWN CHECKBOX ITEMS (`- [ ] title`, `* [x] title`,
- * `1. [ ] title`) across the plan's document artifacts — an explicit,
+ * `1. [ ] title`) across the plan's document artifacts - an explicit,
  * greppable convention rather than heading heuristics, so what the dialog
  * proposes is exactly what the plan literally lists as work. Checked and
  * unchecked items both qualify (the checkbox state belongs to the plan, not

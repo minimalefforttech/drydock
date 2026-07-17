@@ -312,14 +312,14 @@ export class TaskService {
    * derived from ONE listWorkSessions() call and grouped in memory; absent when
    * the task has never been worked (or no work-session store is configured).
    * `state` (transitional) is derived fresh from each task's columnId + that
-   * column's category — not read off the stored column — so a card moved via
+   * column's category - not read off the stored column - so a card moved via
    * board.moveCard (which bypasses updateTask) still reports the right legacy
    * state to the pre-board-UI webview. Falls back to "todo" if the column is
    * missing (e.g. deleted out from under a stale reference).
    *
    * `subtasks` is intentionally empty here: the webview host provider joins
    * each task's subtasks (with the computed isBlocked, which needs the
-   * SubtaskService's dependency projection) on top of these summaries — this
+   * SubtaskService's dependency projection) on top of these summaries - this
    * service reports only its own record's board fields (columnId/doneAt).
    */
   async listTaskSummaries(): Promise<WorkTaskSummary[]> {

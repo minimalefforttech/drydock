@@ -58,6 +58,7 @@ const stagedManifest = {
   name: sourceManifest.name,
   displayName: sourceManifest.displayName,
   version: sourceManifest.version,
+  license: sourceManifest.license,
   publisher: sourceManifest.publisher,
   description: sourceManifest.description,
   repository: sourceManifest.repository,
@@ -68,6 +69,7 @@ const stagedManifest = {
   contributes: sourceManifest.contributes,
   files: [
     "README.md",
+    "LICENSE.txt",
     "dist/extension.js",
     "dist/webview/main.js",
     "dist/webview/main.css",
@@ -92,13 +94,15 @@ await writeFile(
   "utf8"
 );
 await copyFile(path.join(extensionRoot, "README.md"), path.join(stageRoot, "README.md"));
+// The repo-root MIT license ships inside the VSIX (vsce warns without one).
+await copyFile(path.join(root, "LICENSE"), path.join(stageRoot, "LICENSE.txt"));
 
 const vsixPath = path.join(outRoot, `${sourceManifest.name}-${sourceManifest.version}.vsix`);
 await rm(vsixPath, { force: true });
 await run(process.execPath, [vsceBin, "package", "--out", vsixPath], stageRoot);
 
 // VSIX is a zip; use bsdtar (System32 on Windows) rather than whatever GNU
-// tar happens to be first on PATH — GNU tar cannot read zip archives.
+// tar happens to be first on PATH - GNU tar cannot read zip archives.
 const tarBin = process.platform === "win32"
   ? path.join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "tar.exe")
   : process.platform === "linux" ? "bsdtar" : "tar";
@@ -141,6 +145,7 @@ function assertPackagedFiles(stdout) {
     "extension.vsixmanifest",
     "extension/package.json",
     "extension/readme.md",
+    "extension/LICENSE.txt",
     "extension/dist/extension.js",
     "extension/dist/webview/main.js",
     "extension/dist/webview/main.css",

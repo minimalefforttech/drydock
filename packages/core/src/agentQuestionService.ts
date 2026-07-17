@@ -4,7 +4,7 @@
  * Mirrors AccessRequestService: records are created from parsed protocol
  * blocks, resolved exactly once (answer or dismiss), and listed for the
  * panel's attention stack. Answer DISPATCH (the host-authored follow-up turn)
- * stays with the caller — this service owns state, not conversation.
+ * stays with the caller - this service owns state, not conversation.
  */
 
 import type {

@@ -6,11 +6,11 @@
  * paid on a diagram-less panel. Exposes exactly one namespaced global.
  *
  * SECURITY: diagram source is agent-authored (untrusted). This wrapper pins
- * the hardened configuration — securityLevel "strict" and htmlLabels off drop
+ * the hardened configuration - securityLevel "strict" and htmlLabels off drop
  * mermaid's foreignObject/HTML pathways entirely; startOnLoad off means
  * nothing renders without an explicit call. Callers must still strip
  * `%%{init:...}%%` directives from the source (host-controlled theme only)
- * and adopt the output through svgAdopt.ts — never raw innerHTML.
+ * and adopt the output through svgAdopt.ts - never raw innerHTML.
  */
 
 import mermaid from "mermaid";

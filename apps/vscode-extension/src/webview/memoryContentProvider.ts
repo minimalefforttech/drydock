@@ -2,7 +2,7 @@
  * Read-only virtual documents for approved memory candidates.
  *
  * Clicking a memory row in the Work tab opens a small markdown document
- * summarizing that candidate — content lives only in the memory-candidate
+ * summarizing that candidate - content lives only in the memory-candidate
  * store, there is no on-disk path for it. This provider serves that content
  * under the `drydock-memory` scheme; the URI carries the memoryCandidateId so
  * the resolver can fetch the right record.

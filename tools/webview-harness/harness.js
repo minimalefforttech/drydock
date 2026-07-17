@@ -4,7 +4,7 @@
  * Loads BEFORE the real bundled main.js and provides acquireVsCodeApi plus a
  * fixture-backed message host speaking the exact envelope protocol
  * (protocolVersion 1, request/response/push). Fixtures are deterministic
- * dummy data — no real backend, no docker, no network. Drive scripted flows
+ * dummy data - no real backend, no docker, no network. Drive scripted flows
  * from the console or preview_eval via window.__harness.
  */
 
@@ -181,7 +181,7 @@
     { taskId: "t-2", taskTitle: "Py3 farm audit", subtaskId: "st-9", subtaskTitle: "Legacy capture", sessionId: "s-failed", repos: [{ repoName: "asset_api", fileCount: 3 }], capturedAt: iso(4000), overlapsWith: ["st-6"], overlapUnknown: true }
   ];
 
-  /** Task FAQ entries (ADR 0007) — t-1's fixture count matches its faqCount. */
+  /** Task FAQ entries (ADR 0007) - t-1's fixture count matches its faqCount. */
   const harnessFaqs = [
     { faqId: "faq-1", taskId: "t-1", pattern: "which branch", answer: "Work on feature/alembic-publish; never touch main directly.", createdAt: iso(100) },
     { faqId: "faq-2", taskId: "t-1", pattern: "test framework", answer: "pytest with the studio fixtures package.", createdAt: iso(90) }
@@ -235,7 +235,7 @@
       clonePolicy: { workspaceSetId: "set-1", projectIds: ["p-demo", "p-asset"], dirtyHandling: "fresh", workspaceSetProjectCount: 2 },
       subtasks: [
         // st-5 depends on the already-finished st-6 (an edge to a done sibling
-        // is allowed — instantly satisfied) and wears a failed chip from a
+        // is allowed - instantly satisfied) and wears a failed chip from a
         // cancelled earlier run; drives the board's edge + failed visuals.
         { subtaskId: "st-5", taskId: "t-3", title: "Draft board announcement", description: "", prompt: "Write the internal rollout note for the task board.", autoStart: false, origin: "manual", columnId: "col-in-progress", sortOrder: 0, createdAt: iso(3100), updatedAt: iso(60), isBlocked: false, dependsOn: ["st-6"], isRunning: false, lastFailureAt: iso(55), isParked: true, linkedSessionIds: [] },
         { subtaskId: "st-7", taskId: "t-3", title: "Cross-post to wiki", description: "", prompt: "Mirror the rollout note onto the wiki.", autoStart: true, origin: "manual", columnId: "col-todo", sortOrder: 2, createdAt: iso(3100), updatedAt: iso(30), isBlocked: false, dependsOn: [], isRunning: false, isQueued: true, linkedSessionIds: [] },
@@ -247,12 +247,12 @@
   // Attention-stack questions: two pending on s-live (stacks with the two
   // pending access requests → pager shows 4), one answered (hidden).
   const agentQuestions = [
-    { questionId: "q-1", sessionId: "s-live", question: "Should the alembic exporter keep legacy 1.x sidecar files?", options: ["Drop them — 2.x readers are everywhere", "Keep writing both for one release"], status: "pending", createdAt: iso(6) },
+    { questionId: "q-1", sessionId: "s-live", question: "Should the alembic exporter keep legacy 1.x sidecar files?", options: ["Drop them - 2.x readers are everywhere", "Keep writing both for one release"], status: "pending", createdAt: iso(6) },
     { questionId: "q-2", sessionId: "s-live", question: "Name the new config section?", options: [], status: "pending", createdAt: iso(5) },
     {
       questionId: "q-3", sessionId: "s-live", kind: "manual-check", subtaskId: "st-3",
       question: "Does the exported alembic load correctly in Maya with the new framerange guard?",
-      options: ["Loads correctly — matches the render", "Loads but framerange is wrong", "Fails to load"],
+      options: ["Loads correctly - matches the render", "Loads but framerange is wrong", "Fails to load"],
       images: [
         { path: "/workspace/renders/compare.png", dataUri: "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="72"><rect width="120" height="72" fill="#2b4a6f"/><circle cx="36" cy="36" r="18" fill="#3794ff"/><text x="66" y="42" fill="#fff" font-size="12">render</text></svg>') },
         { path: "/workspace/renders/missing.png" }
@@ -260,7 +260,7 @@
       steps: [
         { text: "Open Maya 2026 with the studio env (menu: Pipeline → Dev Shell)." },
         { text: "File → Import → /workspace/exports/publish_test.abc", imageDataUri: "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40"><rect width="120" height="40" fill="#333"/><text x="8" y="24" fill="#ccc" font-size="10">File / Import...</text></svg>') },
-        { text: "Scrub frames 1001–1050 and compare against the attached render." }
+        { text: "Scrub frames 1001-1050 and compare against the attached render." }
       ],
       status: "pending", createdAt: iso(4)
     },
@@ -268,9 +268,23 @@
   ];
 
   const memoryCandidates = [
-    { memoryCandidateId: "m-1", sessionId: "s-live", content: "asset_api integration tests need the fixture server on port 9021.", status: "pending", createdAt: iso(10) },
-    { memoryCandidateId: "m-2", sessionId: "s-ended", content: "USD builds must pin MaterialX 1.39.", status: "approved", createdAt: iso(1500) }
+    { memoryCandidateId: "m-1", sessionId: "s-live", content: "asset_api integration tests need the fixture server on port 9021.", status: "pending", createdAt: iso(10), scope: "workspace", scopeLabel: "asset_api", tags: ["python"], origin: "agent" },
+    { memoryCandidateId: "m-2", sessionId: "s-ended", content: "USD builds must pin MaterialX 1.39.", status: "approved", createdAt: iso(1500), scope: "global", tags: ["usd"], origin: "agent" },
+    { memoryCandidateId: "m-3", sessionId: "user", content: "Prefer pytest over unittest here.", status: "approved", createdAt: iso(300), scope: "workspace", scopeLabel: "asset_api", tags: ["python"], origin: "user" }
   ];
+  const detectedTags = ["python", "pip", "maya"];
+  let memorySerial = 3;
+
+  // --- MCP registry fixture ------------------------------------------------
+  const mcpServers = [
+    { serverId: "mcp-1", name: "asset-db", command: "npx", args: ["-y", "@studio/asset-mcp"], envKeys: ["ASSET_DB_TOKEN"], enabledByDefault: true, sensitive: false, source: "registry" },
+    { serverId: "mcp-2", name: "shotgrid", command: "uvx", args: ["shotgrid-mcp"], envKeys: [], enabledByDefault: false, sensitive: true, notes: "Production tracking - writes are real.", source: "registry" },
+    { serverId: "mcp-settings-docs", name: "docs", command: "node", args: ["docs-server.mjs"], envKeys: [], enabledByDefault: true, sensitive: false, source: "settings" }
+  ];
+  const mcpOverrides = [
+    { scope: "workspace-set", refId: "set-1", serverId: "mcp-1", state: "on" }
+  ];
+  let mcpSerial = 2;
 
   const workHistory = [
     { taskId: "t-1", taskTitle: "Alembic publish support", sessionId: "s-live", sessionTitle: "Add alembic support to asset_api", lastActivityAt: iso(2), turnCount: 7 },
@@ -324,7 +338,7 @@
   ];
 
   const taskReviewNotes = [
-    "Clone session \"Clone helper\" is not live in this window — its changes are not listed."
+    "Clone session \"Clone helper\" is not live in this window - its changes are not listed."
   ];
 
   /** True when a session id names a task-review session. */
@@ -648,7 +662,7 @@
         if (!parent) return respondError(requestId, "unknown session");
         const child = {
           sessionId: `s-role-${payload.role}-${String(sessions.length)}`,
-          title: `${payload.role} — ${parent.title}`,
+          title: `${payload.role} - ${parent.title}`,
           status: "active",
           providerId: parent.providerId,
           model: parent.model,
@@ -1040,7 +1054,7 @@
       case "agents.state": {
         // Fleet snapshot (agents.html, ADR 0013): assembled from the same
         // session/task/question/access fixtures the sidebar uses, mirroring
-        // the host's grouping — task links plus a grafted role child under
+        // the host's grouping - task links plus a grafted role child under
         // s-live; every unlinked session lands in the orphan drawer.
         const fleetLive = new Set(["s-live", "s-waiting", "s-clone"]);
         const decorate = (session) => ({ ...session, live: fleetLive.has(session.sessionId) });
@@ -1088,21 +1102,95 @@
         return respond(requestId, { type, accepted: true });
       case "taskBoard.open":
         // The Task Board panel + command exist, so the relay succeeds (in the
-        // browser harness there is no editor area to reveal — the log line is
+        // browser harness there is no editor area to reveal - the log line is
         // the observable effect).
         harnessLog(`taskBoard.open`);
         return respond(requestId, { type, accepted: true });
       case "work.history": return respond(requestId, { type, entries: workHistory });
-      case "memory.list": return respond(requestId, { type, candidates: memoryCandidates });
+      case "memory.list": return respond(requestId, { type, candidates: memoryCandidates, detectedTags });
       case "memory.resolve": {
         const candidate = memoryCandidates.find((entry) => entry.memoryCandidateId === payload.memoryCandidateId);
         if (!candidate) return respondError(requestId, "unknown candidate");
+        if (payload.approve && payload.edits) {
+          harnessLog(`memory.resolve edits scope=${String(payload.edits.scope)} tags=${(payload.edits.tags ?? []).join(",")}`);
+          if (payload.edits.content) candidate.content = payload.edits.content;
+          if (payload.edits.scope) candidate.scope = payload.edits.scope;
+          if (payload.edits.tags) candidate.tags = payload.edits.tags;
+        }
         candidate.status = payload.approve ? "approved" : "rejected";
         return respond(requestId, { type, candidate });
+      }
+      case "memory.add": {
+        memorySerial += 1;
+        const candidate = {
+          memoryCandidateId: `m-${memorySerial}`,
+          sessionId: "user",
+          content: payload.content,
+          status: "approved",
+          createdAt: new Date().toISOString(),
+          scope: payload.scope,
+          ...(payload.scope === "workspace" ? { scopeLabel: "asset_api" } : {}),
+          ...(payload.scope === "task" ? { scopeLabel: "Alembic publish support" } : {}),
+          tags: payload.tags ?? [],
+          origin: "user"
+        };
+        memoryCandidates.unshift(candidate);
+        harnessLog(`memory.add scope=${payload.scope} tags=${(payload.tags ?? []).join(",")}`);
+        return respond(requestId, { type, candidate });
+      }
+      case "memory.delete": {
+        const index = memoryCandidates.findIndex((entry) => entry.memoryCandidateId === payload.memoryCandidateId);
+        if (index !== -1) memoryCandidates.splice(index, 1);
+        harnessLog(`memory.delete ${String(payload.memoryCandidateId)}`);
+        return respond(requestId, { type, memoryCandidateId: payload.memoryCandidateId });
       }
       case "memory.open":
         // Log the send so a visual check can assert the Memories "Open" row wiring.
         harnessLog(`memory.open ${String(payload.memoryCandidateId)}`);
+        return respond(requestId, { type, accepted: true });
+      case "mcp.list": return respond(requestId, { type, servers: mcpServers, overrides: mcpOverrides });
+      case "mcp.save": {
+        const draft = payload.server;
+        const existing = draft.serverId ? mcpServers.find((entry) => entry.serverId === draft.serverId) : undefined;
+        if (existing) {
+          Object.assign(existing, {
+            name: draft.name, command: draft.command, args: draft.args,
+            enabledByDefault: draft.enabledByDefault, sensitive: draft.sensitive,
+            ...(draft.notes === undefined ? {} : { notes: draft.notes }),
+            ...(draft.env === undefined ? {} : { envKeys: Object.keys(draft.env) })
+          });
+        } else {
+          mcpSerial += 1;
+          mcpServers.push({
+            serverId: `mcp-${String(mcpSerial + 1)}`, name: draft.name, command: draft.command, args: draft.args,
+            envKeys: Object.keys(draft.env ?? {}), enabledByDefault: draft.enabledByDefault,
+            sensitive: draft.sensitive, ...(draft.notes === undefined ? {} : { notes: draft.notes }), source: "registry"
+          });
+        }
+        harnessLog(`mcp.save ${draft.name}`);
+        return respond(requestId, { type, servers: mcpServers });
+      }
+      case "mcp.delete": {
+        const index = mcpServers.findIndex((entry) => entry.serverId === payload.serverId);
+        if (index !== -1) mcpServers.splice(index, 1);
+        harnessLog(`mcp.delete ${String(payload.serverId)}`);
+        return respond(requestId, { type, servers: mcpServers });
+      }
+      case "mcp.setOverride": {
+        const index = mcpOverrides.findIndex((entry) =>
+          entry.scope === payload.scope && entry.refId === payload.refId && entry.serverId === payload.serverId);
+        if (payload.state === "inherit") {
+          if (index !== -1) mcpOverrides.splice(index, 1);
+        } else if (index === -1) {
+          mcpOverrides.push({ scope: payload.scope, refId: payload.refId, serverId: payload.serverId, state: payload.state });
+        } else {
+          mcpOverrides[index].state = payload.state;
+        }
+        harnessLog(`mcp.setOverride ${payload.scope}/${payload.refId} ${payload.serverId}=${payload.state}`);
+        return respond(requestId, { type, overrides: mcpOverrides });
+      }
+      case "chat.contextDebug":
+        harnessLog(`chat.contextDebug ${String(payload.sessionId)}`);
         return respond(requestId, { type, accepted: true });
       case "clone.state":
         return respond(requestId, { type, sessionId: payload.sessionId, repos: cloneRepos });
@@ -1130,6 +1218,9 @@
       case "preview.list":
         harnessLog(`preview.list ${String(payload.sessionId)}`);
         return respond(requestId, { type, previews: previewFixtures.filter((p) => p.sessionId === payload.sessionId) });
+      case "terminal.attach":
+        harnessLog(`terminal.attach ${String(payload.sessionId)}`);
+        return respond(requestId, { type, accepted: true });
       case "preview.open":
         harnessLog(`preview.open ${String(payload.previewId)}${payload.external ? " external" : ""}`);
         return respond(requestId, { type, accepted: true });
@@ -1373,7 +1464,7 @@
       case "planner.materializeSubtasks": {
         const plan = plannerPlans.find((candidate) => candidate.planId === payload.planId);
         const owner = tasks.find((candidate) => candidate.taskId === plan?.taskId);
-        if (!owner) return respondError(requestId, "This plan has no owning task — pick one in the plan intake first.");
+        if (!owner) return respondError(requestId, "This plan has no owning task - pick one in the plan intake first.");
         harnessLog(`planner.materializeSubtasks ${String(payload.planId)} n=${String(payload.titles.length)}`);
         const stamp = new Date().toISOString();
         for (const title of payload.titles) {
@@ -1449,9 +1540,9 @@
     "",
     "## Phases",
     "",
-    "- Phase 1 — provider spike and library choice",
-    "- Phase 2 — migrate sessions and cut over cookies",
-    "- Phase 3 — rollout with kill switch",
+    "- Phase 1 - provider spike and library choice",
+    "- Phase 2 - migrate sessions and cut over cookies",
+    "- Phase 3 - rollout with kill switch",
     "",
     "## Rollback",
     "",
@@ -1559,9 +1650,9 @@
         const base = window.__harness.eventSequence;
         push({ type: "chat.turnStarted", sessionId, runId: "run-x" });
         push({ type: "chat.event", sessionId, line: { sequence: base + 1, eventType: "user.message", summary: userSummary, createdAt: new Date().toISOString() } });
-        push({ type: "chat.event", sessionId, line: { sequence: base + 2, eventType: "agent.text", summary: "Working on it — ", createdAt: new Date().toISOString(), final: false } });
+        push({ type: "chat.event", sessionId, line: { sequence: base + 2, eventType: "agent.text", summary: "Working on it - ", createdAt: new Date().toISOString(), final: false } });
         setTimeout(() => {
-          push({ type: "chat.event", sessionId, line: { sequence: base + 3, eventType: "agent.text", summary: "Working on it — done.\n\n- item one\n- item two", createdAt: new Date().toISOString(), final: true } });
+          push({ type: "chat.event", sessionId, line: { sequence: base + 3, eventType: "agent.text", summary: "Working on it - done.\n\n- item one\n- item two", createdAt: new Date().toISOString(), final: true } });
           push({ type: "chat.turnCompleted", sessionId, runId: "run-x", status: "completed" });
         }, 400);
       },
@@ -1597,7 +1688,7 @@
       /**
        * Subagent fan-out (V31/V32): streams a turn where the agent spawns two
        * subagents (scribe + lister), scribe nests a grandchild (counter),
-       * scribe completes and lister FAILS — mirroring the 2026-07-05 codex
+       * scribe completes and lister FAILS - mirroring the 2026-07-05 codex
        * probe. Lines carry agentPath/nodeId/label/nodeStatus/toolStatus/detail
        * exactly as summarizeAgentEvent emits them.
        */
@@ -1677,7 +1768,7 @@
       },
       /**
        * Fires the coarse board.changed push (turn-completed / board mutation
-       * simulation) — an open task-board panel refetches board.state. Mutate
+       * simulation) - an open task-board panel refetches board.state. Mutate
        * `__harness.fixtures.tasks`/`boardColumns` first to see a delta land.
        */
       boardChanged() {

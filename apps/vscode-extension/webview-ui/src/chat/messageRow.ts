@@ -1,8 +1,8 @@
 /**
  * Shared chat message rendering (ADR 0012, P3 extraction).
  *
- * The DOM for one transcript row — user card, full-width assistant markdown,
- * system notices with their action buttons, coalesced command rows — plus the
+ * The DOM for one transcript row - user card, full-width assistant markdown,
+ * system notices with their action buttons, coalesced command rows - plus the
  * working / reconnecting / thinking indicators. Both the Chat tab and the
  * Planner rail render through these, so a bubble fixed once is fixed
  * everywhere; everything surface-specific arrives via MessageRowContext
@@ -10,13 +10,14 @@
  * retry/sign-in handlers), with safe defaults for surfaces that skip a
  * capability.
  *
- * SECURITY: every dynamic string renders via textContent — NEVER innerHTML.
+ * SECURITY: every dynamic string renders via textContent - NEVER innerHTML.
  * Inline markdown is parsed structurally; raw HTML in agent output stays
  * literal text.
  */
 
 import { button, el, formatTime, iconButton } from "../components.js";
 import { splitBlocks, type DocBlock } from "../markdownBlocks.js";
+import { buildProtocolNote, isProtocolFenceLanguage } from "./protocolNotes.js";
 import type { AgentGroup, ChatMessage } from "./transcriptModel.js";
 
 export interface MessageRowContext {
@@ -26,6 +27,8 @@ export interface MessageRowContext {
   openLink(href: string): void;
   /** Copy-to-clipboard for code figures; default uses the navigator clipboard. */
   copyText?(text: string, copyButton: HTMLButtonElement): void;
+  /** Whether a turn is live NOW; absent = assume live (planner replay etc.). */
+  turnActive?(): boolean;
   /** Mermaid fence renderer; default shows the source as a labeled code figure. */
   renderMermaid?(block: DocBlock): HTMLElement;
   /** User message body (host-briefing disclosure, file tokens); default is plain text. */
@@ -79,16 +82,22 @@ export function chatMessageRow(message: ChatMessage, ctx: MessageRowContext): HT
     return row;
   }
   if (message.role === "command") {
-    const row = el("div", `chat-message role-command status-${message.commandStatus ?? "started"}`);
+    // A command still "started" when NO turn is live never completed - the
+    // turn died (cancelled/crashed). Show that honestly instead of a forever
+    // "running…" on a dead session.
+    const interrupted = message.commandStatus === "started" && ctx.turnActive?.() === false;
+    const row = el("div", `chat-message role-command status-${interrupted ? "interrupted" : message.commandStatus ?? "started"}`);
     const commandLine = el("div", "chat-command-line");
     const promptGlyph = el("span", "chat-command-prompt");
     promptGlyph.textContent = "$";
     const commandText = el("span", "chat-command-text");
     commandText.textContent = message.text;
     const statusChip = el("span", "chat-command-status");
-    statusChip.textContent = message.commandStatus === "started"
-      ? "running…"
-      : message.commandStatus === "failed"
+    statusChip.textContent = interrupted
+      ? "interrupted"
+      : message.commandStatus === "started"
+        ? "running…"
+        : message.commandStatus === "failed"
         ? `failed${message.commandExit === undefined ? "" : ` · exit ${String(message.commandExit)}`}`
         : `exit ${message.commandExit === undefined ? "0" : String(message.commandExit)}`;
     commandLine.append(promptGlyph, commandText, statusChip);
@@ -125,7 +134,9 @@ export function chatMessageRow(message: ChatMessage, ctx: MessageRowContext): HT
   } else {
     const body = el("div", "chat-assistant-body");
     // Structural markdown: mermaid fences render as sanitized diagrams when
-    // the surface supplies a renderer; the source figure otherwise.
+    // the surface supplies a renderer; the source figure otherwise. Protocol
+    // fences (access-request/question/preview/memory) render as collapsed
+    // one-line notes - their raw JSON is host plumbing, not reading material.
     for (const block of splitBlocks(message.text, "markdown")) {
       body.append(assistantBlock(block, ctx));
     }
@@ -215,6 +226,10 @@ function inlineLink(label: string, href: string, openLink: (href: string) => voi
 
 /** Builds one structural markdown block as DOM (inline markdown + textContent leaves). */
 export function assistantBlock(block: DocBlock, ctx: MessageRowContext): HTMLElement {
+  // Protocol fences render as collapsed notes, not raw JSON code blocks.
+  if (block.kind === "code" && isProtocolFenceLanguage(block.language)) {
+    return buildProtocolNote(block.language ?? "", block.text);
+  }
   switch (block.kind) {
     case "heading": {
       const level = Math.min(block.level ?? 1, 4);
@@ -300,7 +315,7 @@ const BRIEFING_END = "[end host briefing";
  * First turns carry host briefings (the session mount briefing and the
  * planner's own). Collapses any leading `[host briefing…]…[end host briefing…]`
  * spans into disclosures so a rail leads with what was actually asked. Plain
- * textContent rendering throughout (no file tokens — the Chat tab supplies its
+ * textContent rendering throughout (no file tokens - the Chat tab supplies its
  * richer renderUserBody itself).
  */
 export function renderBriefedUserBody(container: HTMLElement, text: string): void {
@@ -424,9 +439,9 @@ export function reasoningDisclosure(live: boolean, text: string, elapsedSeconds:
 export function reconnectingIndicatorRow(reconnectLabel: string, elapsedSeconds: number): HTMLElement {
   const row = el("div", "chat-working chat-reconnecting");
   const suffix = elapsedSeconds >= 45
-    ? " — still trying; if it doesn't recover, End the session or reload the window"
+    ? " - still trying; if it doesn't recover, End the session or reload the window"
     : elapsedSeconds >= 20
-      ? " — starting the sandbox can take a bit"
+      ? " - starting the sandbox can take a bit"
       : "";
   const text = `${reconnectLabel} (${String(elapsedSeconds)}s)${suffix}`;
   const label = el("span", "chat-working-label");

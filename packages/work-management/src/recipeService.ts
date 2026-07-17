@@ -1,7 +1,7 @@
 /**
  * Task recipes (ADR 0007): templates that materialize into a task, its
  * subtasks, their dependency DAG, and per-role defaults (prompt, autoStart,
- * seedMode, and ADR 0002 model routing) — in one action that CREATES and
+ * seedMode, and ADR 0002 model routing) - in one action that CREATES and
  * never starts. Stored
  * rows (seeded + user) merge with read-only overlay rows supplied by the
  * host from the workspace's `.drydock/recipes.json` (the planner-aspects
@@ -59,7 +59,7 @@ export class RecipeService {
    * recipe order (keys resolved to fresh subtask ids); `{title}` in prompts
    * is replaced with the task title. The complete recipe and dependency DAG
    * are validated before the task write, so predictable input defects cannot
-   * leave a partially materialized task. NOTHING starts — creation and
+   * leave a partially materialized task. NOTHING starts - creation and
    * starting stay separate acts.
    */
   async materializeTask(recipeId: string, title: string): Promise<WorkTaskRecord> {

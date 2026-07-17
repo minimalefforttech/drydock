@@ -7,6 +7,7 @@ export * from "./agentQuestionStore.js";
 export * from "./boardColumnStore.js";
 export * from "./diffReviewStore.js";
 export * from "./eventStore.js";
+export * from "./mcpServerStore.js";
 export * from "./memoryCandidateStore.js";
 export * from "./migrations.js";
 export * from "./plannerStore.js";

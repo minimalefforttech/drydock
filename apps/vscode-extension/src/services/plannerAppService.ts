@@ -4,8 +4,8 @@
  * One truth for the plan lifecycle: intake, the planning chat session, artifact
  * collection, workspace hydration, annotations, and the composed turns that
  * drive the agent. The agent writes into its workspace `plan/` directory (a
- * host bind mount, so a sandbox crash never loses bytes); after every turn —
- * and on panel open — this service collects those files into durable rows:
+ * host bind mount, so a sandbox crash never loses bytes); after every turn -
+ * and on panel open - this service collects those files into durable rows:
  * text kinds inline in SQLite, images into the content-addressed blob store.
  * A fresh session for an existing plan is hydrated from the store before its
  * first turn, so sessions stay disposable while plans persist.
@@ -256,7 +256,7 @@ export class PlannerAppService {
 
   /**
    * Boots (or revives) the plan's session, hydrates its workspace from the
-   * store, and — when the plan has no artifacts yet — fires the initial
+   * store, and - when the plan has no artifacts yet - fires the initial
    * briefing turn detached. Resolves once the session is live; callers ack the
    * webview first and follow with a planner.sessionReady push.
    */
@@ -303,7 +303,7 @@ export class PlannerAppService {
       lines.push(`- ${title} (${relPath}, ${describePlanAnchor(annotation.anchor)}): ${annotation.body}`);
     }
     const prompt = [
-      "[host] Reviewer instructions on the plan artifacts — address each item and update the matching files under plan/, revising in place:",
+      "[host] Reviewer instructions on the plan artifacts - address each item and update the matching files under plan/, revising in place:",
       ...lines
     ].join("\n");
 
@@ -373,7 +373,7 @@ export class PlannerAppService {
       mode: "plan",
       roots: plan.contextRoots
     };
-    const started = await this.options.sessions.startChatSession(model, `Plan — ${plan.title}`, workspace);
+    const started = await this.options.sessions.startChatSession(model, `Plan - ${plan.title}`, workspace);
     const sessionId = started.session.sessionId;
     this.hydrationRequired.add(sessionId);
     await this.options.plans.updatePlan(plan.planId, {
@@ -553,7 +553,7 @@ export class PlannerAppService {
 
   /**
    * Materializes the stored artifacts back into a session workspace's `plan/`
-   * directory (fresh boots and revivals). Unreadable blobs degrade to a warn —
+   * directory (fresh boots and revivals). Unreadable blobs degrade to a warn -
    * the agent regenerates what it cannot see.
    */
   async hydrateWorkspace(planId: PlanId, sessionId: SessionId): Promise<void> {
@@ -841,19 +841,19 @@ export class PlannerAppService {
         return `- ${aspect.label} (write under plan/${aspect.aspectId}/): ${aspect.instructions}${expected}`;
       });
     const sections = [
-      `[host briefing — planner]`,
+      `[host briefing - planner]`,
       `You are drafting the plan "${plan.title}". The ask follows after this briefing.`,
       ...(plan.notes.trim().length === 0 ? [] : [`Pre-information from the reviewer:\n${plan.notes}`]),
       [
         "Write every artifact under the `plan/` directory of your workspace, one subdirectory per aspect below.",
-        "Formats: Markdown (`.md`) for documents — the first `# H1` becomes the display title; Mermaid (`.mmd`, or ```mermaid fences inside a document) for diagrams;",
+        "Formats: Markdown (`.md`) for documents - the first `# H1` becomes the display title; Mermaid (`.mmd`, or ```mermaid fences inside a document) for diagrams;",
         "PNG/SVG images for mockups; one self-contained `.html` file (inline CSS/JS, no external requests) for a clickable prototype.",
-        `Revise files in place — the reviewer sees revisions, not copies. Keep text files under ${String(PLANNER_MAX_TEXT_BYTES / 1024)} KB, images under ${String(PLANNER_MAX_IMAGE_BYTES / (1024 * 1024))} MB, and at most ${String(PLANNER_MAX_FILES)} files.`,
+        `Revise files in place - the reviewer sees revisions, not copies. Keep text files under ${String(PLANNER_MAX_TEXT_BYTES / 1024)} KB, images under ${String(PLANNER_MAX_IMAGE_BYTES / (1024 * 1024))} MB, and at most ${String(PLANNER_MAX_FILES)} files.`,
         "Optionally maintain `plan/manifest.json` mapping relative paths to display titles."
       ].join(" "),
       ...(aspectLines.length === 0 ? [] : [`Aspects to cover:\n${aspectLines.join("\n")}`]),
       "The project context is mounted read-only; the plan directory is writable.",
-      "[end host briefing — planner]",
+      "[end host briefing - planner]",
       "",
       // The brief sits OUTSIDE the briefing delimiters so a rail's collapsed
       // rendering leads with the user's own words, not host preamble.

@@ -5,7 +5,7 @@
  * through: the Edit tab (via views/chatTab.ts) and the Plan tab. One code
  * path means a routing rule fixed once is fixed everywhere. The folder owns
  * the live-turn bookkeeping (streaming assistant row, running-command
- * coalescing, subagent group tree) and mutates a caller-owned store — the
+ * coalescing, subagent group tree) and mutates a caller-owned store - the
  * caller supplies accessors so it can keep swapping its arrays on session
  * switches, plus hooks for everything surface-specific (diagnostics feed,
  * changed-files tracking, system notices, reasoning stream, render/persist).
@@ -27,7 +27,7 @@ export interface ChatMessage {
   readonly streaming?: boolean;
   /** role "group": the subagent group block this row renders. */
   readonly nodeId?: string;
-  /** role "system": severity styling — "error" reds it, otherwise neutral. */
+  /** role "system": severity styling - "error" reds it, otherwise neutral. */
   readonly tone?: "error" | "info";
   /** role "system": show a Retry button that re-sends the last prompt. */
   readonly retry?: boolean;
@@ -114,7 +114,7 @@ export type TranscriptInputLine = SequencedTranscriptLine | DiagnosticEntry;
 
 /**
  * The caller-owned message/group store. Supplied as accessors so a surface
- * that reassigns its arrays on session switch stays coherent — the folder
+ * that reassigns its arrays on session switch stays coherent - the folder
  * always reads through the getters.
  */
 export interface TranscriptStore {
@@ -233,7 +233,7 @@ export class TranscriptFolder {
     }
     if (line.eventType === "agent.command") {
       // The shell commands the agent runs in the container are the "docker shell"
-      // activity — render them inline (a dev needs to watch them), not just in
+      // activity - render them inline (a dev needs to watch them), not just in
       // the hidden Diagnostics feed. Still diagnose for the flat debug truth.
       this.appendCommand(line, shouldPersist);
       this.hooks.onDiagnostic(diagnosticFromLine(line), shouldPersist);
@@ -287,7 +287,7 @@ export class TranscriptFolder {
     if (shouldPersist) this.hooks.onPersist();
   }
 
-  /** A surface-authored notice (built by the surface — auth detection etc. lives there). */
+  /** A surface-authored notice (built by the surface - auth detection etc. lives there). */
   appendSystemMessage(message: Omit<ChatMessage, "id" | "role" | "createdAt"> & { readonly text: string }): void {
     this.store.messages.push({
       id: nextMessageId("system"),

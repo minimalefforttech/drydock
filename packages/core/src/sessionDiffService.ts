@@ -132,7 +132,7 @@ export class SessionDiffService {
 
   /**
    * Copies an existing baseline's file snapshots into a new record with the
-   * given scope — no tree walk, no hashing, no new blobs (blobs are
+   * given scope - no tree walk, no hashing, no new blobs (blobs are
    * content-addressed and shared). Backs the session-start and turn scopes,
    * which start life as exact copies of another frame.
    */

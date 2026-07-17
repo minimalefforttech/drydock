@@ -146,7 +146,7 @@ test("app-server: wait-first ordering (probe order) emits one terminal per child
   assert.deepEqual(normalizer.normalize(notification("turn/completed", { threadId: LISTER }), context), []);
 
   // close_agent repeating the same terminal state stays silent too? It
-  // carries the same message — a repeat emit is allowed only when a message
+  // carries the same message - a repeat emit is allowed only when a message
   // is present, and the reducer merges it idempotently. Assert the shape.
   const closeEvents = normalizer.normalize(notification("item/completed", {
     threadId: ROOT,

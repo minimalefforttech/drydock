@@ -1,7 +1,7 @@
 @import "./help.css";
 
 /*
- * Agents panel (ADR 0013) — fleet view styles.
+ * Agents panel (ADR 0013) - fleet view styles.
  *
  * VS Code theme variables only; status/depth/accent styling is by CLASS
  * (the panel's strict CSP has no 'unsafe-inline' for styles, so no style
@@ -59,7 +59,7 @@ html, body {
 .rollup-waiting.loud { color: var(--fleet-warn); }
 .rollup-idle, .rollup-sep, .rollup-waiting { color: var(--fleet-quiet); }
 .rollup-waiting.loud { font-weight: 700; }
-/* Fleet token total (ADR 0013) — quiet cost line. */
+/* Fleet token total (ADR 0013) - quiet cost line. */
 .rollup-tokens { color: var(--fleet-quiet); font-weight: 500; font-variant-numeric: tabular-nums; }
 .gmeta-tokens { font-variant-numeric: tabular-nums; }
 
@@ -299,7 +299,7 @@ html, body {
 }
 .dot-fail { background: var(--fleet-fail); }
 .dot-unknown { background: transparent; border: 1.5px dashed var(--fleet-quiet); }
-/* ADR 0013: resuming/booting — hollow but alive (pulsing outline). */
+/* ADR 0013: resuming/booting - hollow but alive (pulsing outline). */
 .dot-boot {
   background: transparent;
   border: 1.5px solid var(--fleet-run);
@@ -362,7 +362,7 @@ html, body {
 
 /* --- hover card (ADR 0013) ---------------------------------------------- */
 
-/* One consolidated popover per row for everything the detail level hides —
+/* One consolidated popover per row for everything the detail level hides -
    revealed by CSS with a tooltip-ish delay on the way in, gone instantly on
    the way out; no pointer events, so row clicks are never intercepted. */
 .hovercard {
@@ -420,7 +420,7 @@ html, body {
 .drawer { border-style: dashed; }
 .drawer .ghead { background: transparent; }
 
-/* Landing drawer (ADR 0014): solid border — it holds real actions. */
+/* Landing drawer (ADR 0014): solid border - it holds real actions. */
 .drawer.landing { border-style: solid; }
 .landing-row { cursor: default; }
 

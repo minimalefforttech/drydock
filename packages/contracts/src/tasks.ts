@@ -73,7 +73,7 @@ export interface WorkTaskUpdate {
 /**
  * One task FAQ entry (ADR 0007): when the task's auto-answer toggle (and the
  * global config) is on, an incoming agent question containing `pattern`
- * (case-insensitive) is answered automatically with `answer` — with a
+ * (case-insensitive) is answered automatically with `answer` - with a
  * transcript receipt, and never for access requests.
  */
 export interface TaskFaqRecord {
@@ -119,7 +119,7 @@ export type ColumnCategory = (typeof COLUMN_CATEGORIES)[number];
 
 export interface BoardColumnRecord {
   readonly columnId: ColumnId;
-  /** "Review" — cosmetic, user-editable. */
+  /** "Review" - cosmetic, user-editable. */
   readonly name: string;
   /** Drives every behaviour rule; column names never do. */
   readonly category: ColumnCategory;
@@ -130,13 +130,13 @@ export interface BoardColumnRecord {
  * How a dependent subtask's clone seeds at start (ADR 0014). `local` clones
  * the developer's current local HEAD (classic behavior); `upstream`
  * additionally applies its upstream subtasks' unlanded changesets 3-way.
- * Unset means `local` — the user chooses, automation never invents one.
+ * Unset means `local` - the user chooses, automation never invents one.
  */
 export type SubtaskSeedMode = "local" | "upstream";
 
 /**
  * Per-subtask model profile (ADR 0002), set by recipes at materialization.
- * Structural twin of webviewMessages.ChatModelSelection — tasks.ts cannot
+ * Structural twin of webviewMessages.ChatModelSelection - tasks.ts cannot
  * import it without a cycle (webviewMessages imports tasks).
  */
 export interface SubtaskModelSelection {
@@ -146,7 +146,7 @@ export interface SubtaskModelSelection {
 
 export interface SubtaskRecord {
   readonly subtaskId: SubtaskId;
-  /** Owning task — dependencies never leave it. */
+  /** Owning task - dependencies never leave it. */
   readonly taskId: TaskId;
   readonly title: string;
   readonly description?: string;
@@ -273,7 +273,7 @@ export interface TaskRecipeSubtask {
 
 /**
  * A task template (ADR 0007): one click creates the task, its subtasks,
- * their dependency DAG, and per-role defaults — and never starts anything.
+ * their dependency DAG, and per-role defaults - and never starts anything.
  * `seeded` rows ship with the product; `overlay` rows merge read-only from
  * the workspace's `.drydock/recipes.json` (the planner-aspects pattern).
  */
@@ -306,14 +306,14 @@ export interface TaskChangesetRecord {
   readonly changesetId: string;
   readonly taskId: TaskId;
   readonly subtaskId: SubtaskId;
-  /** Session whose clone produced the patch — landing is keyed off it. */
+  /** Session whose clone produced the patch - landing is keyed off it. */
   readonly sessionId: SessionId;
   /** Clone repo folder name; dependents match seeds to their clones by it. */
   readonly repoName: string;
   readonly patchSha256: string;
   readonly patchBytes: number;
   readonly fileCount: number;
-  /** Repo-relative touched paths — the landing overlap pre-check (ADR 0014). Absent on older captures. */
+  /** Repo-relative touched paths - the landing overlap pre-check (ADR 0014). Absent on older captures. */
   readonly paths?: readonly string[];
   readonly capturedAt: string;
   /** Stamped when the user pulls this session's work into the local repo. */
@@ -327,7 +327,7 @@ export interface TaskChangesetStore {
   listForSubtasks(subtaskIds: readonly SubtaskId[]): Promise<TaskChangesetRecord[]>;
   /** Subtask ids among the given set that hold at least one unlanded row. */
   listUnlandedSubtaskIds(subtaskIds: readonly SubtaskId[]): Promise<SubtaskId[]>;
-  /** Every unlanded row across every subtask — the landing queue view (ADR 0014). */
+  /** Every unlanded row across every subtask - the landing queue view (ADR 0014). */
   listUnlanded(): Promise<TaskChangesetRecord[]>;
   /** Marks rows landed for a session's pull; repoName narrows to one repo. */
   markLandedBySession(sessionId: SessionId, landedAt: string, repoName?: string): Promise<number>;

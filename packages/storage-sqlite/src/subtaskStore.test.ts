@@ -252,7 +252,7 @@ test("colorOverride round-trips through insert, update, clear, and a reopen", as
     const store = new SqliteSubtaskStore(connection);
 
     await taskStore.insertTask(task("task-1"));
-    // Absent by default (undefined, not 0) — falls back to the parent task's stripe hue.
+    // Absent by default (undefined, not 0) - falls back to the parent task's stripe hue.
     await store.insertSubtask(subtask("sub-default", "task-1", 0));
     // Set at creation time.
     await store.insertSubtask(subtask("sub-colored", "task-1", 1, { colorOverride: 3 }));

@@ -96,7 +96,7 @@ export class ClaudeAdapter implements AgentAdapter {
     const connection: AgentConnection = {
       providerId: this.providerId,
       // Generation + agent: a sidecar connection on the SAME runtime (e.g. an
-      // out-of-band summary prompt) must never share state with — or clobber —
+      // out-of-band summary prompt) must never share state with - or clobber -
       // the session's own connection.
       connectionId: `claude-exec-${String(request.runtime.runtimeGenerationId)}-${String(request.agentId)}`,
       sessionId: request.sessionId,
@@ -191,8 +191,8 @@ export class ClaudeAdapter implements AgentAdapter {
     }
 
     // Only synthesize a generic failure when Claude produced NO terminal event of
-    // its own. When it did — a stream-json `result` with is_error (auth failures
-    // like "Not logged in · Please run /login", rate limits, etc.) — that event
+    // its own. When it did - a stream-json `result` with is_error (auth failures
+    // like "Not logged in · Please run /login", rate limits, etc.) - that event
     // already carries the real, actionable message; stacking "claude exec failed"
     // on top only buries it. The generic path remains for true launch failures
     // (sbx couldn't start claude, empty stdout) where stderr/error hold the cause.

@@ -8,10 +8,10 @@ Related: roadmap, `architecture-implementation-plan.md`, threat model.
 |---|---|---|
 | Standard (implementation) | live work folders mounted rw | directly on disk |
 | Planning session | live folders mounted ro | durable Planner artifacts only |
-| **Clone** | a git clone of each repo, inside its disposable workspace — **no live mounts** | a patch the developer pulls into the editor |
+| **Clone** | a git clone of each repo, inside its disposable workspace - **no live mounts** | a patch the developer pulls into the editor |
 | Remote (future, specced below) | a clone on a separate networked machine | the same patch protocol over a transport |
 
-## Clone mode — mechanics
+## Clone mode - mechanics
 
 ### The load-bearing fact
 The session workspace is a host-side temp directory mounted into the VM.
@@ -20,12 +20,12 @@ commit, diff, 3-way apply) runs on the host against
 `<workspace>/repos/<name>`. The container needs no git, no credentials, and
 no network; it just edits files through its mount. The developer's real repo
 is only ever (a) a read-only clone source / fetch remote and (b) a
-working-tree apply target — **nothing is ever pushed to any origin**, and the
+working-tree apply target - **nothing is ever pushed to any origin**, and the
 local repo gains no commits.
 
 ### Why full clones, not worktrees
 A `git worktree`'s gitdir points back into the primary repo's `.git`
-directory — mounting a worktree rw into a VM hands the container a path into
+directory - mounting a worktree rw into a VM hands the container a path into
 the live repository. Disqualified. Drydock uses `git clone --local
 --no-hardlinks`: local clone transport stays fast, while object files are
 physically copied so a VM write cannot reach the developer's real object store.
@@ -60,19 +60,19 @@ fails with an actionable error rather than running against an empty workspace.
 All bookkeeping lives in the clone; `refs/sync/base` always names the last
 state both sides share.
 
-**Inbound — "pull the agent's work into my editor" (the common gesture):**
+**Inbound - "pull the agent's work into my editor" (the common gesture):**
 1. Commit agent progress in the clone (`add -A; commit "[sync] agent"`).
 2. Patch = `git -C clone diff --binary sync/base..HEAD` (optionally filtered
    to one file for per-file pulls).
-3. `git -C local apply --binary --3way` — **working tree only**, no commits;
+3. `git -C local apply --binary --3way` - **working tree only**, no commits;
    the developer reviews in the editor / working set and commits on their
    own terms.
 4. Advance `sync/base` to HEAD. Conflicts (developer edited the same lines
    since the last sync) surface as standard conflict markers in the LOCAL
-   files, reported per file — the developer resolves in-editor, which is
+   files, reported per file - the developer resolves in-editor, which is
    where a developer wants conflicts.
 
-**Outbound — "push my local edits to the VM":**
+**Outbound - "push my local edits to the VM":**
 1. Commit agent progress (keeps the 3-way base honest).
 2. Local committed delta: `git -C clone fetch origin <branch>` (origin = the
    local repo path), `diff --binary sync/base FETCH_HEAD`, apply `--3way` to
@@ -80,16 +80,16 @@ state both sides share.
    apply `--3way`; copy untracked. Commit `"[sync] local"`; advance
    `sync/base`.
 3. Conflicts land as markers in the CLONE's files and the next turn's host
-   note tells the agent to resolve them — outbound conflicts are the
+   note tells the agent to resolve them - outbound conflicts are the
    *agent's* to fix, inbound conflicts are the *developer's*. Symmetry keeps
    both sides friction-free.
 
 Notes: binary patches via `--binary` throughout; untracked files copy-win
-(no merge semantics — documented); multi-root sets clone every **git** root
+(no merge semantics - documented); multi-root sets clone every **git** root
 under `repos/<name>`, and clone mode refuses non-git roots with a clear
 error rather than silently mounting them.
 
-### UX — the working set IS the sync surface
+### UX - the working set IS the sync surface
 Zero new mental models: in a clone session the existing Changes working set
 lists the agent's changes in the clone (same glyphs, same `+N −M` stats,
 same click-to-open-diff against the sync base). Only the verbs change:
@@ -115,7 +115,7 @@ pulling first: Review entry captures each clone's `sync/base..HEAD` patch
 durably (blob store + `task_changesets` row, latest capture wins) together
 with its repo-relative touched paths, and a
 subtask whose stored `seedMode` is `upstream` 3-way applies its upstreams'
-unlanded changesets into the fresh clone BEFORE `refs/sync/base` freezes —
+unlanded changesets into the fresh clone BEFORE `refs/sync/base` freezes -
 so each subtask's own changeset stays scoped to its own work. A full Pull
 marks the session's changesets landed (they stop seeding). Conflicting
 seeds fail the start loudly; the user chooses the mode (start QuickPick or
@@ -129,12 +129,12 @@ and lost-clone or mid-turn refusals stay visible. The durable patch cannot yet
 rehydrate a lost clone, so landing still requires that live process-local clone
 state.
 
-## Remote mode (future) — specification only
+## Remote mode (future) - specification only
 
 Target: a separate machine with internet access (never production access)
 runs the container; the developer's machine keeps the real repos.
 
-The sync protocol is deliberately **transport-independent** — `sync/base`
+The sync protocol is deliberately **transport-independent** - `sync/base`
 + bidirectional `--binary --3way` patches make no assumption that the clone
 is local. Remote mode replaces "shared temp directory" with a transport:
 
@@ -149,8 +149,8 @@ is local. Remote mode replaces "shared temp directory" with a transport:
 3. **Inbound**: the remote runner commits agent progress and pushes
    `sync/agent-<n>` to the staging repo; the local host fetches it and runs
    the identical `apply --3way` into the working tree. Same conflicts model,
-   same UI — the working set does not know or care that the clone is remote.
-4. **Security posture**: remote machine gets clones only (no live mounts —
+   same UI - the working set does not know or care that the clone is remote.
+4. **Security posture**: remote machine gets clones only (no live mounts -
    the clone-mode definition of done extends naturally); network allowlist on
    the remote runner (provider endpoints + the staging repo only); patch
    size caps and denied-path filters applied before anything leaves the

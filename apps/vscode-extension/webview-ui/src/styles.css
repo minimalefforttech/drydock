@@ -1,4 +1,4 @@
-/* Control panel styles — VS Code theme variables only, no remote assets.
+/* Control panel styles - VS Code theme variables only, no remote assets.
    Redesigned for the three-tab layout (Tasks | Chat | System). Compact and
    quiet; usable down to ~300px panel width. Class names for moved-unchanged
    rendering (chat-log, chat-message, diagnostics-log, status, runtime-row…)
@@ -248,7 +248,7 @@ select {
    body.vscode-high-contrast so this only kicks in for dark/high-contrast
    themes (light themes keep the default light popup). The explicit option
    rule is belt-and-suspenders for engines that still theme options off
-   color-scheme alone. This is a pragmatic CSS-only fix — native <option>
+   color-scheme alone. This is a pragmatic CSS-only fix - native <option>
    popup styling is OS-rendered and not fully controllable from CSS. */
 body.vscode-dark select,
 body.vscode-high-contrast select {
@@ -276,7 +276,7 @@ h3 {
   font-style: italic;
 }
 
-/* R13: new-chat empty transcript — two centered lines that orient the first-run
+/* R13: new-chat empty transcript - two centered lines that orient the first-run
    user (call to action + a dim line naming the mode consequences the segment
    hides). Replaces the bare "No messages yet." box. */
 .chat-empty {
@@ -365,7 +365,7 @@ h3 {
   box-shadow: inset 0 0 0 1.5px var(--vscode-descriptionForeground, #888);
 }
 
-/* Offline: selected but its backend isn't live here — an amber hollow ring.
+/* Offline: selected but its backend isn't live here - an amber hollow ring.
    Sending reconnects it (not a lock). */
 .status-dot.state-offline {
   background: transparent;
@@ -585,8 +585,8 @@ h3 {
 
 /* --------------------------------------------------------------------------
    Plan tab (ADR 0012): the planning session's rail in the sidebar. Message
-   rows reuse the shared chat styles (chat/chatView.css); only the shell —
-   header/status/log/composer — is styled here.
+   rows reuse the shared chat styles (chat/chatView.css); only the shell -
+   header/status/log/composer - is styled here.
    -------------------------------------------------------------------------- */
 .plan-tab {
   display: flex;
@@ -1087,7 +1087,7 @@ h3 {
   font-size: 0.82em;
 }
 
-/* Raw-stream debug disclosure — mirrors the mounts disclosure styling. */
+/* Raw-stream debug disclosure - mirrors the mounts disclosure styling. */
 .context-raw {
   margin: 0;
 }
@@ -1187,7 +1187,7 @@ h3 {
 }
 
 /* Full Session history rows: already-accepted changes stay listed but read
-   as record, not pending work — dimmed, with a small named-state chip. */
+   as record, not pending work - dimmed, with a small named-state chip. */
 .working-set-row.accepted {
   opacity: 0.65;
 }
@@ -1877,7 +1877,7 @@ h3 {
 .stat-added { color: var(--vscode-testing-iconPassed, #2ea043); }
 .stat-removed { color: var(--vscode-editorError-foreground, #f14c4c); }
 
-/* R15: dim inline tag on a row whose discard is unsupported — states the
+/* R15: dim inline tag on a row whose discard is unsupported - states the
    irreversibility next to the stats instead of only in the disabled ✕'s tooltip. */
 .no-rollback-tag {
   flex: 0 0 auto;
@@ -2101,7 +2101,7 @@ h3 {
 }
 
 /* R4: the needs-attention section rests as ONE clickable summary line
-   (`⚠ N requests · M failed — review`) pinned at top; clicking expands the full
+   (`⚠ N requests · M failed - review`) pinned at top; clicking expands the full
    access cards in place. The whole section is hidden (display:none) when empty. */
 .attention-section {
   display: none;
@@ -2289,7 +2289,7 @@ h3 {
 .session-chip.chip-failed { color: var(--vscode-editorError-foreground, #f14c4c); }
 .session-chip.chip-approval { color: var(--vscode-editorWarning-foreground, #cca700); }
 
-/* Demoted completion: non-bold, dim green — "a turn finished", not an alarm. */
+/* Demoted completion: non-bold, dim green - "a turn finished", not an alarm. */
 .session-chip.chip-ready {
   font-size: 0.78em;
   font-weight: 400;
@@ -2756,7 +2756,7 @@ h3 {
   opacity: 1;
 }
 
-/* Category tint palette — one CSS var per category, reusing accents already
+/* Category tint palette - one CSS var per category, reusing accents already
    established elsewhere in this file (mode-read-write green for done, the
    warning accent for pending, charts-blue for in-progress, a quiet neutral
    for backlog). Applied to both the column pill and the subtask status pill. */
@@ -3006,7 +3006,7 @@ h3 {
 }
 
 /* Lean, scannable rows (Copilot-sessions style): tight vertical rhythm, two
-   text lines, no border/status-badge chrome — just a dot + title + dim meta. */
+   text lines, no border/status-badge chrome - just a dot + title + dim meta. */
 .session-card {
   cursor: pointer;
   padding: 6px 8px;
@@ -3669,6 +3669,372 @@ h3 {
 }
 
 /* --------------------------------------------------------------------------
+   Scoped memory: quick-add row, scope pill, tag chips, editable pending card
+   -------------------------------------------------------------------------- */
+
+.memory-quick-add {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.memory-quick-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.memory-quick-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.scope-pill {
+  white-space: nowrap;
+  border-radius: 999px;
+  font-size: 0.78em;
+  padding: 2px 10px;
+  border: 1px solid var(--vscode-button-border, rgba(128, 128, 128, 0.4));
+}
+
+.memory-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.memory-tag-label {
+  font-size: 0.75em;
+}
+
+.memory-tag-chip {
+  font-size: 0.72em;
+  opacity: 0.65;
+  cursor: pointer;
+}
+
+.memory-tag-chip.selected {
+  opacity: 1;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+
+.memory-tag-chip.dim {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.memory-scope-chip {
+  font-size: 0.72em;
+  white-space: nowrap;
+}
+
+.memory-scope-chip.scope-global { opacity: 0.55; }
+
+.memory-card-edit {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 0.9em;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 3px;
+  padding: 4px 6px;
+}
+
+.memory-card-scope-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 5px;
+}
+
+/* --------------------------------------------------------------------------
+   MCP: registry manager (System tab), tri-state toggle popovers, FileMap rows
+   -------------------------------------------------------------------------- */
+
+.mcp-intro {
+  font-size: 0.8em;
+  margin: 2px 0 6px;
+}
+
+.mcp-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 6px;
+}
+
+.mcp-server-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85em;
+  padding: 3px 4px;
+  border-radius: 3px;
+}
+
+.mcp-server-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.mcp-server-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mcp-server-command {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.65;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
+}
+
+.mcp-form {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 6px 0 10px;
+  padding: 8px;
+  border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+}
+
+.mcp-env-input {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 3px;
+  padding: 4px 6px;
+  resize: vertical;
+}
+
+.mcp-panel-title {
+  font-weight: 600;
+  font-size: 0.85em;
+  margin-bottom: 4px;
+}
+
+.mcp-toggle-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.mcp-toggle-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 3px;
+  background: var(--vscode-editorWidget-background, transparent);
+}
+
+.mcp-toggle-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mcp-toggle-name {
+  font-weight: 600;
+  font-size: 0.85em;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcp-toggle-state {
+  font-size: 0.72em;
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+
+.mcp-toggle-state.on {
+  background: rgba(46, 160, 67, 0.25);
+  color: var(--vscode-testing-iconPassed, #2ea043);
+}
+
+.mcp-toggle-state.off {
+  background: rgba(128, 128, 128, 0.18);
+  opacity: 0.75;
+}
+
+.mcp-tristate {
+  display: inline-flex;
+  border: 1px solid var(--vscode-button-border, rgba(128, 128, 128, 0.35));
+  border-radius: 3px;
+  overflow: hidden;
+  width: fit-content;
+}
+
+.mcp-tristate-option {
+  background: transparent;
+  color: var(--vscode-foreground);
+  border: none;
+  font-size: 0.72em;
+  padding: 2px 8px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.mcp-tristate-option + .mcp-tristate-option {
+  border-left: 1px solid var(--vscode-button-border, rgba(128, 128, 128, 0.35));
+}
+
+.mcp-tristate-option.active {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  opacity: 1;
+}
+
+.mcp-toggle-source,
+.mcp-panel-note {
+  font-size: 0.72em;
+}
+
+.mcp-panel-note {
+  margin-top: 5px;
+}
+
+.context-mcp {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px dashed var(--vscode-widget-border, rgba(128, 128, 128, 0.25));
+}
+
+.set-row-mcp,
+.task-mcp {
+  white-space: nowrap;
+}
+
+/* Mid-row MCP triggers anchor their popover left so it stays on-panel. */
+.mcp-popover-left .popover {
+  right: auto;
+  left: 0;
+}
+
+.muted {
+  opacity: 0.6;
+}
+
+/* --------------------------------------------------------------------------
+   Edit-tab chrome: pinned sandbox-access section, busy line, new-chat button
+   -------------------------------------------------------------------------- */
+
+/* The sandbox dropdown is the header's second row, above its separator. */
+.chat-header {
+  flex-wrap: wrap;
+}
+
+.context-mounts.section {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0 2px 1px;
+  border-top: none;
+  border-bottom: none;
+}
+
+.context-mounts-summary {
+  font-weight: 500;
+  font-size: 0.85em;
+  opacity: 0.8;
+  padding: 3px 0;
+  cursor: pointer;
+}
+
+.context-mounts-body {
+  padding: 2px 0 6px;
+}
+
+.chat-busy-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.18));
+  flex: 0 0 auto;
+}
+
+/* Inline spinner: text-sized (the 22px default reads as a modal blocker). */
+.chat-busy-line .spinner {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  border-width: 1.5px;
+}
+
+.chat-new-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+   Mounts dropdown (Edit tab context strip): inline mappings, no tooltips
+   -------------------------------------------------------------------------- */
+
+.context-mount-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: var(--vscode-editor-font-family, Consolas, monospace);
+  font-size: 0.82em;
+}
+
+.context-mount-row:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.08));
+}
+
+.context-mount-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The host↔sandbox mapping / note, inline and dim. */
+.context-mount-host {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.55;
+  font-size: 0.92em;
+}
+
+.context-mount-tag {
+  flex: 0 0 auto;
+  font-size: 0.72em;
+  border: 1px solid var(--vscode-editorWarning-foreground, #cca700);
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  border-radius: 8px;
+  padding: 0 5px;
+}
+
+.context-mount-special .context-mount-path {
+  opacity: 0.8;
+}
+
+/* --------------------------------------------------------------------------
    Sandbox preview strip (ADR 0017) + inbox preview rows
    -------------------------------------------------------------------------- */
 
@@ -3699,6 +4065,65 @@ h3 {
 }
 
 .inbox-preview .inbox-glyph { color: var(--vscode-charts-green, #3fb950); }
+
+/* --------------------------------------------------------------------------
+   Protocol notes (collapsed access/question/preview/memory fences) +
+   interrupted command chips
+   -------------------------------------------------------------------------- */
+
+.protocol-note {
+  margin: 6px 0;
+  border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  padding: 2px 8px;
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
+.protocol-note-summary {
+  cursor: pointer;
+  list-style: revert;
+  color: var(--vscode-foreground, #ccc);
+  opacity: 0.85;
+}
+
+.protocol-note[open] .protocol-note-summary {
+  opacity: 1;
+}
+
+.protocol-note-body {
+  padding: 4px 0 2px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.protocol-note-path {
+  font-family: var(--vscode-editor-font-family, Consolas, monospace);
+  font-size: 0.92em;
+  word-break: break-all;
+}
+
+.protocol-note-hint {
+  font-style: italic;
+  opacity: 0.7;
+}
+
+.protocol-note-raw {
+  margin: 2px 0;
+  max-height: 160px;
+  overflow: auto;
+  font-size: 0.85em;
+}
+
+.protocol-access-request { border-left-color: var(--vscode-editorWarning-foreground, #cca700); }
+.protocol-question { border-left-color: var(--vscode-charts-blue, #3794ff); }
+.protocol-preview { border-left-color: var(--vscode-charts-green, #3fb950); }
+
+/* Commands whose turn died before completing: quiet, not "running…". */
+.role-command.status-interrupted .chat-command-status {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  opacity: 0.8;
+}
 
 /* --------------------------------------------------------------------------
    Question extras (ADR 0016): images, manual-check steps, verify stamping
@@ -3847,7 +4272,7 @@ h3 {
    One-line rows throughout: hierarchy is indentation, metadata is the quiet
    right edge, and the loud/ready dot+chip vocabulary is shared verbatim with
    the expanded rows (same classes). Category colors reuse the established
-   tint palette (text-only here — pills stay on task rows only).
+   tint palette (text-only here - pills stay on task rows only).
    -------------------------------------------------------------------------- */
 
 .tasks-view-toggle .segment {
@@ -3947,8 +4372,8 @@ h3 {
 }
 
 /* Quiet right-edge metadata: owning task · state · time, or counts. Shrinks
-   4× faster than the title when the row is tight — the title is the scanning
-   anchor and must win — but never below a readable time word. */
+   4× faster than the title when the row is tight - the title is the scanning
+   anchor and must win - but never below a readable time word. */
 .compact-row-meta {
   margin-left: auto;
   flex: 0 4 auto;
@@ -4010,7 +4435,7 @@ h3 {
   opacity: 0.85;
 }
 
-/* FIXES 1 & 4: reduced motion — the starting spinner falls back to a static
+/* FIXES 1 & 4: reduced motion - the starting spinner falls back to a static
    ring; the working-indicator dots stop pulsing (still visible, just static),
    matching the existing tb-shake/tb-running-chip fallback in taskBoard.css. */
 @media (prefers-reduced-motion: reduce) {

@@ -110,7 +110,7 @@ export class LineJsonRpcClient {
 
   /**
    * Resolves with the next server notification. `timeoutMs`, when set, rejects
-   * with a NotificationTimeoutError after that much silence — the stall watchdog
+   * with a NotificationTimeoutError after that much silence - the stall watchdog
    * the streaming loop uses so a wedged app-server can't hang a turn forever.
    */
   nextNotification(signal?: AbortSignal, timeoutMs?: number): Promise<JsonRpcMessage> {
@@ -123,8 +123,8 @@ export class LineJsonRpcClient {
     }
     return new Promise<JsonRpcMessage>((resolve, reject) => {
       let timer: NodeJS.Timeout | undefined;
-      // Wrapped settlers so every resolution path — a notification, an abort, a
-      // rejectAll, or the timeout — clears the watchdog timer exactly once.
+      // Wrapped settlers so every resolution path - a notification, an abort, a
+      // rejectAll, or the timeout - clears the watchdog timer exactly once.
       const settleResolve = (message: JsonRpcMessage): void => {
         if (timer !== undefined) clearTimeout(timer);
         resolve(message);

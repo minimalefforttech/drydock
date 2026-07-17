@@ -9,7 +9,7 @@
  * non-sensitive request keeps its one-click Allow. When the request grants write
  * access (`mode === "read-write"`) OR the path looks sensitive
  * (`sensitive === true`), the card escalates: an amber/red accent, a one-line
- * warning, and a TWO-STEP typed confirmation — clicking Allow reveals an input
+ * warning, and a TWO-STEP typed confirmation - clicking Allow reveals an input
  * and the confirm button stays disabled until the typed text matches the
  * expected last path segment (basename of the CURRENT path value, compared
  * case-insensitively after trimming). Editing the path re-derives the expected
@@ -17,7 +17,7 @@
  * one click.
  *
  * SECURITY: all dynamic strings (path, reason, mode, expected segment) render
- * via textContent — never innerHTML.
+ * via textContent - never innerHTML.
  */
 
 import type { AccessRequestSummary } from "@drydock/contracts";
@@ -119,16 +119,16 @@ export function buildAccessCard(
   if (access.sensitive === true) {
     const exposure = access.mode === "read-write" ? "writes to your machine" : "readable by the model";
     warning.textContent = access.sensitiveReason !== undefined && access.sensitiveReason.length > 0
-      ? `${access.sensitiveReason} — ${exposure}`
-      : `this path looks like credentials or secrets — ${exposure}`;
+      ? `${access.sensitiveReason} - ${exposure}`
+      : `this path looks like credentials or secrets - ${exposure}`;
   } else {
     warning.textContent = "writes to your machine";
   }
   c.insertBefore(warning, pathInput);
 
   // The typed-confirm block is hidden until Allow arms it. The label NAMES the
-  // exact token to type — the current path's final segment in a monospace span
-  // — while the input placeholder stays GENERIC so the greyed text can't be
+  // exact token to type - the current path's final segment in a monospace span
+  // - while the input placeholder stays GENERIC so the greyed text can't be
   // transcribed on autopilot without reading the label.
   const confirmWrap = el("div", "access-confirm hidden");
   const confirmLabel = el("label", "access-confirm-label");

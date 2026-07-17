@@ -1,7 +1,7 @@
 /**
  * Tab bar + router for the control panel (Tasks | Plan | Edit | System).
  *
- * Tasks is the home surface — a lean session list. Plan is the planning
+ * Tasks is the home surface - a lean session list. Plan is the planning
  * conversation and the Planner panel's sidebar companion (ADR 0012). Edit
  * is the implementation chat entered from Tasks (its own back button "‹"
  * returns there).

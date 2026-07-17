@@ -12,8 +12,8 @@ B-series.
 
 ## Purpose
 
-When the in-VM agent fans out — **Codex collab agents (`multi_agent` is a
-STABLE, ENABLED feature on codex-cli 0.142.4) and Claude Code Task subagents —
+When the in-VM agent fans out - **Codex collab agents (`multi_agent` is a
+STABLE, ENABLED feature on codex-cli 0.142.4) and Claude Code Task subagents -
 the product today is worse than blind: it misattributes and, on codex
 app-server, would end the turn early.** Verified against the code and live
 streams:
@@ -35,7 +35,7 @@ streams:
 This milestone makes delegated agent activity **correct, attributed, and
 navigable to one common standard, degrading per provider**: collapsible
 per-subagent groups in the transcript, an alternate hierarchy lens over the
-same feed (depth-N — sub-subagents render when a transport reports them),
+same feed (depth-N - sub-subagents render when a transport reports them),
 live status/counts while collapsed, click-through to each agent's prompt,
 feed, result, and (where reported) per-agent token usage.
 
@@ -53,7 +53,7 @@ Verified against real fan-out turns (parallel spawns, a nested spawn attempt,
 a web fetch) driven through both codex transports:
 
 **codex app-server** (`app-server --listen stdio://`, initialize →
-`thread/start` → `turn/start`): a fan-out turn produces multiple threads —
+`thread/start` → `turn/start`): a fan-out turn produces multiple threads -
 one main thread plus one per spawned child.
 - Every `item/started`/`item/completed` carries **`threadId` + `turnId`**
   (schema-required).
@@ -68,13 +68,13 @@ one main thread plus one per spawned child.
   reported as `exitCode`/`status`), plus their own
   `turn/started`/`turn/completed` and `thread/status/changed`
   (active/idle). Child threads can complete BEFORE the parent thread.
-- **`thread/tokenUsage/updated` per thread** — per-subagent token cost is
+- **`thread/tokenUsage/updated` per thread** - per-subagent token cost is
   reportable.
 - `webSearch` item (query) on the emitting thread covers "loads webpages".
 - `subAgentActivity {agentPath: string, agentThreadId, kind:
   started|interacted|interrupted}` exists in the v2 schema but is not
   reliably observed on the current fan-out path (likely gated behind the
-  disabled `multi_agent_v2` path) — parse it when present, don't depend on it.
+  disabled `multi_agent_v2` path) - parse it when present, don't depend on it.
 - Nested spawn: a child reports "nested spawning unsupported" today (children
   get no collab tools); `agentPath` being a *path string* in the schema says
   nesting is planned. Design stays depth-N.
@@ -82,13 +82,13 @@ one main thread plus one per spawned child.
 **codex exec --json**: `item.started/completed` for `collab_tool_call`
 (snake_case: `sender_thread_id`, `receiver_thread_ids`, `agents_states`,
 `prompt`) and `web_search`; `turn.completed` with usage. **No per-child
-items** — lifecycle-level visibility only (spawn → status → result message
+items** - lifecycle-level visibility only (spawn → status → result message
 per child).
 
 **claude -p --output-format stream-json**: mapping is spec'd from the
 documented stream format (`parent_tool_use_id` on sidechain assistant/user
 lines; Task `tool_use` blocks carry `{description, prompt, subagent_type}`).
-Verifying this transport live requires an authenticated Claude CLI host —
+Verifying this transport live requires an authenticated Claude CLI host -
 the standalone CLI's credential store is separate from desktop-app auth, so
 this parsing path is validated by capturing a real fixture against an
 authenticated CLI (host login, or inside the product's authed runtime)
@@ -101,15 +101,15 @@ Everything derives from the durable event stream; the tree is a projection.
 | Concern | Reused machinery |
 |---|---|
 | Event capture | Normalizers already emit `agent.text/tool_call/command/file_edit` with full `raw` preserved (`claudeEventNormalizer.ts`, `codex*Normalizer.ts`) |
-| Persistence & replay | `session_events` (rowid replay order) — new fields ride `payload_json`; old rows stay valid |
-| Live + replay to UI | `chat.event` push and `session.timeline` both project through `TranscriptLine` (`events.ts:91`, `controlPanelProvider.ts:136`) — one type extension serves both |
+| Persistence & replay | `session_events` (rowid replay order) - new fields ride `payload_json`; old rows stay valid |
+| Live + replay to UI | `chat.event` push and `session.timeline` both project through `TranscriptLine` (`events.ts:91`, `controlPanelProvider.ts:136`) - one type extension serves both |
 | Transcript rendering | Dev-log transcript + Diagnostics section (`chatTab.ts:909`); `collapsible()` and inline-toggle patterns (`components.ts:74`, grants ledger) |
-| Tasks-tab chips | The documented role-extension points: `sessionChips` / `sessionMetaSegments` / `sessionLoudness` (`workTab.ts:79-132`) — the ⑂ chip is the promised one-entry change |
+| Tasks-tab chips | The documented role-extension points: `sessionChips` / `sessionMetaSegments` / `sessionLoudness` (`workTab.ts:79-132`) - the ⑂ chip is the promised one-entry change |
 | Tree computation | ONE pure reducer in contracts, consumed by both the webview (Agents lens) and the host (session-summary decoration) |
 
-### Lineage model (contracts — the common standard)
+### Lineage model (contracts - the common standard)
 
-- `AgentEventBase` gains **`agentPath?: readonly string[]`** — lineage of the
+- `AgentEventBase` gains **`agentPath?: readonly string[]`** - lineage of the
   *emitting* agent. Absent/empty = the session's root agent; `["n1"]` =
   subagent `n1`; `["n1","n2"]` = its child. **Node ids are transport-scoped:
   codex = the child's thread id; claude = the spawning Task `tool_use.id`.**
@@ -117,12 +117,12 @@ Everything derives from the durable event stream; the tree is a projection.
 - New event types (`summarizeAgentEvent` is exhaustive with `assertNever`,
   so every surface is forced to handle them):
   - **`agent.spawn`** `{ nodeId, label, subagentType?, model?,
-    promptPreview? }` — a recognized delegation. `agentPath` = the parent's
+    promptPreview? }` - a recognized delegation. `agentPath` = the parent's
     path; the child's path is `[...agentPath, nodeId]`. Codex source:
     `collabAgentToolCall spawnAgent` completion (receivers + prompt + model);
     Claude source: Task `tool_use` (description + subagent_type + prompt).
   - **`agent.node_done`** `{ nodeId, status:
-    "completed"|"failed"|"cancelled", resultPreview?, usage? }` — the child
+    "completed"|"failed"|"cancelled", resultPreview?, usage? }` - the child
     finished. Codex source: the child's own `turn/completed` (tier full) or
     `wait`/`close` `agentsStates` (tier lifecycle); status `errored`→failed,
     `interrupted`/`shutdown`-before-done→cancelled; usage from the child
@@ -133,7 +133,7 @@ Everything derives from the durable event stream; the tree is a projection.
   `output`. Codex webSearch/mcpToolCall/dynamicToolCall items map to
   `agent.tool_call` with attribution (webSearch summary = the query/URL).
 - `TranscriptLine` gains `agentPath?`, `nodeId?`, `label?`, `nodeStatus?`,
-  `detail?` — carried by `summarizeAgentEvent`/`summarizeStoredEvent` so live
+  `detail?` - carried by `summarizeAgentEvent`/`summarizeStoredEvent` so live
   push and timeline replay stay in lockstep. `detail` holds capped output/
   result previews (the 400-char `summary` clip stays).
 
@@ -142,7 +142,7 @@ Everything derives from the durable event stream; the tree is a projection.
 `promptPreview` ≤ 500 chars; `resultPreview`/tool `output`/`detail` ≤ 1 KB.
 Documented deviation from the raw-preservation norm: events derived from
 tool_result/child-output payloads store `raw` with the bulky content field
-truncated to the same cap — subagent results can be file-dump sized and
+truncated to the same cap - subagent results can be file-dump sized and
 `session_events` must not become a blob store. Everything else keeps full
 `raw` as today.
 
@@ -153,18 +153,18 @@ Per-transport constant in contracts, `subagentReporting`:
 | Transport | Tier | Meaning in UI |
 |---|---|---|
 | `codex-app-server` | **`full`** | Child nodes with live feeds, per-node status/usage/duration |
-| `codex-exec-json` | **`lifecycle`** | Child cards with prompt/status/result — body says "this transport reports lifecycle only, no per-agent feed" |
+| `codex-exec-json` | **`lifecycle`** | Child cards with prompt/status/result - body says "this transport reports lifecycle only, no per-agent feed" |
 | `claude-exec-json` | **`full`** (pending a captured live fixture) | As app-server, minus per-node usage unless the stream provides it |
 | (legacy sessions) | `none` | Root only + "recorded before subagent tracking" |
 
-Never render an "all quiet" tree that is actually blindness — `none`/
+Never render an "all quiet" tree that is actually blindness - `none`/
 `lifecycle` states say so.
 
 ### Codex normalizer + transport changes (the correctness core)
 
 - **Thread-aware normalization.** The normalizer context learns the session's
   root thread id and keeps a spawn-edge registry (childThreadId → agentPath),
-  fed by `collabAgentToolCall` receivers and — defensively — `subAgentActivity
+  fed by `collabAgentToolCall` receivers and - defensively - `subAgentActivity
   {agentThreadId, agentPath}` when it appears. Items on a registered child
   thread get that `agentPath`; items on an *unregistered* foreign thread are
   attributed `["unknown:<id8>"]` rather than dropped or mislabeled.
@@ -178,7 +178,7 @@ Never render an "all quiet" tree that is actually blindness — `none`/
 - The registry lives per connection (children are spawned and closed within
   turns; the session's root thread id is already tracked).
 
-### Tree projection — one reducer, two consumers
+### Tree projection - one reducer, two consumers
 
 `reduceAgentTree(source) → SessionAgentTree` in contracts: nodes `{ nodeId,
 parentId, kind: "root"|"native", label, subagentType?, model?, status,
@@ -187,7 +187,7 @@ lastActivity?, resultPreview?, usage? }`. Input is a minimal source
 projection extractable from either `AgentEvent[]` (host) or
 `TranscriptLine[]` (webview), so the logic exists once.
 
-- **Webview (Agents lens):** reduces the selected session's lines — which it
+- **Webview (Agents lens):** reduces the selected session's lines - which it
   already holds from `session.timeline` + streamed `chat.event`. No new push
   type, no polling.
 - **Host (Tasks-tab chips):** live sessions keep incremental counters from the
@@ -199,55 +199,55 @@ projection extractable from either `AgentEvent[]` (host) or
   `ChatSessionSummary` still carries `agentActivity` so reloads hydrate from
   `session.list`. Counters reset on turn start; a child failure keeps the red
   accent until the next turn. Sessions "running elsewhere" stream no
-  events into this host; their chip shows nothing — consistent with their
+  events into this host; their chip shows nothing - consistent with their
   read-only posture.
 
 Two projections consume the same reducer differently in practice: the
 transcript's collapsible groups keep an incremental `AgentGroup` state (needed
 for chronological anchoring plus child prose, which the pure reducer doesn't
 model), while the Agents lens reduces the structured Diagnostics feed directly
-through `reduceAgentTree` — line/event parity between the two is
+through `reduceAgentTree` - line/event parity between the two is
 test-enforced. exec-json terminal dedup is scoped to the normalizer instance's
 lifetime, which is safe because thread ids are UUIDs and cross-run collisions
 cannot occur.
 
 ## UX
 
-**Transcript (Edit tab, Chat lens) — collapsible subagent groups.** An `agent.spawn`
+**Transcript (Edit tab, Chat lens) - collapsible subagent groups.** An `agent.spawn`
 line inserts a group block at its chronological position in the transcript
 flow. Header: `⑂ <label> · <model/type chip> · <status> · N calls ·
-duration` — collapsed by default, counts/last-activity tick live while
+duration` - collapsed by default, counts/last-activity tick live while
 collapsed, status uses the standard loud/quiet status vocabulary (a bold red
 `· failed` chip when the child fails; a quiet `✓` on completion; no halo for
 benign completion). Expanded body: the child's own
-dev-log — its prose blocks (same structural-markdown-as-text renderer), a
+dev-log - its prose blocks (same structural-markdown-as-text renderer), a
 compact activity feed (tool/command/web summaries with `detail` behind a
 per-line disclosure), the prompt it was given, its result preview, per-node
 usage where reported, and *nested groups for its children* (depth-N). Child
-prose/lines route by `agentPath` — they no longer interleave into the main
+prose/lines route by `agentPath` - they no longer interleave into the main
 assistant stream (the misattribution fix). Tier `lifecycle` renders the same
 header/prompt/result card with an honest no-feed note. The flat Diagnostics
 section keeps receiving everything, prefixed `[<label>]`.
 
-**Agents lens — the alternate Edit view.** A
+**Agents lens - the alternate Edit view.** A
 `[Chat | Agents]` segmented toggle on the transcript region. The Agents lens
 renders the tree: one row per node, indent = depth, status dot + label +
 model/type chip + counts + last activity + duration (+ tokens where
 reported); running nodes reuse the header-pulse treatment. Clicking a node
 switches to Log, scrolled to and expanding that node's group.
-Capability-tier empty/degraded states per the table above. No graph canvas —
+Capability-tier empty/degraded states per the table above. No graph canvas -
 a tree earns its keep at sidebar fan-out sizes; a flow panel stays
 deferred.
 
 **Tasks tab.** `sessionChips` gains `⑂ N` while N subagents are running
-(namespaced class, one colour rule — the documented extension pattern); a
+(namespaced class, one colour rule - the documented extension pattern); a
 failed child renders the chip in the failed accent. `sessionLoudness` is
-untouched in v1 — a subagent failure inside a *succeeding* turn does not
+untouched in v1 - a subagent failure inside a *succeeding* turn does not
 flag attention (the parent recovered; the loud header chip in the transcript
 is the record). A failed *turn* already goes loud via existing attention
 routing.
 
-**Deliberately absent (B4 discipline):** no per-node cancel in v1 — codex
+**Deliberately absent (B4 discipline):** no per-node cancel in v1 - codex
 app-server *could* interrupt a child thread, but a safe per-node cancel needs
 the parent's `wait` semantics understood (a killed child leaves the parent
 waiting); deferred to role-session orchestration work. No approval friction
@@ -258,7 +258,7 @@ changes, no new confirms. Visibility + stream correctness only.
 - Native subagents run **inside the parent's runtime with the parent's
   mounts** (codex collab threads live in the same sandboxed process; claude
   Task subagents in the same CLI). This milestone grants nothing, restarts
-  nothing, adds no approval paths — pure observability over an existing
+  nothing, adds no approval paths - pure observability over an existing
   boundary. Child file edits already flow into the working set/diff baseline
   (same runtime); now they are *attributed*.
 - The threat model's Denied Behaviors rule that a subagent must not inherit
@@ -289,7 +289,7 @@ a `[+ role…]` control on the Agents lens strip let a user request a role
 session; it inherits the parent's task link, gets a role chip via the
 documented `sessionChips` extension point, and is grafted into the parent's
 Agents lens (clicking it opens the child session). Per-role cancel reuses the
-existing per-session cancel/end — sessions own their runtimes, so nothing
+existing per-session cancel/end - sessions own their runtimes, so nothing
 couples siblings.
 
 ## Deferred (recorded, not built)
@@ -299,14 +299,14 @@ couples siblings.
 - Agent-driven spawn protocol: spawns are user-driven today; an
   agent-requested spawn needs a B4-graded approval design of its own.
 - Per-native-node cancel (a safe per-node interrupt of a codex child thread
-  needs the parent's `wait` semantics understood first — a killed child
+  needs the parent's `wait` semantics understood first - a killed child
   leaves the parent waiting).
 - Live per-node token ticker (codex `thread/tokenUsage/updated` streams it;
   today's UI shows final usage on node_done only).
-- Editor-area flow-graph panel — only if role-session scale outgrows the tree.
+- Editor-area flow-graph panel - only if role-session scale outgrows the tree.
 - Backfill `agentPath` for old sessions from stored `raw`.
 - Codex `multi_agent_v2`/fan-out (`subAgentActivity` streams, nested spawn)
-  — parse-ready, re-probe when the feature flips stable.
+  - parse-ready, re-probe when the feature flips stable.
 - Role-based model routing (children currently inherit the parent's model).
 - Subagent-failure attention routing (revisit `sessionLoudness` if silent
   child failures inside an otherwise-succeeding turn turn out to get missed).

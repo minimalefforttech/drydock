@@ -2,17 +2,17 @@
  * Chain changesets (ADR 0014).
  *
  * When a subtask's card enters a done-category column ("Review entry"), its
- * clone's outbound patch (refs/sync/base..HEAD — exactly what a full Pull
+ * clone's outbound patch (refs/sync/base..HEAD - exactly what a full Pull
  * would apply) is captured DURABLY: patch text in the content-addressed blob
  * store, one metadata row per (subtask, repo), latest capture replacing the
  * subtask's prior set. A dependent subtask whose stored `seedMode` is
  * `upstream` then seeds its fresh clone by 3-way-applying its upstream
- * subtasks' unlanded changesets at start — the user's choice, never invented
+ * subtasks' unlanded changesets at start - the user's choice, never invented
  * by automation. Pulling a session's work into the local repo marks its rows
  * landed, after which they stop seeding (the content now rides local HEAD).
  *
  * This service owns capture/query/land bookkeeping only; git mechanics stay
- * in CloneSyncService and the clone plumbing stays in IsolatedRunService —
+ * in CloneSyncService and the clone plumbing stays in IsolatedRunService -
  * both reach this service through the narrow ports below.
  */
 
@@ -61,7 +61,7 @@ export class ChangesetService {
 
   /**
    * Replaces the subtask's capture set with the given patches (empty input
-   * clears it — a re-done subtask that now produces no changes must not keep
+   * clears it - a re-done subtask that now produces no changes must not keep
    * seeding stale ones). Empty patch texts are skipped.
    */
   async captureForSubtask(input: {
@@ -101,7 +101,7 @@ export class ChangesetService {
   /**
    * The unlanded upstream patches a dependent seeds from, in the given
    * upstream order (then capture order per subtask). A row whose blob has
-   * vanished is a hard error — the user explicitly chose upstream seeding,
+   * vanished is a hard error - the user explicitly chose upstream seeding,
    * so silently seeding less would be dishonest.
    */
   async seedPatchesFor(upstreamSubtaskIds: readonly string[]): Promise<SeedPatch[]> {
@@ -129,7 +129,7 @@ export class ChangesetService {
     return new Set(await this.options.store.listUnlandedSubtaskIds(subtaskIds.map((id) => asId<"SubtaskId">(id))));
   }
 
-  /** Every unlanded row — the fleet Landing drawer's source (ADR 0014). */
+  /** Every unlanded row - the fleet Landing drawer's source (ADR 0014). */
   listUnlanded(): Promise<TaskChangesetRecord[]> {
     return this.options.store.listUnlanded();
   }

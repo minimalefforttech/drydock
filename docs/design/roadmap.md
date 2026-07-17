@@ -4,76 +4,76 @@ What's shipped and what's next for Drydock.
 
 ## Shipped
 
-- **Contained sessions** — isolated per-chat runtime, Codex and Claude Code
+- **Contained sessions** - isolated per-chat runtime, Codex and Claude Code
   transports, restart-not-end continuity, model/provider switching mid-session.
-- **Blast-radius approvals & mounts** — fenced host-path request protocol,
+- **Blast-radius approvals & mounts** - fenced host-path request protocol,
   risk-tiered approval cards with typed confirm for sensitive roots,
   default-denied credential roots, per-session grants ledger.
-- **Work management** — tasks linking sessions and workspace sets, live
+- **Work management** - tasks linking sessions and workspace sets, live
   workspace switching with multi-window awareness (host-instance heartbeats
   so sessions can be adopted or shown as running elsewhere), memory
   candidates with human review.
-- **Working set & review** — per-file diff baselines with accept/discard,
+- **Working set & review** - per-file diff baselines with accept/discard,
   Copilot-style working set with line stats and diff-editor integration.
-- **Task Review** — one surface to review a task's changes across every
+- **Task Review** - one surface to review a task's changes across every
   linked session and repo before the normal commit/PR; comments become
   agent revision turns through the shared composer; never commits or pushes.
-- **Clone mode** — full-clone sandboxes (never worktrees) with a symmetric
+- **Clone mode** - full-clone sandboxes (never worktrees) with a symmetric
   3-way patch sync between the clone and the working tree, for work that
   must never mount live folders.
-- **Subagent visibility** — native fan-outs render as collapsible transcript
+- **Subagent visibility** - native fan-outs render as collapsible transcript
   groups and a hierarchy lens with per-agent status, files, and token usage.
-- **Role sessions** — spawn researcher/planner/worker/tester/reviewer
+- **Role sessions** - spawn researcher/planner/worker/tester/reviewer
   children from a live chat; children's mounts are always a subset of the
   parent's, enforced at spawn and at every expansion.
-- **Attention stack** — agent questions and access requests share one paged
+- **Attention stack** - agent questions and access requests share one paged
   card slot (question plus recommended answers plus free-text, or the
   typed-confirm access flow), wired to badges and toasts.
-- **Task board & subtasks** — tasks and per-task subtasks as independent
+- **Task board & subtasks** - tasks and per-task subtasks as independent
   cards on a configurable kanban panel (fixed behaviour categories, an age
   filter over finished work, Review→Finished as a manual gate); same-task
   dependency edges drawn dot-to-dot with live boundary grey-out and cycle
   rejection; per-subtask auto-start flags cascade prompt-backed runs in
   parallel as upstream chats finish (Backlog never auto-starts, Force start
   is manual-only). Work-tab memories open as read-only documents.
-- **Planner and plan → board** — durable task-owned plans collect/hydrate
+- **Planner and plan → board** - durable task-owned plans collect/hydrate
   documents, diagrams, images, and sandboxed prototypes across disposable
   sessions; annotations become revision turns, while literal document
   checkboxes can be previewed into backlog subtasks without inference or
   auto-start (ADR 0012).
-- **Agents panel** — the fleet view (ADR 0013): every session across every
+- **Agents panel** - the fleet view (ADR 0013): every session across every
   task grouped under its board column, role children nested, subagent rows
   from the same activity summaries as the sidebar chips, honest
   running-elsewhere/capability-tier states, attention chips for pending
   questions/access, click-through to the sidebar Edit session, configurable quiet
   density, live token rollups, and explicit starting/resuming state. The
   session overview adds no polling or parallel session store.
-- **Chained clone output and landing** — Review entry captures durable
+- **Chained clone output and landing** - Review entry captures durable
   per-repo changesets; dependents may explicitly seed from unlanded upstream
   output before their sync base freezes. The fleet Landing drawer orders
   path-disjoint, unknown, and overlapping work and reuses the two-click full
   Pull into the developer's working tree (ADR 0014).
-- **Fleet workflow rails** — seeded/repo-overlay task recipes create DAGs with
+- **Fleet workflow rails** - seeded/repo-overlay task recipes create DAGs with
   model/seed/verification defaults but never start them; a machine-derived
   run-slot budget exposes a durable queue, automatic failures retry once then
   park, and doubly-opt-in task FAQ answers leave transcript receipts while
   never touching access requests (ADRs 0007 and 0015).
-- **Verification and review provenance** — recipes can mark a done subtask as
+- **Verification and review provenance** - recipes can mark a done subtask as
   needing human verification, and machine-authored Task Review comments are
   visibly labeled `agent` or `guard` rather than presented as the user's.
-- **Code Review panel** — in-panel PR-style review over three scopes
+- **Code Review panel** - in-panel PR-style review over three scopes
   (uncommitted / task / session): inline hunks, images, binary deltas,
   whitespace + split toggles, and selection-driven multi-range comments that
   route to the owning agents (docs/design/code-review-panel.md).
-- **Lead's inbox** — the needs-attention line covers requests, questions,
+- **Lead's inbox** - the needs-attention line covers requests, questions,
   failed chats, verify gates, parked runs, and unlanded changesets in one
   ranked expansion with inline Verified/Retry actions; every session row shows
   running-a-turn vs idle-live.
-- **Human gates (ADR 0016)** — questions carry sandbox images the agent
+- **Human gates (ADR 0016)** - questions carry sandbox images the agent
   produced (resolved at capture over the runtime transport); the
   `manual-check` question kind folds HITL steps, per-step check-off, an
   answer receipt, and one-gesture Verified stamping into a single card.
-- **Patch portability** — clone changesets export as `.patch` files
+- **Patch portability** - clone changesets export as `.patch` files
   (`Export patch…`) and apply on another machine via
   `Drydock: Apply Patch to Folder…` (three-way merge, human-confirmed,
   never committed or pushed).
@@ -107,4 +107,4 @@ What's shipped and what's next for Drydock.
 - Planner follow-ups: an "Export plan…" command materializing a plan's
   artifacts to a chosen folder. (Task ownership shipped: plans carry `task_id`,
   create surfaces lead with a task picker, and task cards have a "Plan"
-  action — see docs/design/planner.md.)
+  action - see docs/design/planner.md.)

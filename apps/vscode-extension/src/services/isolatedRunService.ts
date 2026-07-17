@@ -14,7 +14,6 @@ import { claudeModelCatalog, fetchCodexHostModelCatalog } from "@drydock/agent-a
 import { TempWorkspaceStore, type TempWorkspace } from "@drydock/artifacts";
 import {
   asId,
-  MEMORY_BRIEFING_LIMIT,
   summarizeStoredEvent,
   type AgentModelCatalog,
   type AgentEvent,
@@ -47,6 +46,7 @@ import {
   assertMountAllowed,
   buildChatLog,
   buildSessionBriefing,
+  stripHostBriefing,
   buildSummaryPrompt,
   buildIsolatedRunTemplate,
   ChatSessionService,
@@ -63,7 +63,8 @@ import {
   type IdGenerator,
   type Logger
 } from "@drydock/core";
-import type { MemoryService } from "@drydock/work-management";
+import type { McpEffectiveServer, McpEffectiveQuery, MemoryService } from "@drydock/work-management";
+import { detectWorkspaceTags, type TagRule } from "@drydock/core";
 import { blocksGlobalMemoryBriefing, type EffectiveSecurityPolicy } from "./securityPolicy.js";
 
 export const ISOLATED_RUN_DEFAULT_PROMPT = "Create smoke-result.txt containing exactly DRYDOCK_SMOKE_OK, then say smoke-ok.";
@@ -93,6 +94,10 @@ export interface IsolatedRunServiceOptions {
   };
   /** Studio-registered prototype themes pushed alongside the built-ins (ADR 0017). */
   readonly userPrototypeThemes?: readonly PrototypeTheme[];
+  /** Validated MCP config JSON (drydock.mcp.configPath) written to /workspace/.mcp.json before the first turn. */
+  readonly mcpConfigJson?: string;
+  /** Studio-level standing instructions (drydock.teamInstructionsPath) appended to the briefing. */
+  readonly teamInstructions?: string;
   /** Clone mode: host-side git plumbing for the workspace clones + sync. */
   readonly cloneSync: CloneSyncService;
   /**
@@ -103,6 +108,17 @@ export interface IsolatedRunServiceOptions {
   readonly hostInstanceId: string;
   /** Approved team memory injected into the first briefing of each session. */
   readonly memoryService?: MemoryService;
+  /** Glob→tag rule table (defaults + user rules) driving memory tag selection. */
+  readonly tagRules?: readonly TagRule[];
+  /** MCP registry: effective-set cascade + .mcp.json rendering (design doc). */
+  readonly mcpRegistry?: {
+    effectiveForSession(query: McpEffectiveQuery): Promise<McpEffectiveServer[]>;
+    renderConfigJson(servers: readonly McpEffectiveServer[]): string | null;
+  };
+  /** Tasks linked to a session - task-scope memory + MCP task overrides. */
+  readonly sessionTaskIds?: (sessionId: string) => Promise<readonly string[]>;
+  /** Workspace sets with mount roots - MCP workspace-set override resolution. */
+  readonly workspaceSetRefs?: () => Promise<readonly { workspaceSetId: string; roots: readonly string[] }[]>;
   readonly deniedPaths?: readonly string[];
   readonly securityPolicy?: EffectiveSecurityPolicy;
   /** Host sbx binary, used for inert auth-status checks and login commands. */
@@ -127,7 +143,7 @@ export interface ChatWorkspaceContext {
   readonly dirtyHandling?: "carry" | "fresh";
   /**
    * Clone mode only (ADR 0014): upstream changeset patches 3-way applied into
-   * each matching fresh clone before its sync base freezes. Start-time only —
+   * each matching fresh clone before its sync base freezes. Start-time only -
    * never persisted, so a resume re-clones without them (the same documented
    * limitation as the rest of the process-local clone state).
    */
@@ -199,7 +215,7 @@ export interface SessionCloneRepo {
   readonly name: string;
   /** Host path of the clone under `<workspace>/repos/<name>` (the sync working copy). */
   readonly clonePath: string;
-  /** The developer's real repo — read-only clone source + working-tree apply target. */
+  /** The developer's real repo - read-only clone source + working-tree apply target. */
   readonly localRepoPath: string;
   /** Branch the clone tracks (or a commit id when the local repo was detached). */
   readonly branch: string;
@@ -207,6 +223,8 @@ export interface SessionCloneRepo {
 }
 
 const HOST_CATALOG_TTL_MS = 5 * 60_000;
+/** Detected workspace tags are re-scanned at most this often per root. */
+const TAG_CACHE_TTL_MS = 5 * 60_000;
 
 export class IsolatedRunService {
   private runInFlight = false;
@@ -226,6 +244,10 @@ export class IsolatedRunService {
   private readonly sessionPreviews = new Map<string, { summary: PreviewSummary; server: import("node:http").Server }[]>();
   /** Sessions whose sandbox already received the prototype theme pack. */
   private readonly themedSessions = new Set<string>();
+  /** Sessions whose workspace already received the MCP config file. */
+  private readonly mcpConfiguredSessions = new Set<string>();
+  /** Per-root detected workspace tags (bounded scan, TTL-cached). */
+  private readonly tagCache = new Map<string, { tags: string[]; at: number }>();
   private readonly providerCatalogs = new Map<string, AgentModelCatalog>([
     [CODEX_PROVIDER_ID, fallbackCodexCatalog()],
     [CLAUDE_PROVIDER_ID, claudeModelCatalog(new Date().toISOString())]
@@ -316,7 +338,7 @@ export class IsolatedRunService {
 
   /**
    * Live per-sandbox resource sample (CPU%, memory, I/O rate) measured entirely
-   * HOST-SIDE — no container exec. Each sbx sandbox is a nerdbox microVM whose
+   * HOST-SIDE - no container exec. Each sbx sandbox is a nerdbox microVM whose
    * `containerd-shim-nerdbox` process (plus any children) carries the sandbox's
    * real CPU and memory. We map externalName -> shim PID from containerd's
    * on-disk task state, then sum each shim's whole process tree from ONE
@@ -487,7 +509,7 @@ export class IsolatedRunService {
 
   /**
    * Role-session spawn: a child session under a LIVE parent, inheriting the
-   * parent's mounts with role-derived modes — read roles (researcher/planner/
+   * parent's mounts with role-derived modes - read roles (researcher/planner/
    * reviewer/memory-extractor) get every mount read-only and plan mode;
    * worker/tester keep the parent's modes. The subset guard runs here at
    * spawn and again inside expandSessionMounts for every later widening, so
@@ -505,7 +527,7 @@ export class IsolatedRunService {
     const parentRecord = await this.options.chatService.getSession(parentId);
     if (parentRecord?.mode === "clone") {
       // The clone lives inside the parent's private disposable workspace,
-      // which a separate child runtime cannot see — spawning would hand the
+      // which a separate child runtime cannot see - spawning would hand the
       // child an empty world while looking like it worked.
       throw new Error("Role sessions cannot spawn from a clone session: the clone lives inside the parent's private workspace.");
     }
@@ -528,7 +550,7 @@ export class IsolatedRunService {
       template,
       workspacePath: workspace.workspacePath,
       workspaceOwnerToken: workspace.ownerToken,
-      title: title ?? `${role} — ${parentRecord?.title ?? "chat"}`,
+      title: title ?? `${role} - ${parentRecord?.title ?? "chat"}`,
       model: snapshot.model,
       transport: snapshot.transport,
       mode,
@@ -559,7 +581,7 @@ export class IsolatedRunService {
    * Prepends the host briefing to a session's first prompt (and the first
    * prompt after a backend restart, when briefedSessions was cleared and mounts
    * may have changed). The briefing is host-authored preamble; the user's text
-   * follows it. Once briefed, the session is marked so later turns pay nothing —
+   * follows it. Once briefed, the session is marked so later turns pay nothing -
    * in particular the approved-memory query runs only on the first briefed turn,
    * never on every turn.
    */
@@ -567,25 +589,84 @@ export class IsolatedRunService {
     if (this.briefedSessions.has(sessionId)) {
       return prompt;
     }
-    // Approved memory currently has no project provenance. Under a managed or
-    // project-restricting policy, global injection could carry content from a
-    // newly forbidden project into this prompt, so keep it local to the UI
-    // until provenance-aware filtering exists.
-    const memories = this.options.memoryService === undefined || blocksGlobalMemoryBriefing(this.options.securityPolicy)
-      ? []
-      : await this.options.memoryService.listApprovedContents(MEMORY_BRIEFING_LIMIT);
+    // Scoped memory (design doc): global + this workspace + this task, tag
+    // filtered against the mounted roots, grouped most specific first. Under
+    // a managed/project-restricting policy only the provenance-free GLOBAL
+    // group is dropped - workspace/task memories carry their anchor.
+    const memoryGroups = await this.memoryGroupsFor(sessionId);
     const mode = this.sessionModes.get(sessionId) ?? "implementation";
     const cloneRepos = mode === "clone"
       ? (this.sessionClones.get(sessionId) ?? []).map((repo) => repo.name)
       : [];
+    // MCP config + instruction-file detection run before the FIRST turn: the
+    // agent CLIs are invoked per turn, so a /workspace/.mcp.json written here
+    // is loaded by every turn including this one.
+    const mcpConfigured = await this.ensureMcpConfig(sessionId);
+    const instructionFiles = await this.detectInstructionFiles(sessionId);
     const briefing = buildSessionBriefing({
       mode,
       mounts: this.options.chatService.getSessionMounts(asId<"SessionId">(sessionId)),
-      ...(memories.length === 0 ? {} : { memories }),
-      ...(cloneRepos.length === 0 ? {} : { cloneRepos })
+      ...(memoryGroups.length === 0 ? {} : { memoryGroups }),
+      ...(cloneRepos.length === 0 ? {} : { cloneRepos }),
+      ...(instructionFiles.length === 0 ? {} : { instructionFiles }),
+      ...(this.options.teamInstructions === undefined ? {} : { teamInstructions: this.options.teamInstructions }),
+      ...(mcpConfigured ? { mcpConfigured: true } : {})
     });
     this.briefedSessions.add(sessionId);
     return `${briefing}\n\n${prompt}`;
+  }
+
+  /** Session roots + linked tasks + detected tags - the scope query shared by memory and MCP. */
+  private async sessionScopeQuery(sessionId: string): Promise<{ sessionRoots: readonly string[]; taskIds: readonly string[]; detectedTags: readonly string[] }> {
+    const stored = await this.options.chatService.getSession(asId<"SessionId">(sessionId));
+    const sessionRoots = stored?.workspaceRoots ?? [];
+    const taskIds = this.options.sessionTaskIds === undefined ? [] : await this.options.sessionTaskIds(sessionId);
+    const detectedTags = await this.tagsForRoots(sessionRoots);
+    return { sessionRoots, taskIds, detectedTags };
+  }
+
+  private async memoryGroupsFor(sessionId: string): Promise<{ label: string; notes: readonly string[] }[]> {
+    if (this.options.memoryService === undefined) return [];
+    try {
+      const query = await this.sessionScopeQuery(sessionId);
+      return await this.options.memoryService.briefingGroups({
+        ...query,
+        blockGlobal: blocksGlobalMemoryBriefing(this.options.securityPolicy)
+      });
+    } catch (error) {
+      this.options.logger.warn("memory briefing selection failed", {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Detected workspace tags per root: one bounded scan (top levels +
+   * extension census) cached for TAG_CACHE_TTL_MS, so mount-time detection
+   * stays fast and repeated briefings pay nothing.
+   */
+  async tagsForRoots(roots: readonly string[]): Promise<string[]> {
+    const rules = this.options.tagRules ?? [];
+    if (rules.length === 0 || roots.length === 0) return [];
+    const tags = new Set<string>();
+    for (const root of roots) {
+      const key = root.replace(/\\/g, "/").toLowerCase();
+      const cached = this.tagCache.get(key);
+      if (cached !== undefined && Date.now() - cached.at < TAG_CACHE_TTL_MS) {
+        for (const tag of cached.tags) tags.add(tag);
+        continue;
+      }
+      try {
+        const detected = await detectWorkspaceTags([root], rules);
+        this.tagCache.set(key, { tags: detected, at: Date.now() });
+        for (const tag of detected) tags.add(tag);
+      } catch {
+        // Unreadable root: no tags, no cache poison.
+      }
+    }
+    return [...tags].sort();
   }
 
   async restartChatBackend(sessionId: string, model: ChatModelSelection): Promise<{ session: ChatSessionRecord; providerCatalogs: readonly AgentModelCatalog[] }> {
@@ -607,9 +688,9 @@ export class IsolatedRunService {
   }
 
   /**
-   * "Take over here": reclaims a session another window still owns — most often
+   * "Take over here": reclaims a session another window still owns - most often
    * this same window's own pre-reload instance, whose heartbeat has not yet gone
-   * stale — and revives it live in THIS window with its transcript replayed.
+   * stale - and revives it live in THIS window with its transcript replayed.
    * Claims ownership first so the running-elsewhere guard yields, then resumes on
    * a fresh runtime using the session's persisted project roots plus any approved
    * access mounts.
@@ -634,7 +715,7 @@ export class IsolatedRunService {
    * session's provider/model when the caller omits one; a fresh disposable
    * workspace and template are provisioned exactly as startChatSession does, so
    * resume honors the current denied-path defaults. Rejects a still-live
-   * session — resume is revival, not a takeover of a running backend.
+   * session - resume is revival, not a takeover of a running backend.
    */
   async resumeChatSession(
     sessionId: string,
@@ -749,7 +830,7 @@ export class IsolatedRunService {
   /**
    * Durable outbound patches for every clone of a session (ADR 0014 capture).
    * Returns null when the process-local clone state is gone (window reload,
-   * ended session) — the caller records an honest skip instead of guessing.
+   * ended session) - the caller records an honest skip instead of guessing.
    * Refuses mid-turn like every other sync op (the agent may be writing).
    */
   async buildOutboundPatches(sessionId: string): Promise<{ readonly repoName: string; readonly patch: string; readonly fileCount: number; readonly paths: readonly string[] }[] | null> {
@@ -775,6 +856,247 @@ export class IsolatedRunService {
     return this.aggregateOutbound(clones);
   }
 
+  /** The sandbox CLI path, for host affordances that shell out directly (terminal attach); null when unset. */
+  getSbxPath(): string | null {
+    return this.options.sbxPath ?? null;
+  }
+
+  /**
+   * The session's effective MCP servers under the registry cascade (defaults
+   * → workspace-set → task → session, sensitive gate applied). Empty when no
+   * registry is wired.
+   */
+  async effectiveMcpServers(sessionId: string): Promise<McpEffectiveServer[]> {
+    if (this.options.mcpRegistry === undefined) return [];
+    const query = await this.sessionScopeQuery(sessionId);
+    const workspaceSets = this.options.workspaceSetRefs === undefined ? [] : await this.options.workspaceSetRefs();
+    return this.options.mcpRegistry.effectiveForSession({
+      sessionId,
+      sessionRoots: query.sessionRoots,
+      taskIds: query.taskIds,
+      workspaceSets: [...workspaceSets]
+    });
+  }
+
+  /** The .mcp.json this session should carry right now; null = nothing enabled. */
+  private async effectiveMcpJson(sessionId: string): Promise<string | null> {
+    if (this.options.mcpRegistry !== undefined) {
+      const effective = await this.effectiveMcpServers(sessionId);
+      return this.options.mcpRegistry.renderConfigJson(effective);
+    }
+    // Legacy path: the raw validated drydock.mcp.configPath contents.
+    return this.options.mcpConfigJson ?? null;
+  }
+
+  /**
+   * Writes the session's effective MCP config to /workspace/.mcp.json (once
+   * per session) so per-turn CLI invocations load it. Claude transports read
+   * the project-scope file; Codex support is a recorded follow-up.
+   * Best-effort: failures log and the briefing simply omits the MCP line.
+   */
+  private async ensureMcpConfig(sessionId: string): Promise<boolean> {
+    if (this.mcpConfiguredSessions.has(sessionId)) return true;
+    let configJson: string | null;
+    try {
+      configJson = await this.effectiveMcpJson(sessionId);
+    } catch (error) {
+      this.options.logger.warn("mcp effective-set resolution failed", {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
+    if (configJson === null) return false;
+    const written = await this.writeMcpConfig(sessionId, configJson);
+    if (written) this.mcpConfiguredSessions.add(sessionId);
+    return written;
+  }
+
+  /**
+   * Rewrites a LIVE session's config after a toggle. Honest semantics: the
+   * per-turn CLI picks the file up on the NEXT turn. An empty effective set
+   * writes an empty mcpServers map so a disable actually disables.
+   */
+  async refreshMcpConfig(sessionId: string): Promise<boolean> {
+    if (this.options.chatService.liveRuntimeHandle(asId(sessionId)) === null) return false;
+    let configJson: string | null;
+    try {
+      configJson = await this.effectiveMcpJson(sessionId);
+    } catch {
+      return false;
+    }
+    const written = await this.writeMcpConfig(sessionId, configJson ?? '{\n  "mcpServers": {}\n}');
+    if (written) this.mcpConfiguredSessions.add(sessionId);
+    return written;
+  }
+
+  /** Rewrites every live session's config; used after registry/override edits. */
+  async refreshMcpConfigForLiveSessions(): Promise<void> {
+    for (const sessionId of this.options.chatService.liveSessionIds()) {
+      await this.refreshMcpConfig(sessionId).catch(() => false);
+    }
+  }
+
+  private async writeMcpConfig(sessionId: string, configJson: string): Promise<boolean> {
+    const executor = this.options.runtimeExecutor;
+    const runtime = this.options.chatService.liveRuntimeHandle(asId(sessionId));
+    if (executor === undefined || runtime === null) return false;
+    try {
+      const result = await executor.exec(
+        runtime,
+        ["/bin/sh", "-c", "base64 -d > /workspace/.mcp.json"],
+        30_000,
+        Buffer.from(configJson, "utf8").toString("base64")
+      );
+      if (result.exitCode !== 0) throw new Error(result.stderr.slice(0, 200));
+      return true;
+    } catch (error) {
+      this.options.logger.warn("mcp config write failed", {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Lists repo instruction files (CLAUDE.md / AGENTS.md) present in the
+   * session's mounts, by runtime path, so the briefing can point at them.
+   * Best-effort: empty on any failure.
+   */
+  private async detectInstructionFiles(sessionId: string): Promise<string[]> {
+    const executor = this.options.runtimeExecutor;
+    const runtime = this.options.chatService.liveRuntimeHandle(asId(sessionId));
+    if (executor === undefined || runtime === null) return [];
+    try {
+      const result = await executor.exec(
+        runtime,
+        ["/bin/sh", "-c", "for f in /workspace/CLAUDE.md /workspace/AGENTS.md /workspace/*/CLAUDE.md /workspace/*/AGENTS.md /workspace/repos/*/CLAUDE.md /workspace/repos/*/AGENTS.md; do [ -f \"$f\" ] && echo \"$f\"; done; exit 0"],
+        15_000
+      );
+      return result.stdout.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("/workspace/")).slice(0, 12);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Context debug (design doc): everything the session's briefing/context is
+   * composed of, as markdown, each section annotated with WHERE it came from.
+   * Renders what the NEXT briefed turn would carry - the same code paths the
+   * real briefing uses, so this view cannot drift from reality.
+   */
+  async composeContextDebug(sessionId: string): Promise<string> {
+    const stored = await this.options.chatService.getSession(asId<"SessionId">(sessionId));
+    if (stored === null) throw new Error(`Session ${sessionId} was not found.`);
+    const live = this.isChatSessionLive(sessionId);
+    const mode = this.sessionModes.get(sessionId) ?? stored.mode ?? "implementation";
+    const scope = await this.sessionScopeQuery(sessionId);
+    const mounts = this.options.chatService.getSessionMounts(asId<"SessionId">(sessionId));
+    const lines: string[] = [];
+    lines.push(`# Context debug - ${stored.title}`);
+    lines.push("");
+    lines.push(`> Session \`${sessionId}\` · ${stored.providerId}${stored.model === undefined ? "" : ` / ${stored.model}`} · mode: ${mode} · ${live ? "live" : `not live (${stored.status})`}`);
+    lines.push(`> Generated ${this.options.clock.isoNow()}. Shows what the next briefed turn would carry; a session is briefed on its first turn and re-briefed after restarts.`);
+    lines.push("");
+
+    lines.push("## Mounts");
+    lines.push("_Source: the session's runtime template - workspace roots chosen at start, plus approved access-request grants (ADR 0009)._");
+    if (mounts.length === 0) {
+      lines.push("- none beyond the disposable workspace");
+    } else {
+      for (const mount of mounts) {
+        lines.push(`- \`${mount.runtimePath}\` (${mount.mode})${mount.hostDisplayPath === undefined ? "" : ` ← host \`${mount.hostDisplayPath}\``}`);
+      }
+    }
+    lines.push("");
+
+    lines.push("## Detected workspace tags");
+    lines.push("_Source: glob rule table (built-in defaults + `drydock.memory.tagRules`) matched against the mounted roots at mount time. Tags select which tagged memories load._");
+    lines.push(scope.detectedTags.length === 0 ? "- none detected" : scope.detectedTags.map((tag) => `\`${tag}\``).join(" · "));
+    lines.push("");
+
+    lines.push("## Team memory");
+    lines.push("_Source: the memory store (Tasks tab → Memory). Grouped by scope, most specific first; tagged memories require a matching detected tag. Agent proposals entered via the approval gate; user entries via quick-add._");
+    const memoryGroups = this.options.memoryService === undefined
+      ? []
+      : await this.options.memoryService.briefingRecords({
+          sessionRoots: scope.sessionRoots,
+          taskIds: scope.taskIds,
+          detectedTags: scope.detectedTags,
+          blockGlobal: blocksGlobalMemoryBriefing(this.options.securityPolicy)
+        });
+    if (memoryGroups.length === 0) {
+      lines.push("- none apply to this session");
+    }
+    for (const group of memoryGroups) {
+      lines.push(`### ${group.label}`);
+      for (const record of group.records) {
+        const origin = record.origin === "user" ? "user quick-add" : `agent proposal (session \`${record.sessionId}\`, approved)`;
+        const tags = record.tags === undefined || record.tags.length === 0 ? "" : ` · tags: ${record.tags.join(", ")}`;
+        lines.push(`- ${record.content}`);
+        lines.push(`  - _from: ${origin} · added ${record.createdAt}${tags}_`);
+      }
+    }
+    lines.push("");
+
+    lines.push("## MCP servers");
+    if (this.options.mcpRegistry === undefined) {
+      lines.push("_Source: `drydock.mcp.configPath`._");
+      lines.push(this.options.mcpConfigJson === undefined ? "- none configured" : "- host config file written to `/workspace/.mcp.json` before the first turn");
+    } else {
+      lines.push("_Source: MCP registry (System tab) resolved through the override cascade - defaults → workspace → task → chat. Rendered to `/workspace/.mcp.json` over the exec channel; toggles apply next turn._");
+      const effective = await this.effectiveMcpServers(sessionId).catch(() => [] as McpEffectiveServer[]);
+      if (effective.length === 0) {
+        lines.push("- no servers registered");
+      }
+      for (const entry of effective) {
+        const decided = entry.decidedBy === "default"
+          ? "registry default"
+          : entry.decidedBy === "sensitive-gate"
+            ? "sensitive - needs a task/chat opt-in"
+            : `${entry.decidedBy} override`;
+        lines.push(`- ${entry.enabled ? "🟢" : "⚪"} **${entry.server.name}** - ${entry.enabled ? "on" : "off"} (${decided})${entry.server.source === "settings" ? " · from settings" : ""}`);
+      }
+    }
+    lines.push("");
+
+    lines.push("## Standing instructions");
+    lines.push("_Source: repo instruction files detected inside the live sandbox at first turn, plus `drydock.teamInstructionsPath` appended to every briefing._");
+    const instructionFiles = live ? await this.detectInstructionFiles(sessionId) : [];
+    if (instructionFiles.length === 0) {
+      lines.push(live ? "- no CLAUDE.md / AGENTS.md files detected in the mounts" : "- session not live; file detection runs in-container at first turn");
+    } else {
+      for (const file of instructionFiles) lines.push(`- \`${file}\``);
+    }
+    if (this.options.teamInstructions !== undefined && this.options.teamInstructions.trim().length > 0) {
+      lines.push("- team instructions (drydock.teamInstructionsPath):");
+      lines.push("");
+      lines.push("```");
+      lines.push(this.options.teamInstructions.trim());
+      lines.push("```");
+    }
+    lines.push("");
+
+    lines.push("## Full briefing preview");
+    lines.push("_Source: host-composed preamble prepended to the first prompt (stripped from replayed context). This is the exact text, built by the same code the real briefing uses._");
+    const briefing = buildSessionBriefing({
+      mode,
+      mounts,
+      ...(mode === "clone" ? { cloneRepos: (this.sessionClones.get(sessionId) ?? []).map((repo) => repo.name) } : {}),
+      ...(await this.memoryGroupsFor(sessionId).then((groups) => (groups.length === 0 ? {} : { memoryGroups: groups }))),
+      ...(instructionFiles.length === 0 ? {} : { instructionFiles }),
+      ...(this.options.teamInstructions === undefined ? {} : { teamInstructions: this.options.teamInstructions }),
+      ...(this.mcpConfiguredSessions.has(sessionId) ? { mcpConfigured: true } : {})
+    });
+    lines.push("");
+    lines.push("````");
+    lines.push(briefing);
+    lines.push("````");
+    lines.push("");
+    return lines.join("\n");
+  }
+
   // MARK: Sandbox preview servers (ADR 0017)
 
   /**
@@ -782,14 +1104,14 @@ export class IsolatedRunService {
    * 127.0.0.1 proxy for it. Each proxied request is one bounded exec into the
    * SESSION'S OWN container (node fetch against loopback), so no container
    * restart, no published ports, and no network reach beyond that one
-   * container — remote runtimes work over their own exec transport. Web-only
+   * container - remote runtimes work over their own exec transport. Web-only
    * previews; websockets/streaming are a recorded fast-follow.
    */
   async registerPreview(sessionId: string, containerPort: number, urlPath: string, title: string): Promise<PreviewSummary> {
     const executor = this.options.runtimeExecutor;
     if (executor === undefined) throw new Error("Preview proxying is not available in this build.");
     if (this.options.chatService.liveRuntimeHandle(asId(sessionId)) === null) {
-      throw new Error("Start or resume this chat first — previews proxy into the running sandbox.");
+      throw new Error("Start or resume this chat first - previews proxy into the running sandbox.");
     }
     const existing = (this.sessionPreviews.get(sessionId) ?? []).find((candidate) => candidate.summary.containerPort === containerPort);
     if (existing !== undefined) {
@@ -888,7 +1210,7 @@ export class IsolatedRunService {
       const runtime = this.options.chatService.liveRuntimeHandle(asId(sessionId));
       if (executor === undefined || runtime === null) {
         response.writeHead(503, { "content-type": "text/plain" });
-        response.end("The session is not live — resume it to serve this preview.");
+        response.end("The session is not live - resume it to serve this preview.");
         return;
       }
       const chunks: Buffer[] = [];
@@ -934,7 +1256,7 @@ export class IsolatedRunService {
   /**
    * Writes a user attachment (pasted screenshot, picked image/document) into
    * the LIVE session's container at /workspace/attachments/<name> via a
-   * bounded exec — base64 over stdin, so it rides the runtime transport and
+   * bounded exec - base64 over stdin, so it rides the runtime transport and
    * works identically for remote/networked runtimes. No mounts change and
    * nothing restarts; the agent can read the file immediately. Refuses when
    * the session is not live in this window.
@@ -946,7 +1268,7 @@ export class IsolatedRunService {
     }
     const runtime = this.options.chatService.liveRuntimeHandle(asId(sessionId));
     if (runtime === null) {
-      throw new Error("Start or resume this chat first — attachments upload into the running sandbox.");
+      throw new Error("Start or resume this chat first - attachments upload into the running sandbox.");
     }
     const bytes = Buffer.from(dataBase64, "base64");
     if (bytes.length === 0) throw new Error("The attachment was empty.");
@@ -973,7 +1295,7 @@ export class IsolatedRunService {
    * as a data URI (ADR 0016 question illustrations). The inverse of
    * uploadAttachment: `base64 <path>` over the runtime transport, capped at
    * ~512 KB encoded, absolute in-sandbox image paths only. Null on any
-   * failure — callers degrade to a path-only reference, never throw.
+   * failure - callers degrade to a path-only reference, never throw.
    */
   async readSandboxImageDataUri(sessionId: string, imagePath: string): Promise<string | null> {
     const executor = this.options.runtimeExecutor;
@@ -1182,7 +1504,7 @@ export class IsolatedRunService {
 
   /**
    * Refreshes provider catalogs and auth statuses with inert host capability
-   * discovery (allowed by the threat model) — no prompt or model output ever
+   * discovery (allowed by the threat model) - no prompt or model output ever
    * flows through these calls. The primary source is the host Codex
    * app-server model/list; the OPENAI_API_KEY ping remains a fallback. A
    * richer catalog fetched from a live sandbox is never overwritten.
@@ -1233,13 +1555,18 @@ export class IsolatedRunService {
     return this.options.chatService.isSessionLive(asId<"SessionId">(sessionId));
   }
 
+  /** Stored session record passthrough for host affordances (memory scope anchors). */
+  getChatSession(sessionId: string): Promise<ChatSessionRecord | null> {
+    return this.options.chatService.getSession(asId<"SessionId">(sessionId));
+  }
+
   /** This window's host-instance id, stamped onto sessions it owns. */
   get hostInstanceId(): string {
     return this.options.hostInstanceId;
   }
 
   /**
-   * True when `heartbeatAt` is within the staleness window relative to now — i.e.
+   * True when `heartbeatAt` is within the staleness window relative to now - i.e.
    * the owning host proved liveness recently enough that the session is still
    * considered running. Absent/blank heartbeats and unparseable timestamps are
    * treated as stale (false). Mirrors the core reconcile freshness rule so the
@@ -1292,8 +1619,8 @@ export class IsolatedRunService {
 
   /**
    * The clipboard-ready trimmed chat log (dialogue + files touched; no
-   * commands, reasoning, or host briefing). Works for any stored session —
-   * live or ended — because it reads only durable events.
+   * commands, reasoning, or host briefing). Works for any stored session -
+   * live or ended - because it reads only durable events.
    */
   async buildChatLogExport(sessionId: string): Promise<string> {
     const id = asId<"SessionId">(sessionId);
@@ -1367,7 +1694,7 @@ export class IsolatedRunService {
     try {
       await writeFile(path.join(workspace.workspacePath, "README.md"), "# Isolated run disposable workspace\n", "utf8");
       // Clone mode: each root is git-cloned INTO the workspace, and buildMountPolicy
-      // yields NO project-root mounts for clone mode — so the only rw mount is the
+      // yields NO project-root mounts for clone mode - so the only rw mount is the
       // workspace itself, which now contains the clones. That is the design.
       const clones = effectiveContext?.mode === "clone"
         ? await this.prepareClones(
@@ -1616,7 +1943,7 @@ interface ProcessSnapshot {
  * Maps each running sandbox's externalName to its nerdbox shim host PID by
  * reading containerd's on-disk task state (`config.json`.hostname + `shim.pid`),
  * whose location is derived from the sbx binary path. Best-effort: returns what
- * it can parse, empty on any failure — callers then report the sandbox as
+ * it can parse, empty on any failure - callers then report the sandbox as
  * unavailable rather than throwing.
  */
 async function readSandboxShimPids(sbxPath: string): Promise<Map<string, number>> {
@@ -1717,7 +2044,10 @@ function statNumber(value: unknown): number | null {
 }
 
 function titleFromPrompt(prompt: string): string {
-  return prompt.length > CHAT_TITLE_MAX ? `${prompt.slice(0, CHAT_TITLE_MAX)}…` : prompt;
+  // First prompts arrive with the host briefing prepended; titles must derive
+  // from the USER's words ("[host briefing]Mode: IMPLEMENTATION…" is not a title).
+  const cleaned = stripHostBriefing(prompt).trim() || prompt.trim();
+  return cleaned.length > CHAT_TITLE_MAX ? `${cleaned.slice(0, CHAT_TITLE_MAX)}…` : cleaned;
 }
 
 /**

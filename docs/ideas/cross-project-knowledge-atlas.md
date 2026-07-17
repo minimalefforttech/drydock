@@ -16,16 +16,16 @@ The goal is to give every project a small, version-controlled knowledge pack and
 
 Separate three kinds of knowledge:
 
-1. **Project knowledge** — what the project is and how it works.
-2. **Reusable API knowledge** — code another project can safely consume.
-3. **Workflow knowledge** — how capabilities across several projects combine to accomplish something.
+1. **Project knowledge** - what the project is and how it works.
+2. **Reusable API knowledge** - code another project can safely consume.
+3. **Workflow knowledge** - how capabilities across several projects combine to accomplish something.
 
 This should remain distinct from Drydock's existing reviewed memory system. Current memory is short briefing context; it is not a structured, versioned API catalog.
 
 The Atlas should have two complementary layers:
 
-1. **Evidence graph** — deterministically extracted projects, packages, exports, imports, references, tests, build targets, and consumers.
-2. **Reviewed knowledge graph** — human-readable responsibilities, workflows, ownership, stability, usage guidance, and approved similarity or supersession relationships.
+1. **Evidence graph** - deterministically extracted projects, packages, exports, imports, references, tests, build targets, and consumers.
+2. **Reviewed knowledge graph** - human-readable responsibilities, workflows, ownership, stability, usage guidance, and approved similarity or supersession relationships.
 
 Markdown is the portable, reviewed human projection of this knowledge. It is not the whole database and should not be required to duplicate facts that can be extracted reliably from code.
 
@@ -82,7 +82,7 @@ A deliberately short entry point containing:
 - Build, test, and run commands
 - Links to architecture, APIs, and workflows
 
-Target roughly 500–1,000 words.
+Target roughly 500-1,000 words.
 
 ### `architecture.md`
 
@@ -221,7 +221,7 @@ This can extend the existing project catalog and `WorkspaceSet` model.
 
 Search should begin with local full-text ranking such as BM25 over names, tags, descriptions, signatures, examples, and source paths. Semantic or embedding search can be added later for differently worded capabilities, but it should complement rather than replace exact symbol and metadata search.
 
-The index should expose small neighbourhood queries—for example, a selected API plus its direct consumers, tests, owner, workflows, and alternatives—rather than serializing the complete graph into an agent prompt.
+The index should expose small neighbourhood queries-for example, a selected API plus its direct consumers, tests, owner, workflows, and alternatives-rather than serializing the complete graph into an agent prompt.
 
 ## Visualization
 
@@ -269,7 +269,7 @@ Before an implementation session:
 4. Let the agent open detailed API pages or source files on demand.
 5. Require the implementation plan to state whether it will reuse, extend, promote, or create a capability.
 
-The initial context pack should have a hard budget—approximately 1,000–2,000 tokens—and normally contain no more than three to five candidates. Each candidate should include only its responsibility, stability, compatibility, import path, reason for ranking, and links for deeper retrieval. Agents can request API details, examples, consumers, or source on demand.
+The initial context pack should have a hard budget-approximately 1,000-2,000 tokens-and normally contain no more than three to five candidates. Each candidate should include only its responsibility, stability, compatibility, import path, reason for ranking, and links for deeper retrieval. Agents can request API details, examples, consumers, or source on demand.
 
 During review:
 
@@ -403,7 +403,7 @@ References:
 
 ## Rollout plan
 
-### Phase 1 — Convention and pilot
+### Phase 1 - Convention and pilot
 
 - Define the Markdown and frontmatter schema.
 - Hand-author or generate packs for Drydock and two contrasting projects.
@@ -411,7 +411,7 @@ References:
 - Decide naming, stability, ownership, and staleness conventions.
 - Measure the current tokens and time spent rediscovering project structure to establish a baseline.
 
-### Phase 2 — Deterministic generator
+### Phase 2 - Deterministic generator
 
 - Extract project structure, package exports, signatures, docs, and tests.
 - Generate stable Markdown with protected manual sections.
@@ -419,7 +419,7 @@ References:
 - Add a `check` mode that reports stale knowledge without rewriting it.
 - Persist evidence for every extracted node and edge.
 
-### Phase 3 — Local catalog and search
+### Phase 3 - Local catalog and search
 
 - Index every registered project.
 - Add full-text and tag search.
@@ -428,20 +428,20 @@ References:
 - Enforce a context budget and support deeper on-demand retrieval.
 - Integrate the reuse shortlist into task start before building the graph UI.
 
-### Phase 4 — Atlas visualization
+### Phase 4 - Atlas visualization
 
 - Add project, component, and workflow graph views.
 - Add source navigation and backlink or consumer panels.
 - Show stale, unsupported, duplicated, and high-reuse nodes.
 - Reuse the existing Planner Markdown and Mermaid rendering stack.
 
-### Phase 5 — Workflow intelligence
+### Phase 5 - Workflow intelligence
 
 - Add explicit workflow records and cross-project sequence diagrams.
 - Link workflows to tasks and task review.
 - Show impact when an API used by several workflows changes.
 
-### Phase 6 — Reuse and duplication gates
+### Phase 6 - Reuse and duplication gates
 
 - Add changed-file similarity checks.
 - Suggest existing APIs before new implementation.

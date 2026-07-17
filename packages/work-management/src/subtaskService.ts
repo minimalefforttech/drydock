@@ -34,7 +34,7 @@ export interface SubtaskServiceOptions {
    * Optional: publishes "card-entered-done" (subtask transitions into a
    * done-category column, manual moves included) and "board-changed" (after
    * any successful create/update/delete/moveCard) for the orchestrator and UI
-   * to react to. Omitted in most existing tests — every publish is guarded so
+   * to react to. Omitted in most existing tests - every publish is guarded so
    * the service works identically without a bus.
    */
   readonly bus?: ProductEventBus;
@@ -50,7 +50,7 @@ export interface SubtaskCreateInput {
    * dependent auto-starts only when this is set AND all upstreams are done
    * AND it has a prompt AND it is not in a backlog-category column; manual
    * start never runs dependencies (Force start override, manual only). The
-   * cascade lives in subtaskOrchestrator.ts — this is just the flag.
+   * cascade lives in subtaskOrchestrator.ts - this is just the flag.
    */
   readonly autoStart?: boolean;
   /** Defaults to the first backlog-category column when omitted. */
@@ -284,7 +284,7 @@ export class SubtaskService {
     }
     // Fires for EVERY transition into a done-category column, manual drags
     // included (the doc's "manual drags always win / trigger dependent
-    // evaluation" rule) — not just orchestrator-driven completions.
+    // evaluation" rule) - not just orchestrator-driven completions.
     if (destination.category === "done") {
       this.options.bus?.publish({ kind: "card-entered-done", taskId: updated.taskId, subtaskId: updated.subtaskId });
     }

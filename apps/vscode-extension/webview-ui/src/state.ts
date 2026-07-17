@@ -4,11 +4,11 @@
  * One mutable `AppState` object is the single source of truth for the whole
  * panel; every view reads and mutates it and calls `persist()`. The persisted
  * shape is versioned via `getState`/`setState`; `restore()` migrates the legacy
- * (pre-redesign) persisted shape gracefully — anything that no longer fits is
+ * (pre-redesign) persisted shape gracefully - anything that no longer fits is
  * reset rather than crashing.
  *
  * SECURITY: this module holds data only. All dynamic strings that reach the DOM
- * are rendered via textContent by the view modules — never innerHTML — so agent
+ * are rendered via textContent by the view modules - never innerHTML - so agent
  * output can never become markup.
  */
 
@@ -22,6 +22,8 @@ import type {
   ChatSessionSummary,
   ColumnCategory,
   IsolationSummary,
+  McpOverrideSummary,
+  McpServerSummary,
   MemoryCandidateSummary,
   PanelInitState,
   PreviewSummary,
@@ -134,7 +136,7 @@ export interface AppState {
   planTabPlanId: string | null;
   openFolderNames: readonly string[];
   /** The window's active editor (host-reported), offered as a composer
-   * attachment; null when none. Transient — not persisted. */
+   * attachment; null when none. Transient - not persisted. */
   activeEditor: ActiveEditorRef | null;
   /** Internal work tasks, newest-first by updatedAt. */
   tasks: WorkTaskSummary[];
@@ -157,16 +159,28 @@ export interface AppState {
    * it migrates to [].
    */
   memoryCandidates: MemoryCandidateSummary[];
+  /** Tags detected in the open folders (quick-add suggestion chips). Transient. */
+  detectedTags: string[];
+  /** MCP registry rows + tri-state overrides. Transient; mcp.list hydrates. */
+  mcpServers: McpServerSummary[];
+  mcpOverrides: McpOverrideSummary[];
   /** Webview-local task notes keyed by durable taskId. */
   taskNotes: TaskNote[];
   /**
    * Sessions currently running a turn (from chat.turnStarted/turnCompleted
-   * pushes). Transient — rebuilt from pushes after a reload — but lets every
+   * pushes). Transient - rebuilt from pushes after a reload - but lets every
    * session row show running-a-turn vs idle-live, not just the selected one.
    */
   turnActiveSessionIds: Set<string>;
-  /** Agent-announced sandbox previews (ADR 0017). Transient — re-pushed/refetched. */
+  /** Agent-announced sandbox previews (ADR 0017). Transient - re-pushed/refetched. */
   previews: PreviewSummary[];
+  /**
+   * The CURRENT task, shared across Tasks/Plan/Edit so they stay in sync:
+   * selecting a session adopts its owning task, clicking a task card sets it,
+   * the Plan tab's task picker reads and writes it, and new chats link to it.
+   * Persisted; null = no explicit choice (surfaces fall back to derivation).
+   */
+  activeTaskId: string | null;
   /** Tasks-tab view density (expanded cards vs the compact tree). */
   tasksViewMode: TasksViewMode;
   /** Compact-tree grouping order (task-first vs workspace-first). */
@@ -204,9 +218,13 @@ function freshState(): AppState {
     boardColumns: [],
     attention: {},
     memoryCandidates: [],
+    detectedTags: [],
+    mcpServers: [],
+    mcpOverrides: [],
     taskNotes: [],
     turnActiveSessionIds: new Set<string>(),
     previews: [],
+    activeTaskId: null,
     tasksViewMode: "expanded",
     compactGroupOrder: "task"
   };
@@ -341,6 +359,7 @@ export function restore(): AppState {
     state.taskNotes = raw["taskNotes"].filter(isTaskNote);
   }
   // Tasks-tab view prefs are later additions; legacy blobs keep the defaults.
+  if (typeof raw["activeTaskId"] === "string") state.activeTaskId = raw["activeTaskId"];
   if (raw["tasksViewMode"] === "expanded" || raw["tasksViewMode"] === "compact") {
     state.tasksViewMode = raw["tasksViewMode"];
   }
@@ -382,6 +401,7 @@ export function persist(state: AppState): void {
     attention: state.attention,
     memoryCandidates: state.memoryCandidates,
     taskNotes: state.taskNotes,
+    activeTaskId: state.activeTaskId,
     tasksViewMode: state.tasksViewMode,
     compactGroupOrder: state.compactGroupOrder
   });
@@ -469,7 +489,7 @@ export function topAttentionReason(state: AppState, sessionId: string): string |
   return reasons[0] ?? null;
 }
 
-/** Upserts one agent question by id (replace-in-place, else append — asked order). */
+/** Upserts one agent question by id (replace-in-place, else append - asked order). */
 export function upsertQuestion(state: AppState, question: AgentQuestionSummary): void {
   const index = state.questions.findIndex((candidate) => candidate.questionId === question.questionId);
   if (index === -1) {
@@ -490,7 +510,7 @@ export function isSessionLiveish(state: AppState, sessionId: string): boolean {
   if (session === undefined) return false;
   // Authoritative: the host tells us whether the backend is live HERE. Fall back
   // to the stored status only for summaries that predate the `live` field (which
-  // the host now always sets) — a reloaded "active" row is NOT live until revived.
+  // the host now always sets) - a reloaded "active" row is NOT live until revived.
   return session.live !== undefined
     ? session.live
     : (session.status === "active" || session.status === "starting");

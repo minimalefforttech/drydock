@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Code Review panel — design prototype</title>
+<title>Code Review panel - design prototype</title>
 <!--
   Static design prototype for docs/design/code-review-panel.md.
   Self-contained; VS Code dark palette hardcoded. Working bits: sidebar jump +
@@ -207,7 +207,7 @@
 <body>
 
 <header>
-  <h1>Code Review <span class="task">— Alembic publish support</span></h1>
+  <h1>Code Review <span class="task">- Alembic publish support</span></h1>
   <div class="seg" id="scopeSeg">
     <button class="active">Task changes</button><button>All uncommitted</button>
   </div>
@@ -271,13 +271,13 @@
         <div class="thread-head"><span class="author">you</span> · src/publish_hooks.py:42-43 · <span class="rev">delegated · rev 2</span>
           <select class="status-sel"><option>delegated</option><option>open</option><option>resolved</option><option>wont-fix</option></select>
         </div>
-        <div class="thread-body">Validation should log what failed, not just raise — ops needs the asset id in the farm log.</div>
+        <div class="thread-body">Validation should log what failed, not just raise - ops needs the asset id in the farm log.</div>
       </div>
       <div class="thread">
         <div class="thread-head"><span class="author">reviewer</span> <span class="author-badge">agent</span> · src/publish_hooks.py:42 ·
           <select class="status-sel"><option>open</option><option>acknowledged</option><option>resolved</option></select>
         </div>
-        <div class="thread-body">`strict=True` changes behavior for legacy assets missing UDIM tags — 14 assets in the test set would now fail publish. Confirm intended.</div>
+        <div class="thread-body">`strict=True` changes behavior for legacy assets missing UDIM tags - 14 assets in the test set would now fail publish. Confirm intended.</div>
       </div>
 
       <table class="diff"><tbody>
@@ -297,7 +297,7 @@
           <span class="anchor-chip">api:src/exporters/alembic.py:57 <button>✕</button></span>
           <button class="add-range">＋ Add another range</button>
         </div>
-        <textarea>Both of these re-implement the retry/validate pattern — extract into shared/checks.py and reuse it in the exporter too.</textarea>
+        <textarea>Both of these re-implement the retry/validate pattern - extract into shared/checks.py and reuse it in the exporter too.</textarea>
         <div class="composer-actions">
           <button class="btn primary">Comment</button>
           <button class="btn">Comment &amp; send</button>
@@ -402,7 +402,7 @@
       <span class="stats"><span class="plus">+178</span> <span class="minus">−64</span></span>
       <div class="head-actions"><button class="link-btn">Open in editor</button></div>
     </div>
-    <div class="collapsed-note">Generated file (+178 −64) — collapsed by default, click to expand</div>
+    <div class="collapsed-note">Generated file (+178 −64) - collapsed by default, click to expand</div>
     <div class="card-body"><div class="bin-row">…lockfile hunks would render here…</div></div>
   </section>
 
@@ -420,7 +420,7 @@
       </div>
     </div>
     <div class="card-body">
-      <div class="conflict-note">⚠ Unresolved sync conflict markers — resolve in the owning session's sync view before landing.</div>
+      <div class="conflict-note">⚠ Unresolved sync conflict markers - resolve in the owning session's sync view before landing.</div>
       <table class="diff"><tbody>
         <tr class="hunk-sep"><td colspan="3"><span class="expand">⋯ expand 20 lines</span>@@ -12,6 +12,6 @@ def submit(job):</td></tr>
         <tr class="row-del"><td class="lineno">13<button class="addc">＋</button></td><td class="lineno"></td><td class="code" data-sign="−">    return farm.submit(job, retries=0)</td></tr>
@@ -438,7 +438,7 @@
       <span class="stats"><span class="plus">+812</span> <span class="minus">−540</span></span>
       <div class="head-actions"><button class="link-btn">Open in editor</button></div>
     </div>
-    <div class="collapsed-note">Large diff (+812 −540) — collapsed by default, click to expand</div>
+    <div class="collapsed-note">Large diff (+812 −540) - collapsed by default, click to expand</div>
     <div class="card-body"><div class="bin-row">…1,352 rows would lazy-load here…</div></div>
   </section>
 

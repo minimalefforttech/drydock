@@ -1,6 +1,6 @@
 /**
  * Candidate extraction tests (ADR 0012): checkbox items only, across
- * document artifacts, deduped, bounded, capped — nothing inferred from
+ * document artifacts, deduped, bounded, capped - nothing inferred from
  * headings or prose.
  */
 
@@ -33,9 +33,9 @@ test("extracts checkbox items across documents, skipping prose, headings, and no
       "1. [ ] Ship the docs",
       "- a plain bullet is NOT a candidate",
       "## Tasks are not candidates either",
-      "- [ ] ok" // 2 chars — below the minimum
+      "- [ ] ok" // 2 chars - below the minimum
     ].join("\n")),
-    doc("diagram", "- [ ] not scanned — diagrams are not documents", "diagram"),
+    doc("diagram", "- [ ] not scanned - diagrams are not documents", "diagram"),
     doc("dupes", "- [ ] Wire the exporter\n- [ ] WIRE THE EXPORTER") // case-insensitive dedupe
   ]);
   assert.deepEqual(candidates, ["Wire the exporter", "Update the allowlist config", "Ship the docs"]);

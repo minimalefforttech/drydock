@@ -3,7 +3,7 @@
  * anchored annotations, and the configurable aspect registry.
  *
  * Revision numbering, aspect/title resolution, and blob handling live in the
- * app service — these stores persist what they are handed. Artifact rows key
+ * app service - these stores persist what they are handed. Artifact rows key
  * on artifact_id with a UNIQUE(plan_id, rel_path) guard; the service preserves
  * artifact ids across re-collections so annotations stay attached.
  */

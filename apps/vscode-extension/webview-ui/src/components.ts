@@ -1,8 +1,8 @@
 /**
  * DOM component helpers for the chat panel webview.
  *
- * SECURITY: every helper that takes text assigns it via textContent — never
- * innerHTML — so agent output and any host-supplied string can never become
+ * SECURITY: every helper that takes text assigns it via textContent - never
+ * innerHTML - so agent output and any host-supplied string can never become
  * markup. Callers must keep this invariant when composing nodes.
  */
 

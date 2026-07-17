@@ -66,7 +66,7 @@ export class CodexAppServerEventNormalizer {
       }
       // NOTE: the method string "item/reasoning/delta" is inferred from the
       // "item/agentMessage/delta" pattern plus the schema's `reasoning` item
-      // type — not yet confirmed against a live app-server stream. If the
+      // type - not yet confirmed against a live app-server stream. If the
       // real method name differs, this case simply never matches and
       // reasoning falls through to `default: return []` as it does today
       // (no regression, just no reasoning captured until confirmed).
@@ -166,7 +166,7 @@ export class CodexAppServerEventNormalizer {
   ): AgentEvent[] {
     const item = itemObject(params);
     if (isCollabItem(item)) {
-      // Spawn starts carry no receiver ids yet (probe fact) — wait for completion.
+      // Spawn starts carry no receiver ids yet (probe fact) - wait for completion.
       return [];
     }
     if (isWebSearchItem(item)) {
@@ -210,7 +210,7 @@ export class CodexAppServerEventNormalizer {
       return text === null ? [] : [this.reasoningEvent(context, text, raw, path, true)];
     }
     if (isCommandItem(item)) {
-      // The completed command_execution item carries the full captured output —
+      // The completed command_execution item carries the full captured output -
       // grab it (capped) so the chat shows what the command actually printed,
       // not just the command + exit code.
       const rawOutput = textFrom(item, ["aggregated_output", "output", "stdout", "formatted_output", "aggregatedOutput"]);
@@ -228,7 +228,7 @@ export class CodexAppServerEventNormalizer {
    * collabAgentToolCall items are the spawn edges (probe 2026-07-05):
    * spawnAgent completions name the new child thread in receiverThreadIds;
    * wait/close/sendInput completions carry each child's last status+message
-   * in agentsStates — the lifecycle-tier terminal source, deduped per child.
+   * in agentsStates - the lifecycle-tier terminal source, deduped per child.
    */
   private collabEvents(
     item: JsonObject,
@@ -279,7 +279,7 @@ export class CodexAppServerEventNormalizer {
 
   /**
    * subAgentActivity is schema-present but unobserved in the probe (likely
-   * the disabled multi_agent_v2 path) — registered defensively so activity
+   * the disabled multi_agent_v2 path) - registered defensively so activity
    * from that path lands attributed instead of misfiled under root.
    */
   private subAgentActivity(

@@ -23,8 +23,8 @@ Subtasks are the only child work item. A subtask belongs to exactly one task,
 optionally carries a prompt (which makes it startable), and review-driven mini
 tasks are subtasks with `origin: "review"` rather than a separate record type.
 
-Board columns are user-defined names inside four fixed categories — backlog,
-pending, in-progress, done — and only the category drives behaviour. Every
+Board columns are user-defined names inside four fixed categories - backlog,
+pending, in-progress, done - and only the category drives behaviour. Every
 category keeps at least one column; the first done-category column is the
 automation target. Renaming or adding columns can never change semantics.
 
@@ -38,7 +38,7 @@ Automation is opt-in and bounded. A dependent auto-starts only when its own
 it is not in a backlog-category column. Manual start never starts
 dependencies and is refused while any upstream is unfinished; Force start is
 a manual-only override that automation never uses. Nothing automated ever
-moves work past the first done column — Review to Finished is a human action.
+moves work past the first done column - Review to Finished is a human action.
 
 Orchestration is event-driven through the product bus (`turn-completed`,
 `card-entered-done`), per 0002's product-owned model: the product, not a
@@ -64,8 +64,8 @@ agent verify itself and does not move work past Review.
 Migrations map the legacy task states onto seeded default columns; column
 edits are cosmetic by construction. A finishing run can fan out new runs, so
 surfaces refresh off one coarse `board-changed` push instead of fine-grained
-deltas. Auto-start fires when an upstream reaches Review — before a human has
-reviewed it — and pulling a card back out of done does not cancel dependents
+deltas. Auto-start fires when an upstream reaches Review - before a human has
+reviewed it - and pulling a card back out of done does not cancel dependents
 already started. Live run projections may reset with the host; queued and
 parked intent is durable and restored under 0015. Recipes make repeated fleet
 shapes cheap without collapsing creation, start, review, and verification into

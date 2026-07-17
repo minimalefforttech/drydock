@@ -1,9 +1,9 @@
 /**
- * Agents editor panel host (ADR 0013) — the fleet view.
+ * Agents editor panel host (ADR 0013) - the fleet view.
  *
  * A SINGLE editor-area WebviewPanel over every session across every task:
  * what each agent is doing now, its delegated subagents, and who is waiting
- * on the user. Same trust boundary as the other panels — parsePanelRequest
+ * on the user. Same trust boundary as the other panels - parsePanelRequest
  * gates every inbound message, the CSP is the strict task-review CSP (no
  * `unsafe-inline` anywhere), and the webview only sees display-safe
  * projections. Projection only: no new storage, no polling.
@@ -12,7 +12,7 @@
  * hot pushes in place (`session.agentActivity`, `chat.turnStarted`/
  * `chat.turnCompleted`, `session.updated`/`deleted`) while structural bus
  * events (`board-changed`, question/access asked+resolved, turn boundaries)
- * collapse into one debounced coarse `agents.changed` refetch — the board's
+ * collapse into one debounced coarse `agents.changed` refetch - the board's
  * self-healing shape, so a missed push never accumulates drift.
  *
  * Subagent rows are folded from the same bus agent-events through the same
@@ -56,7 +56,7 @@ export class AgentsPanelProvider {
   private readonly activityPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /**
    * Live subagent sources per session, folded from this host's bus
-   * agent-events — the same fold the control panel keeps. Sessions running in
+   * agent-events - the same fold the control panel keeps. Sessions running in
    * another window stream nothing here (read-only posture, ADR 0008).
    */
   private readonly agentActivity = new Map<string, { sources: AgentTreeSource[] }>();
@@ -159,7 +159,7 @@ export class AgentsPanelProvider {
   /**
    * The sidebar's decoration (live + runningElsewhere via the shared
    * predicates) plus this host's folded activity. Unlike the sidebar chip
-   * path, completed-only agent sets are still attached — the fleet renders
+   * path, completed-only agent sets are still attached - the fleet renders
    * what already ran this turn, not just what is running.
    */
   private decorateSession(backend: BackendReady, record: ChatSessionRecord): ChatSessionSummary {
@@ -285,7 +285,7 @@ export class AgentsPanelProvider {
         return;
       }
       case "agents.landSession": {
-        // Landing (ADR 0014): the SAME full pull as the Changes tray — clone
+        // Landing (ADR 0014): the SAME full pull as the Changes tray - clone
         // work into the local working tree, then bookkeeping marks the
         // session's changesets landed. Refusals (mid-turn, clone state lost
         // with the window) surface verbatim via the error-response path.
@@ -336,7 +336,7 @@ export class AgentsPanelProvider {
     const nonce = randomBytes(16).toString("hex");
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "agents.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "agents.css"));
-    // The density default (ADR 0013) rides in as a body data attribute —
+    // The density default (ADR 0013) rides in as a body data attribute -
     // sanitized to the closed enum, so no free-form setting text reaches HTML.
     const cardDetail = cardDetailLevel(vscode.workspace.getConfiguration("drydock").get("ui.cardDetail"));
     // Strict CSP, matching the task-board/task-review panels exactly: no remote

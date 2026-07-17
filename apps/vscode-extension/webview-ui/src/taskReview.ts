@@ -6,13 +6,13 @@
  * changed files, with change glyphs, +N/−M stats, comment badges, clone/conflict
  * markers, and panel-local opened indicators) and a comment dock (right on
  * wide viewports, below when narrow) grouping every open thread by file. Review
- * happens in the native diff editor — a baseline-backed row sends
+ * happens in the native diff editor - a baseline-backed row sends
  * diff.openFile and VS Code opens the diff Beside. Open comments are sent back
  * to the owning sessions as revision turns via taskReview.submit; the panel
  * refetches when a linked session's turn boundary fires taskReview.updated.
  *
  * SECURITY: every dynamic string (task/session titles, repo/file paths, comment
- * bodies, submit outcomes, error lines) renders via textContent — NEVER
+ * bodies, submit outcomes, error lines) renders via textContent - NEVER
  * innerHTML, NEVER insertAdjacentHTML, no DOM-from-string of any kind. Re-renders
  * use replaceChildren, so listeners on discarded nodes are dropped with them.
  * This entry is self-contained (it does not import the control-panel bundle);
@@ -21,7 +21,7 @@
  * PANEL-LOCAL STATE: the set of files whose diff was opened this panel session
  * is tracked here and persisted via vscodeApi.setState (mirroring how planDocs
  * persists selectedDocName) so a webview reload keeps the opened marks. It is
- * deliberately NOT a contract field — "opened" is a per-reviewer, per-panel
+ * deliberately NOT a contract field - "opened" is a per-reviewer, per-panel
  * notion, not shared state.
  */
 
@@ -86,7 +86,7 @@ let openFormKey: string | null = null;
 
 /**
  * Per-file snapshot captured during each render, keyed by fileKey, so the NEXT
- * refetch can diff against it. Purely client-side — content never rides the
+ * refetch can diff against it. Purely client-side - content never rides the
  * push; the flash is computed from the refetched state the panel already fetches.
  */
 interface FileSnapshot {
@@ -176,7 +176,7 @@ function applyPush(payload: PanelPushPayload): void {
 
 const headerBar = el("div", "tr-header");
 const headerTitle = el("h2", "tr-title");
-const refreshButton = iconButton("↻", "Refresh — refetch changed files and comments", "tr-refresh");
+const refreshButton = iconButton("↻", "Refresh - refetch changed files and comments", "tr-refresh");
 // Dim decaying stamp next to ↻ announcing a meaningful refetch; transparent
 // + out of the a11y tree at rest, revealed via the tr-stamp-visible modifier.
 const updatedStamp = el("span", "tr-updated-stamp");
@@ -302,7 +302,7 @@ function sessionTitle(sessionId: string): string {
 }
 
 /**
- * Single rendering point for a session reference's human label — used by BOTH the
+ * Single rendering point for a session reference's human label - used by BOTH the
  * dock's author/meta line and the submit result line. Keeping every
  * session-name render funnelled here is the forward-compat seam the owner asked
  * for: when a future optional `role` lands on TaskReviewSessionRef (multi-agent
@@ -504,7 +504,7 @@ function fileRow(file: TaskReviewFile): HTMLElement {
   if (conflicted) {
     const warn = el("span", "conflict-marker");
     warn.textContent = "⚠";
-    warn.title = "Conflict markers present — resolve in the owning chat's working set";
+    warn.title = "Conflict markers present - resolve in the owning chat's working set";
     warn.setAttribute("aria-label", "conflicted");
     row.append(warn);
   }
@@ -515,7 +515,7 @@ function fileRow(file: TaskReviewFile): HTMLElement {
   if (!isClone && !opened) {
     const unreviewed = el("span", "unreviewed-dot");
     unreviewed.textContent = "•";
-    unreviewed.title = "Unopened — diff not opened in this panel session";
+    unreviewed.title = "Unopened - diff not opened in this panel session";
     unreviewed.setAttribute("aria-label", "unopened");
     row.append(unreviewed);
   }
@@ -545,7 +545,7 @@ function fileRow(file: TaskReviewFile): HTMLElement {
   if (!isClone && file.baselineId !== undefined) {
     name.classList.add("tr-file-open");
     if (isDemoMode()) {
-      name.title = "Demo file — no local diff is opened. Switch to Live data to inspect project files.";
+      name.title = "Demo file - no local diff is opened. Switch to Live data to inspect project files.";
       name.setAttribute("aria-disabled", "true");
     } else {
       name.addEventListener("click", () => openFileDiff(file));
@@ -583,7 +583,7 @@ function fileRow(file: TaskReviewFile): HTMLElement {
   if (!isClone && opened && file.commentCount === 0) {
     const reviewed = el("span", "tr-reviewed");
     reviewed.textContent = "✓";
-    reviewed.title = "Opened — no open comments";
+    reviewed.title = "Opened - no open comments";
     reviewed.setAttribute("aria-label", "opened, no open comments");
     markers.append(reviewed);
   }
@@ -591,7 +591,7 @@ function fileRow(file: TaskReviewFile): HTMLElement {
   if (!isClone && opened && file.commentCount > 0) {
     const openedMark = el("span", "tr-opened");
     openedMark.textContent = "◑";
-    openedMark.title = "Opened — has open comments";
+    openedMark.title = "Opened - has open comments";
     openedMark.setAttribute("aria-label", "opened");
     markers.append(openedMark);
   }
@@ -765,7 +765,7 @@ function dockEntry(comment: ReviewCommentSummary): HTMLElement {
   if (comment.author === "user") {
     authorEl.textContent = `${comment.author} · ${ownerName}`;
   } else {
-    // ADR 0004: machine authorship is visibly labeled — an agent-reviewer's
+    // ADR 0004: machine authorship is visibly labeled - an agent-reviewer's
     // comment must never read as the developer's own.
     const badge = el("span", "tr-author-agent");
     badge.textContent = comment.author === "guard" ? "guard" : "agent";
@@ -845,7 +845,7 @@ async function onSubmit(): Promise<void> {
   const noun = `comment${dispatched === 1 ? "" : "s"}`;
   if (sentSessions !== undefined && sentSessions.length > 0) {
     // R2: name the sessions that received the dispatch, joined with ", ". Built
-    // via textContent through sessionLabel() — plain text, no links/handlers
+    // via textContent through sessionLabel() - plain text, no links/handlers
     // (the jump link is deferred machinery per the design doc).
     const names = sentSessions.map((ref) => sessionLabel(ref)).join(", ");
     line.textContent = `Sent ${String(dispatched)} ${noun} to ${names}.`;
@@ -861,7 +861,7 @@ async function onSubmit(): Promise<void> {
   }
   resultLine.classList.remove("hidden");
   // Delegations changed: refetch state + every session's comments, then render.
-  // Silent — the result line above is the user's feedback; no R11 flash/stamp on
+  // Silent - the result line above is the user's feedback; no R11 flash/stamp on
   // a change the user just made.
   await refresh(false);
 }
@@ -909,7 +909,7 @@ async function refresh(announce = true): Promise<void> {
   await loadState();
   const state = reviewState;
   if (state !== null) {
-    // Fetch each linked session's comment list (including zero-file sessions —
+    // Fetch each linked session's comment list (including zero-file sessions -
     // their comments still surface in the dock). Prune sessions that vanished.
     const live = new Set(state.sessions.map((s) => s.sessionId));
     for (const known of [...commentsBySession.keys()]) {

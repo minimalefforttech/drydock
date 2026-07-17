@@ -1,8 +1,8 @@
 /**
  * Extension entrypoint.
  *
- * Composes the backend once, then wires the two presentation surfaces —
- * command palette and control panel webview — as thin delegations over the
+ * Composes the backend once, then wires the two presentation surfaces -
+ * command palette and control panel webview - as thin delegations over the
  * same IsolatedRunService. Activation always succeeds: a missing Docker Sandbox
  * yields a degraded backend that the surfaces render as an actionable state.
  */
@@ -102,7 +102,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     policyOverlayFile
   );
   // Run-slot budget (ADR 0015), resolved live: an explicit setting wins;
-  // 0/absent derives "auto (N)" from machine spec — half the cores, one run
+  // 0/absent derives "auto (N)" from machine spec - half the cores, one run
   // per ~4 GB of RAM, clamped to 1..8.
   const maxConcurrentRuns = (): number => {
     const configured = vscode.workspace.getConfiguration("drydock").get<number>("orchestrator.maxConcurrentRuns", 0);
@@ -127,6 +127,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       logger.warn("prototype theme unreadable; skipped", { name: entry.name, cssPath: entry.cssPath });
     }
   }
+  // MCP passthrough: a host .mcp.json validated at activation, written into
+  // each session's /workspace before its first turn (claude transports).
+  let mcpConfigJson: string | undefined;
+  const mcpConfigPath = vscode.workspace.getConfiguration("drydock").get<string>("mcp.configPath", "");
+  if (mcpConfigPath.length > 0) {
+    try {
+      const raw = Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.file(mcpConfigPath))).toString("utf8");
+      JSON.parse(raw);
+      mcpConfigJson = raw;
+    } catch (error) {
+      logger.warn("drydock.mcp.configPath unreadable or not valid JSON; MCP passthrough disabled", {
+        mcpConfigPath,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  // Studio-level standing instructions appended to every session briefing.
+  let teamInstructions: string | undefined;
+  const teamInstructionsPath = vscode.workspace.getConfiguration("drydock").get<string>("teamInstructionsPath", "");
+  if (teamInstructionsPath.length > 0) {
+    try {
+      teamInstructions = Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.file(teamInstructionsPath))).toString("utf8").slice(0, 8_000);
+    } catch {
+      logger.warn("drydock.teamInstructionsPath unreadable; skipped", { teamInstructionsPath });
+    }
+  }
   const backend = await createBackend({
     stateRootPath,
     logger,
@@ -139,7 +165,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     recipeOverlays,
     maxConcurrentRuns,
     autoAnswerQuestionsEnabled,
-    prototypeThemes
+    prototypeThemes,
+    ...(mcpConfigJson === undefined ? {} : { mcpConfigJson }),
+    ...(teamInstructions === undefined ? {} : { teamInstructions }),
+    // Glob→tag rules extending the shipped defaults (memory tag selection).
+    memoryTagRules: vscode.workspace.getConfiguration("drydock").get("memory.tagRules", [])
   });
   context.subscriptions.push(new vscode.Disposable(() => backend.dispose()));
   await writeStorePointer(context, stateRootPath);
@@ -242,7 +272,68 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     await taskReviewPanels.open(resolvedId, title, startGuide);
   }));
-  // Apply a Drydock-exported .patch file to an open folder — the receive half
+  // EXPERIMENTAL terminal attach: open an interactive shell inside a running
+  // sandbox (`sbx exec <name> /bin/sh` as a VS Code terminal). Verification
+  // spike: whether the sbx CLI allocates a usable TTY this way is exactly what
+  // this command exists to test - failures print in the terminal itself.
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.session.attachTerminal", async (sessionId?: unknown) => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    const running = (await backend.appService.listRuntimes()).filter((runtime) => runtime.status === "running");
+    if (running.length === 0) {
+      void vscode.window.showInformationMessage("No running sandboxes to attach to - start a chat first.");
+      return;
+    }
+    // Invoked with a sessionId (Edit-tab menu / panels) → that session's
+    // sandbox directly; palette invocation quick-picks when several run.
+    const bySession = typeof sessionId === "string"
+      ? running.find((runtime) => runtime.sessionId === sessionId)
+      : undefined;
+    if (typeof sessionId === "string" && bySession === undefined) {
+      void vscode.window.showInformationMessage("This chat has no running sandbox - resume it first.");
+      return;
+    }
+    const pick = bySession !== undefined
+      ? { runtime: bySession }
+      : running.length === 1
+        ? { runtime: running[0] }
+        : await vscode.window.showQuickPick(
+            running.map((runtime) => ({ label: runtime.externalName, description: runtime.startedAt, runtime })),
+            { placeHolder: "Attach a shell to which running sandbox?" }
+          );
+    if (pick?.runtime === undefined) return;
+    const confirmed = await vscode.window.showWarningMessage(
+      `Open an interactive shell inside "${pick.runtime.externalName}"? You act with the agent's own permissions in its sandbox (host mounts included).`,
+      { modal: true },
+      "Attach shell"
+    );
+    if (confirmed !== "Attach shell") return;
+    const sbxPath = backend.appService.getSbxPath();
+    if (sbxPath === null) {
+      void vscode.window.showErrorMessage("The sandbox CLI path is not configured on this host.");
+      return;
+    }
+    // `sbx exec -i` (stdin attached, NO pseudo-TTY) is the mode proven to move
+    // bytes both ways against the real sbx CLI; `-t` under VS Code's conpty
+    // produced no output. `sh -i` still prints prompts without a TTY. Line
+    // editing is the terminal's own (line-buffered); full PTY support is the
+    // recorded follow-up. The banner sets expectations before the first byte.
+    const terminal = vscode.window.createTerminal({
+      name: `sandbox: ${pick.runtime.externalName}`,
+      shellPath: sbxPath,
+      shellArgs: ["exec", "-i", pick.runtime.externalName, "/bin/sh", "-i"],
+      message: [
+        `\x1b[1mDrydock sandbox shell - ${pick.runtime.externalName}\x1b[0m`,
+        "You are inside the agent's container with its permissions (host mounts included).",
+        "Line-buffered mode: type a command and press Enter; interactive TUIs (vim, top) will not render.",
+        "The agent's workspace is under /workspace. Type `exit` to detach."
+      ].join("\r\n")
+    });
+    terminal.show();
+  }));
+  // Apply a Drydock-exported .patch file to an open folder - the receive half
   // of carrying changesets between machines. Human-driven end to end: pick the
   // file, pick the target folder, confirm the modal; applies with
   // `git apply --3way --binary` and NEVER commits or pushes.
@@ -282,7 +373,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (error) {
             void vscode.window.showErrorMessage(`git apply failed: ${String(stderr || error.message).slice(0, 400)}`);
           } else {
-            void vscode.window.showInformationMessage(`Patch applied to "${folder.name}" — review the working tree, then commit as usual.`);
+            void vscode.window.showInformationMessage(`Patch applied to "${folder.name}" - review the working tree, then commit as usual.`);
           }
           resolve();
         }
@@ -313,7 +404,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     await codeReviewPanels.open(resolvedId, title);
   }));
-  // Task Board: single global panel, so the command takes no arguments — it
+  // Task Board: single global panel, so the command takes no arguments - it
   // opens (or reveals) the one instance. The control panel's taskBoard.open
   // relay routes here.
   const taskBoardPanel = new TaskBoardPanelProvider(context.extensionUri, backend, logger);
@@ -397,7 +488,7 @@ export function deactivate(): void {
 /**
  * The effective mount denylist: the user's configured `deniedPaths` merged with
  * the default sensitive home-config roots (dedup by normalized path key). The
- * defaults are omitted only when `disableDefaultDeniedPaths` is explicitly set —
+ * defaults are omitted only when `disableDefaultDeniedPaths` is explicitly set -
  * the opt-out escape hatch for the rare user who must mount one of them.
  */
 function resolveDeniedPaths(enforceDefaults: boolean, homeDirectory: string = os.homedir()): string[] {

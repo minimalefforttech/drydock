@@ -4,7 +4,7 @@
  * Everything crossing the extension-host/webview boundary is a versioned
  * envelope: requests carry a correlation id, responses answer exactly one
  * request, pushes carry a per-panel-session sequence so a reloaded webview can
- * detect gaps. IDs are plain strings here on purpose — the webview is outside
+ * detect gaps. IDs are plain strings here on purpose - the webview is outside
  * the trusted boundary, so payloads stay display-safe (no runtime handles, no
  * secrets, host paths only as display strings).
  *
@@ -17,7 +17,8 @@ import { usageTokens, type SessionAgentTree } from "./agentTree.js";
 import type { DiffChangeKind, DiffViewMode, ReviewThreadStatus } from "./diffs.js";
 import type { TranscriptLine } from "./events.js";
 import type { AgentRole } from "./ids.js";
-import type { MemoryCandidateStatus } from "./memory.js";
+import type { MemoryCandidateStatus, MemoryOrigin, MemoryScope } from "./memory.js";
+import type { McpOverrideScope } from "./mcp.js";
 import type { AgentQuestionImage, AgentQuestionStep } from "./questions.js";
 import {
   PLAN_ANNOTATION_STATUSES,
@@ -55,7 +56,7 @@ export type ChatSessionModeSelection = "plan" | "implementation" | "clone";
 
 /**
  * Mounting selection for a new chat session: either an explicit workspace
- * set, or `auto` — the host derives the roots from the open VS Code folders
+ * set, or `auto` - the host derives the roots from the open VS Code folders
  * plus configured shared paths (the default, ceremony-free path).
  */
 export type ChatWorkspaceSelection =
@@ -118,8 +119,15 @@ export type PanelRequestPayload =
   | { readonly type: "workspace.activate"; readonly taskId?: string; readonly workspaceSetId?: string }
   | { readonly type: "work.history"; readonly workspaceSetId?: string; readonly projectId?: string }
   | { readonly type: "memory.list" }
-  | { readonly type: "memory.resolve"; readonly memoryCandidateId: string; readonly approve: boolean }
+  | { readonly type: "memory.resolve"; readonly memoryCandidateId: string; readonly approve: boolean; readonly edits?: MemoryEditsInput }
   | { readonly type: "memory.open"; readonly memoryCandidateId: string }
+  | { readonly type: "memory.add"; readonly content: string; readonly scope: MemoryScope; readonly taskId?: string; readonly tags?: readonly string[] }
+  | { readonly type: "memory.delete"; readonly memoryCandidateId: string }
+  | { readonly type: "mcp.list" }
+  | { readonly type: "mcp.save"; readonly server: McpServerDraft }
+  | { readonly type: "mcp.delete"; readonly serverId: string }
+  | { readonly type: "mcp.setOverride"; readonly scope: McpOverrideScope; readonly refId: string; readonly serverId: string; readonly state: "on" | "off" | "inherit" }
+  | { readonly type: "chat.contextDebug"; readonly sessionId: string }
   | { readonly type: "workspace.state" }
   | { readonly type: "workspace.registerOpenFolders" }
   | { readonly type: "workspace.createSet"; readonly name: string; readonly members: readonly WorkspaceSetMemberInput[] }
@@ -146,6 +154,7 @@ export type PanelRequestPayload =
   | { readonly type: "preview.list"; readonly sessionId: string }
   | { readonly type: "preview.open"; readonly previewId: string; readonly external?: boolean }
   | { readonly type: "preview.stop"; readonly previewId: string }
+  | { readonly type: "terminal.attach"; readonly sessionId: string }
   | { readonly type: "taskReview.open"; readonly taskId: string; readonly startGuide?: boolean }
   | { readonly type: "taskReview.state"; readonly taskId: string }
   | { readonly type: "taskReview.submit"; readonly taskId: string }
@@ -216,7 +225,7 @@ export interface PlannerAspectSaveInput {
  * One column entry in a `board.columns.update` request: `columnId` present
  * updates that column, absent creates a new one. The service reconciles the
  * full set (add/rename/reorder) against what is currently stored. A sibling
- * `deletedColumnIds` on the request (not per-entry) names columns to remove —
+ * `deletedColumnIds` on the request (not per-entry) names columns to remove -
  * the service moves their cards to the nearest same-category column and
  * rejects deleting the last column of a category.
  */
@@ -314,7 +323,7 @@ export interface ChatSessionSummary {
   readonly runningElsewhere?: boolean;
   /** Session mode recorded at start; clone sessions drive the sync UI. */
   readonly mode?: ChatSessionModeSelection;
-  /** Agent transport — drives the webview's subagent capability tier. */
+  /** Agent transport - drives the webview's subagent capability tier. */
   readonly transport?: string;
   /** Live subagent counters for the ⑂ chip (host-derived; local-live sessions only). */
   readonly agentActivity?: AgentActivitySummary;
@@ -358,7 +367,7 @@ export interface AgentActivitySummary {
 /**
  * ONE projection from the reduced agent tree to the compact per-agent rows
  * (the sidebar ⑂ chips and the Agents panel's subagent rows both read this,
- * so the two surfaces cannot disagree). Native nodes only — the root agent
+ * so the two surfaces cannot disagree). Native nodes only - the root agent
  * is the session row itself.
  */
 export function agentActivitySummaryOfTree(tree: SessionAgentTree): AgentActivitySummary {
@@ -409,7 +418,7 @@ export interface AgentsTaskGroup {
  * One Landing-drawer row (ADR 0014): a subtask with unlanded changesets,
  * ready to pull. `overlapsWith` names sibling landing subtasks touching at
  * least one same path (disjoint-first ordering; pull overlapping ones with
- * care). Rows without stored paths report no overlap data — unknown, not
+ * care). Rows without stored paths report no overlap data - unknown, not
  * safe.
  */
 export interface LandingItem {
@@ -421,17 +430,17 @@ export interface LandingItem {
   readonly repos: readonly { readonly repoName: string; readonly fileCount: number }[];
   readonly capturedAt: string;
   readonly overlapsWith: readonly string[];
-  /** True when any repo row predates path capture — overlap cannot be checked. */
+  /** True when any repo row predates path capture - overlap cannot be checked. */
   readonly overlapUnknown?: boolean;
 }
 
-/** Fleet snapshot for the Agents panel (ADR 0013) — projection only. */
+/** Fleet snapshot for the Agents panel (ADR 0013) - projection only. */
 export interface AgentsOverviewState {
   readonly generatedAt: string;
   readonly groups: readonly AgentsTaskGroup[];
   /** Sessions linked to no task (and with no linked ancestor): the trailing drawer. */
   readonly orphanSessions: readonly ChatSessionSummary[];
-  /** Pending only — the "waiting on you" chips across every group. */
+  /** Pending only - the "waiting on you" chips across every group. */
   readonly questions: readonly AgentQuestionSummary[];
   readonly accessRequests: readonly AccessRequestSummary[];
   readonly agentIdleThresholdMs: number;
@@ -509,12 +518,12 @@ export interface TaskReviewState {
   readonly taskId: string;
   readonly title: string;
   /**
-   * Every linked session with a stored record, in link order — including
+   * Every linked session with a stored record, in link order - including
    * sessions with no changed files (their comments still show in the dock).
    */
   readonly sessions: readonly TaskReviewSessionRef[];
   readonly projects: readonly TaskReviewProject[];
-  /** All open code comments across linked sessions — what Submit would send. */
+  /** All open code comments across linked sessions - what Submit would send. */
   readonly openCommentCount: number;
   /** Linked sessions currently running a turn; absent when none are. */
   readonly revisionInFlight?: number;
@@ -523,7 +532,7 @@ export interface TaskReviewState {
 }
 
 // ---------------------------------------------------------------------------
-// Code Review panel (in-panel PR-style review — docs/design/code-review-panel.md)
+// Code Review panel (in-panel PR-style review - docs/design/code-review-panel.md)
 // ---------------------------------------------------------------------------
 
 /**
@@ -543,7 +552,7 @@ export interface CodeReviewAnchor {
   readonly sessionId?: string;
 }
 
-/** One changed file in the Code Review panel (stats only — content rides fileDiff). */
+/** One changed file in the Code Review panel (stats only - content rides fileDiff). */
 export interface CodeReviewFile {
   readonly repo: string;
   readonly path: string;
@@ -563,7 +572,7 @@ export interface CodeReviewFile {
   readonly baselineId?: string;
   readonly clone?: boolean;
   readonly conflicted?: boolean;
-  /** Collapse-by-default hint (large or generated/lock file — host rule). */
+  /** Collapse-by-default hint (large or generated/lock file - host rule). */
   readonly largeDiff?: boolean;
 }
 
@@ -673,7 +682,7 @@ export type SessionAttentionReason = "turn-completed" | "turn-failed" | "access-
 /** Display-safe projection of one pending/resolved agent question. */
 /**
  * One agent-announced sandbox preview (ADR 0017): an HTTP server the agent
- * started inside its container, proxied to a host 127.0.0.1 port. Web-only —
+ * started inside its container, proxied to a host 127.0.0.1 port. Web-only -
  * even Qt/Slate work prototypes as HTML styled by the shipped theme packs.
  */
 export interface PreviewSummary {
@@ -748,7 +757,7 @@ export interface SubtaskSummary {
   readonly hasUnlandedChangeset?: boolean;
   /** Per-role model profile (ADR 0002); absent = provider default. */
   readonly model?: SubtaskModelSelection;
-  /** ADR 0007: an armed HITL verify gate is unmet — in Review, no verified stamp. Waiting-on-you. */
+  /** ADR 0007: an armed HITL verify gate is unmet - in Review, no verified stamp. Waiting-on-you. */
   readonly verifyUnmet?: boolean;
   /** ADR 0007: durable time at which a person recorded the latest verification check. */
   readonly verifiedAt?: string;
@@ -775,7 +784,7 @@ export interface WorkTaskSummary {
   readonly lastWorkedAt?: string;
   /**
    * Open (non-plan) review comments across the task's linked sessions; absent
-   * when zero or when the join was unavailable. Joined into task.list only —
+   * when zero or when the join was unavailable. Joined into task.list only -
    * task.updated pushes may omit it until the next list.
    */
   readonly openReviewCommentCount?: number;
@@ -804,13 +813,58 @@ export interface WorkHistoryEntry {
   readonly turnCount: number;
 }
 
-/** Display-safe projection of an agent-proposed memory candidate. */
+/** Display-safe projection of a memory (agent-proposed or user quick-add). */
 export interface MemoryCandidateSummary {
   readonly memoryCandidateId: string;
   readonly sessionId: string;
   readonly content: string;
   readonly status: MemoryCandidateStatus;
   readonly createdAt: string;
+  /** Legacy rows read back as global. */
+  readonly scope: MemoryScope;
+  /** Human anchor label: task title or workspace folder basenames. */
+  readonly scopeLabel?: string;
+  readonly tags: readonly string[];
+  readonly origin: MemoryOrigin;
+}
+
+/** Human edits carried with an approval (trim content, retarget scope/tags). */
+export interface MemoryEditsInput {
+  readonly content?: string;
+  readonly scope?: MemoryScope;
+  readonly tags?: readonly string[];
+}
+
+/** Registry entry draft from the System-tab manager. env is write-only: absent on update = keep stored values. */
+export interface McpServerDraft {
+  readonly serverId?: string;
+  readonly name: string;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+  readonly enabledByDefault: boolean;
+  readonly sensitive: boolean;
+  readonly notes?: string;
+}
+
+/** Display-safe registry row: env renders as KEY NAMES only, never values. */
+export interface McpServerSummary {
+  readonly serverId: string;
+  readonly name: string;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly envKeys: readonly string[];
+  readonly enabledByDefault: boolean;
+  readonly sensitive: boolean;
+  readonly notes?: string;
+  readonly source: "registry" | "settings";
+}
+
+export interface McpOverrideSummary {
+  readonly scope: McpOverrideScope;
+  readonly refId: string;
+  readonly serverId: string;
+  readonly state: "on" | "off";
 }
 
 /** Everything the workspace policy panel section renders. */
@@ -846,7 +900,7 @@ export interface DiffFileSummary {
   readonly reason?: string;
   /**
    * Full Session view only: true when the file's current content already
-   * matches the working (Session) baseline — i.e. the change was accepted and
+   * matches the working (Session) baseline - i.e. the change was accepted and
    * is shown for history, with no pending accept/discard action.
    */
   readonly accepted?: boolean;
@@ -925,7 +979,7 @@ export type PanelResponsePayload =
   | { readonly type: "session.delete"; readonly sessionId: string }
   /**
    * `log` mode has already written the clipboard when this arrives; `ai`
-   * mode has only STARTED the summary — completion lands as a
+   * mode has only STARTED the summary - completion lands as a
    * `session.summaryReady` push (a model turn can outlive the request timeout).
    */
   | { readonly type: "session.summarize"; readonly sessionId: string; readonly mode: ChatSummarizeMode; readonly accepted: true }
@@ -938,9 +992,16 @@ export type PanelResponsePayload =
   | { readonly type: "workspace.openInNewWindow"; readonly accepted: true }
   | { readonly type: "workspace.activate"; readonly result: WorkspaceActivateResult }
   | { readonly type: "work.history"; readonly entries: readonly WorkHistoryEntry[] }
-  | { readonly type: "memory.list"; readonly candidates: readonly MemoryCandidateSummary[] }
+  | { readonly type: "memory.list"; readonly candidates: readonly MemoryCandidateSummary[]; readonly detectedTags: readonly string[] }
   | { readonly type: "memory.resolve"; readonly candidate: MemoryCandidateSummary }
   | { readonly type: "memory.open"; readonly accepted: true }
+  | { readonly type: "memory.add"; readonly candidate: MemoryCandidateSummary }
+  | { readonly type: "memory.delete"; readonly memoryCandidateId: string }
+  | { readonly type: "mcp.list"; readonly servers: readonly McpServerSummary[]; readonly overrides: readonly McpOverrideSummary[] }
+  | { readonly type: "mcp.save"; readonly servers: readonly McpServerSummary[] }
+  | { readonly type: "mcp.delete"; readonly servers: readonly McpServerSummary[] }
+  | { readonly type: "mcp.setOverride"; readonly overrides: readonly McpOverrideSummary[] }
+  | { readonly type: "chat.contextDebug"; readonly accepted: true }
   | { readonly type: "workspace.state"; readonly state: WorkspacePolicyState }
   | { readonly type: "workspace.registerOpenFolders"; readonly projects: readonly ProjectSummary[] }
   | { readonly type: "workspace.createSet"; readonly state: WorkspacePolicyState }
@@ -967,6 +1028,7 @@ export type PanelResponsePayload =
   | { readonly type: "preview.list"; readonly previews: readonly PreviewSummary[] }
   | { readonly type: "preview.open"; readonly accepted: true }
   | { readonly type: "preview.stop"; readonly previews: readonly PreviewSummary[] }
+  | { readonly type: "terminal.attach"; readonly accepted: true }
   | { readonly type: "taskReview.open"; readonly accepted: true }
   | { readonly type: "taskReview.state"; readonly state: TaskReviewState }
   | { readonly type: "taskReview.submit"; readonly dispatched: number; readonly sessions: number; readonly sentSessions?: readonly TaskReviewSessionRef[]; readonly errors?: readonly string[] }
@@ -1000,7 +1062,7 @@ export type PanelResponsePayload =
   | { readonly type: "planner.create"; readonly plan: PlanSummary }
   | { readonly type: "planner.updateIntake"; readonly plan: PlanSummary }
   | { readonly type: "planner.archive"; readonly plan: PlanSummary }
-  /** Ack only — session boot outlives the request timeout; completion arrives as the planner.sessionReady push. */
+  /** Ack only - session boot outlives the request timeout; completion arrives as the planner.sessionReady push. */
   | { readonly type: "planner.startSession"; readonly accepted: true }
   | { readonly type: "planner.sendTurn"; readonly accepted: true }
   | { readonly type: "planner.annotation.add"; readonly annotation: PlanAnnotationSummary }
@@ -1457,12 +1519,64 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const approve = payload["approve"];
       if (!isBoundedString(memoryCandidateId, MAX_ID_LENGTH)) return null;
       if (typeof approve !== "boolean") return null;
-      return { type: "memory.resolve", memoryCandidateId, approve };
+      const edits = parseMemoryEdits(payload["edits"]);
+      if (edits === null) return null;
+      return { type: "memory.resolve", memoryCandidateId, approve, ...(edits === undefined ? {} : { edits }) };
     }
     case "memory.open": {
       const memoryCandidateId = payload["memoryCandidateId"];
       if (!isBoundedString(memoryCandidateId, MAX_ID_LENGTH)) return null;
       return { type: "memory.open", memoryCandidateId };
+    }
+    case "memory.add": {
+      const content = payload["content"];
+      const scope = payload["scope"];
+      const taskId = payload["taskId"];
+      if (!isBoundedString(content, MAX_MEMORY_CONTENT_LENGTH)) return null;
+      if (!isMemoryScope(scope)) return null;
+      if (taskId !== undefined && !isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      const tags = parseMemoryTags(payload["tags"]);
+      if (tags === null) return null;
+      return {
+        type: "memory.add",
+        content,
+        scope,
+        ...(taskId === undefined ? {} : { taskId }),
+        ...(tags === undefined ? {} : { tags })
+      };
+    }
+    case "memory.delete": {
+      const memoryCandidateId = payload["memoryCandidateId"];
+      if (!isBoundedString(memoryCandidateId, MAX_ID_LENGTH)) return null;
+      return { type: "memory.delete", memoryCandidateId };
+    }
+    case "mcp.list":
+      return { type: "mcp.list" };
+    case "mcp.save": {
+      const server = parseMcpServerDraft(payload["server"]);
+      if (server === null) return null;
+      return { type: "mcp.save", server };
+    }
+    case "mcp.delete": {
+      const serverId = payload["serverId"];
+      if (!isBoundedString(serverId, MAX_ID_LENGTH)) return null;
+      return { type: "mcp.delete", serverId };
+    }
+    case "mcp.setOverride": {
+      const scope = payload["scope"];
+      const refId = payload["refId"];
+      const serverId = payload["serverId"];
+      const state = payload["state"];
+      if (scope !== "workspace-set" && scope !== "task" && scope !== "session") return null;
+      if (!isBoundedString(refId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(serverId, MAX_ID_LENGTH)) return null;
+      if (state !== "on" && state !== "off" && state !== "inherit") return null;
+      return { type: "mcp.setOverride", scope, refId, serverId, state };
+    }
+    case "chat.contextDebug": {
+      const sessionId = payload["sessionId"];
+      if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      return { type: "chat.contextDebug", sessionId };
     }
     case "isolatedRun.listRuntimes": {
       const includeRemoved = payload["includeRemoved"];
@@ -1641,6 +1755,11 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const previewId = payload["previewId"];
       if (!isBoundedString(previewId, MAX_ID_LENGTH)) return null;
       return { type: "preview.stop", previewId };
+    }
+    case "terminal.attach": {
+      const sessionId = payload["sessionId"];
+      if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      return { type: "terminal.attach", sessionId };
     }
     case "chat.uploadAttachment": {
       const sessionId = payload["sessionId"];
@@ -2090,6 +2209,93 @@ function parseModelSelection(value: unknown): ChatModelSelection | undefined | n
 
 function isBoundedString(value: unknown, maxLength: number): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= maxLength;
+}
+
+const MAX_MEMORY_CONTENT_LENGTH = 2_000;
+const MAX_MEMORY_TAG_COUNT = 8;
+const MAX_MEMORY_TAG_LENGTH = 32;
+
+function isMemoryScope(value: unknown): value is MemoryScope {
+  return value === "global" || value === "workspace" || value === "task";
+}
+
+/** undefined = absent (fine), null = malformed (reject the request). */
+function parseMemoryTags(value: unknown): readonly string[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return null;
+  const tags: string[] = [];
+  for (const candidate of value.slice(0, MAX_MEMORY_TAG_COUNT)) {
+    if (!isBoundedString(candidate, MAX_MEMORY_TAG_LENGTH)) return null;
+    const tag = candidate.trim().toLowerCase();
+    if (tag.length > 0 && !tags.includes(tag)) tags.push(tag);
+  }
+  return tags;
+}
+
+/** undefined = absent (fine), null = malformed (reject the request). */
+function parseMemoryEdits(value: unknown): MemoryEditsInput | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const content = record["content"];
+  const scope = record["scope"];
+  if (content !== undefined && !isBoundedString(content, MAX_MEMORY_CONTENT_LENGTH)) return null;
+  if (scope !== undefined && !isMemoryScope(scope)) return null;
+  const tags = parseMemoryTags(record["tags"]);
+  if (tags === null) return null;
+  return {
+    ...(content === undefined ? {} : { content }),
+    ...(scope === undefined ? {} : { scope }),
+    ...(tags === undefined ? {} : { tags })
+  };
+}
+
+const MAX_MCP_COMMAND_LENGTH = 512;
+const MAX_MCP_ARG_COUNT = 32;
+const MAX_MCP_ENV_COUNT = 32;
+const MAX_MCP_NOTES_LENGTH = 1_000;
+
+function parseMcpServerDraft(value: unknown): McpServerDraft | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const serverId = record["serverId"];
+  const name = record["name"];
+  const command = record["command"];
+  const notes = record["notes"];
+  if (serverId !== undefined && !isBoundedString(serverId, MAX_ID_LENGTH)) return null;
+  if (!isBoundedString(name, MAX_NAME_LENGTH)) return null;
+  if (!isBoundedString(command, MAX_MCP_COMMAND_LENGTH)) return null;
+  if (notes !== undefined && !isBoundedText(notes, MAX_MCP_NOTES_LENGTH)) return null;
+  const rawArgs = record["args"];
+  if (!Array.isArray(rawArgs)) return null;
+  const args: string[] = [];
+  for (const arg of rawArgs.slice(0, MAX_MCP_ARG_COUNT)) {
+    if (typeof arg !== "string" || arg.length > MAX_MCP_COMMAND_LENGTH) return null;
+    args.push(arg);
+  }
+  const rawEnv = record["env"];
+  let env: Record<string, string> | undefined;
+  if (rawEnv !== undefined) {
+    if (typeof rawEnv !== "object" || rawEnv === null || Array.isArray(rawEnv)) return null;
+    env = {};
+    for (const [key, envValue] of Object.entries(rawEnv).slice(0, MAX_MCP_ENV_COUNT)) {
+      if (typeof envValue !== "string" || key.length === 0 || key.length > MAX_NAME_LENGTH) return null;
+      env[key] = envValue;
+    }
+  }
+  const enabledByDefault = record["enabledByDefault"];
+  const sensitive = record["sensitive"];
+  if (typeof enabledByDefault !== "boolean" || typeof sensitive !== "boolean") return null;
+  return {
+    ...(serverId === undefined ? {} : { serverId }),
+    name,
+    command,
+    args,
+    ...(env === undefined ? {} : { env }),
+    enabledByDefault,
+    sensitive,
+    ...(notes === undefined ? {} : { notes })
+  };
 }
 
 /** Like isBoundedString but admits the empty string (clear/blank semantics). */

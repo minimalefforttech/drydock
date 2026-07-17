@@ -161,7 +161,7 @@ function ok(requestId: string, payload: unknown): PanelResponse {
 /**
  * Demo mutations mirror the host's push channel (window message with the same
  * envelope), so surfaces that re-render on push behave exactly as with Live
- * data — e.g. an answered question clears from the attention stack.
+ * data - e.g. an answered question clears from the attention stack.
  */
 function push(payload: Record<string, unknown>): void {
   window.postMessage({ protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "push", payload }, "*");
@@ -321,7 +321,11 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     case "work.history":
       return ok(requestId, { type: "work.history", entries: fixtures.history });
     case "memory.list":
-      return ok(requestId, { type: "memory.list", candidates: [] });
+      return ok(requestId, { type: "memory.list", candidates: [], detectedTags: ["typescript", "node"] });
+    case "mcp.list":
+      return ok(requestId, { type: "mcp.list", servers: [], overrides: [] });
+    case "mcp.setOverride":
+      return ok(requestId, { type: "mcp.setOverride", overrides: [] });
     case "diff.status":
       return ok(requestId, { type: "diff.status", changes: fixtures.diff });
     case "diff.openFile":
@@ -363,6 +367,7 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     case "chat.uploadAttachment":
     case "preview.open":
     case "preview.stop":
+    case "terminal.attach":
       return error(requestId);
     case "preview.list":
       return ok(requestId, { type: "preview.list", previews: [] });
@@ -471,6 +476,11 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     case "diff.revertFile":
     case "memory.resolve":
     case "memory.open":
+    case "memory.add":
+    case "memory.delete":
+    case "mcp.save":
+    case "mcp.delete":
+    case "chat.contextDebug":
     case "provider.login":
     case "runtime.sbxLogin":
     case "runtime.openTerminal":
@@ -833,7 +843,7 @@ function createFixtures(): DemoFixtures {
   const questions = [
     { questionId: "demo-question-scope", sessionId: "demo-session-build", question: "Should Demo mode reset each time a guide starts?", options: ["Yes, start from predictable fixtures", "Keep the previous demo changes"], status: "pending", createdAt: now },
     { questionId: "demo-question-copy", sessionId: "demo-session-review", question: "Which panel should the completed guide offer first?", options: ["Task Board", "Planner", "Agents", "Task Review"], status: "pending", createdAt: now },
-    { questionId: "demo-question-verify", sessionId: "demo-session-review", question: "Manual check — I run in a container without a display, so I cannot drive the editor UI myself. Please verify in VS Code:\n1. Open the Task Board panel\n2. Press ? and choose Start guided tour\n3. Tab through every control in the first step\nDid the focus ring stay visible on each control?", options: ["Yes — focus visible throughout", "No — focus was lost on the data menu", "Blocked — the tour did not start"], status: "pending", createdAt: now }
+    { questionId: "demo-question-verify", sessionId: "demo-session-review", question: "Manual check - I run in a container without a display, so I cannot drive the editor UI myself. Please verify in VS Code:\n1. Open the Task Board panel\n2. Press ? and choose Start guided tour\n3. Tab through every control in the first step\nDid the focus ring stay visible on each control?", options: ["Yes - focus visible throughout", "No - focus was lost on the data menu", "Blocked - the tour did not start"], status: "pending", createdAt: now }
   ];
   const workspace = {
     projects: [

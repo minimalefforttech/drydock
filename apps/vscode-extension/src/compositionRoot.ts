@@ -26,6 +26,7 @@ import {
   extractAgentQuestions,
   extractPreviewAnnouncements,
   extractMemoryCandidates,
+  mergeTagRules,
   ProductEventBus,
   RandomIdGenerator,
   normalizePathKey,
@@ -67,11 +68,12 @@ import {
   SqliteTaskChangesetStore,
   SqliteTaskFaqStore,
   SqliteTaskRecipeStore,
+  SqliteMcpServerStore,
   SqliteWorkSessionStore,
   SqliteWorkspaceSetStore,
   SqliteWorkTaskStore
 } from "@drydock/storage-sqlite";
-import { BoardService, ChangesetService, MemoryService, ProjectCatalogService, RecipeService, SubtaskOrchestrator, SubtaskService, TaskService, WorkspaceSetService } from "@drydock/work-management";
+import { BoardService, ChangesetService, importServersFromConfigJson, McpRegistryService, MemoryService, ProjectCatalogService, RecipeService, SubtaskOrchestrator, SubtaskService, TaskService, WorkspaceSetService } from "@drydock/work-management";
 import { PlannerAppService } from "./services/plannerAppService.js";
 import { IsolatedRunService } from "./services/isolatedRunService.js";
 import { createSubtaskRunBridge } from "./services/subtaskRunBridge.js";
@@ -97,6 +99,10 @@ export interface BackendReady {
   readonly recipes: RecipeService;
   readonly questions: AgentQuestionService;
   readonly memory: MemoryService;
+  /** MCP registry: definitions + tri-state overrides (design doc). */
+  readonly mcp: McpRegistryService;
+  /** Merged glob->tag rule table (defaults + drydock.memory.tagRules). */
+  readonly tagRules: readonly import("@drydock/core").TagRule[];
   readonly workInsights: WorkInsightsAppService;
   readonly bus: ProductEventBus;
   /** Content-free, append-only security evidence with JSONL export. */
@@ -142,12 +148,18 @@ export interface CreateBackendOptions {
   readonly autoAnswerQuestionsEnabled?: () => boolean;
   /** ADR 0017: studio-registered prototype themes (drydock.prototypeThemes). */
   readonly prototypeThemes?: readonly { readonly name: string; readonly css: string }[];
+  /** Validated MCP config JSON (drydock.mcp.configPath) for /workspace/.mcp.json. */
+  readonly mcpConfigJson?: string;
+  /** Studio-level standing instructions (drydock.teamInstructionsPath). */
+  readonly teamInstructions?: string;
+  /** Raw drydock.memory.tagRules setting value; merged onto the shipped defaults. */
+  readonly memoryTagRules?: unknown;
 }
 
 /**
  * Ensures the runtime tool directories are on the extension host's PATH before
  * any `sbx` call. A GUI-launched VS Code inherits a login-time PATH that often
- * omits Docker Desktop's `resources\bin` — where the Docker credential helper
+ * omits Docker Desktop's `resources\bin` - where the Docker credential helper
  * (`docker-credential-desktop`) lives that `sbx` shells out to for its session
  * token. Without the helper on PATH, `sbx create` fails auth with
  * "secret not found / not authenticated to Docker", even though the identical
@@ -420,6 +432,11 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   // each session.
   const workSessionStore = new SqliteWorkSessionStore(connection);
   const memory = new MemoryService({ ids, clock, store: new SqliteMemoryCandidateStore(connection) });
+  const tagRules = mergeTagRules(options.memoryTagRules);
+  // MCP registry: sqlite-defined servers plus read-only rows imported from the
+  // legacy drydock.mcp.configPath file (tagged "from settings").
+  const mcpImported = options.mcpConfigJson === undefined ? [] : importServersFromConfigJson(options.mcpConfigJson, clock.isoNow());
+  const mcp = new McpRegistryService({ clock, store: new SqliteMcpServerStore(connection), importedServers: mcpImported });
   const runtimeAdapter = new DockerSandboxRuntimeAdapter({
     sbxPath,
     commandRunner,
@@ -513,7 +530,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   });
   const runtimeReconcile = new RuntimeReconcileService({ clock, inventory, runtimeAdapter, logger });
   // Clone mode: host-side git plumbing (clone/status/inbound/outbound/discard)
-  // over the shared CommandRunner. No docker, no network — pure host git.
+  // over the shared CommandRunner. No docker, no network - pure host git.
   const gitPath = discoverHostGitCommand(runtimeEnvironment, options.securityPolicy?.managed === true)
     ?? (managed
       ? process.platform === "win32"
@@ -552,9 +569,30 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     chatService,
     runtimeExecutor: runtimeAdapter,
     ...(options.prototypeThemes === undefined ? {} : { userPrototypeThemes: options.prototypeThemes }),
+    ...(options.mcpConfigJson === undefined ? {} : { mcpConfigJson: options.mcpConfigJson }),
+    ...(options.teamInstructions === undefined ? {} : { teamInstructions: options.teamInstructions }),
     cloneSync,
     hostInstanceId,
     memoryService: memory,
+    tagRules,
+    mcpRegistry: mcp,
+    // Closures over services declared below (invoked long after composition).
+    sessionTaskIds: async (sessionId: string) =>
+      (await workTaskStore.listLinks())
+        .filter((link) => link.sessionId === sessionId)
+        .map((link) => link.taskId as string),
+    workspaceSetRefs: async () => {
+      const sets = await workspaceSets.listWorkspaceSets();
+      const refs: { workspaceSetId: string; roots: readonly string[] }[] = [];
+      for (const set of sets) {
+        try {
+          refs.push({ workspaceSetId: set.workspaceSetId, roots: await workspaceSets.resolveMountRoots(set.workspaceSetId) });
+        } catch {
+          // A set with missing catalog entries simply cannot match a session.
+        }
+      }
+      return refs;
+    },
     deniedPaths,
     ...(options.securityPolicy === undefined ? {} : { securityPolicy: options.securityPolicy }),
     sbxPath,
@@ -630,7 +668,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     // Gitignore oracle: `git check-ignore --stdin -z` per root, so baselines
     // and diffs never report ignored churn (.pyc, caches, build output).
     // Exit 1 (nothing ignored), a non-git root, or a missing git all resolve
-    // to "filter nothing" — the diff stays honest rather than failing.
+    // to "filter nothing" - the diff stays honest rather than failing.
     gitIgnoreFilter: (rootPath, relativePaths) => new Promise((resolve) => {
       const child = execFileCb(
         "git",
@@ -660,7 +698,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     events: eventStore,
     ...(options.securityPolicy === undefined ? {} : { securityPolicy: options.securityPolicy })
   });
-  // Cross-project task review: a VIEW over the task's linked sessions —
+  // Cross-project task review: a VIEW over the task's linked sessions -
   // aggregates their changed files (baseline diffs + clone sync state) and
   // routes the reviewer's comments back as revision turns. It reads only
   // projections and satisfies its ports structurally from the concrete services.
@@ -724,7 +762,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     onCardEnteredDone: async ({ taskId, subtaskId }) => {
       const sessionIds = await workTaskStore.listSessionIdsBySubtask(asId<"SubtaskId">(subtaskId));
       const sessionId = sessionIds[sessionIds.length - 1];
-      if (sessionId === undefined) return; // never ran — nothing to capture
+      if (sessionId === undefined) return; // never ran - nothing to capture
       const patches = await appService.buildOutboundPatches(sessionId);
       if (patches === null) {
         // Window reload or ended session: the clone is gone. Reject so the
@@ -806,13 +844,23 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
           });
         });
     }
-    const memoryTexts = extractMemoryCandidates(finalText);
-    if (memoryTexts.length > 0) {
-      void memory.captureCandidates(event.sessionId, memoryTexts).then((created) => {
+    const memoryCandidates = extractMemoryCandidates(finalText);
+    if (memoryCandidates.length > 0) {
+      // Resolve the capture context so scope suggestions anchor to something
+      // real: workspace scope -> the source session's mounted roots, task
+      // scope -> the task this session is linked to.
+      void (async () => {
+        const stored = await chatService.getSession(asId<"SessionId">(event.sessionId));
+        const links = await workTaskStore.listLinks();
+        const taskId = links.find((link) => link.sessionId === event.sessionId)?.taskId;
+        const created = await memory.captureCandidates(event.sessionId, memoryCandidates, {
+          ...(stored?.workspaceRoots === undefined ? {} : { sessionRoots: stored.workspaceRoots }),
+          ...(taskId === undefined ? {} : { taskId })
+        });
         for (const candidate of created) {
           bus.publish({ kind: "memory-candidate-added", candidate });
         }
-      }).catch((error: unknown) => {
+      })().catch((error: unknown) => {
         logger.warn("agent memory candidate capture failed", {
           sessionId: event.sessionId,
           error: error instanceof Error ? error.message : String(error)
@@ -864,7 +912,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   // Planner (ADR 0012): first-class plans over the same connection. The
   // turn-completed hook collects the session's plan/ directory for the plan
   // that owns that session; session deletion just unlinks (the plan and its
-  // collected artifacts persist — sessions are disposable, plans are not).
+  // collected artifacts persist - sessions are disposable, plans are not).
   const planner = new PlannerAppService({
     logger,
     clock,
@@ -992,6 +1040,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     changesets,
     recipes,
     memory,
+    mcp,
+    tagRules,
     workInsights,
     bus,
     securityEvents,

@@ -87,7 +87,7 @@ export class SqliteEventStore implements EventStore {
 
   /**
    * Removes every stored event for a session; used when a session is deleted.
-   * Not part of the frozen EventStore port — consumers that need it type
+   * Not part of the frozen EventStore port - consumers that need it type
    * against this concrete class (or a local method-only interface).
    */
   async deleteSessionEvents(sessionId: SessionId): Promise<number> {

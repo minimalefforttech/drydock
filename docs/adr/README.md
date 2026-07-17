@@ -4,7 +4,7 @@ Keep this folder small. ADRs are for decisions we do not want to re-argue.
 Implementation details live in `docs/design/`.
 
 Prefer merging or superseding an existing ADR over adding a near-duplicate.
-There is no fixed cap on the count — it grows as genuinely distinct decisions
+There is no fixed cap on the count - it grows as genuinely distinct decisions
 land.
 
 | Number | Title | Status | Summary |
@@ -25,4 +25,6 @@ land.
 | [0014](0014-changeset-chaining-and-landing.md) | Changeset chaining and landing | Accepted | Review-entry changesets can seed dependent clone runs by explicit user choice and land through the existing full-pull path with overlap warnings. |
 | [0015](0015-bounded-fleet-orchestration.md) | Bounded fleet orchestration | Accepted | Durable run slots, queue/restore, retry-once-then-park, and double-opt-in task FAQ answers bound automation without automating access. |
 | [0016](0016-human-gates.md) | Human gates | Accepted | Questions carry sandbox images; `manual-check` kind folds HITL steps, receipts, and verify stamping into one card; HITL stays a protocol layer behind the Lead's inbox, not a new surface. |
-| [0017](0017-sandbox-preview-servers.md) | Sandbox preview servers | Accepted | Web-only prototyping (even for Qt/Slate) with registrable theme packs; agent-announced localhost previews proxied per-request over the runtime exec transport — no published ports, no restarts, untrusted-content posture. |
+| [0017](0017-sandbox-preview-servers.md) | Sandbox preview servers | Accepted | Web-only prototyping (even for Qt/Slate) with registrable theme packs; agent-announced localhost previews proxied per-request over the runtime exec transport - no published ports, no restarts, untrusted-content posture. |
+| [0018](0018-sandbox-side-channel-and-honest-session-views.md) | Sandbox side-channel & honest session views | Accepted (MCP passthrough superseded by 0019) | The exec transport is the only host-initiated path into live sandboxes (MCP passthrough, instructions, terminal attach); session file views are evidence-based (named edits ∪ activity spans, unsure→unlisted); one persisted current task syncs Tasks/Plan/Edit; the chat log renders for humans (collapsed protocol notes, honest statuses, verbatim prose). |
+| [0019](0019-mcp-registry-and-scoped-memory.md) | MCP registry and scoped memory | Accepted | MCP servers defined once, toggled per workspace/task/chat (tri-state cascade, sensitive opt-in, env never rendered); memory scoped global/workspace/task with glob-rule tags detected at mount time and briefed in provenance groups; agent memory proposals editable at the approval gate; a context-debug doc shows the composed briefing with sources. |

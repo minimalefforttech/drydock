@@ -10,10 +10,10 @@ Refs: `docs/design/agents-panel.md`, 0006 (agent lineage + activity summaries),
 
 Concurrency outgrew the surfaces that watch it. Subtask auto-start cascades
 runs in parallel (0007), role sessions fan out children (0006), and the
-Planner boots sessions of its own (0012) — but every visibility surface is
+Planner boots sessions of its own (0012) - but every visibility surface is
 scoped to one thing: the Agents lens to one session, the board to cards, the
 attention stack to one paged slot. With five tasks in flight the user's
-question is "where is everything up to, and who is blocked on me?" — and the
+question is "where is everything up to, and who is blocked on me?" - and the
 only answer today is clicking through tasks one by one.
 
 The data to answer it already exists. `ChatSessionSummary` carries liveness,
@@ -24,7 +24,7 @@ tasks link sessions and sit in board columns.
 ## Decision
 
 One editor-area **Agents panel** (`drydock.agents`, opened by
-`drydock.agents.open`) — a fleet view over all sessions, grouped by task.
+`drydock.agents.open`) - a fleet view over all sessions, grouped by task.
 
 - **The session overview is a projection.** It adds no session tables, event
   types, or polling. A host overview service composes `agents.state` from the
@@ -37,8 +37,8 @@ One editor-area **Agents panel** (`drydock.agents`, opened by
 - **Hybrid data plane.** Structural changes (task/session created, deleted,
   linked; board moves) coarse-invalidate: the webview refetches
   `agents.state`, debounced. Hot signals fold incrementally client-side from
-  the existing pushes — `session.agentActivity`, `session.attention`,
-  `chat.turnStarted`/`chat.turnCompleted`, `question.asked`/`resolved` —
+  the existing pushes - `session.agentActivity`, `session.attention`,
+  `chat.turnStarted`/`chat.turnCompleted`, `question.asked`/`resolved` -
   so a busy fleet never causes refetch storms and the panel adds zero new
   traffic to the hot event path.
 - **Honesty rules carry over.** Rows key liveness off `live`, never stored
@@ -68,19 +68,19 @@ One editor-area **Agents panel** (`drydock.agents`, opened by
   durable usage ledger.
 - **Starting is visible.** A reclaimed or resumed session with
   `status === "starting"` is active, renders a pulsing hollow dot and a
-  "resuming — recreating the runtime and clones" line, and offers no controls
+  "resuming - recreating the runtime and clones" line, and offers no controls
   until boot completes.
 
 ## Consequences
 
 - "Where is everything?" becomes one keystroke, and stays correct because
   every row is derived from the same reducers and summaries the sidebar
-  already trusts — the panel can drift from reality only if those do.
+  already trusts - the panel can drift from reality only if those do.
 - The webview holds a folded copy of the overview; a missed push is repaired
   by the next structural refetch rather than accumulating (the same
   self-healing shape as `board.changed`).
 - Pending questions and access requests render as row chips across every
-  task at once — attention that used to be discoverable only via badges on
+  task at once - attention that used to be discoverable only via badges on
   one sidebar slot becomes scannable, without moving where it is answered.
 - Density is a presentation policy, not a second data contract. New fleet
   metadata must state where it appears at minimal detail rather than adding

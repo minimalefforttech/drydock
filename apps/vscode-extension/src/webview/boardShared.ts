@@ -80,7 +80,7 @@ export function toSubtaskSummary(
     ...(hasUnlandedChangeset ? { hasUnlandedChangeset: true } : {}),
     ...(record.model === undefined ? {} : { model: record.model }),
     // ADR 0007: an armed HITL gate is unmet once the card sits in Review
-    // (done category) without a verified stamp — waiting-on-you.
+    // (done category) without a verified stamp - waiting-on-you.
     ...(record.verifyMode === "hitl"
       && columnsById.get(record.columnId)?.category === "done"
       && record.verifiedAt === undefined
@@ -92,7 +92,7 @@ export function toSubtaskSummary(
 
 /**
  * Joins each task's open review-comment count (cheap review-store reads via
- * TaskReviewAppService — no tree walks) into the summaries so callers can
+ * TaskReviewAppService - no tree walks) into the summaries so callers can
  * read "(N open comments)". Best-effort: a failed join returns the summaries
  * unchanged. task.updated pushes do NOT carry the count; it refreshes on the
  * next full list/board fetch.
@@ -212,12 +212,12 @@ export async function requireTaskSummary(backend: BackendReady, taskId: string):
  * created via `addColumn`. BoardService deliberately exposes no
  * category-change operation (its own `reorder` doc comment: "moving a
  * column to a different category is a separate operation the board UI does
- * not expose in this phase") — an entry's `category` is honoured only when
+ * not expose in this phase") - an entry's `category` is honoured only when
  * creating a new column; a changed category on an EXISTING column is
  * ignored here (rename/reorder only), matching that same-phase boundary.
  *
  * `deletedColumnIds` (additive) is processed FIRST, one at a time via
- * `BoardService.deleteColumn` — which moves that column's cards to the
+ * `BoardService.deleteColumn` - which moves that column's cards to the
  * nearest remaining column of the same category and throws a readable error
  * if it would empty a category entirely (surfaced verbatim to the caller,
  * which aborts the whole reconcile so a partial delete never lands silently
