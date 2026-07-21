@@ -25,6 +25,8 @@ export interface ChatMessage {
   readonly createdAt: string;
   readonly text: string;
   readonly streaming?: boolean;
+  /** User row rendered before its durable user.message echo arrives. */
+  readonly optimistic?: boolean;
   /** role "group": the subagent group block this row renders. */
   readonly nodeId?: string;
   /** role "system": severity styling - "error" reds it, otherwise neutral. */
@@ -257,10 +259,38 @@ export class TranscriptFolder {
   }
 
   appendUserLine(prompt: string, createdAt = new Date().toISOString(), shouldPersist = true): void {
-    this.store.messages.push({ id: nextMessageId("user"), role: "user", createdAt, text: prompt });
+    const messages = this.store.messages;
+    let optimisticIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message?.role === "user"
+        && message.optimistic === true
+        // First-turn host briefings prefix the durable prompt; its user text is
+        // still the exact suffix of the stored line.
+        && (message.text === prompt || prompt.endsWith(message.text))) {
+        optimisticIndex = index;
+        break;
+      }
+    }
+    if (optimisticIndex >= 0) {
+      const optimistic = messages[optimisticIndex];
+      if (optimistic !== undefined) {
+        messages[optimisticIndex] = { id: optimistic.id, role: "user", createdAt, text: prompt };
+      }
+    } else {
+      messages.push({ id: nextMessageId("user"), role: "user", createdAt, text: prompt });
+    }
     this.activeAssistantId = null;
     this.hooks.onRender();
     if (shouldPersist) this.hooks.onPersist();
+  }
+
+  /** Renders a submitted user turn immediately; appendUserLine reconciles its echo. */
+  appendOptimisticUserLine(prompt: string, createdAt = new Date().toISOString()): void {
+    this.store.messages.push({ id: nextMessageId("user"), role: "user", createdAt, text: prompt, optimistic: true });
+    this.activeAssistantId = null;
+    this.hooks.onRender();
+    this.hooks.onPersist();
   }
 
   appendAssistantText(text: string, final: boolean, createdAt: string, shouldPersist = true): void {

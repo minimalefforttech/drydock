@@ -333,9 +333,13 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       taskWorkspaceSelect.append(option(`set:${set.workspaceSetId}`, set.name));
     }
     taskWorkspaceSelect.append(option("none", "No workspace"));
-    // Preserve the prior choice when it still exists; else prefer auto, then none.
+    // Preserve an explicit form choice. On the first render, inherit the saved
+    // "use in new chats" workspace before falling back to auto.
     if ([...taskWorkspaceSelect.options].some((o) => o.value === previous)) {
       taskWorkspaceSelect.value = previous;
+    } else if (state.selectedWorkspaceSetId
+      && [...taskWorkspaceSelect.options].some((o) => o.value === `set:${state.selectedWorkspaceSetId}`)) {
+      taskWorkspaceSelect.value = `set:${state.selectedWorkspaceSetId}`;
     } else {
       taskWorkspaceSelect.value = state.openFolderNames.length > 0 ? "auto" : "none";
     }
@@ -422,6 +426,15 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
    */
   const createTaskAndStartChat = (): void => {
     if (!taskTitleInput.value.trim()) return;
+    // Capture user choices synchronously. Task creation/link pushes can re-render
+    // controls while the requests are in flight; the started session must still
+    // use exactly what was selected when the button was pressed.
+    const workspace = pickedChatWorkspace();
+    const model = {
+      providerId: state.providerId,
+      ...(state.selectedModel ? { model: state.selectedModel } : {}),
+      ...(state.thinkingEffort ? { reasoningEffort: state.thinkingEffort } : {})
+    };
     setCreateButtonsDisabled(true);
     void (async (): Promise<void> => {
       const task = await submitTaskCreate();
@@ -438,14 +451,13 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       ctx.persist();
       ctx.bridge.chat.showStarting(true);
       ctx.bridge.switchTab("chat");
-      // Start the chat with the panel's current provider/model selection, named
+      // Start the chat with the captured provider/model selection, named
       // after the task so the chat list reads naturally.
-      const model = { providerId: state.providerId, ...(state.selectedModel ? { model: state.selectedModel } : {}) };
-      const workspace = pickedChatWorkspace();
       const startResponse = await request({
         type: "chat.startSession",
         model,
         title: task.title,
+        taskId: task.taskId,
         ...(workspace ? { workspace } : {})
       });
       if (!startResponse.ok || startResponse.payload.type !== "chat.startSession") {
@@ -586,6 +598,12 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
 
   workspaceSetSelect.addEventListener("change", () => {
     state.selectedWorkspaceSetId = workspaceSetSelect.value;
+    if (formExpanded) {
+      renderTaskWorkspaceOptions();
+      taskWorkspaceSelect.value = state.selectedWorkspaceSetId
+        ? `set:${state.selectedWorkspaceSetId}`
+        : (state.openFolderNames.length > 0 ? "auto" : "none");
+    }
     ctx.persist();
     ctx.bridge.chat.render();
   });
@@ -3139,6 +3157,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   }
 
   function render(): void {
+    if (formExpanded) renderTaskWorkspaceOptions();
     renderAttention();
     renderTasks();
     renderMemory();

@@ -12,6 +12,7 @@ export * from "./cloneSyncService.js";
 export * from "./codeReviewService.js";
 export * from "./commandRunner.js";
 export * from "./eventBus.js";
+export * from "./hostPathIdentity.js";
 export * from "./ids.js";
 export * from "./logger.js";
 export * from "./lineDiff.js";

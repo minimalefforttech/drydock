@@ -4,14 +4,34 @@
 
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { asId } from "@drydock/contracts";
+import { asId, type AgentModelCatalog } from "@drydock/contracts";
 import type { EffectiveSecurityPolicy } from "./securityPolicy.js";
 import {
   IsolatedRunService,
+  mergeAgentModelCatalog,
   parseSbxSecretServices,
   resolveResumeWorkspaceContext,
   type IsolatedRunServiceOptions
 } from "./isolatedRunService.js";
+
+function catalog(source: AgentModelCatalog["source"], ids: readonly string[]): AgentModelCatalog {
+  return {
+    providerId: "codex",
+    displayName: "Codex",
+    models: ids.map((id) => ({ id, displayName: id, isDefault: id === ids[0], hidden: false })),
+    refreshedAt: "2026-07-20T00:00:00.000Z",
+    source,
+    diagnostics: []
+  };
+}
+
+test("provider discovery replaces fallback and later catalogs merge without losing models", () => {
+  const discovered = mergeAgentModelCatalog(catalog("fallback", ["gpt-5.5"]), catalog("provider", ["gpt-5.6-sol"]));
+  assert.deepEqual(discovered.models.map((model) => model.id), ["gpt-5.6-sol"]);
+
+  const merged = mergeAgentModelCatalog(discovered, catalog("provider", ["gpt-5.5"]));
+  assert.deepEqual(merged.models.map((model) => model.id), ["gpt-5.6-sol", "gpt-5.5"]);
+});
 
 test("sbx secret ls parsing extracts configured service names", () => {
   const stdout = [

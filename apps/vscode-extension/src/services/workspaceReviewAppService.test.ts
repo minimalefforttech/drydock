@@ -20,10 +20,17 @@ import { MemoryLogger, RandomIdGenerator, SessionDiffService, SystemClock } from
 import { ContentAddressedBlobStore } from "@drydock/artifacts";
 import { applyMigrations, SqliteConnection, SqliteDiffBaselineStore } from "@drydock/storage-sqlite";
 import {
+  isAgentWork,
   WorkspaceReviewAppService,
   type WorkspaceReviewAppServiceOptions
 } from "./workspaceReviewAppService.js";
 import { EffectiveSecurityPolicy } from "./securityPolicy.js";
+
+test("session change attribution ignores coincident manual edits", () => {
+  const evidence = { paths: new Set(["/workspace/repo/src/agent.ts"]) };
+  assert.equal(isAgentWork(evidence, { path: "src/agent.ts", currentMtimeMs: 100 }), true);
+  assert.equal(isAgentWork(evidence, { path: "src/manual.ts", currentMtimeMs: 100 }), false);
+});
 
 function approvedRecord(id: string, hostPath: string): AccessRequestRecord {
   return {

@@ -50,7 +50,7 @@ import {
   type WorkTaskRecord,
   type WorkTaskSummary
 } from "@drydock/contracts";
-import { normalizePathKey, sandboxRuntimePath, type AgentQuestionService, type Logger, type ProductBusEvent } from "@drydock/core";
+import { hostPathIdentityKey, sandboxRuntimePath, type AgentQuestionService, type Logger, type ProductBusEvent } from "@drydock/core";
 import type { BoardService, McpRegistryService, MemoryService, SubtaskService, TaskService } from "@drydock/work-management";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import type { PlannerAppService } from "../services/plannerAppService.js";
@@ -284,6 +284,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     // attachment. push() no-ops while the view is hidden, so this is cheap.
     vscode.window.onDidChangeActiveTextEditor(() => {
       this.push({ type: "editor.active", editor: this.activeEditorRef() ?? null });
+    });
+    // `auto` workspace choices and their labels must follow this window, not the
+    // folder list captured when the webview first booted.
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      this.push({ type: "workspace.folders", openFolderNames: this.openFolderNames() });
     });
   }
 
@@ -531,8 +536,19 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       }
       case "chat.start": {
         const appService = this.requireBackend();
+        this.push({ type: "chat.startProgress", message: "Resolving the selected workspace…" });
         const workspace = await this.resolveWorkspace(payload.workspace);
-        const started = await appService.startChat(payload.prompt, payload.model, workspace);
+        const started = await appService.startChat(
+          payload.prompt,
+          payload.model,
+          workspace,
+          undefined,
+          (message) => this.push({ type: "chat.startProgress", message })
+        );
+        if (payload.taskId !== undefined) {
+          await this.requireTasks().link(payload.taskId, { sessionId: started.session.sessionId });
+        }
+        this.push({ type: "chat.startProgress", message: "Capturing the workspace change baseline…" });
         await this.baselineWorkspaceSession(started.session.sessionId, workspace);
         this.push({ type: "run.started", isolation: started.isolation });
         this.push({ type: "provider.models", providerCatalogs: started.providerCatalogs });
@@ -542,8 +558,20 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       }
       case "chat.startSession": {
         const appService = this.requireBackend();
+        this.push({ type: "chat.startProgress", message: "Resolving the selected workspace…" });
         const workspace = await this.resolveWorkspace(payload.workspace);
-        const started = await appService.startChatSession(payload.model, payload.title, workspace);
+        const started = await appService.startChatSession(
+          payload.model,
+          payload.title,
+          workspace,
+          (message) => this.push({ type: "chat.startProgress", message })
+        );
+        // Link before replying so a reload while the webview awaits sandbox boot
+        // cannot leave the newly durable chat orphaned from its task.
+        if (payload.taskId !== undefined) {
+          await this.requireTasks().link(payload.taskId, { sessionId: started.session.sessionId });
+        }
+        this.push({ type: "chat.startProgress", message: "Capturing the workspace change baseline…" });
         await this.baselineWorkspaceSession(started.session.sessionId, workspace);
         this.push({ type: "run.started", isolation: started.isolation });
         this.push({ type: "provider.models", providerCatalogs: started.providerCatalogs });
@@ -1693,10 +1721,13 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   ): Promise<void> {
     const target = await this.resolveActivationTarget(payload);
     const current = this.openFolderRoots();
-    const currentKeys = new Set(current.map((root) => normalizePathKey(root)));
-    const targetKeys = new Set(target.roots.map((root) => normalizePathKey(root)));
-    const toAdd = target.roots.filter((root) => !currentKeys.has(normalizePathKey(root)));
-    const toRemove = current.filter((root) => !targetKeys.has(normalizePathKey(root)));
+    // A mapped drive and its UNC target are the same folder. Compare canonical
+    // filesystem identities, but retain the original spellings for VS Code UI
+    // mutations (switching X:\\ to \\\\server\\share can trip VS Code's UNC gate).
+    const currentKeys = new Set(current.map(hostPathIdentityKey));
+    const targetKeys = new Set(target.roots.map(hostPathIdentityKey));
+    const toAdd = target.roots.filter((root) => !currentKeys.has(hostPathIdentityKey(root)));
+    const toRemove = current.filter((root) => !targetKeys.has(hostPathIdentityKey(root)));
 
     if (toAdd.length === 0 && toRemove.length === 0) {
       this.respond(requestId, { type: "workspace.activate", result: { outcome: "no-change", added: 0, removed: 0 } });

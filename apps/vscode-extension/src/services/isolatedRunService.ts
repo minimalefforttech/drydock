@@ -223,6 +223,34 @@ export interface SessionCloneRepo {
 }
 
 const HOST_CATALOG_TTL_MS = 5 * 60_000;
+
+/**
+ * Merges two real provider catalogs without letting a narrower sandbox result
+ * erase host-advertised models. Existing provider order stays stable; incoming
+ * metadata refreshes matching rows and genuinely new models append. A real
+ * provider result replaces the static fallback wholesale on first discovery.
+ */
+export function mergeAgentModelCatalog(existing: AgentModelCatalog | undefined, incoming: AgentModelCatalog): AgentModelCatalog {
+  if (existing === undefined || existing.providerId !== incoming.providerId || (existing.source === "fallback" && incoming.source === "provider")) {
+    return incoming;
+  }
+  if (incoming.source === "fallback" && existing.source === "provider") {
+    return existing;
+  }
+  const incomingById = new Map(incoming.models.map((model) => [model.id, model]));
+  const existingIds = new Set(existing.models.map((model) => model.id));
+  const models = [
+    ...existing.models.map((model) => ({ ...model, ...(incomingById.get(model.id) ?? {}) })),
+    ...incoming.models.filter((model) => !existingIds.has(model.id))
+  ];
+  return {
+    ...existing,
+    ...incoming,
+    models,
+    source: existing.source === "provider" || incoming.source === "provider" ? "provider" : "fallback",
+    diagnostics: [...new Set([...existing.diagnostics, ...incoming.diagnostics])]
+  };
+}
 /** Detected workspace tags are re-scanned at most this often per root. */
 const TAG_CACHE_TTL_MS = 5 * 60_000;
 
@@ -476,16 +504,29 @@ export class IsolatedRunService {
    * prompt. A title other than "New chat" also survives the first-turn
    * auto-rename in ChatSessionService.
    */
-  async startChat(prompt: string, model?: ChatModelSelection, workspace?: ChatWorkspaceContext, title?: string): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
-    return this.startChatSession(model, title ?? titleFromPrompt(prompt), workspace);
+  async startChat(
+    prompt: string,
+    model?: ChatModelSelection,
+    workspace?: ChatWorkspaceContext,
+    title?: string,
+    onProgress?: (message: string) => void
+  ): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
+    return this.startChatSession(model, title ?? titleFromPrompt(prompt), workspace, onProgress);
   }
 
   /** Starts the isolated chat backend before the first prompt is sent. */
-  async startChatSession(model?: ChatModelSelection, title = "New chat", workspace?: ChatWorkspaceContext): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
+  async startChatSession(
+    model?: ChatModelSelection,
+    title = "New chat",
+    workspace?: ChatWorkspaceContext,
+    onProgress?: (message: string) => void
+  ): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
     const normalizedModel = this.normalizeModelSelection(model);
     this.assertSupportedModelSelection(normalizedModel);
+    onProgress?.("Preparing the isolated workspace and mounts…");
     const prepared = await this.prepareWorkspace("chat", workspace, normalizedModel.providerId);
     const effectiveWorkspace = prepared.workspaceContext;
+    onProgress?.("Starting the sandbox and agent backend…");
     const session = await this.options.chatService.startSession({
       template: prepared.template,
       workspacePath: prepared.workspace.workspacePath,
@@ -501,6 +542,7 @@ export class IsolatedRunService {
         : {}),
       disposeWorkspace: () => this.options.workspaceStore.cleanupWorkspace(prepared.workspace)
     });
+    onProgress?.("Loading available models from the agent backend…");
     await this.refreshModelsForSession(session.sessionId);
     this.sessionModes.set(session.sessionId, effectiveWorkspace?.mode ?? "implementation");
     this.stashSessionClones(session.sessionId, prepared.clones);
@@ -1507,7 +1549,8 @@ export class IsolatedRunService {
    * discovery (allowed by the threat model) - no prompt or model output ever
    * flows through these calls. The primary source is the host Codex
    * app-server model/list; the OPENAI_API_KEY ping remains a fallback. A
-   * richer catalog fetched from a live sandbox is never overwritten.
+   * Host and live-sandbox results are merged because either side can be newer
+   * or broader than the other.
    */
   async refreshHostProviderCatalogs(): Promise<readonly AgentModelCatalog[]> {
     this.options.securityPolicy?.assertPolicyCurrent();
@@ -1519,12 +1562,12 @@ export class IsolatedRunService {
       this.hostCatalogRefreshedAt = now;
       await this.refreshProviderAuthStatuses();
       this.options.securityPolicy?.assertNetworkedAiAllowed();
-      const existing = this.providerCatalogs.get(CODEX_PROVIDER_ID);
-      if (existing === undefined || existing.source === "fallback") {
-        const hostCatalog = await this.fetchCodexCatalogFromHost();
-        if (hostCatalog !== null) {
-          this.providerCatalogs.set(CODEX_PROVIDER_ID, hostCatalog);
-        }
+      const hostCatalog = await this.fetchCodexCatalogFromHost();
+      if (hostCatalog !== null) {
+        this.providerCatalogs.set(
+          CODEX_PROVIDER_ID,
+          mergeAgentModelCatalog(this.providerCatalogs.get(CODEX_PROVIDER_ID), hostCatalog)
+        );
       }
     }
     return this.listChatProviderCatalogs();
@@ -1649,10 +1692,14 @@ export class IsolatedRunService {
     try {
       this.options.securityPolicy?.assertNetworkedAiAllowed();
       const catalog = await this.options.chatService.listModels(sessionId);
-      this.providerCatalogs.set(catalog.providerId, {
+      const displayCatalog: AgentModelCatalog = {
         ...catalog,
         displayName: catalog.displayName || catalog.providerId
-      });
+      };
+      this.providerCatalogs.set(
+        catalog.providerId,
+        mergeAgentModelCatalog(this.providerCatalogs.get(catalog.providerId), displayCatalog)
+      );
     } catch (error) {
       this.options.logger.warn("chat provider model discovery failed", {
         sessionId,

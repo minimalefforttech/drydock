@@ -20,6 +20,7 @@ import { vscode } from "./state.js";
 import { demoResponse } from "./demoMode.js";
 
 const REQUEST_TIMEOUT_MS = 60_000;
+const SANDBOX_START_TIMEOUT_MS = 5 * 60_000;
 const pending = new Map<string, { resolve: (value: PanelResponse) => void; timer: number }>();
 let requestCounter = 0;
 
@@ -46,6 +47,16 @@ export function request(payload: PanelRequestPayload): Promise<PanelResponse> {
   const demo = demoResponse(payload, requestId);
   if (demo !== null) return Promise.resolve(demo);
   return new Promise<PanelResponse>((resolve) => {
+    // VM allocation, image preparation, and provider boot can legitimately
+    // exceed the ordinary UI request timeout on a cold host. Do not abandon
+    // the response and make its eventually-created durable session look lost.
+    const timeoutMs = payload.type === "chat.start"
+      || payload.type === "chat.startSession"
+      || payload.type === "chat.resumeSession"
+      || payload.type === "chat.restartBackend"
+      || payload.type === "planner.startSession"
+      ? SANDBOX_START_TIMEOUT_MS
+      : REQUEST_TIMEOUT_MS;
     const timer = window.setTimeout(() => {
       pending.delete(requestId);
       resolve({
@@ -55,7 +66,7 @@ export function request(payload: PanelRequestPayload): Promise<PanelResponse> {
         ok: false,
         error: { message: "The extension host did not answer in time." }
       });
-    }, REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
     pending.set(requestId, { resolve, timer });
     vscode.postMessage({ protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "request", requestId, payload });
   });

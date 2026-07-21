@@ -67,30 +67,19 @@ export interface WorkspaceReviewAppServiceOptions {
 export interface AgentWorkEvidence {
   /** Runtime paths named by agent.file_edit events. */
   readonly paths: ReadonlySet<string>;
-  /** [startMs, endMs] spans of continuous agent activity (agent.* events). */
-  readonly spans: readonly { readonly start: number; readonly end: number }[];
 }
 
-/** Consecutive agent events within this gap merge into one activity span. */
-const AGENT_SPAN_GAP_MS = 10 * 60_000;
-/** Clock-skew/mtime-granularity padding around each span. */
-const AGENT_SPAN_PAD_MS = 2_000;
-
 /**
- * Attribution: named by a file_edit event, or written while the agent was
- * demonstrably active (mtime inside an activity span). Spans are bounded by
- * the agent's OWN event timestamps, so developer edits after the agent
- * finished always fall outside. Unattributable rows (deletions with no named
- * evidence, missing mtimes) are excluded - unsure means not listed.
+ * Attribution is deliberately evidence-only: a path must be named by an
+ * agent.file_edit event. File mtimes cannot distinguish a developer edit from
+ * an agent edit while the session is active, so treating activity windows as
+ * proof leaks unrelated manual work into the agent's changed-files list.
  */
 export function isAgentWork(
   evidence: AgentWorkEvidence,
   change: { readonly path: string; readonly oldPath?: string; readonly currentMtimeMs?: number }
 ): boolean {
-  if (isAgentTouched(evidence.paths, change.path, change.oldPath)) return true;
-  if (change.currentMtimeMs === undefined) return false;
-  const at = change.currentMtimeMs;
-  return evidence.spans.some((span) => at >= span.start && at <= span.end);
+  return isAgentTouched(evidence.paths, change.path, change.oldPath);
 }
 
 /**
@@ -522,15 +511,11 @@ export class WorkspaceReviewAppService {
     const baselines = await this.options.diff.listBaselines(
       sessionId === undefined ? undefined : asId<"SessionId">(sessionId)
     );
-    // Session views list what the agent worked on: files it explicitly
-    // reported editing (agent.file_edit), plus files whose mtime falls inside
-    // an AGENT ACTIVITY SPAN - windows built purely from agent.* event
-    // timestamps (commands, tool calls, output), so they END when the agent
-    // actually stopped working. Edits the developer makes after the agent
-    // finishes fall outside every span and never show. No evidence at all →
-    // NO files; unfiltered only when the events port itself is absent.
+    // Session views list only files explicitly reported by agent.file_edit.
+    // A file mtime that overlaps agent activity is not attribution: the user
+    // can be editing another file at exactly the same time.
     const evidence = sessionId === undefined ? null : await this.agentWorkEvidence(sessionId);
-    if (evidence !== null && evidence.paths.size === 0 && evidence.spans.length === 0) {
+    if (evidence !== null && evidence.paths.size === 0) {
       return [];
     }
     const changes: DiffFileSummary[] = [];
@@ -563,12 +548,9 @@ export class WorkspaceReviewAppService {
   }
 
   /**
-   * Replays the session's stored events into work evidence: file_edit paths
-   * plus activity spans merged from every agent.* event timestamp (gap-merged
-   * at 10 min, padded ±2 s). Spans end at the agent's LAST event - developer
-   * edits after the agent finished are provably outside. Empty evidence IS an
-   * answer (the session did nothing); null only when the port is absent or
-   * the scan fails.
+   * Replays the session's stored file_edit events into explicit work evidence.
+   * Empty evidence IS an answer (the session did not report file edits); null
+   * only when the port is absent or the scan fails.
    */
   private async agentWorkEvidence(sessionId: string): Promise<AgentWorkEvidence | null> {
     const events = this.options.events;
@@ -576,28 +558,14 @@ export class WorkspaceReviewAppService {
     try {
       const stored = await events.listEvents(asId<"SessionId">(sessionId));
       const paths = new Set<string>();
-      const stamps: number[] = [];
       for (const event of stored) {
-        if (!event.eventType.startsWith("agent.")) continue;
-        const at = Date.parse(event.createdAt);
-        if (Number.isFinite(at)) stamps.push(at);
         if (event.eventType !== "agent.file_edit") continue;
         const rawPath = event.payload["path"] ?? event.payload["filePath"];
         if (typeof rawPath === "string" && rawPath.length > 0) {
           paths.add(rawPath.replace(/\\/g, "/"));
         }
       }
-      stamps.sort((a, b) => a - b);
-      const spans: { start: number; end: number }[] = [];
-      for (const at of stamps) {
-        const last = spans[spans.length - 1];
-        if (last !== undefined && at - last.end <= AGENT_SPAN_GAP_MS + AGENT_SPAN_PAD_MS) {
-          last.end = at + AGENT_SPAN_PAD_MS;
-        } else {
-          spans.push({ start: at - AGENT_SPAN_PAD_MS, end: at + AGENT_SPAN_PAD_MS });
-        }
-      }
-      return { paths, spans };
+      return { paths };
     } catch (error) {
       this.options.logger.warn("agent work-evidence scan failed; session diff stays unfiltered", {
         sessionId,

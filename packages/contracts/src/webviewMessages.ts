@@ -86,8 +86,8 @@ export type PanelRequestPayload =
   | { readonly type: "chat.rawStream"; readonly sessionId: string }
   | { readonly type: "chat.runtimeStats"; readonly sessionId: string }
   | { readonly type: "chat.openFile"; readonly path: string }
-  | { readonly type: "chat.start"; readonly prompt: string; readonly model?: ChatModelSelection; readonly workspace?: ChatWorkspaceSelection }
-  | { readonly type: "chat.startSession"; readonly model: ChatModelSelection; readonly workspace?: ChatWorkspaceSelection; readonly title?: string }
+  | { readonly type: "chat.start"; readonly prompt: string; readonly model?: ChatModelSelection; readonly workspace?: ChatWorkspaceSelection; readonly taskId?: string }
+  | { readonly type: "chat.startSession"; readonly model: ChatModelSelection; readonly workspace?: ChatWorkspaceSelection; readonly title?: string; readonly taskId?: string }
   | { readonly type: "chat.sendTurn"; readonly sessionId: string; readonly prompt: string; readonly model?: ChatModelSelection }
   | { readonly type: "chat.restartBackend"; readonly sessionId: string; readonly model: ChatModelSelection }
   | { readonly type: "chat.resumeSession"; readonly sessionId: string; readonly model?: ChatModelSelection; readonly workspace?: ChatWorkspaceSelection }
@@ -1099,9 +1099,13 @@ export type PanelResponse = PanelResponseOk | PanelResponseError;
 
 export type PanelPushPayload =
   | { readonly type: "panel.availability"; readonly availability: BackendAvailability }
+  /** Open file-scheme folders changed in this VS Code window. */
+  | { readonly type: "workspace.folders"; readonly openFolderNames: readonly string[] }
   | { readonly type: "runtime.inventory"; readonly runtimes: readonly RuntimeSummary[] }
   | { readonly type: "run.started"; readonly isolation: IsolationSummary }
   | { readonly type: "run.failed"; readonly message: string }
+  /** Human-readable phase while a new isolated chat backend is booting. */
+  | { readonly type: "chat.startProgress"; readonly message: string }
   | { readonly type: "probe.completed"; readonly status: string; readonly diagnostics: readonly string[] }
   | { readonly type: "chat.turnStarted"; readonly sessionId: string; readonly runId: string }
   | { readonly type: "chat.event"; readonly sessionId: string; readonly line: SequencedTranscriptLine }
@@ -1591,11 +1595,14 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (parsedModel === null) return null;
       const parsedWorkspace = parseWorkspaceSelection(payload["workspace"]);
       if (parsedWorkspace === null) return null;
+      const taskId = payload["taskId"];
+      if (taskId !== undefined && !isBoundedString(taskId, MAX_ID_LENGTH)) return null;
       return {
         type: "chat.start",
         prompt,
         ...(parsedModel === undefined ? {} : { model: parsedModel }),
-        ...(parsedWorkspace === undefined ? {} : { workspace: parsedWorkspace })
+        ...(parsedWorkspace === undefined ? {} : { workspace: parsedWorkspace }),
+        ...(taskId === undefined ? {} : { taskId })
       };
     }
     case "chat.startSession": {
@@ -1605,11 +1612,14 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (parsedWorkspace === null) return null;
       const title = payload["title"];
       if (title !== undefined && !isBoundedString(title, MAX_NAME_LENGTH)) return null;
+      const taskId = payload["taskId"];
+      if (taskId !== undefined && !isBoundedString(taskId, MAX_ID_LENGTH)) return null;
       return {
         type: "chat.startSession",
         model: parsedModel,
         ...(parsedWorkspace === undefined ? {} : { workspace: parsedWorkspace }),
-        ...(title === undefined ? {} : { title })
+        ...(title === undefined ? {} : { title }),
+        ...(taskId === undefined ? {} : { taskId })
       };
     }
     case "isolatedRun.stopRuntime": {

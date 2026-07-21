@@ -11,6 +11,7 @@
 
 import path from "node:path";
 import * as vscode from "vscode";
+import { hostPathIdentityKey } from "@drydock/core";
 import type { WorkspaceReviewAppService } from "../services/workspaceReviewAppService.js";
 import { baselineUri } from "./baselineContentProvider.js";
 
@@ -31,23 +32,40 @@ export async function openBaselineDiff(
     throw new Error(`Diff baseline ${baselineId} was not found.`);
   }
   const leftUri = baselineUri(baselineId, relativePath);
-  const currentUri = vscode.Uri.file(path.join(rootPath, relativePath));
+  const currentUri = currentFileUri(rootPath, relativePath);
   const title = `${relativePath} (baseline ↔ current)`;
   // A deleted file is absent on disk: fall back to the baseline doc alone
   // rather than diffing against a nonexistent right side.
   if (!(await uriExists(currentUri))) {
     if (viewColumn === undefined) {
-      void vscode.commands.executeCommand("vscode.open", leftUri);
+      await vscode.commands.executeCommand("vscode.open", leftUri);
     } else {
-      void vscode.commands.executeCommand("vscode.open", leftUri, { viewColumn, preview: true });
+      await vscode.commands.executeCommand("vscode.open", leftUri, { viewColumn, preview: true });
     }
     return;
   }
   if (viewColumn === undefined) {
-    void vscode.commands.executeCommand("vscode.diff", leftUri, currentUri, title);
+    await vscode.commands.executeCommand("vscode.diff", leftUri, currentUri, title);
   } else {
-    void vscode.commands.executeCommand("vscode.diff", leftUri, currentUri, title, { viewColumn, preview: true });
+    await vscode.commands.executeCommand("vscode.diff", leftUri, currentUri, title, { viewColumn, preview: true });
   }
+}
+
+/**
+ * Prefer the spelling of an already-open workspace folder for the live side of
+ * a diff. A stored canonical path may be UNC while this window has the same
+ * folder open through a mapped drive that VS Code already trusts.
+ */
+function currentFileUri(rootPath: string, relativePath: string): vscode.Uri {
+  const rootKey = hostPathIdentityKey(rootPath);
+  const openRoot = (vscode.workspace.workspaceFolders ?? []).find((folder) =>
+    folder.uri.scheme === "file" && hostPathIdentityKey(folder.uri.fsPath) === rootKey
+  );
+  if (openRoot !== undefined) {
+    const parts = relativePath.replace(/\\/g, "/").split("/").filter(Boolean);
+    return vscode.Uri.joinPath(openRoot.uri, ...parts);
+  }
+  return vscode.Uri.file(path.join(rootPath, relativePath));
 }
 
 /** True when a file-scheme URI resolves on disk; used to detect deletes. */

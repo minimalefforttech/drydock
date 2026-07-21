@@ -80,6 +80,14 @@ onPush("panel.showPlan", (payload) => {
   tabs.select("plan");
 });
 
+onPush("workspace.folders", (payload) => {
+  state.openFolderNames = [...payload.openFolderNames];
+  workTab.render();
+  chatTab.render();
+  planTab.render();
+  persist();
+});
+
 const help = createHelpExperience({
   id: "control-panel",
   title: "Drydock setup guide",

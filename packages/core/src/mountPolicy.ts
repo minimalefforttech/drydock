@@ -162,7 +162,7 @@ export function buildMountPolicy(request: BuildMountPolicyRequest, ids: IdGenera
 
 /**
  * The in-container path where the Docker Sandbox runtime mounts a host folder:
- * a drive-letter mirror on Windows (`H:\pipeline\work` → `/h/pipeline/work`),
+ * a drive-letter mirror on Windows (`X:\workspace\project` → `/x/workspace/project`),
  * otherwise the resolved POSIX path. sbx derives the mount point from the host
  * path - it is NOT caller-assignable - so this is the ONE true location, and
  * every mount briefing, UI label, and grant note must advertise it. An agent

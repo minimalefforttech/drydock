@@ -264,6 +264,17 @@ test("chat.start carries an optional validated workspace selection", () => {
     prompt: "hello",
     workspace: { workspaceSetId: "set-1", mode: "detached" }
   })), null);
+
+  const linked = parsePanelRequest(wrap({ type: "chat.start", prompt: "hello", taskId: "task-1" }));
+  assert.equal(linked?.payload.type === "chat.start" ? linked.payload.taskId : undefined, "task-1");
+  assert.equal(parsePanelRequest(wrap({ type: "chat.start", prompt: "hello", taskId: "" })), null);
+
+  const taskFirst = parsePanelRequest(wrap({
+    type: "chat.startSession",
+    model: { providerId: "codex", model: "gpt-5.6-sol" },
+    taskId: "task-1"
+  }));
+  assert.equal(taskFirst?.payload.type === "chat.startSession" ? taskFirst.payload.taskId : undefined, "task-1");
 });
 
 test("chat.resumeSession validates the session id, optional model, and workspace union", () => {

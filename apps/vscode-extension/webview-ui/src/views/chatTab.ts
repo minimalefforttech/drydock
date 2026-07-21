@@ -584,8 +584,32 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   const modelButtonChevron = el("span", "composer-model-chevron");
   modelButtonChevron.textContent = "▾";
   modelButton.append(modelButtonChevron);
+  let modelRefreshInFlight = false;
   const modelPopover = popover(modelButton, (content, close) => {
     buildModelTree(content, close);
+    // Opening the menu is the user's freshness signal. The host applies its
+    // catalog TTL, so this is cheap while recent and performs inert async
+    // app-server discovery only when the cache has aged.
+    if (!ctx.isDemo() && !modelRefreshInFlight) {
+      modelRefreshInFlight = true;
+      void request({ type: "provider.list" }).then((response) => {
+        modelRefreshInFlight = false;
+        if (!response.ok || response.payload.type !== "provider.list") return;
+        state.providerCatalogs = [...response.payload.providerCatalogs];
+        renderProviderControls();
+        ctx.persist();
+        if (!content.classList.contains("hidden")) {
+          content.replaceChildren();
+          buildModelTree(content, close);
+          sizeModelPopover(content);
+        }
+      });
+    }
+
+    sizeModelPopover(content);
+  });
+
+  function sizeModelPopover(content: HTMLElement): void {
 
     // This trigger lives in the bottom-left composer rather than the top-right
     // header where shared popovers normally live. Give the upward-opening menu
@@ -601,7 +625,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const visibleTop = Math.max(8, chatRect.top);
     content.style.setProperty("--model-popover-max-height", `${String(Math.max(0, triggerRect.top - visibleTop - 12))}px`);
     content.style.setProperty("--model-popover-max-width", `${String(Math.max(0, composerRect.right - triggerRect.left - 10))}px`);
-  });
+  }
   modelPopover.classList.add("composer-model-popover");
   const hiddenModelControls = el("div", "composer-hidden-controls hidden");
   hiddenModelControls.append(providerSelect, modelSelect);
@@ -897,6 +921,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderProviderControls();
     ctx.persist();
   });
+  onPush("chat.startProgress", (payload) => {
+    if (starting || pendingSessionStart) setBusyLine(payload.message);
+  });
   onPush("chat.event", (payload) => {
     if (payload.sessionId === state.selectedSessionId && payload.line.sequence > state.lastSequence) {
       state.lastSequence = payload.line.sequence;
@@ -1071,6 +1098,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       : undefined;
 
     if (selected !== undefined && isSessionLiveish(state, selected.sessionId)) {
+      folder.appendOptimisticUserLine(prompt);
       setTurnActive(true);
       const response = await request({ type: "chat.sendTurn", sessionId: selected.sessionId, prompt, model });
       if (response.ok) return;
@@ -1078,7 +1106,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       // The backend died since we last heard (a reload race where `live` was
       // briefly stale). Hide the raw "no longer live" error and revive instead.
       if (/no longer live|not live/i.test(response.error.message)) {
-        await reviveAndSend(selected, prompt, model);
+        await reviveAndSend(selected, prompt, model, true);
       } else {
         appendSystemMessage(`Couldn't send: ${response.error.message}`, "error", true);
       }
@@ -1095,6 +1123,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
     // Lazy spin-up: the FIRST message of a brand-new chat (nothing selected)
     // starts the micro-VM. This is the ONLY path that clears the transcript.
+    folder.appendOptimisticUserLine(prompt);
     starting = true;
     refreshControls();
     // Chat sends are always implementation mode; plan-mode sessions belong to
@@ -1111,6 +1140,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       type: "chat.start",
       prompt,
       model,
+      ...(newChatTaskId === null ? {} : { taskId: newChatTaskId }),
       ...(workspace ? { workspace } : {})
     });
     setBusyLine(null);
@@ -1137,7 +1167,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       }
       manualModelSessionId = null;
       state.lastSequence = 0;
-      state.chatMessages = [];
+      // Keep the optimistic user row visible while the detached turn starts;
+      // its durable user.message echo will reconcile it in place.
       folder.clearLiveState();
       state.diagnostics = state.diagnostics.slice(-3);
       state.agentGroups = {};
@@ -1178,7 +1209,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     );
   }
 
-  async function reviveAndSend(session: ChatSessionSummary, prompt: string, model: ChatModelSelection): Promise<void> {
+  async function reviveAndSend(
+    session: ChatSessionSummary,
+    prompt: string,
+    model: ChatModelSelection,
+    userRowAlreadyShown = false
+  ): Promise<void> {
     // A provider switch reboots on the NEW provider's sandbox; same-provider is a
     // plain reconnect. Both keep the durable transcript + project mounts.
     const providerChanged = normalizeProviderId(session.providerId) !== model.providerId;
@@ -1195,6 +1231,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         return;
       }
     }
+    if (!userRowAlreadyShown) folder.appendOptimisticUserLine(prompt);
     starting = true;
     reconnecting = true;
     reconnectStartedAt = Date.now();
@@ -2143,7 +2180,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   /**
    * Client mirror of core's sandboxRuntimePath: the real in-container mount
-   * point for a host folder (`H:\a\b` → `/h/a/b`). Used for the pre-start mount
+   * point for a host folder (`X:\a\b` → `/x/a/b`). Used for the pre-start mount
    * preview so the advertised path matches where sbx actually mounts it.
    */
   function hostPathToSandboxPath(hostPath: string): string {
@@ -2264,8 +2301,14 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       const sameProviderAsSession = selectedSessionProvider === selectedProvider;
       const manualModel = manualModelSessionId === state.selectedSessionId ? state.selectedModel || previousModel : "";
       const selectedModel = manualModel || (sameProviderAsSession ? selectedSession?.model ?? "" : "") || previousModel;
+      // A saved/live session is authoritative even if an aged or partial
+      // catalog has not rediscovered its model yet. Keep that selection visible
+      // rather than silently snapping the UI (and next turn) to the default.
+      if (selectedModel !== "" && !catalog.models.some((model) => model.id === selectedModel)) {
+        modelSelect.append(option(selectedModel, selectedModel));
+      }
       const defaultModel = catalog.models.find((model) => model.isDefault)?.id ?? catalog.models[0]?.id ?? "";
-      modelSelect.value = catalog.models.some((model) => model.id === selectedModel) ? selectedModel : defaultModel;
+      modelSelect.value = selectedModel || defaultModel;
       state.selectedModel = modelSelect.value;
     }
 
@@ -4102,9 +4145,28 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   function handleDrop(event: DragEvent): void {
     const data = event.dataTransfer;
     if (!data) return;
+    // Prefer VS Code's URI payload: it remains usable even before a chat has a
+    // live sandbox and preserves the real mounted host path.
     const paths = droppedPaths(data);
-    if (paths.length === 0) return;
-    for (const path of paths) addAttachment(path);
+    if (paths.length > 0) {
+      for (const path of paths) addAttachment(path);
+      return;
+    }
+    const files = Array.from(data.files);
+    if (files.length > 0) {
+      // Current Electron/WebView builds intentionally hide File.path. Upload
+      // the bytes just like the paperclip/paste flow in that case; older
+      // builds that expose an absolute path can retain the cheaper mount token.
+      const localPaths = files
+        .map((file) => (file as File & { readonly path?: string }).path)
+        .filter((path): path is string => typeof path === "string" && path.length > 0);
+      if (localPaths.length === files.length) {
+        for (const path of localPaths) addAttachment(path);
+      } else {
+        void uploadComposerFiles(files);
+      }
+      return;
+    }
   }
 
   /** Adds a host file path as a composer attachment chip (dedup by host path). */
@@ -4201,17 +4263,17 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter((line) => line.length > 0 && !line.startsWith("#"))
-        .map(fileUriToPath);
+        .map(fileUriToPath)
+        // text/plain may contain only a display label; never turn that into a
+        // misleading unmounted attachment token.
+        .filter(isAbsoluteDropPath);
       if (paths.length > 0) return paths;
     }
-    // Last resort: plain OS file drops (Electron exposes File.path; the web
-    // platform does not, so name-only is the final fallback).
-    return Array.from(data.files)
-      .map((file) => {
-        const maybePath = (file as File & { readonly path?: string }).path;
-        return maybePath && maybePath.length > 0 ? maybePath : file.name;
-      })
-      .filter((path) => path.length > 0);
+    return [];
+  }
+
+  function isAbsoluteDropPath(value: string): boolean {
+    return /^[a-zA-Z]:[\\/]/.test(value) || /^[/\\]{2}[^/\\]/.test(value) || value.startsWith("/");
   }
 
   /** Parses the `resourceurls` payload (JSON array of URI strings) into newline-joined text, or undefined if absent/malformed. */
@@ -4313,12 +4375,14 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    */
   function showStarting(active: boolean): void {
     pendingSessionStart = active;
+    if (!active) setBusyLine(null);
     renderHeader();
     renderChat();
   }
 
   function selectSession(sessionId: string | null): void {
     pendingSessionStart = false;
+    setBusyLine(null);
     state.selectedSessionId = sessionId;
     // Selecting a session ADOPTS its owning task as the shared current task
     // (Plan picker + new-chat linking follow along). Orphan sessions leave

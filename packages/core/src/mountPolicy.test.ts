@@ -69,7 +69,7 @@ test("clone mode does not mount live workspace roots", () => {
 test("workspace roots advertise the real sandbox mount path, not a synthetic label", () => {
   const [mount] = buildMountPolicy({
     mode: "implementation",
-    workspaceRoots: ["H:\\pipeline\\work\\fr_sceptre"],
+    workspaceRoots: ["X:\\workspace\\sample-project"],
     sharedRead: [],
     sharedWrite: [],
     approvedAt: "2026-07-01T00:00:00.000Z",
@@ -79,12 +79,12 @@ test("workspace roots advertise the real sandbox mount path, not a synthetic lab
   // `/workspace/root-N` fiction sent writes into an unmounted overlay.
   assert.notEqual(mount?.runtimePath, "/workspace/root-1");
   if (process.platform === "win32") {
-    assert.equal(mount?.runtimePath, "/h/pipeline/work/fr_sceptre");
+    assert.equal(mount?.runtimePath, "/x/workspace/sample-project");
   }
 });
 
 test("sandboxRuntimePath mirrors a Windows drive path into the container", () => {
-  assert.equal(sandboxRuntimePath("H:\\pipeline\\work"), "/h/pipeline/work");
+  assert.equal(sandboxRuntimePath("X:\\workspace\\project"), "/x/workspace/project");
   assert.equal(sandboxRuntimePath("C:/proj/app"), "/c/proj/app");
   assert.equal(sandboxRuntimePath("\\\\server\\share\\project"), "//server/share/project");
 });
@@ -213,7 +213,7 @@ test("assertMountAllowed refuses filesystem roots and UNC share roots", () => {
 });
 
 test("defaultDeniedPaths joins the sensitive home config roots", () => {
-  const home = process.platform === "win32" ? "C:\\Users\\alex" : "/home/alex";
+  const home = process.platform === "win32" ? "C:\\Users\\example" : "/home/example";
   const denied = defaultDeniedPaths(home);
   assert.deepEqual(
     denied,
@@ -221,28 +221,28 @@ test("defaultDeniedPaths joins the sensitive home config roots", () => {
   );
   // Each entry lives under the home dir (join, not raw concatenation).
   assert.ok(denied.every((entry) => entry.startsWith(home)));
-  assert.deepEqual(defaultDeniedPaths("C:\\Users\\alex"), [
-    "C:\\Users\\alex\\.ssh",
-    "C:\\Users\\alex\\.aws",
-    "C:\\Users\\alex\\.gnupg",
-    "C:\\Users\\alex\\.kube",
-    "C:\\Users\\alex\\.azure",
-    "C:\\Users\\alex\\.docker"
+  assert.deepEqual(defaultDeniedPaths("C:\\Users\\example"), [
+    "C:\\Users\\example\\.ssh",
+    "C:\\Users\\example\\.aws",
+    "C:\\Users\\example\\.gnupg",
+    "C:\\Users\\example\\.kube",
+    "C:\\Users\\example\\.azure",
+    "C:\\Users\\example\\.docker"
   ]);
-  assert.deepEqual(defaultDeniedPaths("/home/alex"), [
-    "/home/alex/.ssh",
-    "/home/alex/.aws",
-    "/home/alex/.gnupg",
-    "/home/alex/.kube",
-    "/home/alex/.azure",
-    "/home/alex/.docker"
+  assert.deepEqual(defaultDeniedPaths("/home/example"), [
+    "/home/example/.ssh",
+    "/home/example/.aws",
+    "/home/example/.gnupg",
+    "/home/example/.kube",
+    "/home/example/.azure",
+    "/home/example/.docker"
   ]);
 });
 
 test("isSensitivePath flags credential dirs and files across separators", () => {
   // Sensitive directory segments, anywhere in the path, either separator.
-  assert.equal(isSensitivePath("C:\\Users\\alex\\.ssh\\id_rsa"), true);
-  assert.equal(isSensitivePath("/home/alex/.aws/credentials"), true);
+  assert.equal(isSensitivePath("C:\\Users\\example\\.ssh\\id_rsa"), true);
+  assert.equal(isSensitivePath("/home/example/.aws/credentials"), true);
   assert.equal(isSensitivePath("C:\\proj\\secrets\\token.txt"), true);
   assert.equal(isSensitivePath("/srv/.GnuPG/keyring"), true); // case-insensitive segment
 
@@ -253,13 +253,13 @@ test("isSensitivePath flags credential dirs and files across separators", () => 
   assert.equal(isSensitivePath("C:\\keys\\host.key"), true);
   assert.equal(isSensitivePath("C:\\certs\\bundle.p12"), true);
   assert.equal(isSensitivePath("C:\\certs\\bundle.PFX"), true); // case-insensitive ext
-  assert.equal(isSensitivePath("/home/alex/id_ed25519.pub"), true);
-  assert.equal(isSensitivePath("/home/alex/.netrc"), true);
+  assert.equal(isSensitivePath("/home/example/id_ed25519.pub"), true);
+  assert.equal(isSensitivePath("/home/example/.netrc"), true);
   assert.equal(isSensitivePath("/proj/credentials.json"), true);
 
   // Negatives: ordinary project paths and near-misses.
   assert.equal(isSensitivePath("C:\\project\\src\\index.ts"), false);
-  assert.equal(isSensitivePath("/home/alex/notes.md"), false);
+  assert.equal(isSensitivePath("/home/example/notes.md"), false);
   assert.equal(isSensitivePath("C:\\proj\\environment.ts"), false); // not .env
   assert.equal(isSensitivePath("C:\\proj\\keyboard.ts"), false); // not *.key
   assert.equal(isSensitivePath("C:\\proj\\my-secrets-app\\main.ts"), false); // segment is "my-secrets-app", not "secrets"
@@ -267,7 +267,7 @@ test("isSensitivePath flags credential dirs and files across separators", () => 
 
 test("sensitivePathMatch names the matched trigger for the approval card", () => {
   // Directory segment wins, verbatim (original casing preserved for display).
-  assert.deepEqual(sensitivePathMatch("C:\\Users\\alex\\.ssh\\id_rsa"), { kind: "directory", match: ".ssh" });
+  assert.deepEqual(sensitivePathMatch("C:\\Users\\example\\.ssh\\id_rsa"), { kind: "directory", match: ".ssh" });
   assert.deepEqual(sensitivePathMatch("/srv/.GnuPG/keyring"), { kind: "directory", match: ".GnuPG" });
   // Basename pattern when no directory segment matches.
   assert.deepEqual(sensitivePathMatch("C:\\proj\\.env"), { kind: "file", match: ".env" });
