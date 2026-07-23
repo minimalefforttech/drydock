@@ -35,6 +35,40 @@ test("turns run claude -p stream-json with resume continuity and model override"
   assert.deepEqual(executor.calls[1]?.args.slice(-2), ["--resume", "claude-abc"]);
 });
 
+test("ridden providers wrap the exec in sh -c with wire env and the token file, never the token itself", async () => {
+  const executor = new FakeExecutor([execResult(JSON.stringify({ type: "result", is_error: false, result: "ok", session_id: "s1" }))]);
+  const adapter = new ClaudeAdapter({
+    ids: new FixedIds(),
+    clock: new FixedClock(),
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    runtimeExecutor: executor,
+    providerId: "deepseek",
+    wire: {
+      baseUrl: "https://api.deepseek.com/anthropic",
+      tokenFile: "/tmp/.drydock-provider-token",
+      smallFastModel: "deepseek-chat",
+      defaultModel: "deepseek-chat"
+    }
+  });
+  const connection = await adapter.startProtocol(protocolRequest());
+  assert.equal(String(connection.providerId), "deepseek");
+
+  const runId = await adapter.sendPrompt(connection, { text: "hello" });
+  await collect(adapter.streamEvents(connection, runId));
+
+  const args = executor.calls[0]?.args ?? [];
+  assert.deepEqual(args.slice(0, 2), ["sh", "-c"]);
+  const command = args[2] ?? "";
+  // Token comes from the runtime-scoped file via command substitution.
+  assert.match(command, /ANTHROPIC_AUTH_TOKEN="\$\(cat '\/tmp\/\.drydock-provider-token' 2>\/dev\/null\)"/);
+  assert.match(command, /ANTHROPIC_BASE_URL=https:\/\/api\.deepseek\.com\/anthropic/);
+  assert.match(command, /ANTHROPIC_SMALL_FAST_MODEL=deepseek-chat/);
+  // A rider turn without an explicit model pins the rider default.
+  assert.match(command, /'--model' 'deepseek-chat'/);
+  // The prompt still rides stdin, through the shell into claude.
+  assert.equal(executor.calls[0]?.input, "hello");
+});
+
 test("restored context is delivered as a preamble on the next prompt only", async () => {
   const executor = new FakeExecutor([execResult(""), execResult("")]);
   const adapter = makeAdapter(executor);

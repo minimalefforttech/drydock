@@ -14,6 +14,11 @@ import { claudeModelCatalog, fetchCodexHostModelCatalog } from "@drydock/agent-a
 import { TempWorkspaceStore, type TempWorkspace } from "@drydock/artifacts";
 import {
   asId,
+  isRegisteredProvider,
+  providerDescriptor,
+  providerEgressResources,
+  providerTransport,
+  PROVIDER_REGISTRY,
   summarizeStoredEvent,
   type AgentModelCatalog,
   type AgentEvent,
@@ -128,6 +133,8 @@ export interface IsolatedRunServiceOptions {
   readonly environment?: NodeJS.ProcessEnv;
   /** Host codex binary, used for inert app-server model discovery. */
   readonly hostCodexPath?: string;
+  /** Platform secret store backing `vscode-secret:<provider>` auth refs. */
+  readonly providerSecrets?: ProviderSecretRefStore;
 }
 
 /** Resolved workspace mounting for a chat session. */
@@ -176,11 +183,18 @@ export const CODEX_PROVIDER_ID = "codex";
 export const CLAUDE_PROVIDER_ID = "claude";
 export const LEGACY_CODEX_PROVIDER_ID = "codex-openai";
 
-/** Docker Sandbox service secret backing each provider's runtime auth. */
-const PROVIDER_SBX_SERVICES: Readonly<Record<string, string>> = {
-  [CODEX_PROVIDER_ID]: "openai",
-  [CLAUDE_PROVIDER_ID]: "anthropic"
-};
+/**
+ * Write/read access to provider API keys held in the platform secret store
+ * (VS Code SecretStorage; ref form `vscode-secret:<provider>`). Used only for
+ * providers without a Docker Sandbox service secret. Values are read at
+ * runtime-injection time and never logged, persisted elsewhere, or displayed.
+ */
+export interface ProviderSecretRefStore {
+  has(providerId: string): Promise<boolean>;
+  get(providerId: string): Promise<string | undefined>;
+  set(providerId: string, value: string): Promise<void>;
+  delete(providerId: string): Promise<void>;
+}
 
 export interface IsolatedRunHooks {
   /** Fired after the disposable workspace and template exist, before the runtime starts. */
@@ -278,7 +292,12 @@ export class IsolatedRunService {
   private readonly tagCache = new Map<string, { tags: string[]; at: number }>();
   private readonly providerCatalogs = new Map<string, AgentModelCatalog>([
     [CODEX_PROVIDER_ID, fallbackCodexCatalog()],
-    [CLAUDE_PROVIDER_ID, claudeModelCatalog(new Date().toISOString())]
+    [CLAUDE_PROVIDER_ID, claudeModelCatalog(new Date().toISOString())],
+    // Ridden providers (OpenRouter, DeepSeek, Kimi, ...) seed from their
+    // registry catalogs; live listModels results merge over these per session.
+    ...PROVIDER_REGISTRY
+      .filter((descriptor) => descriptor.models.length > 0)
+      .map((descriptor): [string, AgentModelCatalog] => [descriptor.providerId, riderCatalog(descriptor.providerId)])
   ]);
 
   constructor(private readonly options: IsolatedRunServiceOptions) {}
@@ -1454,35 +1473,54 @@ export class IsolatedRunService {
   }
 
   listChatProviderCatalogs(): readonly AgentModelCatalog[] {
-    return [...this.providerCatalogs.values()].map((catalog) => ({
-      ...catalog,
-      authStatus: this.providerAuthStatuses.get(catalog.providerId) ?? "unknown",
-      loginHint: this.loginHint(catalog.providerId)
-    }));
+    return [...this.providerCatalogs.values()].map((catalog) => {
+      const descriptor = providerDescriptor(catalog.providerId);
+      return {
+        ...catalog,
+        authStatus: this.providerAuthStatuses.get(catalog.providerId) ?? "unknown",
+        loginHint: this.loginHint(catalog.providerId),
+        ...(descriptor === undefined
+          ? {}
+          : {
+              authKind: (descriptor.connect.oauth !== undefined ? "oauth" : "api-key") as "oauth" | "api-key",
+              ...(descriptor.connect.apiKey === undefined ? {} : { keyUrl: descriptor.connect.apiKey.keyUrl })
+            })
+      };
+    });
   }
 
-  /** Display command plus spawnable pieces for signing a provider in. */
+  /**
+   * Display command plus spawnable pieces for signing a provider in.
+   *
+   * `sbx-service-oauth` providers run `sbx secret set -g <service> --oauth`
+   * (a HOST-side flow: browser and localhost callback both work natively).
+   * The Claude terminal fallback stays `sbx run claude` + `/login` because
+   * Docker Sandbox rejects `sbx secret set -g anthropic --oauth`; the guided
+   * host path (ProviderConnectService, `claude setup-token`) is preferred and
+   * only falls back here when no host Claude CLI exists. API-key-only
+   * providers have no spawnable login; the connect card collects a key via
+   * `provider.submitApiKey` instead.
+   */
   loginCommand(providerId: string): { readonly command: string; readonly args: readonly string[]; readonly display: string } {
     this.assertInteractiveSetupAllowed("Provider sign-in");
     if (this.options.sbxPath === undefined) {
       throw new Error(`No login flow is available for provider ${providerId}.`);
     }
     const normalized = this.normalizeModelSelection({ providerId }).providerId;
-    // Anthropic can't be configured via `sbx secret set` (Docker Sandbox rejects
-    // `sbx secret set -g anthropic --oauth`). Claude must be signed in from INSIDE
-    // a Claude sandbox: `sbx run claude`, then `/login`; Docker Sandbox then
-    // persists the credential for future Claude sandboxes. OpenAI/Codex uses the
-    // standard sbx secret OAuth flow.
+    const descriptor = providerDescriptor(normalized);
+    if (descriptor?.connect.oauth === "sbx-service-oauth" && descriptor.connect.sbxService !== undefined) {
+      const args = ["secret", "set", "-g", descriptor.connect.sbxService, "--oauth"];
+      return { command: this.options.sbxPath, args, display: `sbx ${args.join(" ")}` };
+    }
     if (normalized === CLAUDE_PROVIDER_ID) {
       const args = ["run", "claude"];
       return { command: this.options.sbxPath, args, display: "sbx run claude (then /login inside Claude)" };
     }
-    const service = PROVIDER_SBX_SERVICES[normalized];
-    if (service === undefined) {
-      throw new Error(`No login flow is available for provider ${providerId}.`);
-    }
-    const args = ["secret", "set", "-g", service, "--oauth"];
-    return { command: this.options.sbxPath, args, display: `sbx ${args.join(" ")}` };
+    throw new Error(
+      descriptor?.connect.apiKey !== undefined
+        ? `${descriptor.displayName} signs in with an API key; enter one on the connect card instead.`
+        : `No login flow is available for provider ${providerId}.`
+    );
   }
 
   /** Final host guard for OAuth and other interactive network setup. */
@@ -1506,41 +1544,66 @@ export class IsolatedRunService {
   }
 
   /**
-   * Inert auth-status probe: reads the Docker Sandbox secret ledger (the same
-   * store the sandbox proxy uses to authenticate agents) without touching any
-   * secret values.
+   * Inert auth-status probe. Providers backed by a Docker Sandbox service
+   * secret read the secret ledger (the same store the sandbox proxy uses to
+   * authenticate agents) without touching any secret values; providers backed
+   * by VS Code SecretStorage check only whether their reference exists.
    */
   async refreshProviderAuthStatuses(): Promise<void> {
-    if (this.options.sbxPath === undefined || this.options.commandRunner === undefined) {
-      return;
+    let configuredServices: ReadonlySet<string> | null = null;
+    if (this.options.sbxPath !== undefined && this.options.commandRunner !== undefined) {
+      try {
+        const result = await this.options.commandRunner.run(this.options.sbxPath, ["secret", "ls"], {
+          cwd: process.cwd(),
+          timeoutMs: 15_000
+        });
+        if (result.exitCode !== 0) {
+          throw new Error(result.stderr || result.error || "sbx secret ls failed");
+        }
+        configuredServices = parseSbxSecretServices(result.stdout);
+      } catch (error) {
+        this.options.logger.warn("provider auth status probe failed", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
-    try {
-      const result = await this.options.commandRunner.run(this.options.sbxPath, ["secret", "ls"], {
-        cwd: process.cwd(),
-        timeoutMs: 15_000
-      });
-      if (result.exitCode !== 0) {
-        throw new Error(result.stderr || result.error || "sbx secret ls failed");
+    for (const descriptor of PROVIDER_REGISTRY) {
+      const service = descriptor.connect.sbxService;
+      if (service !== undefined) {
+        this.providerAuthStatuses.set(
+          descriptor.providerId,
+          configuredServices === null ? "unknown" : configuredServices.has(service) ? "authenticated" : "needs-login"
+        );
+        continue;
       }
-      const configuredServices = parseSbxSecretServices(result.stdout);
-      for (const [providerId, service] of Object.entries(PROVIDER_SBX_SERVICES)) {
-        this.providerAuthStatuses.set(providerId, configuredServices.has(service) ? "authenticated" : "needs-login");
+      if (this.options.providerSecrets === undefined) {
+        this.providerAuthStatuses.set(descriptor.providerId, "unknown");
+        continue;
       }
-    } catch (error) {
-      this.options.logger.warn("provider auth status probe failed", {
-        error: error instanceof Error ? error.message : String(error)
-      });
-      for (const providerId of Object.keys(PROVIDER_SBX_SERVICES)) {
-        this.providerAuthStatuses.set(providerId, "unknown");
+      try {
+        const present = await this.options.providerSecrets.has(descriptor.providerId);
+        this.providerAuthStatuses.set(descriptor.providerId, present ? "authenticated" : "needs-login");
+      } catch {
+        this.providerAuthStatuses.set(descriptor.providerId, "unknown");
       }
     }
   }
 
+  /** Current inertly-probed auth status for one provider (login watchers poll this). */
+  providerAuthStatus(providerId: string): ProviderAuthStatus {
+    return this.providerAuthStatuses.get(this.normalizeModelSelection({ providerId }).providerId) ?? "unknown";
+  }
+
   private loginHint(providerId: string): string {
     if (this.options.securityPolicy?.managed === true) return "";
-    // Claude signs in from inside a sandbox; Codex/OpenAI via the secret OAuth flow.
+    const descriptor = providerDescriptor(providerId);
+    if (descriptor?.connect.oauth === undefined && descriptor?.connect.apiKey !== undefined) {
+      return `API key (create one at ${descriptor.connect.apiKey.keyUrl})`;
+    }
+    // Claude's terminal fallback signs in from inside a sandbox; Codex/OpenAI
+    // run the host-side secret OAuth flow.
     if (providerId === CLAUDE_PROVIDER_ID) return "sbx run claude (then /login)";
-    const service = PROVIDER_SBX_SERVICES[providerId];
+    const service = descriptor?.connect.sbxService;
     return service === undefined ? "" : `sbx secret set -g ${service} --oauth`;
   }
 
@@ -1552,15 +1615,23 @@ export class IsolatedRunService {
    * Host and live-sandbox results are merged because either side can be newer
    * or broader than the other.
    */
-  async refreshHostProviderCatalogs(): Promise<readonly AgentModelCatalog[]> {
+  async refreshHostProviderCatalogs(options?: { readonly forceAuthProbe?: boolean }): Promise<readonly AgentModelCatalog[]> {
     this.options.securityPolicy?.assertPolicyCurrent();
     if (this.options.securityPolicy?.allowNetworkedAiOnThisMachine === false) {
       return this.listChatProviderCatalogs();
     }
     const now = Date.now();
-    if (now - this.hostCatalogRefreshedAt >= HOST_CATALOG_TTL_MS) {
-      this.hostCatalogRefreshedAt = now;
+    const catalogRefreshDue = now - this.hostCatalogRefreshedAt >= HOST_CATALOG_TTL_MS;
+    // The auth probe is a cheap, inert LOCAL read (`sbx secret ls` + secret-ref
+    // existence); an explicit recheck must always run it. Only the
+    // network-touching model-catalog fetch stays behind the TTL - gating the
+    // probe too is what made "Recheck" a silent no-op for five minutes after
+    // a completed login.
+    if (catalogRefreshDue || options?.forceAuthProbe === true) {
       await this.refreshProviderAuthStatuses();
+    }
+    if (catalogRefreshDue) {
+      this.hostCatalogRefreshedAt = now;
       this.options.securityPolicy?.assertNetworkedAiAllowed();
       const hostCatalog = await this.fetchCodexCatalogFromHost();
       if (hostCatalog !== null) {
@@ -1710,8 +1781,9 @@ export class IsolatedRunService {
 
   private assertSupportedModelSelection(model: ChatModelSelection | undefined): void {
     if (model === undefined) return;
-    if (model.providerId !== CODEX_PROVIDER_ID && model.providerId !== CLAUDE_PROVIDER_ID) {
-      throw new Error(`Provider ${model.providerId} is not wired yet. Supported providers: Codex/OpenAI and Claude/Anthropic.`);
+    if (!isRegisteredProvider(model.providerId)) {
+      const supported = PROVIDER_REGISTRY.map((descriptor) => descriptor.displayName).join(", ");
+      throw new Error(`Provider ${model.providerId} is not wired yet. Supported providers: ${supported}.`);
     }
   }
 
@@ -1752,11 +1824,16 @@ export class IsolatedRunService {
             this.options.securityPolicy?.cloneOmission
           )
         : [];
+      // Ridden providers run inside the image of the CLI they ride, with
+      // their own scoped egress replacing the image's native service list.
+      const rideKind = providerId === undefined ? "codex" : providerDescriptor(providerId)?.ride ?? "codex";
+      const egress = providerId === undefined ? undefined : providerEgressResources(providerId);
       const template = this.withSecurityPolicyMetadata(buildIsolatedRunTemplate({
         workspacePath: workspace.workspacePath,
         ids: this.options.ids,
         approvedAt: this.options.clock.isoNow(),
-        provider: providerId === CLAUDE_PROVIDER_ID ? "claude" : "codex",
+        provider: rideKind,
+        ...(egress === undefined ? {} : { networkResources: egress }),
         ...(effectiveContext === undefined ? {} : {
           projectRoots: effectiveContext.roots,
           sessionMode: effectiveContext.mode,
@@ -2194,7 +2271,23 @@ function fallbackCodexCatalog(reason?: string): AgentModelCatalog {
 }
 
 function transportForProvider(providerId: string): AgentTransport {
-  return providerId === CLAUDE_PROVIDER_ID ? "claude-exec-json" : "codex-app-server";
+  return providerTransport(providerId);
+}
+
+/** Registry seed catalog for a ridden provider, stamped with a fresh timestamp. */
+function riderCatalog(providerId: string): AgentModelCatalog {
+  const descriptor = providerDescriptor(providerId);
+  if (descriptor === undefined) {
+    throw new Error(`Unknown provider ${providerId} has no registry catalog.`);
+  }
+  return {
+    providerId: descriptor.providerId,
+    displayName: descriptor.displayName,
+    models: [...descriptor.models],
+    refreshedAt: new Date().toISOString(),
+    source: "fallback",
+    diagnostics: [descriptor.catalogDiagnostic ?? "Static registry catalog."]
+  };
 }
 
 /**

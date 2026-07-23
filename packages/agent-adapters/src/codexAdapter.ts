@@ -38,15 +38,24 @@ export interface CodexAdapterOptions {
   readonly commandRunner?: CommandRunner;
   readonly hostCodexPath?: string;
   readonly appServer?: Omit<CodexAppServerTransportOptions, "ids" | "clock" | "logger">;
+  /** Rider identity (e.g. "openrouter"); defaults to the native "codex" provider. */
+  readonly providerId?: string;
+  /**
+   * Static catalog override for ridden providers. The app-server's model/list
+   * advertises OpenAI models regardless of the configured model_provider, so
+   * riders answer listModels from their registry seed instead.
+   */
+  readonly staticCatalog?: AgentModelCatalog;
 }
 
 export class CodexAdapter implements AgentAdapter {
-  readonly providerId: ProviderId = asId<"ProviderId">("codex");
+  readonly providerId: ProviderId;
   private readonly execTransport: CodexExecJsonTransport;
   private readonly appServerTransport: CodexAppServerTransport | undefined;
   private readonly appServerSessions = new Map<string, CodexAppServerSession>();
 
   constructor(private readonly options: CodexAdapterOptions) {
+    this.providerId = asId<"ProviderId">(options.providerId ?? "codex");
     this.execTransport = new CodexExecJsonTransport({
       ids: options.ids,
       clock: options.clock,
@@ -143,6 +152,9 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async listModels(connection: AgentConnection): Promise<AgentModelCatalog> {
+    if (this.options.staticCatalog !== undefined) {
+      return this.options.staticCatalog;
+    }
     if (connection.transport === "codex-app-server") {
       const appServer = this.requiredAppServerSession(connection);
       return appServer.transport.listModels(appServer.session);

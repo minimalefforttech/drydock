@@ -699,7 +699,10 @@
         return respond(requestId, { type, question });
       }
       case "provider.list": return respond(requestId, { type, providerCatalogs: catalogs });
-      case "provider.login": return respond(requestId, { type, providerId: payload.providerId, launched: "sbx secret set -g anthropic --oauth" });
+      case "provider.login": return respond(requestId, { type, providerId: payload.providerId, launched: "sbx secret set -g openai --oauth", mode: "terminal" });
+      case "provider.submitCode": return respond(requestId, { type, providerId: payload.providerId, accepted: true });
+      case "provider.submitApiKey": return respond(requestId, { type, providerId: payload.providerId, authStatus: "authenticated" });
+      case "provider.cancelLogin": return respond(requestId, { type, providerId: payload.providerId, cancelled: false });
       case "isolatedRun.listRuntimes": return respond(requestId, { type, runtimes });
       case "isolatedRun.stopRuntime": return respond(requestId, { type, runtimeId: payload.runtimeId, status: "removed", diagnostics: [] });
       case "isolatedRun.probeAppServer": return respond(requestId, { type, accepted: true });

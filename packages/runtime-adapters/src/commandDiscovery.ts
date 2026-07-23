@@ -17,6 +17,21 @@ export function discoverDockerSandboxCommand(environment: NodeJS.ProcessEnv = pr
   ], environment);
 }
 
+/**
+ * Host Claude Code CLI, used ONLY for the guided sign-in flow
+ * (`claude setup-token` runs on the host where the browser works natively).
+ * Prompt-bearing Claude work still happens exclusively inside sandboxes.
+ * The npm `claude.cmd` shim is deliberately ineligible (see module header);
+ * the native installer's `~/.local/bin/claude.exe` is.
+ */
+export function discoverStandaloneClaudeCommand(environment: NodeJS.ProcessEnv = process.env): string | null {
+  const home = os.homedir();
+  const preferred = process.platform === "win32"
+    ? [path.join(home, ".local", "bin", "claude.exe")]
+    : [path.join(home, ".local", "bin", "claude"), "/usr/local/bin/claude", "/opt/homebrew/bin/claude"];
+  return findCommand(["claude", "claude.exe"], "CLAUDE_PATH", preferred, environment);
+}
+
 export function discoverStandaloneCodexCommand(environment: NodeJS.ProcessEnv = process.env): string | null {
   const localAppData = environment["LOCALAPPDATA"];
   const candidates: string[] = [];

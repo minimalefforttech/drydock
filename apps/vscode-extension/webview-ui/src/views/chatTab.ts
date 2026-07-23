@@ -406,12 +406,38 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   });
 
-  // Auth banner (keyed off the SELECTED provider only).
+  // Auth banner / connect card (keyed off the SELECTED provider only). One
+  // row of text + actions, plus flow-dependent rows: a live progress line for
+  // guided sign-ins, a paste-back code field when the flow asks for one, and
+  // a write-only API key field for key-based providers.
   const authBanner = el("div", "auth-banner hidden");
+  const authBannerMain = el("div", "auth-banner-main");
   const authBannerText = el("span", "auth-banner-text");
-  const loginButton = button("Log in", "small primary");
+  const loginButton = button("Connect", "small primary");
   const recheckAuthButton = button("Recheck", "ghost small");
-  authBanner.append(authBannerText, loginButton, recheckAuthButton);
+  authBannerMain.append(authBannerText, loginButton, recheckAuthButton);
+  const authProgressLine = el("div", "auth-progress hidden");
+  const authCodeRow = el("div", "auth-code-row hidden");
+  const authCodeInput = el("input", "auth-code-input") as HTMLInputElement;
+  authCodeInput.type = "password";
+  authCodeInput.placeholder = "Paste the code from your browser";
+  authCodeInput.autocomplete = "off";
+  const authCodeSubmit = button("Submit code", "small primary");
+  authCodeRow.append(authCodeInput, authCodeSubmit);
+  const authKeyRow = el("div", "auth-key-row hidden");
+  const authKeyInput = el("input", "auth-key-input") as HTMLInputElement;
+  authKeyInput.type = "password";
+  authKeyInput.placeholder = "Paste an API key";
+  authKeyInput.autocomplete = "off";
+  const authKeySubmit = button("Save key", "small primary");
+  const authKeyLink = el("a", "auth-key-link") as HTMLAnchorElement;
+  authKeyLink.textContent = "Get a key";
+  authKeyLink.target = "_blank";
+  authKeyLink.rel = "noreferrer";
+  authKeyRow.append(authKeyInput, authKeySubmit, authKeyLink);
+  authBanner.append(authBannerMain, authProgressLine, authCodeRow, authKeyRow);
+  /** Transient guided-login progress per provider; never persisted. */
+  const authFlows = new Map<string, { phase: string; detail?: string }>();
 
   // Reclaim banner: a session marked "running in another window" is read-only
   // here. Most often it's THIS window right after a reload - the old instance's
@@ -457,17 +483,25 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     void request({ type: "provider.login", providerId }).then((response) => {
       loginButton.disabled = false;
       if (!response.ok) {
-        logChat(`login failed to start: ${response.error.message}`);
+        authFlows.set(providerId, { phase: "failed", detail: response.error.message });
+        renderAuthBanner();
         return;
       }
       if (response.payload.type === "provider.login") {
-        logChat(`login started in a terminal (${response.payload.launched}); click Recheck when it finishes`);
+        if (response.payload.mode === "guided") {
+          authFlows.set(providerId, { phase: "launched" });
+          logChat(`sign-in started (${response.payload.launched}); your browser will open`);
+        } else {
+          authFlows.set(providerId, { phase: "terminal" });
+          logChat(`sign-in opened in a terminal (${response.payload.launched}); Drydock will detect completion automatically`);
+        }
+        renderAuthBanner();
       }
     });
   });
   recheckAuthButton.addEventListener("click", () => {
     recheckAuthButton.disabled = true;
-    void request({ type: "provider.list" }).then((response) => {
+    void request({ type: "provider.list", force: true }).then((response) => {
       recheckAuthButton.disabled = false;
       if (response.ok && response.payload.type === "provider.list") {
         state.providerCatalogs = [...response.payload.providerCatalogs];
@@ -475,6 +509,54 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         ctx.persist();
       }
     });
+  });
+  const submitAuthCode = (): void => {
+    const providerId = normalizeProviderId(providerSelect.value);
+    const code = authCodeInput.value.trim();
+    if (code.length === 0) return;
+    authCodeInput.value = "";
+    authCodeSubmit.disabled = true;
+    void request({ type: "provider.submitCode", providerId, code }).then((response) => {
+      authCodeSubmit.disabled = false;
+      if (!response.ok) {
+        authFlows.set(providerId, { phase: "failed", detail: response.error.message });
+      } else if (response.payload.type === "provider.submitCode" && !response.payload.accepted) {
+        authFlows.set(providerId, { phase: "failed", detail: "No sign-in is waiting for a code. Click Connect to start again." });
+      } else {
+        authFlows.set(providerId, { phase: "verifying" });
+      }
+      renderAuthBanner();
+    });
+  };
+  authCodeSubmit.addEventListener("click", submitAuthCode);
+  authCodeInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submitAuthCode();
+  });
+  const submitAuthKey = (): void => {
+    const providerId = normalizeProviderId(providerSelect.value);
+    const apiKey = authKeyInput.value.trim();
+    if (apiKey.length === 0) return;
+    // Write-only: clear the field before the request even resolves.
+    authKeyInput.value = "";
+    authKeySubmit.disabled = true;
+    void request({ type: "provider.submitApiKey", providerId, apiKey }).then((response) => {
+      authKeySubmit.disabled = false;
+      if (!response.ok) {
+        authFlows.set(providerId, { phase: "failed", detail: response.error.message });
+      } else if (response.payload.type === "provider.submitApiKey") {
+        if (response.payload.authStatus === "authenticated") {
+          authFlows.delete(providerId);
+          logChat(`${providerLabel(providerId)} connected`);
+        } else {
+          authFlows.set(providerId, { phase: "failed", detail: response.payload.message ?? "The key was stored but not confirmed yet." });
+        }
+      }
+      renderAuthBanner();
+    });
+  };
+  authKeySubmit.addEventListener("click", submitAuthKey);
+  authKeyInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submitAuthKey();
   });
 
   // --- transcript -------------------------------------------------------------
@@ -920,6 +1002,16 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     state.providerCatalogs = [...payload.providerCatalogs];
     renderProviderControls();
     ctx.persist();
+  });
+  onPush("provider.authProgress", (payload) => {
+    const providerId = normalizeProviderId(payload.providerId);
+    if (payload.phase === "connected") {
+      authFlows.delete(providerId);
+      logChat(`${providerLabel(providerId)} connected`);
+    } else {
+      authFlows.set(providerId, { phase: payload.phase, ...(payload.detail === undefined ? {} : { detail: payload.detail }) });
+    }
+    renderAuthBanner();
   });
   onPush("chat.startProgress", (payload) => {
     if (starting || pendingSessionStart) setBusyLine(payload.message);
@@ -2430,13 +2522,48 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const catalog = state.providerCatalogs.find((c) => normalizeProviderId(c.providerId) === selected);
     if (catalog === undefined || catalog.authStatus !== "needs-login") {
       authBanner.classList.add("hidden");
+      authFlows.delete(selected);
       return;
     }
-    const interactiveLoginAvailable = state.workspacePolicy?.security?.managed === false && Boolean(catalog.loginHint);
-    authBannerText.textContent = interactiveLoginAvailable
-      ? `${catalog.displayName} is not signed in for the sandbox. Log in to start chats (runs: ${catalog.loginHint}).`
-      : `${catalog.displayName} access is not provisioned on this workstation. Ask your administrator, then recheck.`;
+    const managed = state.workspacePolicy?.security?.managed !== false;
+    const flow = authFlows.get(selected);
+    const apiKeyProvider = catalog.authKind === "api-key";
+    const interactiveLoginAvailable = !managed && !apiKeyProvider;
+    if (managed) {
+      authBannerText.textContent = `${catalog.displayName} access is not provisioned on this workstation. Ask your administrator, then recheck.`;
+    } else if (apiKeyProvider) {
+      authBannerText.textContent = `${catalog.displayName} needs an API key to start chats.`;
+    } else {
+      authBannerText.textContent = `${catalog.displayName} is not signed in for the sandbox. Connect to sign in (your browser will open).`;
+    }
     loginButton.classList.toggle("hidden", !interactiveLoginAvailable);
+    // API key entry row (write-only field + "get a key" link).
+    const showKeyRow = !managed && apiKeyProvider;
+    authKeyRow.classList.toggle("hidden", !showKeyRow);
+    if (showKeyRow && catalog.keyUrl !== undefined) {
+      authKeyLink.href = catalog.keyUrl;
+      authKeyLink.classList.remove("hidden");
+    } else {
+      authKeyLink.classList.add("hidden");
+    }
+    // Guided-flow progress + paste-back code row.
+    authCodeRow.classList.toggle("hidden", flow?.phase !== "awaiting-code");
+    if (flow === undefined || managed) {
+      authProgressLine.classList.add("hidden");
+      authProgressLine.textContent = "";
+    } else {
+      const phaseText: Record<string, string> = {
+        launched: "Starting sign-in…",
+        terminal: "Waiting for the terminal sign-in to finish (auto-detected)…",
+        "browser-opened": "Waiting for you to finish signing in in the browser…",
+        "awaiting-code": "Paste the code from your browser below.",
+        verifying: "Verifying…",
+        failed: "Sign-in failed."
+      };
+      authProgressLine.textContent = `${phaseText[flow.phase] ?? flow.phase}${flow.detail === undefined ? "" : ` ${flow.detail}`}`;
+      authProgressLine.classList.toggle("auth-progress-error", flow.phase === "failed");
+      authProgressLine.classList.remove("hidden");
+    }
     authBanner.classList.remove("hidden");
   }
 
@@ -2740,13 +2867,16 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       const providerId = authProviderId ?? selectedProviderId();
       void request({ type: "provider.login", providerId }).then((response) => {
         if (!response.ok) {
-          logChat(`login failed to launch: ${response.error.message}`);
+          logChat(`sign-in failed to launch: ${response.error.message}`);
           return;
         }
+        if (response.payload.type !== "provider.login") return;
         appendSystemMessage(
-          normalizeProviderId(providerId) === "claude"
-            ? "Opened a terminal running Claude in a sandbox. Type /login there to sign in (a browser opens), then close the terminal and click Retry."
-            : `Opened a terminal to sign ${providerLabel(providerId)} in for the sandbox. Complete the OAuth flow, then click Retry or send again.`
+          response.payload.mode === "guided"
+            ? `Signing ${providerLabel(providerId)} in: your browser will open. Drydock detects completion automatically; then click Retry or send again.`
+            : normalizeProviderId(providerId) === "claude"
+              ? "Opened a terminal running Claude in a sandbox. Type /login there to sign in (a browser opens); Drydock detects completion automatically, then click Retry."
+              : `Opened a terminal to sign ${providerLabel(providerId)} in for the sandbox. Complete the OAuth flow; Drydock detects completion automatically.`
         );
       });
     },

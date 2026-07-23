@@ -448,6 +448,13 @@ Auth rules:
 - If auth is missing inside a runtime, the agent session pauses and emits `AUTH_REQUIRED`; it must not fall back to host execution.
 - Suggested secret refs include `sbx:service/openai`, `sbx:service/anthropic`, and `vscode-secret:<provider>`.
 
+Implemented surfaces (see `docs/design/provider-signin-and-registry.md`):
+
+- The provider registry (`@drydock/contracts` `PROVIDER_REGISTRY`) describes every provider: which agent CLI it rides, its connect spec (guided OAuth and/or API key), wire config, scoped egress, and seed model catalog. Ridden providers reuse the existing transports; adding a provider never adds policy.
+- `ProviderConnectService` runs guided sign-in on the HOST (auth handshakes are user setup, not agent work): it spawns the login process with piped stdio, opens the scraped URL in the browser, relays an optional paste-back code from the webview, pipes captured tokens/API keys into `sbx secret set -g <service>` stdin (or VS Code SecretStorage for providers without a sandbox service), and re-probes auth status on completion.
+- `ChatSessionService.prepareRuntime` replays provider wiring into every fresh runtime generation: codex riders get `$HOME/.codex/config.toml` (sentinel env key; the sandbox proxy injects the real value), claude riders get a runtime-scoped token file under `/tmp` (mode 0600) resolved from `vscode-secret:<provider>` at boot.
+- Webview messages: `provider.list {force?}` (force always re-probes auth; only catalog fetches are TTL-throttled), `provider.login` (responds `mode: "guided" | "terminal"`; terminal logins are auto-detected via polling + terminal-close), `provider.submitCode`, `provider.submitApiKey` (both write-only, bounded by `MAX_SECRET_INPUT_LENGTH`, never echoed), `provider.cancelLogin`, and the `provider.authProgress` push (`launched | browser-opened | awaiting-code | verifying | connected | failed`, details scrubbed against token shapes).
+
 ## Session Diff Service
 
 `SessionDiffService` tracks per-session file changes independent of Git.

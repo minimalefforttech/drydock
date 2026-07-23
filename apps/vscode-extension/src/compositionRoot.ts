@@ -14,7 +14,7 @@ import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ClaudeAdapter, CodexAdapter, CodexAppServerTransport } from "@drydock/agent-adapters";
-import { asId, type AgentAdapter } from "@drydock/contracts";
+import { asId, PROVIDER_REGISTRY, PROVIDER_TOKEN_FILE, providerDefaultModel, type AgentAdapter, type AgentModelCatalog, type ProviderDescriptor } from "@drydock/contracts";
 import { ContentAddressedBlobStore, TempWorkspaceStore } from "@drydock/artifacts";
 import type { ChatSessionStore, EventStore, RuntimeInventoryStore, SecurityEventInput, SecurityEventStore } from "@drydock/contracts";
 import {
@@ -42,6 +42,7 @@ import {
 } from "@drydock/core";
 import {
   discoverDockerSandboxCommand,
+  discoverStandaloneClaudeCommand,
   discoverStandaloneCodexCommand,
   DockerSandboxRuntimeAdapter
 } from "@drydock/runtime-adapters";
@@ -75,7 +76,8 @@ import {
 } from "@drydock/storage-sqlite";
 import { BoardService, ChangesetService, importServersFromConfigJson, McpRegistryService, MemoryService, ProjectCatalogService, RecipeService, SubtaskOrchestrator, SubtaskService, TaskService, WorkspaceSetService } from "@drydock/work-management";
 import { PlannerAppService } from "./services/plannerAppService.js";
-import { IsolatedRunService } from "./services/isolatedRunService.js";
+import { IsolatedRunService, type ProviderSecretRefStore } from "./services/isolatedRunService.js";
+import { createProviderRuntimePreparer } from "./services/providerWire.js";
 import { createSubtaskRunBridge } from "./services/subtaskRunBridge.js";
 import type { EffectiveSecurityPolicy } from "./services/securityPolicy.js";
 import { TaskReviewAppService } from "./services/taskReviewAppService.js";
@@ -112,6 +114,12 @@ export interface BackendReady {
   /** Session + inventory reconciliation, run once after activation. */
   readonly reconcileOnActivate: () => Promise<void>;
   readonly sbxDisplayPath: string;
+  /** Host Claude CLI, when present; powers the guided sign-in flow only. */
+  readonly hostClaudePath?: string;
+  /** Private environment for Drydock-owned child processes (login flows). */
+  readonly runtimeEnvironment: NodeJS.ProcessEnv;
+  /** Platform secret store backing `vscode-secret:<provider>` refs, when supplied. */
+  readonly providerSecrets?: ProviderSecretRefStore;
   readonly stateRootPath: string;
   dispose(): void;
 }
@@ -154,6 +162,8 @@ export interface CreateBackendOptions {
   readonly teamInstructions?: string;
   /** Raw drydock.memory.tagRules setting value; merged onto the shipped defaults. */
   readonly memoryTagRules?: unknown;
+  /** Platform secret store (VS Code SecretStorage) for `vscode-secret:<provider>` API keys. */
+  readonly providerSecrets?: ProviderSecretRefStore;
 }
 
 /**
@@ -465,6 +475,9 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   });
   const cleanup = new RuntimeCleanupService({ clock, inventory, runtimeAdapter, logger });
   const hostCodexPath = managed ? null : discoverStandaloneCodexCommand(runtimeEnvironment);
+  // Host Claude CLI powers only the guided sign-in flow (`claude setup-token`
+  // on the host, where the browser works); prompts still never run host-side.
+  const hostClaudePath = managed ? null : discoverStandaloneClaudeCommand(runtimeEnvironment);
   // Debug-only capture of the current turn's raw agent stream, read on demand by
   // the chat tab's raw view. Bounded + last-turn-only, so it scales to many sessions.
   const rawStreamStore = new SessionRawStreamStore(clock);
@@ -488,9 +501,57 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   };
   const agent = new CodexAdapter(hostCodexPath === null ? adapterOptions : { ...adapterOptions, hostCodexPath });
   const claudeAgent = new ClaudeAdapter({ ids, clock, logger, runtimeExecutor: runtimeAdapter, rawSink: rawStreamStore });
+  // Ridden providers (OpenRouter, DeepSeek, Kimi, ...) reuse the two native
+  // adapters, parameterized from the registry: codex rides get their key env
+  // sentinel prefixed into the app-server spawn (the sandbox proxy injects the
+  // real value); claude rides get the Anthropic-compatible wire config with a
+  // runtime-scoped token file.
+  const riderCatalog = (descriptor: ProviderDescriptor): AgentModelCatalog => ({
+    providerId: descriptor.providerId,
+    displayName: descriptor.displayName,
+    models: [...descriptor.models],
+    refreshedAt: clock.isoNow(),
+    source: "fallback",
+    diagnostics: [descriptor.catalogDiagnostic ?? "Static registry catalog."]
+  });
+  const riderAdapters: AgentAdapter[] = PROVIDER_REGISTRY
+    .filter((descriptor) => descriptor.wire !== undefined)
+    .map((descriptor) => {
+      if (descriptor.wire?.kind === "openai-compat" && descriptor.wire.envKey !== undefined) {
+        const envKey = descriptor.wire.envKey;
+        return new CodexAdapter({
+          ...adapterOptions,
+          providerId: descriptor.providerId,
+          staticCatalog: riderCatalog(descriptor),
+          appServer: {
+            ...adapterOptions.appServer,
+            argsForRuntime: (handle: { readonly externalName: string }) =>
+              ["exec", handle.externalName, "env", `${envKey}=proxy-managed`]
+          }
+        });
+      }
+      return new ClaudeAdapter({
+        ids,
+        clock,
+        logger,
+        runtimeExecutor: runtimeAdapter,
+        rawSink: rawStreamStore,
+        providerId: descriptor.providerId,
+        catalog: riderCatalog(descriptor),
+        wire: {
+          baseUrl: descriptor.wire?.baseUrl ?? "",
+          tokenFile: PROVIDER_TOKEN_FILE,
+          ...(descriptor.wire?.smallFastModel === undefined ? {} : { smallFastModel: descriptor.wire.smallFastModel }),
+          ...(providerDefaultModel(descriptor.providerId) === undefined
+            ? {}
+            : { defaultModel: providerDefaultModel(descriptor.providerId) as string })
+        }
+      });
+    });
   const agentAdapters: ReadonlyMap<string, AgentAdapter> = new Map<string, AgentAdapter>([
     [agent.providerId, agent],
-    [claudeAgent.providerId, claudeAgent]
+    [claudeAgent.providerId, claudeAgent],
+    ...riderAdapters.map((adapter): [string, AgentAdapter] => [adapter.providerId, adapter])
   ]);
   const workflow = new IsolatedRunWorkflow({
     ids,
@@ -518,6 +579,13 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     inventory,
     bus,
     hostInstanceId,
+    // Ridden providers write their CLI config / runtime-scoped token into
+    // every fresh runtime generation; native providers are a no-op.
+    prepareRuntime: createProviderRuntimePreparer({
+      runtimeExecutor: runtimeAdapter,
+      ...(options.providerSecrets === undefined ? {} : { providerSecrets: options.providerSecrets }),
+      logger
+    }),
     ...(options.securityPolicy === undefined
       ? {}
       : { validateTurn: () => options.securityPolicy?.assertNetworkedAiAllowed() }),
@@ -598,7 +666,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     sbxPath,
     commandRunner,
     environment: runtimeEnvironment,
-    ...(hostCodexPath === null ? {} : { hostCodexPath })
+    ...(hostCodexPath === null ? {} : { hostCodexPath }),
+    ...(options.providerSecrets === undefined ? {} : { providerSecrets: options.providerSecrets })
   });
 
   // Workspace policy and diff review.
@@ -1048,6 +1117,9 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     rawStreamStore,
     reconcileOnActivate,
     sbxDisplayPath: sbxPath,
+    ...(hostClaudePath === null ? {} : { hostClaudePath }),
+    runtimeEnvironment,
+    ...(options.providerSecrets === undefined ? {} : { providerSecrets: options.providerSecrets }),
     stateRootPath,
     dispose: () => {
       // Drop the orchestrator's bus subscription and stop the heartbeat before

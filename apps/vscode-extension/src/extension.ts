@@ -169,7 +169,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ...(mcpConfigJson === undefined ? {} : { mcpConfigJson }),
     ...(teamInstructions === undefined ? {} : { teamInstructions }),
     // Glob→tag rules extending the shipped defaults (memory tag selection).
-    memoryTagRules: vscode.workspace.getConfiguration("drydock").get("memory.tagRules", [])
+    memoryTagRules: vscode.workspace.getConfiguration("drydock").get("memory.tagRules", []),
+    // `vscode-secret:<provider>` API keys live in the platform secret store
+    // (OS keychain via VS Code SecretStorage); values never reach the webview,
+    // logs, or the sqlite stores.
+    providerSecrets: {
+      has: async (providerId) => (await context.secrets.get(`drydock.providerKey.${providerId}`)) !== undefined,
+      get: async (providerId) => context.secrets.get(`drydock.providerKey.${providerId}`),
+      set: async (providerId, value) => { await context.secrets.store(`drydock.providerKey.${providerId}`, value); },
+      delete: async (providerId) => { await context.secrets.delete(`drydock.providerKey.${providerId}`); }
+    }
   });
   context.subscriptions.push(new vscode.Disposable(() => backend.dispose()));
   await writeStorePointer(context, stateRootPath);

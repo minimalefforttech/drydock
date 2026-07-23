@@ -1,8 +1,8 @@
 {
   "name": "drydock",
   "displayName": "Drydock",
-  "description": "Drydock \u2014 the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
-  "version": "0.12.4",
+  "description": "Drydock — the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
+  "version": "0.12.5",
   "license": "MIT",
   "publisher": "local",
   "private": true,
@@ -235,7 +235,11 @@
         },
         "drydock.ui.cardDetail": {
           "type": "string",
-          "enum": ["minimal", "standard", "full"],
+          "enum": [
+            "minimal",
+            "standard",
+            "full"
+          ],
           "default": "minimal",
           "markdownDescription": "Default detail level for cards on the Task Board and Agents panels. `minimal` shows one state chip per card and moves the rest into the hover card; each panel's toolbar **Detail** control overrides this per panel. Applies when a panel opens."
         },
@@ -265,10 +269,22 @@
           "default": [],
           "items": {
             "type": "object",
-            "required": ["globs", "tag"],
+            "required": [
+              "globs",
+              "tag"
+            ],
             "properties": {
-              "globs": { "type": "array", "items": { "type": "string" }, "description": "Basename globs, e.g. \"package.py\" or \"*.usd\"." },
-              "tag": { "type": "string", "description": "Tag applied when any glob matches, e.g. \"rez\"." }
+              "globs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Basename globs, e.g. \"package.py\" or \"*.usd\"."
+              },
+              "tag": {
+                "type": "string",
+                "description": "Tag applied when any glob matches, e.g. \"rez\"."
+              }
             }
           },
           "markdownDescription": "Extra glob→tag rules EXTENDING the built-in table (`package.py`→rez, `pyproject.toml`→pip, `*.py`→python, `*.h`/`*.hh`→cpp, `*.ma`→maya, …). Tags are detected per mounted root at mount time (fast top-level scan) and select which tagged team memories a session briefing carries. Example: `[{ \"globs\": [\"*.usd\", \"*.usda\"], \"tag\": \"usd\" }]`."
@@ -286,10 +302,19 @@
           "items": {
             "type": "object",
             "properties": {
-              "name": { "type": "string", "description": "Theme file stem (a-z0-9-); lands as /workspace/.drydock-themes/<name>.css" },
-              "cssPath": { "type": "string", "description": "Absolute host path of the CSS file." }
+              "name": {
+                "type": "string",
+                "description": "Theme file stem (a-z0-9-); lands as /workspace/.drydock-themes/<name>.css"
+              },
+              "cssPath": {
+                "type": "string",
+                "description": "Absolute host path of the CSS file."
+              }
             },
-            "required": ["name", "cssPath"]
+            "required": [
+              "name",
+              "cssPath"
+            ]
           },
           "markdownDescription": "Extra prototype theme stylesheets pushed into agent sandboxes alongside the built-ins (`qt-dark`, `slate-dark`, `vscode-dark`, `clean-light`). Agents link them from web prototypes to match a target application's look (ADR 0017)."
         }

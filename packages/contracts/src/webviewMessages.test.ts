@@ -174,6 +174,30 @@ test("provider.login validates its provider id", () => {
   assert.equal(parsePanelRequest(wrap({ type: "provider.login" })), null);
 });
 
+test("provider.list accepts an optional boolean force flag only", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "provider.list" })));
+  const forced = parsePanelRequest(wrap({ type: "provider.list", force: true }));
+  assert.ok(forced);
+  assert.equal(forced.payload.type === "provider.list" ? forced.payload.force : undefined, true);
+  assert.equal(parsePanelRequest(wrap({ type: "provider.list", force: "yes" })), null);
+});
+
+test("provider secret inputs are bounded, required, and typed", () => {
+  const code = parsePanelRequest(wrap({ type: "provider.submitCode", providerId: "claude", code: "ac_123#state" }));
+  assert.ok(code);
+  assert.equal(code.payload.type === "provider.submitCode" ? code.payload.code : undefined, "ac_123#state");
+  assert.equal(parsePanelRequest(wrap({ type: "provider.submitCode", providerId: "claude", code: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "provider.submitCode", providerId: "claude" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "provider.submitCode", providerId: "claude", code: "x".repeat(5_000) })), null);
+
+  assert.ok(parsePanelRequest(wrap({ type: "provider.submitApiKey", providerId: "openrouter", apiKey: "or-key" })));
+  assert.equal(parsePanelRequest(wrap({ type: "provider.submitApiKey", providerId: "openrouter", apiKey: 42 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "provider.submitApiKey", apiKey: "or-key" })), null);
+
+  assert.ok(parsePanelRequest(wrap({ type: "provider.cancelLogin", providerId: "codex" })));
+  assert.equal(parsePanelRequest(wrap({ type: "provider.cancelLogin" })), null);
+});
+
 test("clipboard.writeText validates bounded text", () => {
   const parsed = parsePanelRequest(wrap({ type: "clipboard.writeText", text: "copy me" }));
   assert.ok(parsed);

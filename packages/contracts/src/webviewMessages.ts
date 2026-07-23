@@ -40,6 +40,13 @@ export const MAX_PROMPT_LENGTH = 20_000;
 export const MAX_CLIPBOARD_LENGTH = 200_000;
 export const MAX_ID_LENGTH = 200;
 export const MAX_MODEL_ID_LENGTH = 120;
+/**
+ * Upper bound for write-only secret material crossing the webview boundary
+ * (API keys, OAuth paste-back codes). Values are handed straight to the
+ * platform secret store or the provider CLI's stdin and are never echoed back,
+ * logged, or persisted by Drydock.
+ */
+export const MAX_SECRET_INPUT_LENGTH = 4_096;
 export const MAX_PATH_LENGTH = 1_024;
 export const MAX_COMMENT_LENGTH = 4_000;
 export const MAX_NAME_LENGTH = 200;
@@ -101,8 +108,13 @@ export type PanelRequestPayload =
   | { readonly type: "question.answer"; readonly questionId: string; readonly answer: string }
   | { readonly type: "question.dismiss"; readonly questionId: string }
   | { readonly type: "clipboard.writeText"; readonly text: string }
-  | { readonly type: "provider.list" }
+  | { readonly type: "provider.list"; readonly force?: boolean }
   | { readonly type: "provider.login"; readonly providerId: string }
+  /** Write-only OAuth paste-back code for an in-flight guided login. */
+  | { readonly type: "provider.submitCode"; readonly providerId: string; readonly code: string }
+  /** Write-only API key; stored via sbx secret ledger or VS Code SecretStorage, never echoed. */
+  | { readonly type: "provider.submitApiKey"; readonly providerId: string; readonly apiKey: string }
+  | { readonly type: "provider.cancelLogin"; readonly providerId: string }
   | { readonly type: "session.list" }
   | { readonly type: "session.timeline"; readonly sessionId: string; readonly fromSequence?: number }
   | { readonly type: "session.rename"; readonly sessionId: string; readonly title: string }
@@ -971,7 +983,15 @@ export type PanelResponsePayload =
   | { readonly type: "question.answer"; readonly question: AgentQuestionSummary; readonly dispatched: boolean }
   | { readonly type: "question.dismiss"; readonly question: AgentQuestionSummary }
   | { readonly type: "provider.list"; readonly providerCatalogs: readonly AgentModelCatalog[] }
-  | { readonly type: "provider.login"; readonly providerId: string; readonly launched: string }
+  /**
+   * `guided` means Drydock drives the sign-in itself (progress arrives as
+   * `provider.authProgress` pushes); `terminal` means a visible terminal was
+   * opened and completion is auto-detected by polling the auth probe.
+   */
+  | { readonly type: "provider.login"; readonly providerId: string; readonly launched: string; readonly mode: "guided" | "terminal" }
+  | { readonly type: "provider.submitCode"; readonly providerId: string; readonly accepted: boolean }
+  | { readonly type: "provider.submitApiKey"; readonly providerId: string; readonly authStatus: string; readonly message?: string }
+  | { readonly type: "provider.cancelLogin"; readonly providerId: string; readonly cancelled: boolean }
   | { readonly type: "session.list"; readonly sessions: readonly ChatSessionSummary[] }
   | { readonly type: "session.timeline"; readonly sessionId: string; readonly lines: readonly SequencedTranscriptLine[] }
   | { readonly type: "session.rename"; readonly session: ChatSessionSummary }
@@ -1111,6 +1131,16 @@ export type PanelPushPayload =
   | { readonly type: "chat.event"; readonly sessionId: string; readonly line: SequencedTranscriptLine }
   | { readonly type: "chat.turnCompleted"; readonly sessionId: string; readonly runId: string; readonly status: string }
   | { readonly type: "provider.models"; readonly providerCatalogs: readonly AgentModelCatalog[] }
+  /**
+   * Progress of a guided provider sign-in. `detail` is display-safe (a sign-in
+   * URL or a short status line); secret material never rides this event.
+   */
+  | {
+      readonly type: "provider.authProgress";
+      readonly providerId: string;
+      readonly phase: "launched" | "browser-opened" | "awaiting-code" | "verifying" | "connected" | "failed";
+      readonly detail?: string;
+    }
   | { readonly type: "session.updated"; readonly session: ChatSessionSummary }
   | { readonly type: "session.deleted"; readonly sessionId: string }
   | { readonly type: "session.attention"; readonly sessionId: string; readonly reasons: readonly SessionAttentionReason[] }
@@ -1184,7 +1214,6 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
     case "panel.init":
     case "isolatedRun.probeAppServer":
     case "runtime.sbxLogin":
-    case "provider.list":
     case "session.list":
     case "task.list":
     case "workspace.state":
@@ -1846,10 +1875,34 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       if (!isBoundedString(projectPath, MAX_PATH_LENGTH)) return null;
       return { type: "workspace.updateProjectPath", projectId, path: projectPath };
     }
+    case "provider.list": {
+      const force = payload["force"];
+      if (force !== undefined && typeof force !== "boolean") return null;
+      return { type: "provider.list", ...(force === undefined ? {} : { force }) };
+    }
     case "provider.login": {
       const providerId = payload["providerId"];
       if (!isBoundedString(providerId, MAX_MODEL_ID_LENGTH)) return null;
       return { type: "provider.login", providerId };
+    }
+    case "provider.submitCode": {
+      const providerId = payload["providerId"];
+      const code = payload["code"];
+      if (!isBoundedString(providerId, MAX_MODEL_ID_LENGTH)) return null;
+      if (!isBoundedString(code, MAX_SECRET_INPUT_LENGTH)) return null;
+      return { type: "provider.submitCode", providerId, code };
+    }
+    case "provider.submitApiKey": {
+      const providerId = payload["providerId"];
+      const apiKey = payload["apiKey"];
+      if (!isBoundedString(providerId, MAX_MODEL_ID_LENGTH)) return null;
+      if (!isBoundedString(apiKey, MAX_SECRET_INPUT_LENGTH)) return null;
+      return { type: "provider.submitApiKey", providerId, apiKey };
+    }
+    case "provider.cancelLogin": {
+      const providerId = payload["providerId"];
+      if (!isBoundedString(providerId, MAX_MODEL_ID_LENGTH)) return null;
+      return { type: "provider.cancelLogin", providerId };
     }
     case "policy.requestAccess": {
       const sessionId = payload["sessionId"];

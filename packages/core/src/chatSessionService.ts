@@ -34,6 +34,7 @@ import type {
   TurnResult,
   TurnTerminalStatus
 } from "@drydock/contracts";
+import { providerDescriptor, providerEgressResources } from "@drydock/contracts";
 import type { Clock } from "./clock.js";
 import type { IdGenerator } from "./ids.js";
 import type { Logger } from "./logger.js";
@@ -49,9 +50,13 @@ function sessionRole(record: ChatSessionRecord): AgentRole {
   return record.spawnedRole ?? "worker";
 }
 
-/** Maps a provider id to a sandbox agent kind (only Claude and Codex ship today). */
+/**
+ * Maps a provider id to the sandbox agent image that hosts it. Registered
+ * riders (OpenRouter, DeepSeek, Kimi, ...) run inside the image of the CLI
+ * they ride; unknown ids keep the historical codex default.
+ */
 function toSandboxProvider(providerId: string): SandboxProvider {
-  return providerId === "claude" ? "claude" : "codex";
+  return providerDescriptor(providerId)?.ride ?? (providerId === "claude" ? "claude" : "codex");
 }
 
 export interface StartChatSessionRequest {
@@ -162,6 +167,14 @@ export interface ChatSessionServiceOptions {
   readonly heartbeatStaleMs?: number;
   /** Final authorization immediately before any prompt-bearing adapter call. */
   readonly validateTurn?: () => void | Promise<void>;
+  /**
+   * Provider wiring hook, run on EVERY boot (start/resume/restart/reclaim)
+   * between runtime creation and protocol start. Ridden providers use it to
+   * write their CLI config and runtime-scoped token into the fresh sandbox
+   * generation over the exec side-channel. A throw fails the boot, so a
+   * missing provider key surfaces immediately instead of as a mid-turn 401.
+   */
+  readonly prepareRuntime?: (runtime: RuntimeHandle, model: ChatModelSelection) => Promise<void>;
   /**
    * Optional final authorization for reattaching to a surviving runtime.
    * Throwing refuses adoption before an agent protocol is attached and ends
@@ -366,6 +379,7 @@ export class ChatSessionService {
         ...(boot.workspaceOwnerToken === undefined ? {} : { workspaceOwnerToken: boot.workspaceOwnerToken })
       });
       await this.options.validateTurn?.();
+      await this.options.prepareRuntime?.(runtime, boot.model);
       connection = await adapter.startProtocol({
         sessionId,
         agentId,
@@ -648,7 +662,7 @@ export class ChatSessionService {
     // Claude image, where `codex app-server` never answers initialize.
     const nextTemplate = model.providerId === live.model.providerId
       ? live.template
-      : withSandboxProvider(live.template, toSandboxProvider(model.providerId));
+      : withSandboxProvider(live.template, toSandboxProvider(model.providerId), providerEgressResources(model.providerId));
 
     try {
       await live.adapter.stop(live.connection, reason);

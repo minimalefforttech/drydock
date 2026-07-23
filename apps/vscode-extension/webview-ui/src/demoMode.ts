@@ -239,6 +239,14 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     }
     case "provider.list":
       return ok(requestId, { type: "provider.list", providerCatalogs: fixtures.catalogs });
+    case "provider.login":
+      return ok(requestId, { type: "provider.login", providerId: payload.providerId, launched: "demo sign-in", mode: "terminal" });
+    case "provider.submitCode":
+      return ok(requestId, { type: "provider.submitCode", providerId: payload.providerId, accepted: true });
+    case "provider.submitApiKey":
+      return ok(requestId, { type: "provider.submitApiKey", providerId: payload.providerId, authStatus: "authenticated" });
+    case "provider.cancelLogin":
+      return ok(requestId, { type: "provider.cancelLogin", providerId: payload.providerId, cancelled: false });
     case "task.list":
       return ok(requestId, { type: "task.list", tasks: fixtures.tasks });
     case "task.create": {
@@ -481,7 +489,6 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     case "mcp.save":
     case "mcp.delete":
     case "chat.contextDebug":
-    case "provider.login":
     case "runtime.sbxLogin":
     case "runtime.openTerminal":
     case "runtime.reconcile":

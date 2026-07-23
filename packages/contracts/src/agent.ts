@@ -68,6 +68,10 @@ export interface AgentModelCatalog {
   readonly authStatus?: ProviderAuthStatus;
   /** Display-safe command the user can run to sign the provider in. */
   readonly loginHint?: string;
+  /** How the connect card signs this provider in: a guided OAuth flow or an API key field. */
+  readonly authKind?: "oauth" | "api-key";
+  /** Where the user creates an API key (rendered as a link; api-key providers only). */
+  readonly keyUrl?: string;
 }
 
 export interface AgentContextMessage {

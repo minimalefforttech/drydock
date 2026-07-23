@@ -8,12 +8,12 @@
  * kind follows the selected provider.
  */
 
-import type { RuntimeTemplate, SessionMode } from "@drydock/contracts";
+import { CLAUDE_EGRESS, CODEX_EGRESS, type RuntimeTemplate, type SessionMode } from "@drydock/contracts";
 import type { IdGenerator } from "./ids.js";
 import { buildMountPolicy } from "./mountPolicy.js";
 
-export const CODEX_SERVICE_NETWORK_RESOURCES = "chatgpt.com:443,ab.chatgpt.com:443,files.openai.com:443,api.openai.com:443";
-export const CLAUDE_SERVICE_NETWORK_RESOURCES = "api.anthropic.com:443,claude.ai:443,console.anthropic.com:443,statsig.anthropic.com:443,sentry.io:443";
+export const CODEX_SERVICE_NETWORK_RESOURCES = CODEX_EGRESS.join(",");
+export const CLAUDE_SERVICE_NETWORK_RESOURCES = CLAUDE_EGRESS.join(",");
 
 export type SandboxProvider = "codex" | "claude";
 
@@ -29,8 +29,12 @@ const PROVIDER_NETWORK_RESOURCES: Readonly<Record<SandboxProvider, string>> = {
  * when a live session switches provider: the new agent must run in ITS OWN
  * sandbox (e.g. Codex can't run inside the Claude image), so reusing the old
  * template is what left `codex app-server` hanging on initialize.
+ *
+ * `networkResources` overrides the image default for ridden providers (e.g.
+ * DeepSeek rides the Claude image but must egress to api.deepseek.com, not
+ * Anthropic).
  */
-export function withSandboxProvider(template: RuntimeTemplate, provider: SandboxProvider): RuntimeTemplate {
+export function withSandboxProvider(template: RuntimeTemplate, provider: SandboxProvider, networkResources?: string): RuntimeTemplate {
   return {
     ...template,
     id: `isolated-run-docker-sandbox-${provider}`,
@@ -39,7 +43,7 @@ export function withSandboxProvider(template: RuntimeTemplate, provider: Sandbox
     advancedOptions: {
       ...template.advancedOptions,
       sandboxAgent: provider,
-      networkResources: PROVIDER_NETWORK_RESOURCES[provider]
+      networkResources: networkResources ?? PROVIDER_NETWORK_RESOURCES[provider]
     }
   };
 }
@@ -50,6 +54,8 @@ export function buildIsolatedRunTemplate(input: {
   readonly approvedAt: string;
   /** Sandbox agent provider; defaults to codex. */
   readonly provider?: SandboxProvider;
+  /** Scoped egress override for ridden providers (defaults to the image's own service list). */
+  readonly networkResources?: string;
   /** Real project roots mounted alongside the disposable workspace. */
   readonly projectRoots?: readonly string[];
   /** Subset of projectRoots that must mount read-only even in implementation mode. */
@@ -92,7 +98,7 @@ export function buildIsolatedRunTemplate(input: {
     adapterProviderIds: [provider],
     advancedOptions: {
       sandboxAgent: provider,
-      networkResources: PROVIDER_NETWORK_RESOURCES[provider]
+      networkResources: input.networkResources ?? PROVIDER_NETWORK_RESOURCES[provider]
     }
   };
 }

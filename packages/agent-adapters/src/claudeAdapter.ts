@@ -34,6 +34,21 @@ export interface CancellableRuntimeExecutor {
   exec(handle: RuntimeHandle, args: readonly string[], timeoutMs: number, input?: string, signal?: AbortSignal): Promise<CommandResult>;
 }
 
+/**
+ * Wiring for a ridden provider (DeepSeek, Kimi, ...): the same Claude Code
+ * CLI, pointed at an Anthropic-compatible endpoint. The auth token is read
+ * inside the sandbox from `tokenFile` (written runtime-scoped by the host over
+ * the exec side-channel); it never appears in argv.
+ */
+export interface ClaudeWireConfig {
+  readonly baseUrl: string;
+  readonly tokenFile: string;
+  /** Background/fast-model slot override so the rider endpoint never sees Anthropic model ids. */
+  readonly smallFastModel?: string;
+  /** Model used when a turn does not select one (rider endpoints reject Claude defaults). */
+  readonly defaultModel?: string;
+}
+
 export interface ClaudeAdapterOptions {
   readonly ids: IdGenerator;
   readonly clock: Clock;
@@ -42,6 +57,12 @@ export interface ClaudeAdapterOptions {
   readonly timeoutMs?: number;
   /** Optional debug tee of the raw exec stream for the chat tab's raw view. */
   readonly rawSink?: RawStreamSink;
+  /** Rider identity; defaults to the native "claude" provider. */
+  readonly providerId?: string;
+  /** Present only for ridden providers; absent means native Anthropic auth via the sandbox proxy. */
+  readonly wire?: ClaudeWireConfig;
+  /** Static catalog override for ridden providers (listModels returns it verbatim). */
+  readonly catalog?: AgentModelCatalog;
 }
 
 export const CLAUDE_MODEL_CATALOG_MODELS = [
@@ -63,13 +84,14 @@ interface ActiveRun {
 }
 
 export class ClaudeAdapter implements AgentAdapter {
-  readonly providerId: ProviderId = asId<"ProviderId">("claude");
+  readonly providerId: ProviderId;
   private readonly normalizer: ClaudeEventNormalizer;
   private readonly timeoutMs: number;
   private readonly connections = new Map<string, ClaudeConnectionState>();
   private readonly runs = new Map<string, ActiveRun>();
 
   constructor(private readonly options: ClaudeAdapterOptions) {
+    this.providerId = asId<"ProviderId">(options.providerId ?? "claude");
     this.normalizer = new ClaudeEventNormalizer(options.ids, options.clock);
     this.timeoutMs = options.timeoutMs ?? 360_000;
   }
@@ -85,7 +107,11 @@ export class ClaudeAdapter implements AgentAdapter {
     return {
       status: "unknown",
       secretRefs: [],
-      diagnostics: ["Runtime auth is delegated to the Docker Sandbox `anthropic` service secret."]
+      diagnostics: [
+        this.options.wire === undefined
+          ? "Runtime auth is delegated to the Docker Sandbox `anthropic` service secret."
+          : `Runtime auth is a runtime-scoped token injected from vscode-secret:${String(this.providerId)}.`
+      ]
     };
   }
 
@@ -110,7 +136,7 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   async listModels(_connection: AgentConnection): Promise<AgentModelCatalog> {
-    return claudeModelCatalog(this.options.clock.isoNow());
+    return this.options.catalog ?? claudeModelCatalog(this.options.clock.isoNow());
   }
 
   /** Replayed history is delivered as a context preamble on the next prompt. */
@@ -128,8 +154,13 @@ export class ClaudeAdapter implements AgentAdapter {
   async sendPrompt(connection: AgentConnection, prompt: AgentPrompt): Promise<RunId> {
     const state = this.requiredState(connection);
     const runId = this.options.ids.runId();
-    const model = typeof prompt.metadata?.["model"] === "string" ? prompt.metadata["model"] : undefined;
-    const args = [
+    const requested = typeof prompt.metadata?.["model"] === "string" ? prompt.metadata["model"] : undefined;
+    // Ridden endpoints reject Claude's own default model ids, so a rider turn
+    // always pins a model (the turn's choice, else the rider default).
+    const model = requested !== undefined && requested.length > 0
+      ? requested
+      : this.options.wire?.defaultModel;
+    const claudeArgs = [
       "claude",
       "-p",
       "--output-format", "stream-json",
@@ -138,6 +169,7 @@ export class ClaudeAdapter implements AgentAdapter {
       ...(model === undefined || model.length === 0 ? [] : ["--model", model]),
       ...(state.claudeSessionId === undefined ? [] : ["--resume", state.claudeSessionId])
     ];
+    const args = this.options.wire === undefined ? claudeArgs : wrapWithWire(claudeArgs, this.options.wire);
     const controller = new AbortController();
     const input = this.promptWithContext(state, prompt.text);
     this.options.logger.info("claude exec prompt starting", { runId, runtimeId: connection.runtime.runtimeId });
@@ -278,6 +310,39 @@ export class ClaudeAdapter implements AgentAdapter {
       ...(raw === undefined ? {} : { raw })
     };
   }
+}
+
+/** POSIX single-quote escaping for argv embedded in an `sh -c` command string. */
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Rewrites the claude argv to run behind an Anthropic-compatible rider
+ * endpoint. The token is read from the runtime-scoped token file INSIDE the
+ * sandbox (command substitution), so it never appears in host argv or logs;
+ * base URLs and model ids are not secrets and may. Telemetry is disabled so
+ * the rider's scoped egress does not generate blocked statsig/sentry noise.
+ */
+function wrapWithWire(claudeArgs: readonly string[], wire: ClaudeWireConfig): readonly string[] {
+  const pairs = [
+    `ANTHROPIC_BASE_URL=${wire.baseUrl}`,
+    ...(wire.smallFastModel === undefined
+      ? []
+      : [
+          `ANTHROPIC_SMALL_FAST_MODEL=${wire.smallFastModel}`,
+          `ANTHROPIC_DEFAULT_HAIKU_MODEL=${wire.smallFastModel}`
+        ]),
+    "DISABLE_TELEMETRY=1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+  ];
+  const command = [
+    `ANTHROPIC_AUTH_TOKEN="$(cat ${shQuote(wire.tokenFile)} 2>/dev/null)"`,
+    "exec", "env",
+    ...pairs.map(shQuote),
+    ...claudeArgs.map(shQuote)
+  ].join(" ");
+  return ["sh", "-c", command];
 }
 
 export function claudeModelCatalog(refreshedAt: string): AgentModelCatalog {

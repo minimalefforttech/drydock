@@ -62,6 +62,7 @@ import {
   type ChatWorkspaceContext,
   type IsolatedRunService
 } from "../services/isolatedRunService.js";
+import { ProviderConnectService } from "../services/providerConnectService.js";
 import type { WorkHistoryFilter, WorkInsightsAppService } from "../services/workInsightsAppService.js";
 import { toAccessRequestSummary, type WorkspaceReviewAppService } from "../services/workspaceReviewAppService.js";
 import { openBaselineDiff } from "./baselineDiff.js";
@@ -269,6 +270,10 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   private pendingShowSession: { readonly sessionId: string; readonly nodeId?: string } | null = null;
   /** Planner navigation queued until the sidebar webview has requested its plan list. */
   private pendingShowPlan: { readonly planId?: string } | null = null;
+  /** Guided host-side provider sign-in flows (built lazily; needs vscode.env). */
+  private connectService: ProviderConnectService | null = null;
+  /** Auto-detection for terminal login flows: poll + close listener per provider. */
+  private readonly loginWatchers = new Map<string, () => void>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -747,24 +752,62 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       }
       case "provider.list": {
         const appService = this.requireBackend();
-        const providerCatalogs = await appService.refreshHostProviderCatalogs();
+        // An explicit Recheck (force) always re-probes auth status; only the
+        // model-catalog fetch stays behind the service's TTL.
+        const providerCatalogs = await appService.refreshHostProviderCatalogs(
+          payload.force === true ? { forceAuthProbe: true } : undefined
+        );
         this.respond(request.requestId, { type: "provider.list", providerCatalogs });
         return;
       }
       case "provider.login": {
         const appService = this.requireBackend();
-        // loginCommand enforces the interactive/network policy before it
-        // returns anything that can be launched.
+        // Guided first: Drydock drives the host-side flow itself (URL opens in
+        // the browser, paste-back lands in the connect card, status flips
+        // automatically). Terminal is the fallback, now with auto-detection.
+        const connect = this.requireConnectService(appService);
+        const begun = connect.begin(payload.providerId);
+        if (begun.mode === "guided") {
+          this.respond(request.requestId, { type: "provider.login", providerId: payload.providerId, launched: begun.display, mode: "guided" });
+          return;
+        }
+        // loginCommand re-enforces the interactive/network policy and yields
+        // the spawnable terminal pieces; the flow stays user-driven in a
+        // visible terminal so no credential passes through the extension.
         const login = appService.loginCommand(payload.providerId);
-        // The OAuth flow is interactive and user-driven; it runs in a visible
-        // terminal so no secret ever passes through the extension.
         const terminal = vscode.window.createTerminal({
           name: `${payload.providerId} login`,
           shellPath: login.command,
           shellArgs: [...login.args]
         });
         terminal.show();
-        this.respond(request.requestId, { type: "provider.login", providerId: payload.providerId, launched: login.display });
+        this.watchTerminalLogin(payload.providerId, terminal);
+        this.respond(request.requestId, { type: "provider.login", providerId: payload.providerId, launched: login.display, mode: "terminal" });
+        return;
+      }
+      case "provider.submitCode": {
+        const appService = this.requireBackend();
+        const accepted = this.requireConnectService(appService).submitCode(payload.providerId, payload.code);
+        this.respond(request.requestId, { type: "provider.submitCode", providerId: payload.providerId, accepted });
+        return;
+      }
+      case "provider.submitApiKey": {
+        const appService = this.requireBackend();
+        const authStatus = await this.requireConnectService(appService).submitApiKey(payload.providerId, payload.apiKey);
+        this.push({ type: "provider.models", providerCatalogs: appService.listChatProviderCatalogs() });
+        this.respond(request.requestId, {
+          type: "provider.submitApiKey",
+          providerId: payload.providerId,
+          authStatus,
+          ...(authStatus === "authenticated" ? {} : { message: "The key was stored but the auth probe has not confirmed it yet. Click Recheck." })
+        });
+        return;
+      }
+      case "provider.cancelLogin": {
+        const appService = this.requireBackend();
+        const cancelled = this.requireConnectService(appService).cancel(payload.providerId);
+        this.loginWatchers.get(payload.providerId)?.();
+        this.respond(request.requestId, { type: "provider.cancelLogin", providerId: payload.providerId, cancelled });
         return;
       }
       case "runtime.sbxLogin": {
@@ -2165,6 +2208,73 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       throw new Error(this.backend.reason);
     }
     return this.backend.appService;
+  }
+
+  /** Lazily builds the guided sign-in service against the live backend. */
+  private requireConnectService(appService: IsolatedRunService): ProviderConnectService {
+    if (this.connectService !== null) return this.connectService;
+    if (!this.backend.available) throw new Error("Docker Sandbox is not available in this window.");
+    const backend: BackendReady = this.backend;
+    this.connectService = new ProviderConnectService({
+      logger: this.logger,
+      sbxPath: backend.sbxDisplayPath,
+      ...(backend.hostClaudePath === undefined ? {} : { hostClaudePath: backend.hostClaudePath }),
+      environment: backend.runtimeEnvironment,
+      ...(backend.providerSecrets === undefined ? {} : { providerSecrets: backend.providerSecrets }),
+      assertInteractiveSetupAllowed: (action) => appService.assertInteractiveSetupAllowed(action),
+      openExternal: async (url) => {
+        await vscode.env.openExternal(vscode.Uri.parse(url));
+      },
+      refreshAuthStatus: async (providerId) => {
+        const providerCatalogs = await appService.refreshHostProviderCatalogs({ forceAuthProbe: true });
+        this.push({ type: "provider.models", providerCatalogs });
+        return appService.providerAuthStatus(providerId);
+      },
+      onProgress: (progress) => {
+        this.push({
+          type: "provider.authProgress",
+          providerId: progress.providerId,
+          phase: progress.phase,
+          ...(progress.detail === undefined ? {} : { detail: progress.detail })
+        });
+      }
+    });
+    return this.connectService;
+  }
+
+  /**
+   * Auto-detection for terminal login flows: while the login terminal is open,
+   * the inert auth probe polls every few seconds; closing the terminal forces
+   * a final probe. The banner flips green without the user clicking Recheck.
+   */
+  private watchTerminalLogin(providerId: string, terminal: vscode.Terminal): void {
+    this.loginWatchers.get(providerId)?.();
+    const appService = this.requireBackend();
+    const refresh = async (): Promise<boolean> => {
+      const providerCatalogs = await appService.refreshHostProviderCatalogs({ forceAuthProbe: true });
+      this.push({ type: "provider.models", providerCatalogs });
+      const connected = appService.providerAuthStatus(providerId) === "authenticated";
+      if (connected) this.push({ type: "provider.authProgress", providerId, phase: "connected" });
+      return connected;
+    };
+    const interval = setInterval(() => {
+      void refresh().then((connected) => {
+        if (connected) cleanup();
+      }).catch(() => { /* probe warnings are logged by the service */ });
+    }, 5_000);
+    const closeListener = vscode.window.onDidCloseTerminal((closed) => {
+      if (closed !== terminal) return;
+      void refresh().catch(() => { /* logged by the service */ });
+      cleanup();
+    });
+    const timeout = setTimeout(() => { cleanup(); }, 15 * 60_000);
+    const cleanup = (): void => {
+      clearInterval(interval);
+      clearTimeout(timeout);
+      closeListener.dispose();
+      this.loginWatchers.delete(providerId);
+    };
+    this.loginWatchers.set(providerId, cleanup);
   }
 
   /** The full available-backend value, for the boardShared helpers (which take Backend, not one service at a time). */

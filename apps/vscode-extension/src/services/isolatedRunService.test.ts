@@ -70,6 +70,86 @@ test("provider login uses the network gate and managed mode requires pre-provisi
   });
 });
 
+test("api-key providers have no spawnable login and say so", () => {
+  const unmanaged = serviceWithPolicy(policy({ managed: false, networked: true }));
+  assert.throws(() => unmanaged.loginCommand("openrouter"), /signs in with an API key/);
+  assert.throws(() => unmanaged.loginCommand("deepseek"), /signs in with an API key/);
+});
+
+test("explicit recheck always re-probes auth; only the catalog fetch is TTL-gated", async () => {
+  let secretLsRuns = 0;
+  const options = {
+    securityPolicy: policy({ managed: false, networked: true }),
+    sbxPath: "sbx",
+    logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    environment: {},
+    commandRunner: {
+      run: async (_command: string, args: readonly string[]) => {
+        if (args[0] === "secret") secretLsRuns += 1;
+        return {
+          exitCode: 0,
+          stdout: secretLsRuns > 1 ? "(global)   service   openai   (oauth configured)" : "",
+          stderr: "",
+          timedOut: false
+        };
+      }
+    }
+  } as unknown as IsolatedRunServiceOptions;
+  const service = new IsolatedRunService(options);
+
+  // First call: TTL due, probe runs (no services configured yet).
+  await service.refreshHostProviderCatalogs();
+  assert.equal(secretLsRuns, 1);
+  assert.equal(service.providerAuthStatus("codex"), "needs-login");
+
+  // Within the TTL a plain refresh does NOT re-probe...
+  await service.refreshHostProviderCatalogs();
+  assert.equal(secretLsRuns, 1);
+
+  // ...but a forced recheck does, and picks up the fresh credential at once.
+  await service.refreshHostProviderCatalogs({ forceAuthProbe: true });
+  assert.equal(secretLsRuns, 2);
+  assert.equal(service.providerAuthStatus("codex"), "authenticated");
+});
+
+test("catalogs carry connect metadata: authKind and key URL", async () => {
+  const service = serviceWithPolicy(policy({ managed: false, networked: true }));
+  const catalogs = service.listChatProviderCatalogs();
+  const byId = new Map(catalogs.map((entry) => [entry.providerId, entry]));
+
+  assert.equal(byId.get("codex")?.authKind, "oauth");
+  assert.equal(byId.get("claude")?.authKind, "oauth");
+  const openrouter = byId.get("openrouter");
+  assert.equal(openrouter?.authKind, "api-key");
+  assert.match(openrouter?.keyUrl ?? "", /openrouter\.ai/);
+  assert.match(openrouter?.loginHint ?? "", /API key/);
+  const kimi = byId.get("kimi");
+  assert.equal(kimi?.authKind, "api-key");
+  assert.equal(kimi?.models.some((model) => model.id === "kimi-k2.7-code"), true);
+});
+
+test("vscode-secret providers read auth status from the secret-ref store", async () => {
+  const present = new Set(["deepseek"]);
+  const options = {
+    securityPolicy: policy({ managed: false, networked: true }),
+    logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    providerSecrets: {
+      has: async (providerId: string) => present.has(providerId),
+      get: async () => undefined,
+      set: async () => undefined,
+      delete: async () => undefined
+    }
+  } as unknown as IsolatedRunServiceOptions;
+  const service = new IsolatedRunService(options);
+
+  await service.refreshProviderAuthStatuses();
+
+  assert.equal(service.providerAuthStatus("deepseek"), "authenticated");
+  assert.equal(service.providerAuthStatus("kimi"), "needs-login");
+  // No sbx available in this construction: service-backed providers stay unknown.
+  assert.equal(service.providerAuthStatus("codex"), "unknown");
+});
+
 test("runtime terminals remain available only outside managed mode", () => {
   const managed = serviceWithPolicy(policy({ managed: true, networked: true }));
   assert.throws(() => managed.assertRuntimeTerminalAllowed(), /disabled in managed mode/);
