@@ -54,3 +54,16 @@ answer rails without turning access approval into automation.
   answer remains attributable. No configuration path can apply the same
   behavior to access requests.
 
+
+## Amendment - 2026-07-24 (background lane)
+
+Tasks carry a queue lane (`normal` | `background`). The durable queue is
+band-ordered - manual starts first (unchanged), then normal-lane auto
+starts, then background-lane auto starts - and holds persist their lane so
+restores rebuild the same bands. A second budget,
+`drydock.orchestrator.maxBackgroundRuns` (0 = auto: half the run slots,
+floor 1), caps how many AUTO-origin background runs hold slots at once;
+manual starts are never capped or counted by it - a human clicking start is
+attended work whatever the lane. No preemption: lanes reorder waiting work
+only. Lanes never change access, autonomy consent (FAQ double-opt-in), or
+the retry-once-then-park policy.

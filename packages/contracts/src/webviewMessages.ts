@@ -30,7 +30,7 @@ import {
   type PlannerStateDetail,
   type PlanSummary
 } from "./planner.js";
-import { COLUMN_CATEGORIES, WORK_TASK_STATES, type ColumnCategory, type SubtaskModelSelection, type SubtaskSeedMode, type TaskClonePolicy, type TaskFaqRecord, type TaskRecipeRecord, type WorkTaskState } from "./tasks.js";
+import { COLUMN_CATEGORIES, WORK_TASK_STATES, type ColumnCategory, type SubtaskGate, type SubtaskModelSelection, type SubtaskSeedMode, type TaskApproach, type TaskClonePolicy, type TaskFaqRecord, type TaskHandoffMode, type TaskLane, type TaskRecipeRecord, type WorkTaskState } from "./tasks.js";
 import type { AccessRequestStatus } from "./workspaces.js";
 
 export const WEBVIEW_PROTOCOL_VERSION = 1;
@@ -174,7 +174,31 @@ export type PanelRequestPayload =
   | { readonly type: "task.start"; readonly taskId: string }
   /** Task recipes (ADR 0007): list templates; materialize one (creates, never starts). */
   | { readonly type: "recipes.list" }
-  | { readonly type: "task.createFromRecipe"; readonly recipeId: string; readonly title: string }
+  | {
+      readonly type: "task.createFromRecipe";
+      readonly recipeId: string;
+      readonly title: string;
+      /** Ticket-shape overrides (plan D1); unset fields fall back recipe -> preferences. */
+      readonly lane?: TaskLane;
+      readonly handoffMode?: TaskHandoffMode;
+      readonly branchName?: string;
+      readonly approach?: TaskApproach;
+      /**
+       * Custom stages (plan D4): when present they REPLACE the recipe's steps
+       * with a linear same-branch chain; the recipe still supplies ticket
+       * defaults and the plan-first shape.
+       */
+      readonly stages?: readonly { readonly title: string; readonly prompt?: string }[];
+    }
+  | { readonly type: "task.inspect"; readonly taskId: string; readonly subtaskId: string }
+  | { readonly type: "subtask.approveGate"; readonly subtaskId: string }
+  | { readonly type: "prefs.ticketDefaults.get" }
+  | {
+      readonly type: "prefs.ticketDefaults.set";
+      readonly lane?: TaskLane;
+      readonly handoffMode?: TaskHandoffMode;
+      readonly approach?: TaskApproach;
+    }
   /** Task FAQ (ADR 0007): the auto-answer knowledge the task carries. */
   | { readonly type: "task.faq.list"; readonly taskId: string }
   | { readonly type: "task.faq.add"; readonly taskId: string; readonly pattern: string; readonly answer: string }
@@ -432,6 +456,12 @@ export interface LandingItem {
   readonly overlapsWith: readonly string[];
   /** True when any repo row predates path capture - overlap cannot be checked. */
   readonly overlapUnknown?: boolean;
+  /** Branch-handoff task (plan D3): landing advances this branch instead of pulling. */
+  readonly handoffMode?: TaskHandoffMode;
+  /** The branch the work lands on (landedBranch when known, else the ticket's name). */
+  readonly branch?: string;
+  /** True when the branch already exists locally (stage advances landed it). */
+  readonly branchLanded?: boolean;
 }
 
 /** Fleet snapshot for the Agents panel (ADR 0013) - projection only. */
@@ -761,6 +791,16 @@ export interface SubtaskSummary {
   readonly verifyUnmet?: boolean;
   /** ADR 0007: durable time at which a person recorded the latest verification check. */
   readonly verifiedAt?: string;
+  /** 1-based stage-chain position (plan D4); absent = not a stage. */
+  readonly stageIndex?: number;
+  /** Human gate blocking auto-start (ADR 0016 family); absent = ungated. */
+  readonly gate?: SubtaskGate;
+  /** Stamped when a person satisfied the gate. */
+  readonly gateSatisfiedAt?: string;
+  /** Computed: gate unsatisfied, upstreams done, not itself done - waiting on a person's approval. */
+  readonly gateReady?: boolean;
+  /** Stage branch advance refused (BRANCH_DRIFTED); waiting on a person to reconcile and retry. */
+  readonly branchDriftAt?: string;
 }
 
 /** Display-safe projection of an internal work task with its links. */
@@ -793,6 +833,16 @@ export interface WorkTaskSummary {
   /** ADR 0007: FAQ entry count (absent when zero) and the per-task auto-answer toggle. */
   readonly faqCount?: number;
   readonly autoAnswerFaq?: boolean;
+  /** Queue lane (plan D7); absent = normal. */
+  readonly lane?: TaskLane;
+  /** How finished work returns (plan D3); absent = patch. */
+  readonly handoffMode?: TaskHandoffMode;
+  /** Branch handoff target - the user's own name (ticket key style). */
+  readonly branchName?: string;
+  /** The branch actually created at landing when the name collided. */
+  readonly landedBranch?: string;
+  /** implement | plan-first (plan D5). */
+  readonly approach?: TaskApproach;
   /** This task's subtasks, ordered by sortOrder. */
   readonly subtasks: readonly SubtaskSummary[];
 }
@@ -1048,6 +1098,10 @@ export type PanelResponsePayload =
   | { readonly type: "task.start"; readonly accepted: boolean }
   | { readonly type: "recipes.list"; readonly recipes: readonly TaskRecipeRecord[] }
   | { readonly type: "task.createFromRecipe"; readonly task: WorkTaskSummary }
+  | { readonly type: "task.inspect"; readonly message: string }
+  | { readonly type: "subtask.approveGate"; readonly task: WorkTaskSummary }
+  | { readonly type: "prefs.ticketDefaults.get"; readonly lane?: TaskLane; readonly handoffMode?: TaskHandoffMode; readonly approach?: TaskApproach }
+  | { readonly type: "prefs.ticketDefaults.set"; readonly lane?: TaskLane; readonly handoffMode?: TaskHandoffMode; readonly approach?: TaskApproach }
   | { readonly type: "task.faq.list"; readonly faqs: readonly TaskFaqRecord[] }
   | { readonly type: "task.faq.add"; readonly faqs: readonly TaskFaqRecord[] }
   | { readonly type: "task.faq.remove"; readonly faqs: readonly TaskFaqRecord[] }
@@ -1460,9 +1514,69 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
     case "task.createFromRecipe": {
       const recipeId = payload["recipeId"];
       const title = payload["title"];
+      const lane = payload["lane"];
+      const handoffMode = payload["handoffMode"];
+      const branchName = payload["branchName"];
+      const approach = payload["approach"];
       if (!isBoundedString(recipeId, MAX_ID_LENGTH)) return null;
       if (!isBoundedString(title, MAX_NAME_LENGTH)) return null;
-      return { type: "task.createFromRecipe", recipeId, title };
+      if (lane !== undefined && lane !== "normal" && lane !== "background") return null;
+      if (handoffMode !== undefined && handoffMode !== "patch" && handoffMode !== "branch") return null;
+      if (branchName !== undefined && !isBoundedString(branchName, MAX_NAME_LENGTH)) return null;
+      if (approach !== undefined && approach !== "implement" && approach !== "plan-first") return null;
+      const rawStages = payload["stages"];
+      let stages: { title: string; prompt?: string }[] | undefined;
+      if (rawStages !== undefined) {
+        if (!Array.isArray(rawStages) || rawStages.length === 0 || rawStages.length > 20) return null;
+        stages = [];
+        for (const entry of rawStages) {
+          if (typeof entry !== "object" || entry === null) return null;
+          const stage = entry as Record<string, unknown>;
+          const stageTitle = stage["title"];
+          const stagePrompt = stage["prompt"];
+          if (!isBoundedString(stageTitle, MAX_NAME_LENGTH)) return null;
+          if (stagePrompt !== undefined && (typeof stagePrompt !== "string" || stagePrompt.length > MAX_PROMPT_LENGTH)) return null;
+          stages.push({ title: stageTitle, ...(stagePrompt === undefined ? {} : { prompt: stagePrompt }) });
+        }
+      }
+      return {
+        type: "task.createFromRecipe",
+        recipeId,
+        title,
+        ...(lane === undefined ? {} : { lane }),
+        ...(handoffMode === undefined ? {} : { handoffMode }),
+        ...(branchName === undefined ? {} : { branchName }),
+        ...(approach === undefined ? {} : { approach }),
+        ...(stages === undefined ? {} : { stages })
+      };
+    }
+    case "task.inspect": {
+      const taskId = payload["taskId"];
+      const subtaskId = payload["subtaskId"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(subtaskId, MAX_ID_LENGTH)) return null;
+      return { type: "task.inspect", taskId, subtaskId };
+    }
+    case "subtask.approveGate": {
+      const subtaskId = payload["subtaskId"];
+      if (!isBoundedString(subtaskId, MAX_ID_LENGTH)) return null;
+      return { type: "subtask.approveGate", subtaskId };
+    }
+    case "prefs.ticketDefaults.get":
+      return { type: "prefs.ticketDefaults.get" };
+    case "prefs.ticketDefaults.set": {
+      const lane = payload["lane"];
+      const handoffMode = payload["handoffMode"];
+      const approach = payload["approach"];
+      if (lane !== undefined && lane !== "normal" && lane !== "background") return null;
+      if (handoffMode !== undefined && handoffMode !== "patch" && handoffMode !== "branch") return null;
+      if (approach !== undefined && approach !== "implement" && approach !== "plan-first") return null;
+      return {
+        type: "prefs.ticketDefaults.set",
+        ...(lane === undefined ? {} : { lane }),
+        ...(handoffMode === undefined ? {} : { handoffMode }),
+        ...(approach === undefined ? {} : { approach })
+      };
     }
     case "task.link":
     case "task.unlink": {

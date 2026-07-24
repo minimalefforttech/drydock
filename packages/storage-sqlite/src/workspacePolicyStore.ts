@@ -29,14 +29,15 @@ export class SqliteProjectCatalogStore implements ProjectCatalogStore {
 
   async insertProject(record: ProjectRecord, pathKey: string): Promise<void> {
     this.connection.database.prepare(`
-      INSERT INTO project_records (project_id, name, path, path_key, kind, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO project_records (project_id, name, path, path_key, kind, origin_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.projectId,
       record.name,
       record.path,
       pathKey,
       record.kind,
+      record.origin === undefined ? null : JSON.stringify(record.origin),
       record.createdAt,
       record.updatedAt
     );
@@ -45,9 +46,17 @@ export class SqliteProjectCatalogStore implements ProjectCatalogStore {
   async updateProject(record: ProjectRecord, pathKey: string): Promise<void> {
     this.connection.database.prepare(`
       UPDATE project_records
-      SET name = ?, path = ?, path_key = ?, kind = ?, updated_at = ?
+      SET name = ?, path = ?, path_key = ?, kind = ?, origin_json = ?, updated_at = ?
       WHERE project_id = ?
-    `).run(record.name, record.path, pathKey, record.kind, record.updatedAt, record.projectId);
+    `).run(
+      record.name,
+      record.path,
+      pathKey,
+      record.kind,
+      record.origin === undefined ? null : JSON.stringify(record.origin),
+      record.updatedAt,
+      record.projectId
+    );
   }
 
   async deleteProject(projectId: ProjectId): Promise<void> {
@@ -87,6 +96,7 @@ interface ProjectRow {
   readonly name: string;
   readonly path: string;
   readonly kind: ProjectRecord["kind"];
+  readonly origin_json: string | null;
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -97,9 +107,34 @@ function mapProject(row: ProjectRow): ProjectRecord {
     name: row.name,
     path: row.path,
     kind: row.kind,
+    ...(parseProjectOrigin(row.origin_json) ?? {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+/** Validated remote provenance from the JSON column; junk degrades to absent. */
+function parseProjectOrigin(json: string | null): { origin: NonNullable<ProjectRecord["origin"]> } | null {
+  if (json === null) return null;
+  try {
+    const value = JSON.parse(json) as unknown;
+    if (typeof value !== "object" || value === null) return null;
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate["provider"] !== "string" || typeof candidate["host"] !== "string" || typeof candidate["remotePath"] !== "string") {
+      return null;
+    }
+    return {
+      origin: {
+        provider: candidate["provider"],
+        host: candidate["host"],
+        remotePath: candidate["remotePath"],
+        ...(typeof candidate["webUrl"] === "string" ? { webUrl: candidate["webUrl"] } : {}),
+        ...(typeof candidate["defaultBranch"] === "string" ? { defaultBranch: candidate["defaultBranch"] } : {})
+      }
+    };
+  } catch {
+    return null;
+  }
 }
 
 // MARK: Workspace sets

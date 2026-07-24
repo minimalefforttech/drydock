@@ -17,6 +17,33 @@ export type WorkTaskState = (typeof WORK_TASK_STATES)[number];
 export type CloneDirtyHandling = "carry" | "fresh";
 
 /**
+ * Queue lane (ADR 0015 extension): background runs draw from a bounded
+ * sub-budget of the run slots and queue behind normal-lane work. Unset means
+ * `normal`. Lanes never change access - only scheduling order.
+ */
+export type TaskLane = "normal" | "background";
+
+/**
+ * How finished work returns to the developer. `patch` is the classic ADR 0014
+ * changeset/pull flow. `branch` lands the clone's commits as a local branch
+ * named by the user (ref-only write; no checkout, no push).
+ */
+export type TaskHandoffMode = "patch" | "branch";
+
+/**
+ * `plan-first` prepends a planner stage whose downstream subtasks carry a
+ * `plan-approval` gate - implementation waits for an explicit human approval
+ * of the plan (ADR 0016 family). Unset means `implement`.
+ */
+export type TaskApproach = "implement" | "plan-first";
+
+/**
+ * Human gates a subtask can carry beyond the HITL verify stamp: the subtask
+ * is never auto-start eligible until the gate is satisfied by a person.
+ */
+export type SubtaskGate = "plan-approval";
+
+/**
  * Durable isolation policy for automated work on a task. One workspace set is
  * selected explicitly; projectIds is a non-empty, ordered subset of that set.
  */
@@ -46,6 +73,19 @@ export interface WorkTaskRecord {
   readonly clonePolicy?: TaskClonePolicy;
   /** ADR 0007: agent questions matching this task's FAQ auto-answer (also gated by global config). */
   readonly autoAnswerFaq?: boolean;
+  /** Queue lane; unset = normal. */
+  readonly lane?: TaskLane;
+  /** How finished work returns; unset = patch. */
+  readonly handoffMode?: TaskHandoffMode;
+  /**
+   * Branch handoff target - the user's own name, typically the ticket key
+   * ("PIPE-123"). No product prefix is ever forced onto it.
+   */
+  readonly branchName?: string;
+  /** The branch actually created at landing when branchName collided ("PIPE-123_1"). */
+  readonly landedBranch?: string;
+  /** plan-first gates implementation behind human plan approval; unset = implement. */
+  readonly approach?: TaskApproach;
 }
 
 /** A task points at the places its work happens. Exactly one target per link. */
@@ -67,6 +107,13 @@ export interface WorkTaskUpdate {
   /** null clears doneAt. */
   readonly doneAt?: string | null;
   readonly autoAnswerFaq?: boolean;
+  readonly lane?: TaskLane;
+  readonly handoffMode?: TaskHandoffMode;
+  /** null clears the branch name (reverts the task to patch-only landing). */
+  readonly branchName?: string | null;
+  /** null clears the landed-branch badge. */
+  readonly landedBranch?: string | null;
+  readonly approach?: TaskApproach;
   readonly updatedAt: string;
 }
 
@@ -104,6 +151,8 @@ export interface SubtaskHoldRecord {
   readonly kind: "queued" | "parked";
   readonly origin: "manual" | "auto";
   readonly force: boolean;
+  /** Queue band the entry restores into; absent (older rows) = normal. */
+  readonly lane?: TaskLane;
   readonly heldAt: string;
 }
 
@@ -170,6 +219,22 @@ export interface SubtaskRecord {
   readonly verifyMode?: "hitl";
   /** Stamped by "Mark verified"; cleared when the gate re-arms. */
   readonly verifiedAt?: string;
+  /**
+   * 1-based position in the task's stage chain (background-lane plan D4).
+   * Present = this subtask is a stage: it advances the task branch on
+   * completion and the next stage clones from the branch tip.
+   */
+  readonly stageIndex?: number;
+  /** Human gate blocking auto-start eligibility until satisfied (ADR 0016 family). */
+  readonly gate?: SubtaskGate;
+  /** Stamped when a person satisfies the gate; cleared if the gate re-arms. */
+  readonly gateSatisfiedAt?: string;
+  /**
+   * Stage branch advance refused to fast-forward (BRANCH_DRIFTED): the chain
+   * is parked until a person reconciles the branch and retries the land.
+   * Cleared by the next successful advance.
+   */
+  readonly branchDriftAt?: string;
 }
 
 export interface SubtaskUpdate {
@@ -188,6 +253,14 @@ export interface SubtaskUpdate {
   readonly seedMode?: SubtaskSeedMode;
   /** null clears the verification stamp (re-arms the gate); a string stamps it. */
   readonly verifiedAt?: string | null;
+  /** null removes the subtask from the stage chain. */
+  readonly stageIndex?: number | null;
+  /** null removes the gate. */
+  readonly gate?: SubtaskGate | null;
+  /** null re-arms the gate; a string satisfies it. */
+  readonly gateSatisfiedAt?: string | null;
+  /** null clears the drift park; a string stamps it. */
+  readonly branchDriftAt?: string | null;
   readonly updatedAt: string;
 }
 
@@ -269,6 +342,10 @@ export interface TaskRecipeSubtask {
   readonly model?: SubtaskModelSelection;
   /** ADR 0007: recipes can arm the human verification gate per step. */
   readonly verify?: "hitl";
+  /** 1-based stage-chain position this step materializes with. */
+  readonly stageIndex?: number;
+  /** Human gate the materialized subtask carries (plan-first recipes). */
+  readonly gate?: SubtaskGate;
 }
 
 /**
@@ -284,6 +361,10 @@ export interface TaskRecipeRecord {
   readonly source: "user" | "seeded" | "overlay";
   readonly archived: boolean;
   readonly subtasks: readonly TaskRecipeSubtask[];
+  /** Ticket defaults this recipe pre-fills (the form still overrides them). */
+  readonly lane?: TaskLane;
+  readonly handoffMode?: TaskHandoffMode;
+  readonly approach?: TaskApproach;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -315,9 +396,48 @@ export interface TaskChangesetRecord {
   readonly fileCount: number;
   /** Repo-relative touched paths - the landing overlap pre-check (ADR 0014). Absent on older captures. */
   readonly paths?: readonly string[];
+  /**
+   * The local commit the clone was cut from (refs/sync/origin). Lets an
+   * inspection workspace rebuild the finished tree from durable data alone.
+   * Absent on captures made before inspection support landed.
+   */
+  readonly originCommit?: string;
+  /** The refs/sync/base commit the relative patch applies onto. Absent on older captures. */
+  readonly baseCommit?: string;
+  /**
+   * Blob sha of `git diff --binary refs/sync/origin..HEAD`, stored ONLY when
+   * the base tree differs from the origin tree (upstream seeds or mid-flight
+   * syncs moved it) - i.e. when the relative patch alone cannot rebuild the
+   * finished tree from originCommit.
+   */
+  readonly fullPatchSha256?: string;
+  readonly fullPatchBytes?: number;
   readonly capturedAt: string;
   /** Stamped when the user pulls this session's work into the local repo. */
   readonly landedAt?: string;
+}
+
+/**
+ * A bounded handoff note passed from a finished stage to whatever depends on
+ * it (plan D4). One row per producing subtask - a fresh completion replaces
+ * it. `agent` notes come from a ```handoff fenced block in the worker's
+ * final text; `summary` notes are host-built fallbacks from the capture.
+ */
+export interface SubtaskHandoffRecord {
+  readonly subtaskId: SubtaskId;
+  readonly taskId: TaskId;
+  readonly note: string;
+  readonly source: "agent" | "summary";
+  readonly createdAt: string;
+}
+
+export interface SubtaskHandoffStore {
+  /** Insert-or-replace keyed on subtaskId (latest completion wins). */
+  upsertHandoff(record: SubtaskHandoffRecord): Promise<void>;
+  getHandoff(subtaskId: SubtaskId): Promise<SubtaskHandoffRecord | null>;
+  /** Rows for these subtasks, in the given id order. */
+  listForSubtasks(subtaskIds: readonly SubtaskId[]): Promise<SubtaskHandoffRecord[]>;
+  deleteForSubtask(subtaskId: SubtaskId): Promise<number>;
 }
 
 export interface TaskChangesetStore {

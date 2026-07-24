@@ -1078,13 +1078,15 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
    */
   function attentionSummaryText(counts: {
     requests: number; questions: number; failed: number;
-    verify: number; parked: number; land: number; previews: number;
+    verify: number; plans: number; drift: number; parked: number; land: number; previews: number;
   }): string {
     const parts: string[] = [];
     if (counts.requests > 0) parts.push(`${String(counts.requests)} request${counts.requests === 1 ? "" : "s"}`);
     if (counts.questions > 0) parts.push(`${String(counts.questions)} question${counts.questions === 1 ? "" : "s"}`);
     if (counts.failed > 0) parts.push(`${String(counts.failed)} failed`);
     if (counts.verify > 0) parts.push(`${String(counts.verify)} to verify`);
+    if (counts.plans > 0) parts.push(`${String(counts.plans)} plan${counts.plans === 1 ? "" : "s"} ready`);
+    if (counts.drift > 0) parts.push(`${String(counts.drift)} drifted`);
     if (counts.parked > 0) parts.push(`${String(counts.parked)} parked`);
     if (counts.land > 0) parts.push(`${String(counts.land)} to land`);
     if (counts.previews > 0) parts.push(`${String(counts.previews)} preview${counts.previews === 1 ? "" : "s"}`);
@@ -1107,11 +1109,15 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     // requests/questions: HITL verify gates, parked automation, unlanded
     // changesets. All derived from state.tasks; no new fetches.
     const verifyItems: InboxSubtaskItem[] = [];
+    const gateItems: InboxSubtaskItem[] = [];
+    const driftItems: InboxSubtaskItem[] = [];
     const parkedItems: InboxSubtaskItem[] = [];
     const landItems: InboxSubtaskItem[] = [];
     for (const task of state.tasks) {
       for (const subtask of task.subtasks) {
         if (subtask.verifyUnmet === true) verifyItems.push({ task, subtask });
+        if (subtask.gateReady === true) gateItems.push({ task, subtask });
+        if (subtask.branchDriftAt !== undefined) driftItems.push({ task, subtask });
         if (subtask.isParked === true) parkedItems.push({ task, subtask });
         if (subtask.hasUnlandedChangeset === true) landItems.push({ task, subtask });
       }
@@ -1121,7 +1127,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     const livePreviews = state.previews.filter((preview) => preview.status === "up");
     // Hide the whole section when nothing needs acting on.
     const total = pending.length + pendingQuestions.length + failedSessions.length
-      + verifyItems.length + parkedItems.length + landItems.length + livePreviews.length;
+      + verifyItems.length + gateItems.length + driftItems.length + parkedItems.length + landItems.length + livePreviews.length;
     if (total === 0) {
       attentionSection.classList.remove("has-attention");
       attentionExpanded = false;
@@ -1136,6 +1142,8 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
       questions: pendingQuestions.length,
       failed: failedSessions.length,
       verify: verifyItems.length,
+      plans: gateItems.length,
+      drift: driftItems.length,
       parked: parkedItems.length,
       land: landItems.length,
       previews: livePreviews.length
@@ -1179,7 +1187,7 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
     } else {
       attentionList.replaceChildren();
     }
-    const inbox = buildInboxList(failedSessions, verifyItems, parkedItems, landItems, livePreviews);
+    const inbox = buildInboxList(failedSessions, verifyItems, gateItems, driftItems, parkedItems, landItems, livePreviews);
     if (inbox !== null) attentionList.append(inbox);
   }
 
@@ -1191,11 +1199,13 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
   function buildInboxList(
     failedSessions: readonly ChatSessionSummary[],
     verifyItems: readonly InboxSubtaskItem[],
+    gateItems: readonly InboxSubtaskItem[],
+    driftItems: readonly InboxSubtaskItem[],
     parkedItems: readonly InboxSubtaskItem[],
     landItems: readonly InboxSubtaskItem[],
     livePreviews: readonly PreviewSummary[]
   ): HTMLElement | null {
-    if (failedSessions.length + verifyItems.length + parkedItems.length + landItems.length + livePreviews.length === 0) return null;
+    if (failedSessions.length + verifyItems.length + gateItems.length + driftItems.length + parkedItems.length + landItems.length + livePreviews.length === 0) return null;
     const list = el("div", "inbox-list");
 
     const row = (
@@ -1268,6 +1278,44 @@ export function createWorkTab(ctx: ViewContext): WorkTabView {
         `verify · ${item.task.title}`,
         openBoardPanel,
         verified
+      ));
+    }
+    for (const item of gateItems) {
+      // Plan gate (plan D5, ADR 0016 family): the approval is the human's
+      // alone - the row acts inline and jumps to the board for the details.
+      const approve = button("Approve", "ghost small inbox-approve-button");
+      approve.title = "Approve the plan - satisfies the human gate so gated work can start";
+      approve.addEventListener("click", () => {
+        approve.disabled = true;
+        void request({ type: "subtask.approveGate", subtaskId: item.subtask.subtaskId }).then((response) => {
+          if (!response.ok) {
+            ctx.bridge.chat.logChat(`approve failed: ${response.error.message}`);
+            approve.disabled = false;
+            return;
+          }
+          renderAttention();
+        });
+      });
+      list.append(row(
+        "inbox-plan",
+        "✎",
+        "A plan is waiting for your approval before implementation starts",
+        item.subtask.title,
+        `plan ready · ${item.task.title}`,
+        openBoardPanel,
+        approve
+      ));
+    }
+    for (const item of driftItems) {
+      // Stage drift (plan D4): the chain is parked until a person reconciles
+      // the branch; the retry lives on the board card (Retry land).
+      list.append(row(
+        "inbox-drift",
+        "⚠",
+        "The task branch moved and this stage cannot fast-forward - reconcile the branch, then Retry land on the board",
+        item.subtask.title,
+        `branch drifted · ${item.task.title}`,
+        openBoardPanel
       ));
     }
     for (const item of parkedItems) {

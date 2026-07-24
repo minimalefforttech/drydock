@@ -38,8 +38,14 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
         done_at,
         clone_workspace_set_id,
         clone_project_ids_json,
-        clone_dirty_handling
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        clone_dirty_handling,
+        auto_answer_faq,
+        lane,
+        handoff_mode,
+        branch_name,
+        landed_branch,
+        approach
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.taskId,
       record.title,
@@ -51,7 +57,13 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
       record.doneAt ?? null,
       record.clonePolicy?.workspaceSetId ?? null,
       record.clonePolicy === undefined ? null : JSON.stringify(record.clonePolicy.projectIds),
-      record.clonePolicy?.dirtyHandling ?? null
+      record.clonePolicy?.dirtyHandling ?? null,
+      record.autoAnswerFaq === true ? 1 : 0,
+      record.lane ?? null,
+      record.handoffMode ?? null,
+      record.branchName ?? null,
+      record.landedBranch ?? null,
+      record.approach ?? null
     );
   }
 
@@ -85,6 +97,27 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
     if (update.autoAnswerFaq !== undefined) {
       assignments.push("auto_answer_faq = ?");
       values.push(update.autoAnswerFaq ? 1 : 0);
+    }
+    if (update.lane !== undefined) {
+      assignments.push("lane = ?");
+      values.push(update.lane);
+    }
+    if (update.handoffMode !== undefined) {
+      assignments.push("handoff_mode = ?");
+      values.push(update.handoffMode);
+    }
+    if (update.branchName !== undefined) {
+      // null clears the branch name; a string overwrites it.
+      assignments.push("branch_name = ?");
+      values.push(update.branchName);
+    }
+    if (update.landedBranch !== undefined) {
+      assignments.push("landed_branch = ?");
+      values.push(update.landedBranch);
+    }
+    if (update.approach !== undefined) {
+      assignments.push("approach = ?");
+      values.push(update.approach);
     }
     this.connection.database.prepare(`
       UPDATE work_tasks
@@ -134,6 +167,7 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
       // are also kept here so direct store use cannot leave FAQ or Landing
       // projections detached from their owner.
       db.prepare("DELETE FROM task_changesets WHERE task_id = ?").run(taskId);
+      db.prepare("DELETE FROM subtask_handoffs WHERE task_id = ?").run(taskId);
       db.prepare("DELETE FROM task_faqs WHERE task_id = ?").run(taskId);
       db.prepare("DELETE FROM work_task_links WHERE task_id = ?").run(taskId);
       db.prepare("DELETE FROM work_tasks WHERE task_id = ?").run(taskId);
@@ -231,6 +265,11 @@ interface WorkTaskRow {
   readonly clone_project_ids_json: string | null;
   readonly clone_dirty_handling: string | null;
   readonly auto_answer_faq: number;
+  readonly lane: string | null;
+  readonly handoff_mode: string | null;
+  readonly branch_name: string | null;
+  readonly landed_branch: string | null;
+  readonly approach: string | null;
 }
 
 interface WorkTaskLinkRow {
@@ -253,7 +292,13 @@ function mapTask(row: WorkTaskRow): WorkTaskRecord {
     updatedAt: row.updated_at,
     ...(row.done_at === null ? {} : { doneAt: row.done_at }),
     ...(clonePolicy === undefined ? {} : { clonePolicy }),
-    ...(row.auto_answer_faq ? { autoAnswerFaq: true } : {})
+    ...(row.auto_answer_faq ? { autoAnswerFaq: true } : {}),
+    // Unknown stored values degrade to absent (defaults), never crash a listing.
+    ...(row.lane === "normal" || row.lane === "background" ? { lane: row.lane } : {}),
+    ...(row.handoff_mode === "patch" || row.handoff_mode === "branch" ? { handoffMode: row.handoff_mode } : {}),
+    ...(row.branch_name === null ? {} : { branchName: row.branch_name }),
+    ...(row.landed_branch === null ? {} : { landedBranch: row.landed_branch }),
+    ...(row.approach === "implement" || row.approach === "plan-first" ? { approach: row.approach } : {})
   };
 }
 

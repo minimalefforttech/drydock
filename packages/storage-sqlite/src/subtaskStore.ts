@@ -41,8 +41,12 @@ export class SqliteSubtaskStore implements SubtaskStore {
         seed_mode,
         model_json,
         verify_mode,
-        verified_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        verified_at,
+        stage_index,
+        gate,
+        gate_satisfied_at,
+        branch_drift_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.subtaskId,
       record.taskId,
@@ -60,7 +64,11 @@ export class SqliteSubtaskStore implements SubtaskStore {
       record.seedMode ?? null,
       record.model === undefined ? null : JSON.stringify(record.model),
       record.verifyMode ?? null,
-      record.verifiedAt ?? null
+      record.verifiedAt ?? null,
+      record.stageIndex ?? null,
+      record.gate ?? null,
+      record.gateSatisfiedAt ?? null,
+      record.branchDriftAt ?? null
     );
   }
 
@@ -114,6 +122,26 @@ export class SqliteSubtaskStore implements SubtaskStore {
       assignments.push("verified_at = ?");
       values.push(update.verifiedAt);
     }
+    if (update.stageIndex !== undefined) {
+      // null removes the subtask from the stage chain.
+      assignments.push("stage_index = ?");
+      values.push(update.stageIndex);
+    }
+    if (update.gate !== undefined) {
+      // null removes the gate entirely.
+      assignments.push("gate = ?");
+      values.push(update.gate);
+    }
+    if (update.gateSatisfiedAt !== undefined) {
+      // null re-arms the gate; a string is the human's approval stamp.
+      assignments.push("gate_satisfied_at = ?");
+      values.push(update.gateSatisfiedAt);
+    }
+    if (update.branchDriftAt !== undefined) {
+      // null clears the drift park; a string stamps it.
+      assignments.push("branch_drift_at = ?");
+      values.push(update.branchDriftAt);
+    }
     this.connection.database.prepare(`
       UPDATE subtasks
       SET ${assignments.join(", ")}
@@ -156,6 +184,7 @@ export class SqliteSubtaskStore implements SubtaskStore {
       // Durable orchestration and Landing projections do not use foreign keys,
       // so their rows must disappear with the owning subtask.
       db.prepare("DELETE FROM subtask_holds WHERE subtask_id = ?").run(subtaskId);
+      db.prepare("DELETE FROM subtask_handoffs WHERE subtask_id = ?").run(subtaskId);
       db.prepare("DELETE FROM task_changesets WHERE subtask_id = ?").run(subtaskId);
       db.prepare("DELETE FROM work_task_links WHERE subtask_id = ?").run(subtaskId);
       db.prepare(`
@@ -230,6 +259,10 @@ interface SubtaskRow {
   readonly model_json: string | null;
   readonly verify_mode: string | null;
   readonly verified_at: string | null;
+  readonly stage_index: number | null;
+  readonly gate: string | null;
+  readonly gate_satisfied_at: string | null;
+  readonly branch_drift_at: string | null;
 }
 
 interface SubtaskDependencyRow {
@@ -258,7 +291,14 @@ function mapSubtask(row: SubtaskRow): SubtaskRecord {
     ...(row.seed_mode === "local" || row.seed_mode === "upstream" ? { seedMode: row.seed_mode } : {}),
     ...(parseModel(row.model_json) ?? {}),
     ...(row.verify_mode === "hitl" ? { verifyMode: "hitl" as const } : {}),
-    ...(row.verified_at === null ? {} : { verifiedAt: row.verified_at })
+    ...(row.verified_at === null ? {} : { verifiedAt: row.verified_at }),
+    // Stage indexes are 1-based; junk (0, negatives, non-integers) degrades to absent.
+    ...(typeof row.stage_index === "number" && Number.isInteger(row.stage_index) && row.stage_index >= 1
+      ? { stageIndex: row.stage_index }
+      : {}),
+    ...(row.gate === "plan-approval" ? { gate: "plan-approval" as const } : {}),
+    ...(row.gate_satisfied_at === null ? {} : { gateSatisfiedAt: row.gate_satisfied_at }),
+    ...(row.branch_drift_at === null ? {} : { branchDriftAt: row.branch_drift_at })
   };
 }
 

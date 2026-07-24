@@ -179,3 +179,39 @@ fixture coverage exists for the clone working-set UI, alongside the real-repo
 git plumbing tests; the full sync protocol (both conflict directions, the
 no-commit invariant) still needs guided manual verification against a real VS
 Code window.
+
+## Branch handoff, stage chains, and durable landing (2026-07-24)
+
+Plan: `docs/ideas/background-lane-and-inspection-workspaces.md`; decisions in
+the ADR 0014 amendment.
+
+- **Origin stamping.** `initClone` records the local commit a clone was cut
+  from as `refs/sync/origin` (returned as `originCommit`). Captures carry it
+  with `refs/sync/base`, plus a full `origin..HEAD` patch blob when the base
+  tree moved past the origin - enough durable data to rebuild the finished
+  tree without the live clone.
+- **Branch handoff.** `landAsBranch` fetches the clone's HEAD from its
+  protected git dir (never inside the mounted tree, so agent writes cannot
+  have touched the config consulted) into `refs/heads/<name>` in the local
+  repo. Fast-forward-only on existing branches; foreign collisions suffix
+  `_1`, `_2` in suffix mode or refuse (`BRANCH_DRIFTED`) in fail mode. No
+  checkout, no push, no delete, no working-tree change.
+- **Stage chains.** A stage's completion advances the task's own branch
+  (fail mode after the first land - drift PARKS the chain instead of
+  force-writing); the next stage clones the branch tip via `sourceBranch`,
+  which requires `dirtyHandling: "fresh"` (a chain clone means exactly that
+  tree). Repos without the branch fall back to the current branch, logged.
+  Stage clones never also apply upstream changeset seeds - the branch
+  already carries that content.
+- **Inspection materialization.** Human-only copies: a fresh clone detached
+  at the capture's origin with the patch applied and left uncommitted (so
+  vanilla git shows the work), or a real-repo worktree at the landed branch.
+  These keep their `.git` on purpose, live under `<stateRoot>/inspect`
+  outside any sweep timer, and are never mounted into a sandbox. Windows
+  opening them must never be auto-trusted.
+- **Durable landing.** When the live clone is gone, Landing falls back to
+  the stored changesets: `applyChangesetToLocal` (working-tree 3-way, pull
+  semantics) for patch handoff, `landChangesetAsBranch` (temporary detached
+  worktree at origin, commit, fast-forward the branch, worktree always
+  removed) for branch handoff. Bookkeeping and the human-only pull model
+  are unchanged.

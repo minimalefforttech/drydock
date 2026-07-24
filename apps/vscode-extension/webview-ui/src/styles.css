@@ -4442,3 +4442,26 @@ h3 {
   .spinner { animation: none; }
   .chat-working-dots .dot { animation: none; opacity: 0.8; }
 }
+
+/* New-ticket defaults (plan D10): inherit-or-choose preference segments. */
+.prefs-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.pref-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pref-label {
+  width: 78px;
+  flex: none;
+  font-size: 0.78em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--vscode-descriptionForeground, #8f8f8f);
+}

@@ -80,3 +80,13 @@ human gesture - agents can *request* verification, never grant it.
 - "Add to task FAQ" checkbox at answer time (FAQ machinery exists, ADR 0007;
   needs task resolution in the shared card component).
 - Answer parking ("remind me in an hour") and answering from the Agents panel.
+
+## Amendment - 2026-07-24 (plan-approval gate)
+
+A fourth gate kind joins question / access / manual-check: `plan-approval`.
+A gated subtask is never auto-start eligible until a person satisfies the
+gate (`gateSatisfiedAt`); manual start stays possible - gates bind
+automation, not the human. Plan-first tickets materialize a leading planner
+step and gate every implementation step behind it; approval (board card,
+inbox row, or `Drydock: Approve Plan…`) stamps the gate and re-fires the
+cascade. Model agreement is never approval.

@@ -120,6 +120,38 @@ test("capture stores one row per repo, skips empty patches, and replaces the pri
   assert.equal(store.rows.length, 0);
 });
 
+test("capture stores origin/base commits and a full patch blob when provided", async () => {
+  const { service, store, blobs } = harness();
+  await service.captureForSubtask({
+    ...CAPTURE,
+    patches: [
+      {
+        repoName: "api",
+        patch: "diff-relative",
+        fileCount: 1,
+        originCommit: "origin-sha",
+        baseCommit: "base-sha",
+        fullPatch: "diff-full"
+      },
+      // No full patch: base tree never moved past origin for this repo.
+      { repoName: "web", patch: "diff-web", fileCount: 1, baseCommit: "base-sha" }
+    ]
+  });
+
+  const api = store.rows.find((row) => row.repoName === "api");
+  assert.ok(api);
+  assert.equal(api.originCommit, "origin-sha");
+  assert.equal(api.baseCommit, "base-sha");
+  assert.ok(api.fullPatchSha256);
+  assert.equal(await blobs.readText(api.fullPatchSha256 ?? ""), "diff-full");
+  assert.equal(api.fullPatchBytes, Buffer.byteLength("diff-full", "utf8"));
+
+  const web = store.rows.find((row) => row.repoName === "web");
+  assert.ok(web);
+  assert.equal(web.originCommit, undefined);
+  assert.equal(web.fullPatchSha256, undefined);
+});
+
 test("seedPatchesFor returns unlanded patches in upstream order and skips landed rows", async () => {
   const { service } = harness();
   await service.captureForSubtask({

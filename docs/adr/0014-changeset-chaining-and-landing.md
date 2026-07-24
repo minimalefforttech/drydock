@@ -64,3 +64,32 @@ the user pulls work into the real working tree.
   captured patch is durable. The UI must report that limitation rather than
   pretending a disposable workspace survived.
 
+
+## Amendment - 2026-07-24 (branch handoff, stages, inspection, durable landing)
+
+The background-lane plan (docs/ideas/background-lane-and-inspection-workspaces.md)
+extends this decision's changeset machinery with four consumers:
+
+- **Capture self-containment.** Review-entry rows now also record the clone's
+  `origin_commit` (stamped as `refs/sync/origin` at init) and `base_commit`,
+  plus a full `origin..HEAD` patch blob when the base tree moved past the
+  origin (seeds or mid-flight syncs). Older rows stay valid with the fields
+  absent.
+- **Branch handoff.** Tasks may set `handoffMode: branch` with a plain,
+  user-owned branch name (typically the ticket key). Landing then runs
+  `git fetch <cloneGitDir> HEAD:refs/heads/<name>` in the local repo:
+  ref-only, fast-forward-only on existing branches, `_1`/`_2` auto-suffix on
+  foreign collisions, never a checkout, never a push, never a delete.
+- **Stage chains.** Stage subtasks (1-based `stageIndex`) advance the task's
+  own branch at Review entry (first land may suffix; later stages are
+  fast-forward-only and PARK the chain on drift via the capture-hook
+  rejection path). The next stage clones the branch tip (`sourceBranch`,
+  fresh-only). These per-stage ref advances are the one automated repo
+  write this amendment introduces - badged, scoped to the task's own
+  branch, and never crossing into the working tree.
+- **Inspection and durable landing.** Captured changesets are sufficient to
+  rebuild a finished tree without the live clone: inspection workspaces
+  (human-only copies or branch worktrees) and the Landing fallback (apply
+  the stored patch to the working tree, or synthesize the landed commit in
+  a temporary detached worktree) both read only durable rows and blobs.
+  Landing bookkeeping and the human-only pull model are unchanged.

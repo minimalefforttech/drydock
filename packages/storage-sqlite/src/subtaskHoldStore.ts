@@ -12,14 +12,15 @@ export class SqliteSubtaskHoldStore implements SubtaskHoldStore {
 
   async upsertHold(record: SubtaskHoldRecord): Promise<void> {
     this.connection.database.prepare(`
-      INSERT INTO subtask_holds (subtask_id, kind, origin, force, held_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO subtask_holds (subtask_id, kind, origin, force, lane, held_at)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(subtask_id) DO UPDATE SET
         kind = excluded.kind,
         origin = excluded.origin,
         force = excluded.force,
+        lane = excluded.lane,
         held_at = excluded.held_at
-    `).run(record.subtaskId, record.kind, record.origin, record.force ? 1 : 0, record.heldAt);
+    `).run(record.subtaskId, record.kind, record.origin, record.force ? 1 : 0, record.lane ?? null, record.heldAt);
   }
 
   async deleteHold(subtaskId: SubtaskId): Promise<number> {
@@ -43,6 +44,8 @@ export class SqliteSubtaskHoldStore implements SubtaskHoldStore {
         kind: row.kind as "queued" | "parked",
         origin: row.origin === "manual" ? "manual" : "auto",
         force: row.force !== 0,
+        // Older rows (and junk) restore into the normal band, never invented.
+        ...(row.lane === "background" || row.lane === "normal" ? { lane: row.lane } : {}),
         heldAt: row.held_at
       }));
   }
@@ -53,5 +56,6 @@ interface HoldRow {
   readonly kind: string;
   readonly origin: string;
   readonly force: number;
+  readonly lane: string | null;
   readonly held_at: string;
 }

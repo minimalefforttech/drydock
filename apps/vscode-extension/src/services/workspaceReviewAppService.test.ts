@@ -11,7 +11,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -127,7 +127,7 @@ test("a clone session cannot be widened into a live host mount", async () => {
 });
 
 test("effective policy filters auto roots and silently tightens the mode to clone", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-review-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-review-policy-")));
   try {
     const allowed = path.join(root, "allowed");
     const blocked = path.join(root, "blocked");
@@ -159,7 +159,7 @@ test("effective policy filters auto roots and silently tightens the mode to clon
 });
 
 test("project paths are checked before the catalog is mutated", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-project-path-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-project-path-policy-")));
   try {
     const allowed = path.join(root, "allowed");
     const blocked = path.join(root, "blocked");
@@ -203,7 +203,7 @@ interface DiffHarness {
 }
 
 async function diffHarness(): Promise<DiffHarness> {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-review-diff-"));
+  const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-review-diff-")));
   const root = path.join(dir, "repo");
   await mkdir(root, { recursive: true });
   const connection = new SqliteConnection(path.join(dir, "state.sqlite"));

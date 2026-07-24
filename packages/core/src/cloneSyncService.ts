@@ -15,7 +15,7 @@
 
 import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { devNull, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type {
   CloneFileChange,
   CloneSyncResult,
@@ -88,6 +88,15 @@ export interface InitCloneInput {
   readonly name: string;
   /** carry overlays tracked/untracked working state; fresh uses current local HEAD only. */
   readonly dirtyHandling?: "carry" | "fresh";
+  /**
+   * Stage chains (plan D4): clone this LOCAL branch (the task branch tip)
+   * instead of the developer's current branch, when it exists in the source
+   * repo; a repo without the branch falls back to the current branch (the
+   * chain only materializes in repos with landed work). Requires an explicit
+   * `dirtyHandling: "fresh"` - a chain clone means exactly that tree, never
+   * an overlay of the developer's dirty state.
+   */
+  readonly sourceBranch?: string;
   /** Paths that must never be copied from the developer repo into the clone. */
   readonly omission?: ClonePathOmission;
   /**
@@ -129,6 +138,10 @@ export interface InitCloneResult {
   readonly branch: string;
   /** True when the local repo was on a detached HEAD; `branch` is then a commit id. */
   readonly detached: boolean;
+  /** The local commit the clone was cut from, also stamped as refs/sync/origin. */
+  readonly originCommit: string;
+  /** Present when `sourceBranch` was requested: whether this repo had it. */
+  readonly sourceBranchApplied?: boolean;
 }
 
 interface GitRepositoryLocation {
@@ -262,6 +275,24 @@ export class CloneSyncService {
       branch = commit.stdout.trim();
     }
 
+    // Stage chains: prefer the requested task branch when this repo has it.
+    let sourceBranchApplied: boolean | undefined;
+    if (input.sourceBranch !== undefined) {
+      if (dirtyHandling !== "fresh") {
+        throw new Error("sourceBranch clones are always fresh: pass dirtyHandling \"fresh\" explicitly.");
+      }
+      const probe = await this.gitIn(
+        localRepoPath,
+        ["rev-parse", "--verify", "--quiet", `refs/heads/${input.sourceBranch}`],
+        "probe requested source branch"
+      );
+      sourceBranchApplied = probe.exitCode === 0;
+      if (sourceBranchApplied) {
+        branch = input.sourceBranch;
+        detached = false;
+      }
+    }
+
     // --local --no-hardlinks is the security-critical choice: the clone dir is
     // later mounted rw into a container. With hardlinked objects, a container
     // write to a shared object file would reach into the developer's real repo
@@ -305,6 +336,12 @@ export class CloneSyncService {
     if (detached) {
       await this.gitIn(clonePath, ["checkout", "--detach", branch], "checkout detached commit in clone");
     }
+
+    // The local commit this clone was cut from. Stamped as refs/sync/origin
+    // below so a capture long after base has advanced can still name it -
+    // inspection workspaces rebuild the finished tree from (origin, patches).
+    const originHead = await this.gitIn(clonePath, ["rev-parse", "HEAD"], "resolve clone origin commit");
+    const originCommit = originHead.stdout.trim();
 
     if (dirtyHandling === "carry") {
       // Overlay tracked dirty changes: the patch of local working tree vs its HEAD.
@@ -362,8 +399,15 @@ export class CloneSyncService {
       "commit snapshot in clone"
     );
     await this.gitIn(clonePath, ["update-ref", "refs/sync/base", "HEAD"], "set refs/sync/base");
+    await this.gitIn(clonePath, ["update-ref", "refs/sync/origin", originCommit], "set refs/sync/origin");
 
-    return { clonePath, branch, detached };
+    return {
+      clonePath,
+      branch,
+      detached,
+      originCommit,
+      ...(sourceBranchApplied === undefined ? {} : { sourceBranchApplied })
+    };
   }
 
   /**
@@ -432,7 +476,21 @@ export class CloneSyncService {
   async outboundChangesetPatch(
     clonePath: string,
     omission?: ClonePathOmission
-  ): Promise<{ readonly patch: string; readonly fileCount: number; readonly paths: readonly string[] } | null> {
+  ): Promise<{
+    readonly patch: string;
+    readonly fileCount: number;
+    readonly paths: readonly string[];
+    /** refs/sync/base at capture time - what `patch` applies onto. */
+    readonly baseCommit: string;
+    /** refs/sync/origin (the cloned local commit); absent on clones from before the ref existed. */
+    readonly originCommit?: string;
+    /**
+     * `diff --binary refs/sync/origin..HEAD`, present ONLY when the base tree
+     * differs from the origin tree (seeds / mid-flight syncs) - the case where
+     * the relative patch alone cannot rebuild the tree from originCommit.
+     */
+    readonly fullPatch?: string;
+  } | null> {
     await this.commitAgentProgress(clonePath, "[sync] agent");
     const prepared = await this.diffToFile(clonePath, ["diff", "--binary", "refs/sync/base", "HEAD"], "build changeset patch");
     try {
@@ -442,7 +500,53 @@ export class CloneSyncService {
       // Paths ride along for the landing overlap pre-check (ADR 0014).
       const paths = await this.patchPaths(clonePath, undefined);
       assertPathsNotOmitted(paths, omission, "clone changeset");
-      return { patch, fileCount: paths.length, paths };
+
+      const base = await this.gitIn(clonePath, ["rev-parse", "refs/sync/base"], "resolve refs/sync/base");
+      const baseCommit = base.stdout.trim();
+      let originCommit: string | undefined;
+      try {
+        const origin = await this.gitIn(clonePath, ["rev-parse", "--verify", "refs/sync/origin"], "resolve refs/sync/origin");
+        originCommit = origin.stdout.trim();
+      } catch {
+        // Clone predates refs/sync/origin - capture stays honest without it.
+      }
+
+      let fullPatch: string | undefined;
+      if (originCommit !== undefined && originCommit !== baseCommit) {
+        // Tree ids decide whether a full patch is needed: an --allow-empty
+        // snapshot commit moves the base COMMIT without moving its TREE.
+        const trees = await this.gitIn(
+          clonePath,
+          ["rev-parse", "refs/sync/origin^{tree}", "refs/sync/base^{tree}"],
+          "compare origin/base trees"
+        );
+        const [originTree, baseTree] = trees.stdout.trim().split(/\r?\n/);
+        if (originTree !== baseTree) {
+          const fullPrepared = await this.diffToFile(
+            clonePath,
+            ["diff", "--binary", "refs/sync/origin", "HEAD"],
+            "build full changeset patch"
+          );
+          try {
+            if (fullPrepared.bytes > 0) {
+              const text = await readFile(fullPrepared.patchFile, "utf8");
+              assertPathsNotOmitted(parseDiffPaths(text), omission, "clone full changeset");
+              fullPatch = text;
+            }
+          } finally {
+            await fullPrepared.cleanup();
+          }
+        }
+      }
+
+      return {
+        patch,
+        fileCount: paths.length,
+        paths,
+        baseCommit,
+        ...(originCommit === undefined ? {} : { originCommit }),
+        ...(fullPatch === undefined ? {} : { fullPatch })
+      };
     } finally {
       await prepared.cleanup();
     }
@@ -630,6 +734,249 @@ export class CloneSyncService {
       untrackedCopied,
       message: describeSync("Pushed", appliedFiles, conflictedFiles, undefined, untrackedCopied)
     };
+  }
+
+  /**
+   * Branch handoff (background-lane plan D3): land the clone's committed
+   * work as a LOCAL branch in the developer's repo - a ref-only write via
+   * `git fetch <cloneGitDir> HEAD:refs/heads/<name>` run in the local repo.
+   * No checkout, no working-tree change, no push, never a delete.
+   *
+   * Fetch's own fast-forward rule is the drift guard: an existing branch
+   * advances only when its tip is an ancestor of the clone HEAD (this
+   * task's own earlier land). Anything else either suffixes (`name_1`,
+   * `name_2`, ...) or fails, per `onCollision` - stage advances use `fail`
+   * so drift parks the chain instead of silently forking names.
+   *
+   * Safety note: the fetch's upload-pack runs against the clone's git dir,
+   * which lives OUTSIDE the sandbox-mounted tree (initClone strips the .git
+   * pointer), so agent writes can never have tampered with the repository
+   * config consulted here.
+   */
+  async landAsBranch(
+    clonePath: string,
+    localRepoPath: string,
+    requestedName: string,
+    options?: { readonly onCollision?: "suffix" | "fail" }
+  ): Promise<{ readonly branch: string; readonly created: boolean; readonly tip: string }> {
+    const target = this.authorizeHostPath?.(localRepoPath) ?? await realpath(localRepoPath);
+    const name = await this.assertLandableBranchName(requestedName, target);
+    await this.commitAgentProgress(clonePath, "[sync] agent");
+    const cloneRepository = this.protectedCloneRepositories.get(normalizePathKey(clonePath));
+    if (cloneRepository === undefined) {
+      throw new Error("This clone's git metadata is not tracked by this window; resume the session before landing a branch.");
+    }
+    // The safety note above is an invariant, not a hope: refuse to fetch
+    // from a git dir that sits inside the agent-writable worktree (a future
+    // caller skipping the separate-git-dir layout must fail loudly here).
+    if (isPathWithin(cloneRepository.gitDir, cloneRepository.workTree)) {
+      throw new Error("Refusing branch land: this clone's git dir lives inside the sandbox-mounted tree.");
+    }
+    const tipResult = await this.gitIn(clonePath, ["rev-parse", "HEAD"], "resolve clone tip");
+    const tip = tipResult.stdout.trim();
+
+    const exists = async (candidate: string): Promise<boolean> =>
+      (await this.gitIn(target, ["rev-parse", "--verify", "--quiet", `refs/heads/${candidate}`], "probe branch")).exitCode === 0;
+    const landInto = async (candidate: string): Promise<boolean> => {
+      // A non-forced refspec updates an existing branch only on fast-forward
+      // and refuses everything else - exactly the drift guard we want.
+      const result = await this.runGit(
+        ["fetch", "--no-tags", cloneRepository.gitDir, `HEAD:refs/heads/${candidate}`],
+        target
+      );
+      return result.exitCode === 0;
+    };
+
+    const existedBefore = await exists(name);
+    if (await landInto(name)) {
+      return { branch: name, created: !existedBefore, tip };
+    }
+    if ((options?.onCollision ?? "suffix") === "fail") {
+      throw new Error(`BRANCH_DRIFTED: branch "${name}" moved and cannot fast-forward to the clone's work.`);
+    }
+    for (let n = 1; n <= 99; n += 1) {
+      const candidate = `${name}_${String(n)}`;
+      if (await exists(candidate)) continue;
+      if (await landInto(candidate)) {
+        return { branch: candidate, created: true, tip };
+      }
+    }
+    throw new Error(`Could not land branch "${name}": every suffix through _99 is taken or refused.`);
+  }
+
+  /**
+   * Inspection materialization (plan D6, patch flavor): a HUMAN-ONLY copy of
+   * a finished subtask's tree, rebuilt from durable data - clone the real
+   * repo, detach at the recorded origin commit, apply the captured patch and
+   * leave it UNCOMMITTED so vanilla git UI shows exactly what the worker
+   * produced. Unlike sandbox clones this copy keeps its .git (that is the
+   * point); no sandbox ever mounts it. A missing/rebased-away origin falls
+   * back to a 3-way apply on the current HEAD - flagged, never silent.
+   */
+  async materializeInspectionClone(input: {
+    readonly localRepoPath: string;
+    readonly cloneParentDir: string;
+    readonly name: string;
+    /** The capture's origin commit; absent (old captures) forces the 3-way fallback. */
+    readonly originCommit?: string;
+    readonly patch: string;
+  }): Promise<{ readonly clonePath: string; readonly exactBase: boolean }> {
+    const localRepoPath = this.authorizeHostPath?.(input.localRepoPath) ?? await realpath(input.localRepoPath);
+    const clonePath = join(input.cloneParentDir, input.name);
+    await mkdir(input.cloneParentDir, { recursive: true });
+    await this.git0(
+      [...SYNC_AUTHOR, "clone", "--local", "--no-hardlinks", localRepoPath, clonePath],
+      input.cloneParentDir,
+      "clone repo for inspection"
+    );
+    let exactBase = false;
+    if (input.originCommit !== undefined) {
+      const detach = await this.runGit(["checkout", "--detach", input.originCommit], clonePath);
+      exactBase = detach.exitCode === 0;
+    }
+    if (input.patch.length > 0) {
+      const dir = await mkdtemp(join(this.temporaryDirectory, "inspect-patch-"));
+      const patchFile = join(dir, "inspect.diff");
+      try {
+        await writeFile(patchFile, input.patch, "utf8");
+        // Exact base applies cleanly by construction; drifted bases go 3-way
+        // so the human sees conflict markers instead of a refusal.
+        const flags = exactBase
+          ? ["--binary", "--whitespace=nowarn"]
+          : ["--binary", "--3way", "--whitespace=nowarn"];
+        await this.applyPatchFile(clonePath, patchFile, flags, "apply inspection patch");
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+    return { clonePath, exactBase };
+  }
+
+  /**
+   * Inspection materialization (plan D6, worktree flavor): a real-repo
+   * worktree at the landed task branch - instant, git-native, human-only.
+   * ADR 0004's worktree rejection targets SANDBOX workspaces; nothing here
+   * is ever mounted into one. Removal never deletes the branch.
+   */
+  async addInspectionWorktree(localRepoPath: string, worktreePath: string, branch: string): Promise<void> {
+    const target = this.authorizeHostPath?.(localRepoPath) ?? await realpath(localRepoPath);
+    const probe = await this.gitIn(target, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], "probe inspection branch");
+    if (probe.exitCode !== 0) {
+      throw new Error(`Branch "${branch}" does not exist in ${target}; land it before inspecting.`);
+    }
+    await mkdir(dirname(worktreePath), { recursive: true });
+    await this.gitIn(target, ["worktree", "add", worktreePath, branch], "add inspection worktree");
+  }
+
+  /** Removes an inspection worktree (the branch always survives). */
+  async removeInspectionWorktree(localRepoPath: string, worktreePath: string, force = false): Promise<void> {
+    const target = this.authorizeHostPath?.(localRepoPath) ?? await realpath(localRepoPath);
+    await this.gitIn(
+      target,
+      ["worktree", "remove", ...(force ? ["--force"] : []), worktreePath],
+      "remove inspection worktree"
+    );
+  }
+
+  /**
+   * Durable landing, patch handoff (plan D8): apply a STORED changeset to
+   * the developer's working tree when the live clone is gone (reload,
+   * overnight, reboot). Same 3-way semantics as a pull - conflicts land as
+   * markers, nothing commits. The caller marks the rows landed afterwards.
+   */
+  async applyChangesetToLocal(
+    localRepoPath: string,
+    patch: string
+  ): Promise<{ readonly appliedFiles: number; readonly conflictedFiles: readonly string[] }> {
+    const target = this.authorizeHostPath?.(localRepoPath) ?? await realpath(localRepoPath);
+    if (patch.length === 0) return { appliedFiles: 0, conflictedFiles: [] };
+    if (Buffer.byteLength(patch, "utf8") > MAX_PATCH_BYTES) {
+      throw new Error(`Refusing durable-landing patch: exceeds the ${String(MAX_PATCH_BYTES)}-byte clone-sync cap.`);
+    }
+    const dir = await mkdtemp(join(this.temporaryDirectory, "land-patch-"));
+    const patchFile = join(dir, "land.diff");
+    try {
+      await writeFile(patchFile, patch, "utf8");
+      const paths = parseDiffPaths(patch);
+      const apply = await this.tryApplyPatchFile(target, patchFile, ["--binary", "--3way", "--whitespace=nowarn"]);
+      const conflictedFiles = apply.exitCode === 0 ? [] : await this.scanConflicts(target, paths);
+      if (apply.exitCode !== 0 && conflictedFiles.length === 0) {
+        throw gitError("apply stored changeset to local working tree", target, apply);
+      }
+      return { appliedFiles: paths.length, conflictedFiles };
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Durable landing, branch handoff (plan D8): synthesize the landed commit
+   * from a STORED changeset when the clone is gone - a temporary detached
+   * worktree at the capture's origin commit receives the patch, commits it,
+   * and the branch fast-forwards to the result (same ff/suffix rules as
+   * landAsBranch, via a self-fetch). The developer's working tree is never
+   * touched; the temp worktree is always removed.
+   */
+  async landChangesetAsBranch(
+    localRepoPath: string,
+    originCommit: string,
+    patch: string,
+    requestedName: string,
+    options?: { readonly onCollision?: "suffix" | "fail" }
+  ): Promise<{ readonly branch: string; readonly tip: string }> {
+    const target = this.authorizeHostPath?.(localRepoPath) ?? await realpath(localRepoPath);
+    const name = await this.assertLandableBranchName(requestedName, target);
+    const dir = await mkdtemp(join(this.temporaryDirectory, "land-branch-"));
+    const worktree = join(dir, "wt");
+    try {
+      await this.gitIn(target, ["worktree", "add", "--detach", worktree, originCommit], "add durable-landing worktree");
+      if (patch.length > 0) {
+        const patchFile = join(dir, "land.diff");
+        await writeFile(patchFile, patch, "utf8");
+        // Exact base by construction (the patch was diffed against origin).
+        await this.applyPatchFile(worktree, patchFile, ["--binary", "--whitespace=nowarn"], "apply stored changeset in landing worktree");
+      }
+      await this.gitIn(worktree, ["add", "-A"], "stage durable landing");
+      await this.gitIn(worktree, [...SYNC_AUTHOR, "commit", "--allow-empty", "-m", "[drydock] landed changeset"], "commit durable landing");
+      const tip = (await this.gitIn(worktree, ["rev-parse", "HEAD"], "resolve landed tip")).stdout.trim();
+
+      const exists = async (candidate: string): Promise<boolean> =>
+        (await this.gitIn(target, ["rev-parse", "--verify", "--quiet", `refs/heads/${candidate}`], "probe branch")).exitCode === 0;
+      const landInto = async (candidate: string): Promise<boolean> =>
+        (await this.runGit(["fetch", "--no-tags", ".", `${tip}:refs/heads/${candidate}`], target)).exitCode === 0;
+
+      if (await landInto(name)) return { branch: name, tip };
+      if ((options?.onCollision ?? "suffix") === "fail") {
+        throw new Error(`BRANCH_DRIFTED: branch "${name}" moved and cannot fast-forward to the stored changeset.`);
+      }
+      for (let n = 1; n <= 99; n += 1) {
+        const candidate = `${name}_${String(n)}`;
+        if (await exists(candidate)) continue;
+        if (await landInto(candidate)) return { branch: candidate, tip };
+      }
+      throw new Error(`Could not land branch "${name}": every suffix through _99 is taken or refused.`);
+    } finally {
+      await this.runGit(["worktree", "remove", "--force", worktree], target);
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Authoritative branch-name validation for the landing verbs. Uses the
+   * FULL-refname form of check-ref-format (the `--branch` form accepts
+   * `@`/`@{-1}` shorthand it would then expand - security audit F5) plus
+   * explicit rejects for revision-syntax and ref-prefix smuggling. Returns
+   * the trimmed name.
+   */
+  private async assertLandableBranchName(requestedName: string, repoPath: string): Promise<string> {
+    const name = requestedName.trim();
+    const refuse = (): never => {
+      throw new Error(`Branch name "${name}" is not a valid git branch name.`);
+    };
+    if (name.length === 0 || name === "@" || name.includes("@{") || name.startsWith("refs/")) refuse();
+    const checked = await this.runGit(["check-ref-format", `refs/heads/${name}`], repoPath);
+    if (checked.exitCode !== 0) refuse();
+    return name;
   }
 
   /** Fails when an omitted path exists in the index or any reachable history. */

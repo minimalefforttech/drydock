@@ -8,7 +8,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -38,7 +38,7 @@ function dirOf(p: string): string {
 
 /** Create a workspace root with an initialized local repo on `main`. */
 async function makeLocalRepo(files: Record<string, string>): Promise<{ root: string; localRepoPath: string; cleanup: () => Promise<void> }> {
-  const root = await mkdtemp(join(tmpdir(), "clone-sync-test-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "clone-sync-test-")));
   const localRepoPath = join(root, "local");
   await mkdir(localRepoPath, { recursive: true });
   await git(localRepoPath, "init", "-b", "main");
@@ -373,7 +373,7 @@ test("preflightRepo reports branch and tracked/untracked dirtiness without chang
 });
 
 test("preflightRepo reports a non-git directory without throwing", async () => {
-  const root = await mkdtemp(join(tmpdir(), "clone-sync-non-git-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "clone-sync-non-git-")));
   try {
     assert.deepEqual(await service().preflightRepo(root), {
       localRepoPath: root,
@@ -1032,6 +1032,218 @@ test("initClone seedPatches land upstream output inside the sync base", async ()
     // empty, so its later changeset never re-carries upstream content.
     assert.deepEqual(await svc.agentChanges(dependent.clonePath), []);
     assert.equal(await svc.outboundChangesetPatch(dependent.clonePath), null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("outboundChangesetPatch records origin/base; full patch only when base tree moved past origin", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    const localHead = (await git(localRepoPath, "rev-parse", "HEAD")).trim();
+
+    // Plain clone (no dirty state, no seeds): the --allow-empty snapshot moves
+    // the base COMMIT but not its TREE, so a capture carries the commits and
+    // no separate full patch - the relative patch already rebuilds from origin.
+    const plain = await svc.initClone({ localRepoPath, cloneParentDir: join(root, "repos-plain"), name: "proj" });
+    assert.equal(plain.originCommit, localHead);
+    await writeAll(join(plain.clonePath, "work.txt"), "agent work\n");
+    const plainCap = await svc.outboundChangesetPatch(plain.clonePath);
+    assert.ok(plainCap);
+    assert.equal(plainCap.originCommit, localHead);
+    assert.ok(plainCap.baseCommit);
+    assert.equal(plainCap.fullPatch, undefined);
+
+    // Seeded clone: upstream content moves the base tree past origin, so the
+    // capture also carries an origin..HEAD full patch that can rebuild the
+    // whole finished tree from originCommit alone (inspection materialization).
+    const upstream = await svc.initClone({ localRepoPath, cloneParentDir: join(root, "repos-up"), name: "proj" });
+    await writeAll(join(upstream.clonePath, "generated.txt"), "upstream output\n");
+    const upCap = await svc.outboundChangesetPatch(upstream.clonePath);
+    assert.ok(upCap);
+    const dependent = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos-dep"),
+      name: "proj",
+      seedPatches: [{ label: "sub-up/proj", patch: upCap.patch }]
+    });
+    await writeAll(join(dependent.clonePath, "own.txt"), "dependent work\n");
+    const depCap = await svc.outboundChangesetPatch(dependent.clonePath);
+    assert.ok(depCap);
+    assert.ok(depCap.fullPatch, "seeded capture carries a full patch");
+    assert.match(depCap.fullPatch ?? "", /generated\.txt/);
+    assert.match(depCap.fullPatch ?? "", /own\.txt/);
+    // The relative patch stays scoped to this clone's own work (ADR 0014).
+    assert.doesNotMatch(depCap.patch, /generated\.txt/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("landAsBranch: create, ff advance, suffix on foreign collision, fail mode for stage drift", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    const clone = await svc.initClone({ localRepoPath, cloneParentDir: join(root, "repos"), gitMetadataParentDir: join(root, "git"), name: "proj" });
+    await writeAll(join(clone.clonePath, "feature.txt"), "work v1\n");
+
+    // Create: ref-only write - no checkout, no working-tree change.
+    const first = await svc.landAsBranch(clone.clonePath, localRepoPath, "PIPE-231");
+    assert.equal(first.branch, "PIPE-231");
+    assert.equal(first.created, true);
+    assert.equal((await git(localRepoPath, "rev-parse", "refs/heads/PIPE-231")).trim(), first.tip);
+    assert.equal((await git(localRepoPath, "rev-parse", "--abbrev-ref", "HEAD")).trim(), "main");
+    assert.equal(await fileExists(join(localRepoPath, "feature.txt")), false);
+    assert.match(await git(localRepoPath, "show", "PIPE-231:feature.txt"), /work v1/);
+
+    // Fast-forward advance: further work lands onto the same branch.
+    await writeAll(join(clone.clonePath, "feature.txt"), "work v2\n");
+    const second = await svc.landAsBranch(clone.clonePath, localRepoPath, "PIPE-231");
+    assert.equal(second.branch, "PIPE-231");
+    assert.equal(second.created, false);
+    assert.match(await git(localRepoPath, "show", "PIPE-231:feature.txt"), /work v2/);
+
+    // Human divergence on the branch: suffix mode forks to PIPE-231_1...
+    await git(localRepoPath, "checkout", "PIPE-231");
+    await writeAll(join(localRepoPath, "human.txt"), "human\n");
+    await git(localRepoPath, "add", "-A");
+    await git(localRepoPath, "commit", "-m", "human divergence");
+    await git(localRepoPath, "checkout", "main");
+    await writeAll(join(clone.clonePath, "feature.txt"), "work v3\n");
+    const third = await svc.landAsBranch(clone.clonePath, localRepoPath, "PIPE-231");
+    assert.equal(third.branch, "PIPE-231_1");
+    assert.match(await git(localRepoPath, "show", "PIPE-231_1:feature.txt"), /work v3/);
+    // The human's branch was never force-moved.
+    assert.match(await git(localRepoPath, "show", "PIPE-231:human.txt"), /human/);
+
+    // ...while fail mode (stage advance) refuses on drift instead of forking.
+    await writeAll(join(clone.clonePath, "feature.txt"), "work v4\n");
+    await assert.rejects(
+      () => svc.landAsBranch(clone.clonePath, localRepoPath, "PIPE-231", { onCollision: "fail" }),
+      /BRANCH_DRIFTED/
+    );
+
+    // Names that can never be a git ref refuse loudly.
+    await assert.rejects(() => svc.landAsBranch(clone.clonePath, localRepoPath, "bad..name"), /not a valid git branch name/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("stage chain: stage 1 lands on the task branch, stage 2 clones the branch tip", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    // Stage 1: clone local HEAD, work, land onto the task branch.
+    const stage1 = await svc.initClone({ localRepoPath, cloneParentDir: join(root, "repos-s1"), gitMetadataParentDir: join(root, "git-s1"), name: "proj" });
+    await writeAll(join(stage1.clonePath, "stage1.txt"), "one\n");
+    const landed = await svc.landAsBranch(stage1.clonePath, localRepoPath, "PIPE-114");
+    assert.equal(landed.branch, "PIPE-114");
+
+    // Stage 2: a fresh clone from the branch tip carries stage 1's output
+    // INSIDE its sync base - its own outbound delta starts empty.
+    const stage2 = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos-s2"),
+      gitMetadataParentDir: join(root, "git-s2"),
+      name: "proj",
+      dirtyHandling: "fresh",
+      sourceBranch: "PIPE-114"
+    });
+    assert.equal(stage2.sourceBranchApplied, true);
+    assert.equal(await read(join(stage2.clonePath, "stage1.txt")), "one\n");
+    assert.equal(await svc.outboundChangesetPatch(stage2.clonePath), null);
+
+    // Stage 2 works and fast-forwards the same branch (fail mode: chain integrity).
+    await writeAll(join(stage2.clonePath, "stage2.txt"), "two\n");
+    const advance = await svc.landAsBranch(stage2.clonePath, localRepoPath, "PIPE-114", { onCollision: "fail" });
+    assert.equal(advance.branch, "PIPE-114");
+    assert.match(await git(localRepoPath, "show", "PIPE-114:stage1.txt"), /one/);
+    assert.match(await git(localRepoPath, "show", "PIPE-114:stage2.txt"), /two/);
+
+    // A repo without the chain branch falls back to its current branch, flagged.
+    const other = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos-other"),
+      name: "proj",
+      dirtyHandling: "fresh",
+      sourceBranch: "NOPE-1"
+    });
+    assert.equal(other.sourceBranchApplied, false);
+
+    // carry + sourceBranch is a caller bug and refuses loudly.
+    await assert.rejects(
+      () => svc.initClone({ localRepoPath, cloneParentDir: join(root, "repos-carry"), name: "proj", sourceBranch: "PIPE-114" }),
+      /always fresh/
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("inspection: exact copy detached at origin with uncommitted work; worktree flavor rides landed branches", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    const clone = await svc.initClone({ localRepoPath, cloneParentDir: join(root, "repos"), gitMetadataParentDir: join(root, "git"), name: "proj" });
+    await writeAll(join(clone.clonePath, "work.txt"), "agent work\n");
+    const cap = await svc.outboundChangesetPatch(clone.clonePath);
+    assert.ok(cap);
+    assert.ok(cap.originCommit);
+
+    // Copy flavor: fresh clone detached at the origin commit, the captured
+    // patch applied and left UNCOMMITTED - vanilla git shows the work.
+    const made = await svc.materializeInspectionClone({
+      localRepoPath,
+      cloneParentDir: join(root, "inspect"),
+      name: "proj",
+      originCommit: cap.originCommit ?? "",
+      patch: cap.patch
+    });
+    assert.equal(made.exactBase, true);
+    assert.equal(await read(join(made.clonePath, "work.txt")), "agent work\n");
+    assert.match(await git(made.clonePath, "status", "--porcelain"), /work\.txt/);
+    assert.equal((await git(made.clonePath, "rev-parse", "HEAD")).trim(), cap.originCommit);
+
+    // Worktree flavor: land the branch, mount a worktree at it; removal
+    // never deletes the branch, and a missing branch refuses loudly.
+    const landed = await svc.landAsBranch(clone.clonePath, localRepoPath, "PIPE-9");
+    const worktreePath = join(root, "inspect-wt", "proj");
+    await svc.addInspectionWorktree(localRepoPath, worktreePath, landed.branch);
+    assert.equal(await read(join(worktreePath, "work.txt")), "agent work\n");
+    await svc.removeInspectionWorktree(localRepoPath, worktreePath);
+    assert.ok((await git(localRepoPath, "rev-parse", "--verify", "refs/heads/PIPE-9")).trim().length > 0);
+    await assert.rejects(() => svc.addInspectionWorktree(localRepoPath, worktreePath, "missing-branch"), /does not exist/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("durable landing: stored patch applies to the working tree; branch synthesis lands from origin", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
+  try {
+    const svc = service();
+    const clone = await svc.initClone({ localRepoPath, cloneParentDir: join(root, "repos"), gitMetadataParentDir: join(root, "git"), name: "proj" });
+    await writeAll(join(clone.clonePath, "made.txt"), "durable\n");
+    const cap = await svc.outboundChangesetPatch(clone.clonePath);
+    assert.ok(cap);
+
+    // Patch handoff: the stored relative patch lands into the working tree
+    // with pull semantics - present, uncommitted, no refs touched.
+    const applied = await svc.applyChangesetToLocal(localRepoPath, cap.patch);
+    assert.equal(applied.conflictedFiles.length, 0);
+    assert.equal(await read(join(localRepoPath, "made.txt")), "durable\n");
+    assert.match(await git(localRepoPath, "status", "--porcelain"), /made\.txt/);
+
+    // Branch handoff: synthesize the landed commit host-side from (origin,
+    // patch) - never a checkout, never a leftover worktree.
+    await rm(join(localRepoPath, "made.txt"), { force: true });
+    const landed = await svc.landChangesetAsBranch(localRepoPath, cap.originCommit ?? "", cap.fullPatch ?? cap.patch, "PIPE-500");
+    assert.equal(landed.branch, "PIPE-500");
+    assert.match(await git(localRepoPath, "show", "PIPE-500:made.txt"), /durable/);
+    assert.equal((await git(localRepoPath, "rev-parse", "--abbrev-ref", "HEAD")).trim(), "main");
+    assert.equal((await git(localRepoPath, "worktree", "list")).trim().split("\n").length, 1);
   } finally {
     await cleanup();
   }

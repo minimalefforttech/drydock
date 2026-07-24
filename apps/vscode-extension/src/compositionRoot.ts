@@ -30,6 +30,7 @@ import {
   ProductEventBus,
   RandomIdGenerator,
   normalizePathKey,
+  parseHandoffNote,
   RuntimeCleanupService,
   RuntimeLifecycleService,
   RuntimeReconcileService,
@@ -62,7 +63,9 @@ import {
   SqliteProjectCatalogStore,
   SqliteReviewStore,
   SqliteRuntimeInventoryStore,
+  SqlitePreferenceStore,
   SqliteSecurityEventStore,
+  SqliteSubtaskHandoffStore,
   SqliteSubtaskHoldStore,
   SqliteSubtaskStore,
   SqliteTaskChangesetStore,
@@ -73,8 +76,9 @@ import {
   SqliteWorkspaceSetStore,
   SqliteWorkTaskStore
 } from "@drydock/storage-sqlite";
-import { BoardService, ChangesetService, importServersFromConfigJson, McpRegistryService, MemoryService, ProjectCatalogService, RecipeService, SubtaskOrchestrator, SubtaskService, TaskService, WorkspaceSetService } from "@drydock/work-management";
+import { BoardService, ChangesetService, importServersFromConfigJson, McpRegistryService, MemoryService, PreferencesService, ProjectCatalogService, RecipeService, SubtaskOrchestrator, SubtaskService, TaskService, WorkspaceSetService } from "@drydock/work-management";
 import { PlannerAppService } from "./services/plannerAppService.js";
+import { InspectionService } from "./services/inspectionService.js";
 import { IsolatedRunService } from "./services/isolatedRunService.js";
 import { createSubtaskRunBridge } from "./services/subtaskRunBridge.js";
 import type { EffectiveSecurityPolicy } from "./services/securityPolicy.js";
@@ -95,6 +99,14 @@ export interface BackendReady {
   readonly orchestrator: SubtaskOrchestrator;
   /** Chain changesets (ADR 0014): capture/query/land bookkeeping. */
   readonly changesets: ChangesetService;
+  /** Inspection workspaces (plan D6): materialize finished work for a human to step into. */
+  readonly inspection: InspectionService;
+  /** Product preferences (plan D10): the workflow-defaults rung of the config ladder. */
+  readonly preferences: PreferencesService;
+  /** Host git plumbing (clone/sync/land/inspect verbs) for panel-level flows. */
+  readonly cloneSync: CloneSyncService;
+  /** Durable project catalog (remote picks register here with origin metadata). */
+  readonly projectCatalog: ProjectCatalogService;
   /** Task recipes (ADR 0007): templates that materialize task + subtask DAGs. */
   readonly recipes: RecipeService;
   readonly questions: AgentQuestionService;
@@ -144,6 +156,8 @@ export interface CreateBackendOptions {
   readonly recipeOverlays?: () => Promise<readonly import("@drydock/contracts").TaskRecipeRecord[]>;
   /** ADR 0015: live run-slot budget (drydock.orchestrator.maxConcurrentRuns; host derives the auto default). */
   readonly maxConcurrentRuns?: () => number;
+  /** Background sub-budget (drydock.orchestrator.maxBackgroundRuns; host derives auto = half the slots). */
+  readonly maxBackgroundRuns?: () => number;
   /** ADR 0007: the global gate for task-FAQ question auto-answering. */
   readonly autoAnswerQuestionsEnabled?: () => boolean;
   /** ADR 0017: studio-registered prototype themes (drydock.prototypeThemes). */
@@ -726,6 +740,36 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     bus
   });
 
+  // Stage handoffs (plan D4): one bounded note per finished stage, parsed
+  // from a ```handoff fenced block in the worker's final text (or a
+  // capture-derived summary fallback), forwarded into the next stage's
+  // first turn by the run bridge.
+  const handoffs = new SqliteSubtaskHandoffStore(connection);
+
+  // Inspection workspaces (plan D6): human-only views of finished work,
+  // materialized from durable changesets (copy flavor) or the landed task
+  // branch (worktree flavor) under <stateRoot>/inspect - outside the swept
+  // tmp area, cleaned by human decision only. Never mounted into a sandbox;
+  // the opener must never auto-trust one.
+  const inspection = new InspectionService({
+    logger,
+    workspaceStore: new TempWorkspaceStore(path.join(stateRootPath, "inspect")),
+    cloneSync,
+    tasks: { getTask: (taskId) => workTaskStore.getTask(asId<"TaskId">(taskId)) },
+    policies: tasks,
+    workspaces: workspaceReview,
+    changesets,
+    subtasks: { getSubtask: (subtaskId) => subtasks.getSubtask(subtaskId) },
+    onLandedBranchMissing: async (taskId) => {
+      await workTaskStore.updateTask(asId<"TaskId">(taskId), { landedBranch: null, updatedAt: clock.isoNow() });
+      bus.publish({ kind: "board-changed" });
+    }
+  });
+
+  // Product preferences (plan D10): the workflow-defaults rung of the config
+  // ladder, edited later in the System tab; recipes and tickets override it.
+  const preferences = new PreferencesService(new SqlitePreferenceStore(connection), logger);
+
   // Task recipes (ADR 0007): stored templates (seeded once by migration)
   // plus a read-only overlay from the workspace's .drydock/recipes.json,
   // supplied by extension.ts exactly like the planner aspect overlays.
@@ -734,7 +778,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     tasks,
     subtasks,
     logger,
-    ...(options.recipeOverlays === undefined ? {} : { overlays: options.recipeOverlays })
+    ...(options.recipeOverlays === undefined ? {} : { overlays: options.recipeOverlays }),
+    preferences: () => preferences.getNewTicketDefaults()
   });
 
   // Subtask auto-start orchestration (task board, Orchestration phase): the
@@ -746,6 +791,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   // session back to its subtask). The card-entered-done hook captures the
   // finishing subtask's changeset BEFORE dependents evaluate, so an
   // auto-started dependent with upstream seeding reads a fresh store.
+  // Per-task serialization of stage branch advances (see the hook below).
+  const stageAdvanceLocks = new Map<string, Promise<void>>();
   const orchestrator = new SubtaskOrchestrator({
     subtasks,
     board,
@@ -754,10 +801,37 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       listLinks: () => workTaskStore.listLinks()
     },
     bus,
-    startRun: createSubtaskRunBridge({ logger, sessions: appService, workspaces: workspaceReview, tasks, changesets }),
+    startRun: createSubtaskRunBridge({
+      logger,
+      sessions: appService,
+      workspaces: workspaceReview,
+      tasks,
+      changesets,
+      tickets: {
+        getTicket: async (taskId) => {
+          const task = await workTaskStore.getTask(asId<"TaskId">(taskId));
+          if (task === null) return null;
+          return {
+            ...(task.handoffMode === undefined ? {} : { handoffMode: task.handoffMode }),
+            ...(task.branchName === undefined ? {} : { branchName: task.branchName }),
+            ...(task.landedBranch === undefined ? {} : { landedBranch: task.landedBranch })
+          };
+        }
+      },
+      handoffs: {
+        listForSubtasks: async (subtaskIds) =>
+          (await handoffs.listForSubtasks(subtaskIds.map((id) => asId<"SubtaskId">(id))))
+            .map((record) => ({ subtaskId: record.subtaskId as string, note: record.note }))
+      }
+    }),
     logger,
     ...(options.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: options.maxConcurrentRuns }),
+    ...(options.maxBackgroundRuns === undefined ? {} : { maxBackgroundRuns: options.maxBackgroundRuns }),
+    // Lane resolution reads the owning task fresh per start so a card edit
+    // applies to the very next dispatch. Missing task = normal lane.
+    resolveTaskLane: async (taskId) => (await workTaskStore.getTask(asId<"TaskId">(taskId)))?.lane ?? "normal",
     isSessionLive: (sessionId) => appService.isChatSessionLive(sessionId),
+    endOrphanedSession: (sessionId, reason) => appService.endChatSession(sessionId, reason),
     holds: new SqliteSubtaskHoldStore(connection),
     onCardEnteredDone: async ({ taskId, subtaskId }) => {
       const sessionIds = await workTaskStore.listSessionIdsBySubtask(asId<"SubtaskId">(subtaskId));
@@ -771,6 +845,65 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
         throw new Error(`Changeset capture unavailable for subtask ${subtaskId}: clone state for session ${sessionId} is no longer available.`);
       }
       await changesets.captureForSubtask({ taskId, subtaskId, sessionId, patches });
+
+      const subtaskRecord = await subtasks.getSubtask(subtaskId);
+      if (subtaskRecord?.stageIndex === undefined) return;
+
+      // Stage handoff fallback (plan D4): a stage that emitted no ```handoff
+      // block still leaves an honest, capture-derived baton for its successor.
+      if (await handoffs.getHandoff(asId<"SubtaskId">(subtaskId)) === null) {
+        const files = patches.flatMap((patch) => patch.paths).slice(0, 40);
+        await handoffs.upsertHandoff({
+          subtaskId: asId<"SubtaskId">(subtaskId),
+          taskId: asId<"TaskId">(taskId),
+          note: [
+            `Stage "${subtaskRecord.title}" completed without an explicit handoff note.`,
+            files.length > 0 ? `Files it changed: ${files.join(", ")}` : "It changed no files."
+          ].join("\n"),
+          source: "summary",
+          createdAt: clock.isoNow()
+        });
+      }
+
+      // Stage branch advance (plan D4): a finishing stage of a branch-handoff
+      // task lands its work onto the task's OWN branch - ref-only, and
+      // fast-forward-only once the canonical name exists. A drifted branch
+      // rejects this hook, which blocks dependent auto-start: the chain parks
+      // instead of force-writing over human commits. Advances SERIALIZE per
+      // task (concurrency audit M2): two staged completions racing the
+      // read-land-persist of landedBranch could otherwise fork the branch -
+      // inside the lock each advance re-reads the task, so the second sees
+      // the first's canonical name and fast-forwards instead of suffixing.
+      const priorAdvance = stageAdvanceLocks.get(taskId) ?? Promise.resolve();
+      const advance = priorAdvance.then(async () => {
+        const task = await workTaskStore.getTask(asId<"TaskId">(taskId));
+        if (task?.handoffMode !== "branch" || task.branchName === undefined || patches.length === 0) return;
+        const requested = task.landedBranch ?? task.branchName;
+        try {
+          const landed = await appService.landSessionAsBranch(sessionId, requested, {
+            onCollision: task.landedBranch === undefined ? "suffix" : "fail",
+            repoNames: patches.map((patch) => patch.repoName)
+          });
+          if (landed !== null && landed.branch !== task.landedBranch) {
+            await workTaskStore.updateTask(asId<"TaskId">(taskId), { landedBranch: landed.branch, updatedAt: clock.isoNow() });
+          }
+          // A successful advance clears any earlier drift park (the human
+          // reconciled the branch and re-dragged/retried the stage).
+          if (subtaskRecord.branchDriftAt !== undefined) {
+            await subtasks.updateSubtask(subtaskId, { branchDrift: false });
+          }
+        } catch (error) {
+          // Drift is a first-class, visible state (workflow audit M5): stamp
+          // the stage so the board can wear the chip and offer the retry,
+          // then rethrow so the hook still blocks the cascade.
+          if (error instanceof Error && error.message.includes("BRANCH_DRIFTED")) {
+            await subtasks.updateSubtask(subtaskId, { branchDrift: true }).catch(() => undefined);
+          }
+          throw error;
+        }
+      });
+      stageAdvanceLocks.set(taskId, advance.catch(() => undefined));
+      await advance;
     }
   });
 
@@ -785,6 +918,28 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       return;
     }
     const finalText = event.event.text;
+    // Stage handoff notes (plan D4): a ```handoff fenced block in a
+    // subtask-linked session's final text becomes the durable baton for the
+    // next stage. Plain chats have no successor to brief - silently skipped.
+    void (async () => {
+      const note = parseHandoffNote(finalText);
+      if (note === null) return;
+      const links = await workTaskStore.listLinks();
+      const link = links.find((entry) => entry.sessionId === event.sessionId && entry.subtaskId !== undefined);
+      if (link?.subtaskId === undefined) return;
+      await handoffs.upsertHandoff({
+        subtaskId: link.subtaskId,
+        taskId: link.taskId,
+        note,
+        source: "agent",
+        createdAt: clock.isoNow()
+      });
+    })().catch((error: unknown) => {
+      logger.warn("handoff note capture failed", {
+        sessionId: event.sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
     if (appService.isChatSessionLive(event.sessionId)) {
       void workspaceReview.detectAgentAccessRequests(event.sessionId, finalText).catch((error: unknown) => {
         logger.warn("agent access request detection failed", {
@@ -1038,6 +1193,10 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     subtasks,
     orchestrator,
     changesets,
+    inspection,
+    preferences,
+    cloneSync,
+    projectCatalog,
     recipes,
     memory,
     mcp,

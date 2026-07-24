@@ -32,9 +32,13 @@ export class SqliteTaskChangesetStore implements TaskChangesetStore {
           patch_bytes,
           file_count,
           paths_json,
+          origin_commit,
+          base_commit,
+          full_patch_sha256,
+          full_patch_bytes,
           captured_at,
           landed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const record of records) {
         insert.run(
@@ -47,6 +51,10 @@ export class SqliteTaskChangesetStore implements TaskChangesetStore {
           record.patchBytes,
           record.fileCount,
           record.paths === undefined ? null : JSON.stringify(record.paths),
+          record.originCommit ?? null,
+          record.baseCommit ?? null,
+          record.fullPatchSha256 ?? null,
+          record.fullPatchBytes ?? null,
           record.capturedAt,
           record.landedAt ?? null
         );
@@ -125,6 +133,10 @@ interface ChangesetRow {
   readonly patch_bytes: number;
   readonly file_count: number;
   readonly paths_json: string | null;
+  readonly origin_commit: string | null;
+  readonly base_commit: string | null;
+  readonly full_patch_sha256: string | null;
+  readonly full_patch_bytes: number | null;
   readonly captured_at: string;
   readonly landed_at: string | null;
 }
@@ -140,6 +152,10 @@ function mapChangeset(row: ChangesetRow): TaskChangesetRecord {
     patchBytes: row.patch_bytes,
     fileCount: row.file_count,
     ...(parsePaths(row.paths_json) ?? {}),
+    ...(row.origin_commit === null ? {} : { originCommit: row.origin_commit }),
+    ...(row.base_commit === null ? {} : { baseCommit: row.base_commit }),
+    ...(row.full_patch_sha256 === null ? {} : { fullPatchSha256: row.full_patch_sha256 }),
+    ...(row.full_patch_bytes === null ? {} : { fullPatchBytes: row.full_patch_bytes }),
     capturedAt: row.captured_at,
     ...(row.landed_at === null ? {} : { landedAt: row.landed_at })
   };
@@ -151,7 +167,11 @@ function parsePaths(json: string | null): { paths: readonly string[] } | null {
   try {
     const value = JSON.parse(json) as unknown;
     if (!Array.isArray(value)) return null;
-    return { paths: value.filter((entry): entry is string => typeof entry === "string") };
+    // A partially corrupt array must degrade to UNKNOWN, never to a truncated
+    // list - understating touched paths would let the landing overlap
+    // pre-check (ADR 0014) conclude "no overlap" and skip its warning.
+    if (value.some((entry) => typeof entry !== "string")) return null;
+    return { paths: value as string[] };
   } catch {
     return null;
   }

@@ -61,6 +61,7 @@ interface DemoFixtures {
   runtimeStats: DemoRecord[];
   recipes: DemoRecord[];
   faqs: Record<string, DemoRecord[]>;
+  ticketDefaults: { lane?: "normal" | "background"; handoffMode?: "patch" | "branch"; approach?: "implement" | "plan-first" };
 }
 
 export interface DemoModeController {
@@ -298,6 +299,28 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
       task.subtasks = [demoSubtask(task.taskId, "Confirm the change boundary", "col-ready", 0), demoSubtask(task.taskId, "Implement and review", "col-backlog", 1)];
       fixtures.tasks = [task, ...fixtures.tasks];
       return ok(requestId, { type: "task.createFromRecipe", task });
+    }
+    case "task.inspect":
+      return ok(requestId, { type: "task.inspect", message: "Demo mode: inspection windows open against a real backend only." });
+    case "subtask.approveGate": {
+      const task = fixtures.tasks.find((candidate) =>
+        (candidate["subtasks"] as DemoRecord[]).some((subtask) => subtask["subtaskId"] === payload.subtaskId));
+      if (task === undefined) return error(requestId, "Demo subtask not found.");
+      task["subtasks"] = (task["subtasks"] as DemoRecord[]).map((subtask) =>
+        subtask["subtaskId"] === payload.subtaskId
+          ? { ...subtask, gateSatisfiedAt: fixtures.now, gateReady: undefined }
+          : subtask);
+      return ok(requestId, { type: "subtask.approveGate", task });
+    }
+    case "prefs.ticketDefaults.get":
+      return ok(requestId, { type: "prefs.ticketDefaults.get", ...fixtures.ticketDefaults });
+    case "prefs.ticketDefaults.set": {
+      fixtures.ticketDefaults = {
+        ...(payload.lane === undefined ? {} : { lane: payload.lane }),
+        ...(payload.handoffMode === undefined ? {} : { handoffMode: payload.handoffMode }),
+        ...(payload.approach === undefined ? {} : { approach: payload.approach })
+      };
+      return ok(requestId, { type: "prefs.ticketDefaults.set", ...fixtures.ticketDefaults });
     }
     case "task.faq.list":
       return ok(requestId, { type: "task.faq.list", faqs: fixtures.faqs[payload.taskId] ?? [] });
@@ -793,7 +816,7 @@ function createFixtures(): DemoFixtures {
     },
     {
       taskId: "demo-task-auth",
-      title: "Replace the token refresh path",
+      title: "PIPE-231 Replace the token refresh path",
       description: "Move refresh handling into the shared client and cover failure recovery.",
       state: "review",
       columnId: "col-review",
@@ -803,9 +826,17 @@ function createFixtures(): DemoFixtures {
       updatedAt: now,
       lastWorkedAt: now,
       openReviewCommentCount: 1,
+      // Background-lane branch ticket (plan D1/D3/D4): stage chips, the
+      // branch chip, plan-ready approval, and the done-column Inspect
+      // affordance all render from this fixture in demo/guide mode.
+      lane: "background",
+      handoffMode: "branch",
+      branchName: "PIPE-231",
+      landedBranch: "PIPE-231",
+      approach: "plan-first",
       subtasks: [
-        { ...demoSubtask("demo-task-auth", "Extract token storage", "col-done", 0), subtaskId: "demo-subtask-token", doneAt: now, verifiedAt: now },
-        { ...demoSubtask("demo-task-auth", "Handle expired refresh tokens", "col-review", 1), subtaskId: "demo-subtask-expired", dependsOn: ["demo-subtask-token"], linkedSessionIds: ["demo-session-auth"] }
+        { ...demoSubtask("demo-task-auth", "Extract token storage", "col-done", 0), subtaskId: "demo-subtask-token", doneAt: now, verifiedAt: now, stageIndex: 1, hasUnlandedChangeset: true, gate: "plan-approval", gateSatisfiedAt: now },
+        { ...demoSubtask("demo-task-auth", "Handle expired refresh tokens", "col-review", 1), subtaskId: "demo-subtask-expired", dependsOn: ["demo-subtask-token"], linkedSessionIds: ["demo-session-auth"], stageIndex: 2, gate: "plan-approval", gateReady: true }
       ]
     },
     {
@@ -972,6 +1003,7 @@ function createFixtures(): DemoFixtures {
         { faqId: "demo-faq-files", taskId: "demo-task-onboarding", pattern: "Can Demo mode open files?", answer: "No. Demo mode keeps file, AI, and runtime actions disconnected.", createdAt: now },
         { faqId: "demo-faq-reset", taskId: "demo-task-onboarding", pattern: "How do I restore the sample data?", answer: "Use Reset demo in the Demo data banner.", createdAt: now }
       ]
-    }
+    },
+    ticketDefaults: { lane: "background", handoffMode: "branch" }
   };
 }

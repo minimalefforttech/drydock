@@ -14,6 +14,7 @@ export * from "./json.js";
 export * from "./mcp.js";
 export * from "./memory.js";
 export * from "./planner.js";
+export * from "./preferences.js";
 export * from "./questions.js";
 export * from "./runtime.js";
 export * from "./sessions.js";

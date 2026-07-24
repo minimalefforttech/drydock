@@ -70,3 +70,17 @@ already started. Live run projections may reset with the host; queued and
 parked intent is durable and restored under 0015. Recipes make repeated fleet
 shapes cheap without collapsing creation, start, review, and verification into
 one implicit action.
+
+## Amendment - 2026-07-24 (ticket shape, stages, gated edges)
+
+Tasks now carry a ticket shape settable at creation and editable later:
+queue lane, handoff mode (patch | branch) with a plain user-owned branch
+name, and approach (implement | plan-first). Recipes carry matching
+defaults (below the ticket, above product preferences in the config
+ladder) and may declare stage steps: 1-based `stageIndex` values must be
+unique and every stage after the first must explicitly depend on its
+predecessor - validation rejects implied chains. The cascade predicate
+gains one clause: a subtask carrying an unsatisfied human gate (ADR 0016)
+is never auto-start eligible. Batch intake (`Drydock: Queue Background
+Tickets…`) materializes one background ticket per pasted line; creation
+and start remain separate acts.

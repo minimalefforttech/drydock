@@ -15,6 +15,8 @@ export * from "./runtimeInventoryStore.js";
 export * from "./securityEventStore.js";
 export * from "./sessionStore.js";
 export * from "./sqliteConnection.js";
+export * from "./preferenceStore.js";
+export * from "./subtaskHandoffStore.js";
 export * from "./subtaskHoldStore.js";
 export * from "./subtaskStore.js";
 export * from "./taskChangesetStore.js";

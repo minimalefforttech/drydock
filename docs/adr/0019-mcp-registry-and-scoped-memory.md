@@ -91,3 +91,15 @@ memory still cannot persist without human approval.
 - Codex-side MCP config rendering (TOML); per-server health probes.
 - Path-prefix memory selectors if glob tags prove too coarse.
 - Memory dedup/contradiction surfacing; registry + memory export/import.
+
+## Amendment - 2026-07-24 (the cascade generalizes to configuration)
+
+The tri-state cascade mental model this decision established now also
+governs product configuration (plan D10): studio policy caps everything
+and can only forbid; machine facts live in VS Code settings; workflow
+defaults live in a sqlite `preferences` store edited in the System tab
+(first resident: new-ticket defaults - lane, handoff, approach); recipes
+override preferences; the ticket overrides recipes; the stage overrides
+the ticket. Unset means inherit, the most specific written value wins,
+and junk stored values degrade to defaults instead of crashing consumers.
+Secrets keep this decision's posture: never rendered, never in a sandbox.

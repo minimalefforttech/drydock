@@ -51,3 +51,15 @@ outlive the webview request timeout.
 - One summarize per session at a time (service-side guard); the panel keeps a
   single in-flight indicator and recovers via a safety timeout if the
   completion push is lost. The clipboard still lands host-side in that case.
+
+## Amendment - 2026-07-24 (stage handoff notes)
+
+Stage chains reuse this decision's digest posture for their baton: a
+finished stage's handoff note comes from a ```handoff fenced block in the
+worker's final text (last non-empty block wins, byte-capped at 2 KB with an
+explicit truncation marker), with a host-built, capture-derived summary as
+the fallback - the host never invents prose. Notes are durable
+(`subtask_handoffs`, latest completion wins), forwarded verbatim as a
+labeled section of the next stage's first turn, and remain worker-authored
+content at the same trust tier as any agent text: rendered safely, never
+executed, never widening access.

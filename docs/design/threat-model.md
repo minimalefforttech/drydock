@@ -138,3 +138,26 @@ Before VS Code implementation begins, the prevalidation harness must prove or cl
 - Multiple orchestrated role sessions can run independently and one can be cancelled without killing the rest.
 - Role timeline, task registry, related project history, prompt history, memory review, automated-test, and HITL records can be represented before UI implementation begins.
 
+
+## Additions - 2026-07-24 (background-lane features)
+
+- **Inspection windows are worker-authored content.** They open
+  `forceNewWindow` and must never be auto-trusted: VS Code Restricted Mode
+  is the proportional friction between agent-written workspace config
+  (`.vscode/tasks.json` and friends) and host execution. No sandbox ever
+  mounts an inspection workspace; edits there are never synced back.
+- **Automated ref writes are bounded.** The only automated repository
+  write the stage/branch features add is a fast-forward advance of the
+  task's OWN branch (creation may suffix `_1`, `_2` on foreign collisions).
+  Never a force move, never a delete, never a checkout, never a push, and
+  drift parks the chain loudly.
+- **Handoff notes are an agent-to-agent channel by design.** A stage's
+  note is worker-authored text forwarded verbatim into the next worker's
+  prompt - the same trust tier as any agent output: rendered safely for
+  humans, byte-capped, never executed by the host, and never a path to
+  wider access (mounts still resolve through approvals only).
+- **Git-host tokens.** GitHub sessions ride VS Code's keychain; GitLab
+  PATs live in SecretStorage per host. Tokens are never rendered, never in
+  git config or argv (transient 0600 ASKPASS helper only), never in a
+  sandbox; remote clones are https-only and host-side. The sandbox still
+  never fetches.

@@ -185,6 +185,8 @@ interface Harness {
 
 function harness(startRunImpl?: StartSubtaskRun, extra?: {
   maxConcurrentRuns?: () => number;
+  maxBackgroundRuns?: () => number;
+  resolveTaskLane?: (taskId: string) => Promise<"normal" | "background">;
   onCardEnteredDone?: (input: { readonly taskId: string; readonly subtaskId: string }) => Promise<void>;
 }): Harness {
   const subtasks = new FakeSubtasks();
@@ -211,6 +213,8 @@ function harness(startRunImpl?: StartSubtaskRun, extra?: {
     startRun,
     logger,
     ...(extra?.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: extra.maxConcurrentRuns }),
+    ...(extra?.maxBackgroundRuns === undefined ? {} : { maxBackgroundRuns: extra.maxBackgroundRuns }),
+    ...(extra?.resolveTaskLane === undefined ? {} : { resolveTaskLane: extra.resolveTaskLane }),
     ...(extra?.onCardEnteredDone === undefined ? {} : { onCardEnteredDone: extra.onCardEnteredDone })
   });
   return { orchestrator, subtasks, board, links, bus, logger, startRun, startCalls, sessionCounter };
@@ -738,12 +742,107 @@ test("parked dependents are excluded from the cascade", async () => {
   assert.equal(h.orchestrator.isParked("sub-down"), true);
 });
 
+// --- Background lane (ADR 0015 extension) -------------------------------------
+
+test("background lane: auto starts respect the sub-budget and queue while normal work still starts", async () => {
+  const lanes = new Map<string, "normal" | "background">([["task-bg", "background"]]);
+  const h = harness(undefined, {
+    maxConcurrentRuns: () => 3,
+    maxBackgroundRuns: () => 1,
+    resolveTaskLane: async (taskId) => lanes.get(taskId) ?? "normal"
+  });
+  h.subtasks.add(subtask({ subtaskId: "bg-1", taskId: "task-bg", columnId: "col-todo", prompt: "b1" }));
+  h.subtasks.add(subtask({ subtaskId: "bg-2", taskId: "task-bg", columnId: "col-todo", prompt: "b2" }));
+  h.subtasks.add(subtask({ subtaskId: "n-1", taskId: "task-n", columnId: "col-todo", prompt: "n1" }));
+
+  await h.orchestrator.startSubtask("bg-1", { origin: "auto" });
+  await h.orchestrator.startSubtask("bg-2", { origin: "auto" });
+  assert.equal(h.orchestrator.isRunning("bg-1"), true);
+  assert.equal(h.orchestrator.isQueued("bg-2"), true, "second background auto start waits on the sub-budget");
+  assert.equal(h.orchestrator.backgroundActiveCount(), 1);
+
+  // Normal-lane work is untouched by the sub-budget: the global budget has room.
+  await h.orchestrator.startSubtask("n-1", { origin: "auto" });
+  assert.equal(h.orchestrator.isRunning("n-1"), true);
+
+  // bg-1 finishing frees the sub-budget; bg-2 drains.
+  await completeRun(h, "session-1", "completed");
+  assert.equal(h.orchestrator.isRunning("bg-2"), true);
+});
+
+test("queue bands: manual first, then normal auto, then background auto", async () => {
+  const lanes = new Map<string, "normal" | "background">([["task-bg", "background"]]);
+  const h = harness(undefined, {
+    maxConcurrentRuns: () => 1,
+    resolveTaskLane: async (taskId) => lanes.get(taskId) ?? "normal"
+  });
+  h.subtasks.add(subtask({ subtaskId: "first", taskId: "task-n", columnId: "col-todo", prompt: "f" }));
+  h.subtasks.add(subtask({ subtaskId: "bg-a", taskId: "task-bg", columnId: "col-todo", prompt: "a" }));
+  h.subtasks.add(subtask({ subtaskId: "norm", taskId: "task-n", columnId: "col-todo", prompt: "n" }));
+  h.subtasks.add(subtask({ subtaskId: "hotfix", taskId: "task-n", columnId: "col-todo", prompt: "h" }));
+
+  await h.orchestrator.startSubtask("first");
+  await h.orchestrator.startSubtask("bg-a", { origin: "auto" });
+  await h.orchestrator.startSubtask("norm", { origin: "auto" }); // enqueues AHEAD of bg-a
+  await h.orchestrator.startSubtask("hotfix"); // manual -> front
+  assert.deepEqual(h.orchestrator.queueDepths(), { manual: 1, normal: 1, background: 1 });
+
+  await completeRun(h, "session-1", "completed");
+  await completeRun(h, "session-2", "completed");
+  await completeRun(h, "session-3", "completed");
+  assert.deepEqual(h.startCalls.map((call) => call.subtaskId), ["first", "hotfix", "norm", "bg-a"]);
+});
+
+test("manual starts of background tasks bypass the sub-budget and never count against it", async () => {
+  const lanes = new Map<string, "normal" | "background">([["task-bg", "background"]]);
+  const h = harness(undefined, {
+    maxConcurrentRuns: () => 4,
+    maxBackgroundRuns: () => 1,
+    resolveTaskLane: async (taskId) => lanes.get(taskId) ?? "normal"
+  });
+  h.subtasks.add(subtask({ subtaskId: "bg-auto", taskId: "task-bg", columnId: "col-todo", prompt: "a" }));
+  h.subtasks.add(subtask({ subtaskId: "bg-manual", taskId: "task-bg", columnId: "col-todo", prompt: "m" }));
+
+  await h.orchestrator.startSubtask("bg-auto", { origin: "auto" });
+  await h.orchestrator.startSubtask("bg-manual"); // a human clicking start is attended work
+  assert.equal(h.orchestrator.isRunning("bg-manual"), true);
+  assert.equal(h.orchestrator.backgroundActiveCount(), 1);
+});
+
+test("a gated dependent never auto-starts until a person satisfies the gate", async () => {
+  const h = harness();
+  h.subtasks.add(subtask({ subtaskId: "plan", taskId: "task-1", columnId: "col-todo", prompt: "plan it" }));
+  h.subtasks.add(subtask({ subtaskId: "impl", taskId: "task-1", columnId: "col-todo", prompt: "build it", autoStart: true }));
+  h.subtasks.update("impl", { gate: "plan-approval" });
+  h.subtasks.addDependency("plan", "impl", "task-1");
+
+  await h.orchestrator.startSubtask("plan");
+  await completeRun(h, "session-1", "completed");
+  // autoStart + upstream done, but the human gate is unsatisfied: no start.
+  assert.equal(h.startCalls.filter((call) => call.subtaskId === "impl").length, 0);
+
+  // Approval satisfies the gate; re-firing the cascade starts the dependent.
+  h.subtasks.update("impl", { gateSatisfiedAt: NOW });
+  await h.subtasks.moveCard({ subtaskId: "plan" }, "col-finished");
+  await flush();
+  assert.equal(h.startCalls.filter((call) => call.subtaskId === "impl").length, 1);
+});
+
 // --- Continuity (ADR 0015) ----------------------------------------------------
 
-class FakeHoldStore {
-  rows = new Map<string, { subtaskId: string; kind: "queued" | "parked"; origin: "manual" | "auto"; force: boolean; heldAt: string }>();
+interface FakeHold {
+  subtaskId: string;
+  kind: "queued" | "parked";
+  origin: "manual" | "auto";
+  force: boolean;
+  lane?: "normal" | "background";
+  heldAt: string;
+}
 
-  async upsertHold(record: { subtaskId: string; kind: "queued" | "parked"; origin: "manual" | "auto"; force: boolean; heldAt: string }): Promise<void> {
+class FakeHoldStore {
+  rows = new Map<string, FakeHold>();
+
+  async upsertHold(record: FakeHold): Promise<void> {
     this.rows.set(record.subtaskId, record);
   }
 
@@ -751,7 +850,7 @@ class FakeHoldStore {
     return this.rows.delete(subtaskId) ? 1 : 0;
   }
 
-  async listHolds(): Promise<{ subtaskId: string; kind: "queued" | "parked"; origin: "manual" | "auto"; force: boolean; heldAt: string }[]> {
+  async listHolds(): Promise<FakeHold[]> {
     return [...this.rows.values()].sort((a, b) => a.heldAt.localeCompare(b.heldAt));
   }
 }
@@ -832,6 +931,26 @@ test("restore reloads holds after a reload: parked stays, queued drains under th
   assert.equal(h.orchestrator.isParked("sub-p"), true);
   assert.equal(holds.rows.get("sub-p")?.kind, "parked");
   assert.equal(holds.rows.has("sub-q"), false);
+});
+
+test("restore rebuilds bands: manual, then normal auto, then background auto", async () => {
+  const holds = new FakeHoldStore();
+  await holds.upsertHold({ subtaskId: "bg-q", kind: "queued", origin: "auto", force: false, lane: "background", heldAt: "2026-07-12T00:00:01.000Z" });
+  await holds.upsertHold({ subtaskId: "n-q", kind: "queued", origin: "auto", force: false, heldAt: "2026-07-12T00:00:02.000Z" });
+  await holds.upsertHold({ subtaskId: "m-q", kind: "queued", origin: "manual", force: false, heldAt: "2026-07-12T00:00:03.000Z" });
+  const h = holdsHarness(holds, () => 1);
+  h.subtasks.add(subtask({ subtaskId: "bg-q", taskId: "task-1", columnId: "col-todo", prompt: "b" }));
+  h.subtasks.add(subtask({ subtaskId: "n-q", taskId: "task-1", columnId: "col-todo", prompt: "n" }));
+  h.subtasks.add(subtask({ subtaskId: "m-q", taskId: "task-1", columnId: "col-todo", prompt: "m" }));
+
+  await h.orchestrator.restore();
+  await flush();
+  // One slot: the manual hold started first despite being held last.
+  assert.deepEqual(h.startCalls.map((call) => call.subtaskId), ["m-q"]);
+  await completeRun(h, "session-1", "completed");
+  assert.deepEqual(h.startCalls.map((call) => call.subtaskId), ["m-q", "n-q"]);
+  await completeRun(h, "session-2", "completed");
+  assert.deepEqual(h.startCalls.map((call) => call.subtaskId), ["m-q", "n-q", "bg-q"]);
 });
 
 test("restore preserves FIFO within manual priority before automatic holds", async () => {

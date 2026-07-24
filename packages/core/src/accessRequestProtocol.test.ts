@@ -5,10 +5,34 @@ import {
   extractAccessRequests,
   extractAgentQuestions,
   extractMemoryCandidates,
+  HANDOFF_NOTE_MAX_BYTES,
   MAX_ACCESS_REQUESTS_PER_TEXT,
+  parseHandoffNote,
   stripHostBriefing
 } from "./accessRequestProtocol.js";
 import { sandboxRuntimePath } from "./mountPolicy.js";
+
+test("parseHandoffNote: last non-empty handoff fence wins, capped with a truncation marker", () => {
+  assert.equal(parseHandoffNote("no fences here"), null);
+  assert.equal(parseHandoffNote("```handoff\n\n```"), null);
+  const text = [
+    "Stage done.",
+    "```handoff",
+    "first draft",
+    "```",
+    "Correction:",
+    "```handoff",
+    "Guard added in retry_guard.py; submit_hooks wiring remains for stage 2.",
+    "```"
+  ].join("\n");
+  assert.equal(parseHandoffNote(text), "Guard added in retry_guard.py; submit_hooks wiring remains for stage 2.");
+
+  const oversized = ["```handoff", "x".repeat(5000), "```"].join("\n");
+  const parsed = parseHandoffNote(oversized);
+  assert.ok(parsed !== null);
+  assert.ok(Buffer.byteLength(parsed, "utf8") <= HANDOFF_NOTE_MAX_BYTES + 128);
+  assert.match(parsed, /truncated/);
+});
 
 test("extractAccessRequests parses a well-formed fenced block", () => {
   const text = [

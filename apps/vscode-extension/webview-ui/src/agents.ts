@@ -127,7 +127,7 @@ const help = createHelpExperience({
     { title: "Open the responsible session", body: "Select a session row to open its chat in the sidebar. Hover the row for provider, model, capability, activity, questions, access requests, timing, and tokens.", target: () => app.querySelector<HTMLElement>(".session-row") ?? app },
     { title: "Inspect delegated work", body: "Indented session and agent rows preserve parent-child relationships. A transport note explains when per-agent activity is unavailable.", target: () => app.querySelector<HTMLElement>(".row-sub, .session-row.depth-1, .row-note.depth-1") ?? app.querySelector<HTMLElement>(".session-row") ?? app },
     { title: "Open the task board or review", body: "Use Board to manage stages and verification. Use Review to inspect changed files and send revision comments for this task.", target: () => app.querySelector<HTMLElement>(".group:not(.drawer) .gmeta") ?? app.querySelector<HTMLElement>(".group:not(.drawer)") ?? app },
-    { title: "Inspect and pull landing work", body: "The Landing drawer orders unlanded clone changes by known overlap. Inspect related work first, then confirm Pull when the changes should enter the working copy.", target: () => app.querySelector<HTMLElement>(".landing-row") ?? app.querySelector<HTMLElement>(".landing") ?? app, prepare: () => { if (!landingOpen) { landingOpen = true; render(); } } },
+    { title: "Inspect and land finished work", body: "The Landing drawer orders unlanded clone changes by known overlap. Patch tickets Pull into your working copy; branch tickets Land ref-only onto their own branch. Inspect related work first, then confirm.", target: () => app.querySelector<HTMLElement>(".landing-row") ?? app.querySelector<HTMLElement>(".landing") ?? app, prepare: () => { if (!landingOpen) { landingOpen = true; render(); } } },
     nextWorkflowStep({
       current: "agents",
       request,
@@ -1081,9 +1081,19 @@ function renderLandingDrawer(items: readonly LandingItem[]): HTMLElement {
     const row = el("div", "row depth-0 landing-row");
     row.append(el("span", item.overlapsWith.length > 0 ? "dot dot-unknown" : "dot dot-done"));
     row.append(el("span", "stitle", `${item.taskTitle} · ${item.subtaskTitle}`));
+    // Branch-handoff rows (plan D3) land as a ref advance, never a
+    // working-tree pull - and once stage advances put the work on the
+    // branch, the row is informational rather than pending.
+    const branchMode = item.handoffMode === "branch" && item.branch !== undefined;
+    if (branchMode) {
+      row.append(chip(
+        item.branchLanded === true ? `on branch ${item.branch ?? ""}` : `→ branch ${item.branch ?? ""}`,
+        "chip-mode"
+      ));
+    }
     if (item.overlapsWith.length > 0) {
       row.append(chip(`⚠ overlaps ${String(item.overlapsWith.length)}`, "chip-a"));
-    } else if (item.overlapUnknown === true) {
+    } else if (item.overlapUnknown === true && !branchMode) {
       row.append(chip("overlap unknown", "chip-mode"));
     }
     const line = el("span", "act");
@@ -1093,25 +1103,29 @@ function renderLandingDrawer(items: readonly LandingItem[]): HTMLElement {
     const meta = el("span", "rmeta");
     meta.append(el("span", "rmeta-part quiet", formatAgo(item.capturedAt)));
     const armed = armedLandId === item.subtaskId;
-    const pull = actionButton(armed ? "Confirm pull" : "Pull", "Pull this run's clone work into your working copy and mark it landed", () => {
+    const verb = branchMode ? `Land branch` : "Pull";
+    const landTitle = branchMode
+      ? `Advance local branch ${item.branch ?? ""} to this run's work (ref-only; your working tree is untouched) and mark it landed`
+      : "Pull this run's clone work into your working copy and mark it landed";
+    const pull = actionButton(armed ? `Confirm ${verb.toLowerCase()}` : verb, landTitle, () => {
       if (armedLandId !== item.subtaskId) {
         armedLandId = item.subtaskId;
         render();
         return;
       }
       armedLandId = null;
-      landingNotice = `Pulling ${item.subtaskTitle}…`;
+      landingNotice = `${branchMode ? "Landing branch for" : "Pulling"} ${item.subtaskTitle}…`;
       render();
       void request({ type: "agents.landSession", sessionId: item.sessionId }).then((response) => {
         landingNotice = response.ok && response.payload.type === "agents.landSession"
           ? response.payload.message
-          : `pull failed: ${response.ok ? "unexpected response" : response.error.message}`;
+          : `land failed: ${response.ok ? "unexpected response" : response.error.message}`;
         scheduleRefetch();
         render();
       });
     }, armed ? "stop armed" : "");
     pull.disabled = isDemoMode();
-    if (isDemoMode()) pull.title = "Demo data does not write to your working copy. Switch to Live data to pull this work.";
+    if (isDemoMode()) pull.title = "Demo data does not write to your working copy. Switch to Live data to land this work.";
     meta.append(pull);
     row.append(meta);
     section.append(row);

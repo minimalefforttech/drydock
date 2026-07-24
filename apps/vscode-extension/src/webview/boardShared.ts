@@ -53,6 +53,7 @@ export function toSubtaskSummary(
   runtime: { readonly isRunning: boolean; readonly lastFailureAt?: string; readonly isQueued?: boolean; readonly isParked?: boolean },
   hasUnlandedChangeset = false
 ): SubtaskSummary {
+  const isBlocked = subtaskService.isBlocked(record.subtaskId, dependencies, subtasksById, columnsById);
   return {
     subtaskId: record.subtaskId,
     taskId: record.taskId,
@@ -66,7 +67,7 @@ export function toSubtaskSummary(
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     ...(record.doneAt === undefined ? {} : { doneAt: record.doneAt }),
-    isBlocked: subtaskService.isBlocked(record.subtaskId, dependencies, subtasksById, columnsById),
+    isBlocked,
     dependsOn: dependencies
       .filter((edge) => edge.toSubtaskId === record.subtaskId)
       .map((edge) => edge.fromSubtaskId as string),
@@ -86,7 +87,19 @@ export function toSubtaskSummary(
       && record.verifiedAt === undefined
       ? { verifyUnmet: true }
       : {}),
-    ...(record.verifiedAt === undefined ? {} : { verifiedAt: record.verifiedAt })
+    ...(record.verifiedAt === undefined ? {} : { verifiedAt: record.verifiedAt }),
+    ...(record.stageIndex === undefined ? {} : { stageIndex: record.stageIndex }),
+    ...(record.gate === undefined ? {} : { gate: record.gate }),
+    ...(record.gateSatisfiedAt === undefined ? {} : { gateSatisfiedAt: record.gateSatisfiedAt }),
+    // Plan gate is "ready" when only the human is missing: gate armed and
+    // unsatisfied, every upstream done, the card not itself done (plan D5).
+    ...(record.gate !== undefined
+      && record.gateSatisfiedAt === undefined
+      && columnsById.get(record.columnId)?.category !== "done"
+      && !isBlocked
+      ? { gateReady: true }
+      : {}),
+    ...(record.branchDriftAt === undefined ? {} : { branchDriftAt: record.branchDriftAt })
   };
 }
 
@@ -174,6 +187,13 @@ export async function decorateTaskSummary(
     ...summary,
     columnId: record?.columnId ?? summary.columnId,
     ...(record?.doneAt === undefined ? {} : { doneAt: record.doneAt }),
+    // Ticket shape (plan D1): lane/handoff/branch/approach ride every summary
+    // so board chips and the create-flow echo render from one projection.
+    ...(record?.lane === undefined ? {} : { lane: record.lane }),
+    ...(record?.handoffMode === undefined ? {} : { handoffMode: record.handoffMode }),
+    ...(record?.branchName === undefined ? {} : { branchName: record.branchName }),
+    ...(record?.landedBranch === undefined ? {} : { landedBranch: record.landedBranch }),
+    ...(record?.approach === undefined ? {} : { approach: record.approach }),
     subtasks
   };
 }

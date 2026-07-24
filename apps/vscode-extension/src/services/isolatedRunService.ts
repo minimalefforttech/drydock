@@ -148,6 +148,12 @@ export interface ChatWorkspaceContext {
    * limitation as the rest of the process-local clone state).
    */
   readonly seedPatches?: readonly WorkspaceSeedPatch[];
+  /**
+   * Clone mode only (plan D4): clone this LOCAL branch (the task branch tip)
+   * in every repo that has it - the stage-chain source. Requires
+   * `dirtyHandling: "fresh"`. Start-time only, like seedPatches.
+   */
+  readonly sourceBranch?: string;
 }
 
 /** One upstream changeset patch destined for a named clone repo (ADR 0014). */
@@ -833,19 +839,73 @@ export class IsolatedRunService {
    * ended session) - the caller records an honest skip instead of guessing.
    * Refuses mid-turn like every other sync op (the agent may be writing).
    */
-  async buildOutboundPatches(sessionId: string): Promise<{ readonly repoName: string; readonly patch: string; readonly fileCount: number; readonly paths: readonly string[] }[] | null> {
+  async buildOutboundPatches(sessionId: string): Promise<{
+    readonly repoName: string;
+    readonly patch: string;
+    readonly fileCount: number;
+    readonly paths: readonly string[];
+    readonly originCommit?: string;
+    readonly baseCommit?: string;
+    readonly fullPatch?: string;
+  }[] | null> {
     const clones = this.sessionClones.get(sessionId);
     if (clones === undefined || clones.length === 0) return null;
     this.assertNoActiveTurnForSync(sessionId);
     this.assertCloneHostAccess(clones);
-    const patches: { repoName: string; patch: string; fileCount: number; paths: readonly string[] }[] = [];
+    const patches: {
+      repoName: string;
+      patch: string;
+      fileCount: number;
+      paths: readonly string[];
+      originCommit?: string;
+      baseCommit?: string;
+      fullPatch?: string;
+    }[] = [];
     for (const clone of clones) {
       const result = await this.options.cloneSync.outboundChangesetPatch(clone.clonePath, clone.omission);
       if (result !== null) {
-        patches.push({ repoName: clone.name, patch: result.patch, fileCount: result.fileCount, paths: result.paths });
+        patches.push({
+          repoName: clone.name,
+          patch: result.patch,
+          fileCount: result.fileCount,
+          paths: result.paths,
+          ...(result.originCommit === undefined ? {} : { originCommit: result.originCommit }),
+          baseCommit: result.baseCommit,
+          ...(result.fullPatch === undefined ? {} : { fullPatch: result.fullPatch })
+        });
       }
     }
     return patches;
+  }
+
+  /**
+   * Branch handoff (plan D3/D4): land the session's clone work as a local
+   * branch in each named repo (all clones when repoNames is omitted). The
+   * first land fixes the canonical name (a foreign collision may suffix it
+   * when allowed); every subsequent repo then uses that exact name with
+   * fast-forward-only semantics so a multi-repo task never forks names
+   * silently. Returns null when the process-local clone state is gone.
+   */
+  async landSessionAsBranch(
+    sessionId: string,
+    requestedName: string,
+    options?: { readonly onCollision?: "suffix" | "fail"; readonly repoNames?: readonly string[] }
+  ): Promise<{ readonly branch: string; readonly repos: readonly string[] } | null> {
+    const clones = this.sessionClones.get(sessionId);
+    if (clones === undefined || clones.length === 0) return null;
+    this.assertNoActiveTurnForSync(sessionId);
+    this.assertCloneHostAccess(clones);
+    let branch = requestedName;
+    let collision = options?.onCollision ?? "suffix";
+    const repos: string[] = [];
+    for (const clone of clones) {
+      if (options?.repoNames !== undefined && !options.repoNames.includes(clone.name)) continue;
+      const result = await this.options.cloneSync.landAsBranch(clone.clonePath, clone.localRepoPath, branch, { onCollision: collision });
+      branch = result.branch;
+      collision = "fail";
+      repos.push(clone.name);
+    }
+    return { branch, repos };
   }
 
   /** Push the developer's local edits into every clone (VM). Refuses while a turn runs. */
@@ -1702,7 +1762,8 @@ export class IsolatedRunService {
             effectiveContext.roots,
             effectiveContext.dirtyHandling ?? "carry",
             effectiveContext.seedPatches ?? [],
-            this.options.securityPolicy?.cloneOmission
+            this.options.securityPolicy?.cloneOmission,
+            effectiveContext.sourceBranch
           )
         : [];
       const template = this.withSecurityPolicyMetadata(buildIsolatedRunTemplate({
@@ -1744,7 +1805,8 @@ export class IsolatedRunService {
     roots: readonly string[],
     dirtyHandling: "carry" | "fresh",
     seedPatches: readonly WorkspaceSeedPatch[] = [],
-    omission?: ClonePathOmission
+    omission?: ClonePathOmission,
+    sourceBranch?: string
   ): Promise<SessionCloneRepo[]> {
     const git = await this.options.cloneSync.detectGit();
     if (!git.available) {
@@ -1786,8 +1848,14 @@ export class IsolatedRunService {
         name,
         dirtyHandling,
         ...(omission === undefined ? {} : { omission }),
-        ...(seedsForRepo.length === 0 ? {} : { seedPatches: seedsForRepo })
+        ...(seedsForRepo.length === 0 ? {} : { seedPatches: seedsForRepo }),
+        ...(sourceBranch === undefined ? {} : { sourceBranch })
       });
+      if (sourceBranch !== undefined && result.sourceBranchApplied === false) {
+        // The chain only materializes in repos with landed work; the rest
+        // clone their current branch. Logged so a surprising tree is traceable.
+        this.options.logger.info("stage branch absent in repo; cloned current branch", { repo: name, sourceBranch });
+      }
       clones.push({
         name,
         clonePath: result.clonePath,

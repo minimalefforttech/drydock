@@ -4,7 +4,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -313,7 +313,7 @@ interface Harness {
 }
 
 async function makeHarness(options?: { readonly maxBlobBytes?: number }): Promise<Harness> {
-  const base = await mkdtemp(path.join(os.tmpdir(), "drydock-diff-"));
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-diff-")));
   const root = path.join(base, "workspace");
   await mkdir(root);
   const blobs = new MemoryBlobStore();

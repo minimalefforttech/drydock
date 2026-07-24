@@ -7,11 +7,11 @@
  * yields a degraded backend that the surfaces render as an actionable state.
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
-import { defaultDeniedPaths, normalizePathKey } from "@drydock/core";
+import { defaultDeniedPaths, normalizePathKey, SpawnCommandRunner } from "@drydock/core";
 import { registerIsolatedRunCommands } from "./commands/registerIsolatedRunCommands.js";
 import { createBackend } from "./compositionRoot.js";
 import { OutputChannelLogger } from "./outputChannelLogger.js";
@@ -74,6 +74,56 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   const managedMode = managedPolicySeen || securityPolicy?.managed === true;
   if (managedMode && managedHome === undefined) managedHome = os.userInfo().homedir;
+  // Inspection window (plan D6): a folder carrying the inspection marker gets
+  // a status-bar Return affordance; everything else stays normal VS Code.
+  // The tree is worker-authored content - Restricted Mode is expected and
+  // this deliberately never trusts the folder.
+  let inspectionTaskId: string | undefined;
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.inspection.return", async () => {
+    await vscode.commands.executeCommand("workbench.action.closeWindow");
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.inspection.openReview", async () => {
+    if (inspectionTaskId === undefined) {
+      void vscode.window.showInformationMessage("This window is not inspecting a task.");
+      return;
+    }
+    await vscode.commands.executeCommand("drydock.taskReview.open", inspectionTaskId);
+  }));
+  void (async () => {
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      if (folder.uri.scheme !== "file") continue;
+      try {
+        const raw = await readFile(path.join(folder.uri.fsPath, ".drydock-inspection.json"), "utf8");
+        // The marker is folder content = untrusted: bound the parse and
+        // neutralize codicon syntax before it reaches the status bar.
+        if (raw.length > 16_384) continue;
+        const marker = JSON.parse(raw) as { taskId?: string; taskTitle?: string; subtaskTitle?: string };
+        const title = (typeof marker.taskTitle === "string" ? marker.taskTitle : "finished work")
+          .replace(/\$\(/g, "$ (")
+          .slice(0, 80);
+        if (typeof marker.taskId === "string" && marker.taskId.length <= 200) {
+          inspectionTaskId = marker.taskId;
+        }
+        const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10_000);
+        item.text = `$(anchor) Inspecting: ${title} - Return`;
+        item.tooltip = "Human-only inspection workspace. Edits here are not synced back; keep tweaks as review comments. Click to close this window and return.";
+        item.command = "drydock.inspection.return";
+        item.show();
+        context.subscriptions.push(item);
+        // Feedback loop stays reachable from inside the excursion: comments
+        // filed here flow to the same store as everywhere else.
+        const review = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 9_999);
+        review.text = "$(comment-discussion) Task Review";
+        review.tooltip = "Open this task's cross-project review - comments become revision turns for the owning agents.";
+        review.command = "drydock.inspection.openReview";
+        review.show();
+        context.subscriptions.push(review);
+        break;
+      } catch {
+        // Not an inspection folder - the normal case.
+      }
+    }
+  })();
   // Resolve a private child-process environment after policy. Never mutate the
   // extension host environment or let managed mode inherit setting overrides.
   const runtimeEnvironment = resolveRuntimeEnvironment(logger, managedMode);
@@ -112,6 +162,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const byCpu = Math.floor(os.cpus().length / 2);
     const byRam = Math.floor(os.totalmem() / (4 * 1024 ** 3));
     return Math.max(1, Math.min(8, byCpu, Math.max(1, byRam)));
+  };
+  // Background sub-budget (lane extension of ADR 0015): an explicit setting
+  // wins; 0/absent derives "auto" as half the run slots, floor 1 - so
+  // unattended background work always leaves headroom for the day's real work.
+  const maxBackgroundRuns = (): number => {
+    const configured = vscode.workspace.getConfiguration("drydock").get<number>("orchestrator.maxBackgroundRuns", 0);
+    if (Number.isFinite(configured) && configured > 0) {
+      return Math.floor(configured);
+    }
+    return Math.max(1, Math.floor(maxConcurrentRuns() / 2));
   };
   const autoAnswerQuestionsEnabled = (): boolean =>
     !managedMode && vscode.workspace.getConfiguration("drydock").get<boolean>("autoAnswer.questions", true);
@@ -164,6 +224,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     plannerAspectOverlays,
     recipeOverlays,
     maxConcurrentRuns,
+    maxBackgroundRuns,
     autoAnswerQuestionsEnabled,
     prototypeThemes,
     ...(mcpConfigJson === undefined ? {} : { mcpConfigJson }),
@@ -379,6 +440,236 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
       );
     });
+  }));
+  // Inspect finished work (plan D6): pick a Review-entered subtask with a
+  // captured changeset, materialize a human-only copy/worktree of its tree,
+  // and open it in a NEW window - this window's live sessions keep running.
+  // The new window opens under VS Code's own workspace-trust prompt (never
+  // auto-trusted): the tree is worker-authored content.
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.inspect", async (taskIdArg?: unknown, subtaskIdArg?: unknown) => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    try {
+      let targetTask = typeof taskIdArg === "string" ? taskIdArg : undefined;
+      let targetSubtask = typeof subtaskIdArg === "string" ? subtaskIdArg : undefined;
+      if (targetTask === undefined || targetSubtask === undefined) {
+        const unlanded = await backend.changesets.listUnlanded();
+        const bySubtask = new Map<string, { taskId: string; repos: string[] }>();
+        for (const row of unlanded) {
+          const entry = bySubtask.get(row.subtaskId as string) ?? { taskId: row.taskId as string, repos: [] };
+          entry.repos.push(row.repoName);
+          bySubtask.set(row.subtaskId as string, entry);
+        }
+        if (bySubtask.size === 0) {
+          void vscode.window.showInformationMessage("No captured work to inspect yet - a subtask captures durably when it enters Review.");
+          return;
+        }
+        const items = await Promise.all([...bySubtask.entries()].map(async ([sub, info]) => {
+          const record = await backend.subtasks.getSubtask(sub);
+          return { label: record?.title ?? sub, description: info.repos.join(", "), sub, task: info.taskId };
+        }));
+        const pick = await vscode.window.showQuickPick(items, { placeHolder: "Inspect which finished subtask?" });
+        if (pick === undefined) return;
+        targetTask = pick.task;
+        targetSubtask = pick.sub;
+      }
+      const built = await backend.inspection.materialize(targetTask, targetSubtask);
+      const summary = built.repos
+        .map((repo) => repo.flavor === "worktree"
+          ? `${repo.name} (worktree @ ${repo.branch ?? "?"})`
+          : `${repo.name} (copy${repo.exactBase === false ? ", 3-way fallback" : ""})`)
+        .join(", ");
+      logger.info("inspection workspace materialized", { root: built.workspaceRoot, repos: summary });
+      await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(built.workspaceRoot), { forceNewWindow: true });
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Inspect failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }));
+  // Batch intake (plan D9): pick a recipe once, then throw ticket lines at
+  // it - one background task per line ("PIPE-231 fix retry | optional
+  // prompt"). Creation and start stay separate acts (ADR 0007); the cascade
+  // picks work up as background slots free.
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.queueBackgroundTickets", async () => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    try {
+      const recipes = await backend.recipes.listRecipes();
+      if (recipes.length === 0) {
+        void vscode.window.showInformationMessage("No recipes available - create one on the Task Board first.");
+        return;
+      }
+      const recipePick = await vscode.window.showQuickPick(
+        recipes.map((recipe) => ({ label: recipe.name, description: `${String(recipe.subtasks.length)} step${recipe.subtasks.length === 1 ? "" : "s"}`, recipe })),
+        { placeHolder: "Shape every ticket with which recipe?" }
+      );
+      if (recipePick === undefined) return;
+      const created: string[] = [];
+      for (;;) {
+        const line = await vscode.window.showInputBox({
+          prompt: `Ticket ${String(created.length + 1)}: "title | optional prompt" - leave empty to finish`,
+          placeHolder: "PIPE-231 fix double submit | Repro in tests/test_retry.py; keep the queue API stable",
+          ignoreFocusOut: true
+        });
+        if (line === undefined || line.trim().length === 0) break;
+        const [titlePart, ...promptParts] = line.split("|");
+        const title = (titlePart ?? "").trim();
+        if (title.length === 0) continue;
+        const task = await backend.recipes.materializeTask(recipePick.recipe.recipeId, title, { lane: "background" });
+        const prompt = promptParts.join("|").trim();
+        if (prompt.length > 0) {
+          // The ticket context must actually reach the workers: append it to
+          // every ROOT step's prompt (the recipe's own steps stay intact),
+          // and keep it on the task as the human-readable note too.
+          await backend.tasks.updateTask(task.taskId as string, { description: prompt });
+          const subtasksForTask = await backend.subtasks.listForTask(task.taskId as string);
+          const edges = await backend.subtasks.listDependenciesForTask(task.taskId as string);
+          const downstreamIds = new Set(edges.map((edge) => edge.toSubtaskId as string));
+          for (const subtask of subtasksForTask) {
+            if (downstreamIds.has(subtask.subtaskId as string)) continue;
+            if (subtask.prompt === undefined || subtask.prompt.length === 0) continue;
+            await backend.subtasks.updateSubtask(subtask.subtaskId as string, {
+              prompt: `${subtask.prompt}\n\n## Ticket context\n${prompt}`
+            });
+          }
+        }
+        // Ignition (workflow audit B1): batch tickets are the walk-away path,
+        // so ready roots start now - the budget queues any overflow into the
+        // background band. Plan-first tickets start their planner only; the
+        // gated steps still wait for human approval.
+        await backend.orchestrator.startTask(task.taskId as string);
+        created.push(title);
+      }
+      if (created.length > 0) {
+        void vscode.window.showInformationMessage(
+          `Queued ${String(created.length)} background ticket${created.length === 1 ? "" : "s"} - ready steps started (overflow waits in the background band; plan-first tickets stop at the plan gate).`
+        );
+      }
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Queue tickets failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }));
+  // Remote project picker (plan D2): search GitHub/GitLab, clone the pick
+  // HOST-SIDE into the managed projects root, register it in the catalog
+  // with origin metadata. Tokens live in VS Code's auth/SecretStorage and
+  // reach git only through a transient ASKPASS helper - never the sandbox.
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.addRemoteProject", async () => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    try {
+      const { searchGitHub, searchGitLab, remoteCloneDestination, cloneRemoteProject, originFor } = await import("./services/remoteProjects.js");
+      const gitlabHosts = vscode.workspace.getConfiguration("drydock").get<readonly string[]>("gitlabHosts", []);
+      const providerPick = await vscode.window.showQuickPick(
+        [
+          { label: "GitHub", description: "github.com (uses VS Code's GitHub sign-in)", provider: "github" as const, host: "github.com" },
+          ...gitlabHosts.map((host) => ({ label: `GitLab · ${host}`, description: "personal access token (kept in SecretStorage)", provider: "gitlab" as const, host }))
+        ],
+        { placeHolder: gitlabHosts.length === 0 ? "Pick a provider (add GitLab hosts via drydock.gitlabHosts)" : "Pick a provider" }
+      );
+      if (providerPick === undefined) return;
+      let token: string | undefined;
+      let username: string | undefined;
+      if (providerPick.provider === "github") {
+        const session = await vscode.authentication.getSession("github", ["repo"], { createIfNone: true });
+        token = session.accessToken;
+        username = "x-access-token";
+      } else {
+        const secretKey = `drydock.gitlab.pat:${providerPick.host}`;
+        token = await context.secrets.get(secretKey);
+        if (token === undefined || token.length === 0) {
+          const entered = await vscode.window.showInputBox({
+            prompt: `Personal access token for ${providerPick.host} (scopes: read_api, read_repository). Stored in VS Code SecretStorage; never shown again.`,
+            password: true,
+            ignoreFocusOut: true
+          });
+          if (entered === undefined || entered.trim().length === 0) return;
+          token = entered.trim();
+          await context.secrets.store(secretKey, token);
+        }
+        username = "oauth2";
+      }
+      const query = await vscode.window.showInputBox({ prompt: `Search ${providerPick.host} repositories`, ignoreFocusOut: true });
+      if (query === undefined || query.trim().length === 0) return;
+      const hits = providerPick.provider === "github"
+        ? await searchGitHub(query.trim(), token)
+        : await searchGitLab(providerPick.host, query.trim(), token);
+      if (hits.length === 0) {
+        void vscode.window.showInformationMessage(`No repositories matched "${query.trim()}" on ${providerPick.host}.`);
+        return;
+      }
+      const repoPick = await vscode.window.showQuickPick(
+        hits.map((hit) => ({ label: hit.remotePath, description: `${hit.isPrivate ? "private" : "public"}${hit.description === undefined ? "" : ` · ${hit.description}`}`, hit })),
+        { placeHolder: `Clone which repository into the managed projects root?` }
+      );
+      if (repoPick === undefined) return;
+      const configuredRoot = vscode.workspace.getConfiguration("drydock").get<string>("projectsRoot", "").trim();
+      const projectsRoot = configuredRoot === "" ? path.join(backend.stateRootPath, "projects") : configuredRoot;
+      const destination = remoteCloneDestination(projectsRoot, providerPick.host, repoPick.hit.remotePath);
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Cloning ${repoPick.hit.remotePath}…` },
+        () => cloneRemoteProject({
+          runner: new SpawnCommandRunner(),
+          logger,
+          httpsUrl: repoPick.hit.httpsUrl,
+          destination,
+          ...(repoPick.hit.isPrivate || providerPick.provider === "gitlab"
+            ? { token, usernameForToken: username, tokenHost: providerPick.host }
+            : {})
+        })
+      );
+      const registered = await backend.projectCatalog.registerProject({
+        path: destination,
+        origin: originFor(providerPick.provider, providerPick.host, repoPick.hit)
+      });
+      void vscode.window.showInformationMessage(
+        `Registered "${registered.name}" in the project catalog (${destination}). Add it to a workspace set or a task's clone policy to use it.`
+      );
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Add remote project failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }));
+  // Approve a plan gate (plan D5): satisfying the gate is a human-only act;
+  // the cascade then starts whatever the approval unblocked. Model agreement
+  // is never approval - only this explicit gesture is.
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.approvePlan", async (subtaskIdArg?: unknown) => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    try {
+      let target = typeof subtaskIdArg === "string" ? subtaskIdArg : undefined;
+      if (target === undefined) {
+        const gated = (await backend.subtasks.listAll()).filter(
+          (subtask) => subtask.gate !== undefined && subtask.gateSatisfiedAt === undefined
+        );
+        if (gated.length === 0) {
+          void vscode.window.showInformationMessage("No plans are waiting for approval.");
+          return;
+        }
+        const pick = await vscode.window.showQuickPick(
+          gated.map((subtask) => ({ label: subtask.title, description: subtask.gate ?? "", sub: subtask })),
+          { placeHolder: "Approve the plan gating which subtask?" }
+        );
+        if (pick === undefined) return;
+        target = pick.sub.subtaskId as string;
+      }
+      const approved = await backend.subtasks.updateSubtask(target, { gateSatisfied: true });
+      // Re-fire the cascade from each upstream so an already-finished plan
+      // step starts the newly approved dependent without another event.
+      const edges = await backend.subtasks.listDependenciesForTask(approved.taskId as string);
+      const upstreams = [...new Set(edges.filter((edge) => edge.toSubtaskId === approved.subtaskId).map((edge) => edge.fromSubtaskId as string))];
+      for (const upstream of upstreams) {
+        await backend.orchestrator.evaluateDependents(upstream);
+      }
+      void vscode.window.showInformationMessage(`Plan approved - "${approved.title}" is unblocked.`);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Approve failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }));
   // Code Review panel (in-panel PR-style review, docs/design/code-review-panel.md):
   // one panel per task, opened from the command palette or the sidebar relay.

@@ -14,6 +14,7 @@ import type {
   BoardColumnStore,
   ColumnId,
   SubtaskDependencyRecord,
+  SubtaskGate,
   SubtaskId,
   SubtaskModelSelection,
   SubtaskRecord,
@@ -23,6 +24,14 @@ import type {
   WorkTaskStore
 } from "@drydock/contracts";
 import type { Clock, IdGenerator, ProductEventBus } from "@drydock/core";
+
+/** Stage indexes are 1-based chain positions; anything else is a caller bug. */
+function assertStageIndex(value: number): number {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error("Subtask stageIndex must be an integer >= 1.");
+  }
+  return value;
+}
 
 export interface SubtaskServiceOptions {
   readonly ids: IdGenerator;
@@ -61,6 +70,10 @@ export interface SubtaskCreateInput {
   readonly model?: SubtaskModelSelection;
   /** ADR 0007: arms the human verification gate. */
   readonly verifyMode?: "hitl";
+  /** 1-based stage-chain position (background-lane plan D4). */
+  readonly stageIndex?: number;
+  /** Human gate blocking auto-start until satisfied (ADR 0016 family). */
+  readonly gate?: SubtaskGate;
 }
 
 export interface SubtaskUpdateInput {
@@ -76,6 +89,12 @@ export interface SubtaskUpdateInput {
   readonly seedMode?: SubtaskSeedMode;
   /** ADR 0007: true stamps verifiedAt (the human's "Mark verified"); false re-arms the gate. */
   readonly verified?: boolean;
+  /** A 1-based integer joins/moves the stage chain; null leaves it. */
+  readonly stageIndex?: number | null;
+  /** true stamps gateSatisfiedAt (the human's approval); false re-arms the gate. */
+  readonly gateSatisfied?: boolean;
+  /** true stamps branchDriftAt (stage advance refused); false clears the park. */
+  readonly branchDrift?: boolean;
 }
 
 /** One card reference: exactly one of taskId/subtaskId is set. */
@@ -111,7 +130,9 @@ export class SubtaskService {
       updatedAt: now,
       ...(input.seedMode === undefined ? {} : { seedMode: input.seedMode }),
       ...(input.model === undefined ? {} : { model: input.model }),
-      ...(input.verifyMode === undefined ? {} : { verifyMode: input.verifyMode })
+      ...(input.verifyMode === undefined ? {} : { verifyMode: input.verifyMode }),
+      ...(input.stageIndex === undefined ? {} : { stageIndex: assertStageIndex(input.stageIndex) }),
+      ...(input.gate === undefined ? {} : { gate: input.gate })
     };
     await this.options.store.insertSubtask(record);
     this.options.bus?.publish({ kind: "board-changed" });
@@ -122,7 +143,8 @@ export class SubtaskService {
     if (
       input.title === undefined && input.description === undefined && input.prompt === undefined
       && input.autoStart === undefined && input.colorOverride === undefined && input.seedMode === undefined
-      && input.verified === undefined
+      && input.verified === undefined && input.stageIndex === undefined && input.gateSatisfied === undefined
+      && input.branchDrift === undefined
     ) {
       throw new Error("Subtask update must change at least one field.");
     }
@@ -151,6 +173,9 @@ export class SubtaskService {
         }
       }
     }
+    if (input.gateSatisfied !== undefined && existing.gate === undefined) {
+      throw new Error("SUBTASK_GATE_NOT_ARMED: only a gated subtask can have its gate satisfied or re-armed.");
+    }
     await this.options.store.updateSubtask(id, {
       updatedAt: this.options.clock.isoNow(),
       ...(input.title === undefined ? {} : { title: input.title.trim() }),
@@ -160,7 +185,10 @@ export class SubtaskService {
       ...(input.autoStart === undefined ? {} : { autoStart: input.autoStart }),
       ...(input.colorOverride === undefined ? {} : { colorOverride: input.colorOverride }),
       ...(input.seedMode === undefined ? {} : { seedMode: input.seedMode }),
-      ...(input.verified === undefined ? {} : { verifiedAt: input.verified ? this.options.clock.isoNow() : null })
+      ...(input.verified === undefined ? {} : { verifiedAt: input.verified ? this.options.clock.isoNow() : null }),
+      ...(input.stageIndex === undefined ? {} : { stageIndex: input.stageIndex === null ? null : assertStageIndex(input.stageIndex) }),
+      ...(input.gateSatisfied === undefined ? {} : { gateSatisfiedAt: input.gateSatisfied ? this.options.clock.isoNow() : null }),
+      ...(input.branchDrift === undefined ? {} : { branchDriftAt: input.branchDrift ? this.options.clock.isoNow() : null })
     });
     const updated = await this.options.store.getSubtask(id);
     if (updated === null) {

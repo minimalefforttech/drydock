@@ -12,12 +12,30 @@ import type { AccessRequestId, ProjectId, SessionId, WorkspaceSetId } from "./id
 /** How a session may touch workspace roots. Plan mode is technically read-only. */
 export type SessionMode = "plan" | "implementation" | "clone";
 
+/**
+ * Where a catalog project was picked from (background-lane plan D2). Present
+ * only on projects added via the remote picker; the local folder stays the
+ * project's identity - origin is provenance, never a live connection.
+ */
+export interface ProjectOrigin {
+  /** "github" | "gitlab" (extensible; unknown values round-trip untouched). */
+  readonly provider: string;
+  /** Host the project came from ("github.com", "gitlab.mystudio.local"). */
+  readonly host: string;
+  /** Provider-side path ("org/repo"). */
+  readonly remotePath: string;
+  readonly webUrl?: string;
+  readonly defaultBranch?: string;
+}
+
 export interface ProjectRecord {
   readonly projectId: ProjectId;
   readonly name: string;
   /** Absolute host path, original casing preserved for display. */
   readonly path: string;
   readonly kind: "git" | "folder";
+  /** Remote provenance (plan D2); absent on plain local folders. */
+  readonly origin?: ProjectOrigin;
   readonly createdAt: string;
   readonly updatedAt: string;
 }

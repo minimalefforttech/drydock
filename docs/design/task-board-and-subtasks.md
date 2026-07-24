@@ -168,3 +168,30 @@ separate human move.
 - Clone workspace state is process-local. Resume recreates a clone from local
   HEAD without replaying prior seeds; the durable queue survives, not the
   disposable workspace.
+
+## Tickets, lanes, stages, and gates (2026-07-24)
+
+Plan: `docs/ideas/background-lane-and-inspection-workspaces.md`; decisions in
+the ADR 0007/0015/0016 amendments.
+
+- **Ticket shape.** The recipe modal carries inherit-or-choose controls for
+  lane, handoff (with a plain branch-name field defaulting to the title's
+  ticket key), and approach; unset values inherit recipe defaults, then the
+  System tab's new-ticket preferences. Summaries carry the shape so board
+  chips, hover cards, and the fleet render from one projection.
+- **Background lane.** One chip and one queue band, never a second board:
+  manual starts first, then normal-lane auto, then background-lane auto,
+  with `drydock.orchestrator.maxBackgroundRuns` capping auto background
+  runs only. Waiting-on-you states never hide, whatever the lane.
+- **Stages.** `stage N` chips mark chain members; each stage runs with
+  fresh context on the task branch tip and forwards a bounded handoff note
+  (```handoff fence, host summary fallback) into the next stage's first
+  turn. Drift between stages parks the chain via the capture-hook rejection
+  path - visible, never silent.
+- **Plan gates.** Gated cards show a plan lock until their gate satisfies;
+  a ready gate ("plan ready") is waiting-on-you: the board card, the inbox
+  row, and `Drydock: Approve Plan…` all satisfy it and re-fire the cascade.
+- **Inspect.** Done-column cards with captured changesets carry Inspect,
+  which opens the finished tree in a new, never-auto-trusted window
+  (branch worktree or exact copy); Return is just closing it. The current
+  window's live sessions keep running throughout.

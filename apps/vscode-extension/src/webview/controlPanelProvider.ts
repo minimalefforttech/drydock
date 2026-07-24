@@ -1413,12 +1413,68 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "task.createFromRecipe": {
-        // Materializes task + subtasks + DAG with per-role defaults; never starts.
+        // Materializes task + subtasks + DAG with per-role defaults; never
+        // starts. Custom stages (plan D4) replace the recipe's steps with a
+        // linear same-branch chain; the recipe still supplies defaults.
         const backend = this.requireBackendReady();
-        const created = await backend.recipes.materializeTask(payload.recipeId, payload.title);
+        const overrides = {
+          ...(payload.lane === undefined ? {} : { lane: payload.lane }),
+          ...(payload.handoffMode === undefined ? {} : { handoffMode: payload.handoffMode }),
+          ...(payload.branchName === undefined ? {} : { branchName: payload.branchName }),
+          ...(payload.approach === undefined ? {} : { approach: payload.approach })
+        };
+        const created = payload.stages === undefined
+          ? await backend.recipes.materializeTask(payload.recipeId, payload.title, overrides)
+          : await backend.recipes.materializeStagedTask(payload.recipeId, payload.title, payload.stages, overrides);
         const summary = await this.requireTaskSummary(this.requireTasks(), created.taskId);
         this.respond(request.requestId, { type: "task.createFromRecipe", task: summary });
         this.push({ type: "task.updated", task: summary });
+        return;
+      }
+      case "task.inspect": {
+        // Inspection workspace (plan D6): materialize a human-only view of the
+        // finished subtask and open it in a NEW window - this window's live
+        // sessions keep running, and the new one is never auto-trusted.
+        const backend = this.requireBackendReady();
+        const built = await backend.inspection.materialize(payload.taskId, payload.subtaskId);
+        await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(built.workspaceRoot), { forceNewWindow: true });
+        const repoSummary = built.repos
+          .map((repo) => repo.flavor === "worktree" ? `${repo.name} (worktree)` : `${repo.name} (copy)`)
+          .join(", ");
+        this.respond(request.requestId, { type: "task.inspect", message: `Opened inspection window: ${repoSummary}` });
+        return;
+      }
+      case "subtask.approveGate": {
+        // Plan approval (plan D5, ADR 0016 family): the human satisfies the
+        // gate, then the cascade re-fires from each upstream so an already
+        // finished plan step starts the approved work without another event.
+        const backend = this.requireBackendReady();
+        const approved = await backend.subtasks.updateSubtask(payload.subtaskId, { gateSatisfied: true });
+        const edges = await backend.subtasks.listDependenciesForTask(approved.taskId as string);
+        const upstreams = [...new Set(edges.filter((edge) => edge.toSubtaskId === approved.subtaskId).map((edge) => edge.fromSubtaskId as string))];
+        for (const upstream of upstreams) {
+          await backend.orchestrator.evaluateDependents(upstream);
+        }
+        const summary = await this.requireTaskSummary(this.requireTasks(), approved.taskId as string);
+        this.respond(request.requestId, { type: "subtask.approveGate", task: summary });
+        this.push({ type: "task.updated", task: summary });
+        return;
+      }
+      case "prefs.ticketDefaults.get": {
+        const backend = this.requireBackendReady();
+        const defaults = await backend.preferences.getNewTicketDefaults();
+        this.respond(request.requestId, { type: "prefs.ticketDefaults.get", ...defaults });
+        return;
+      }
+      case "prefs.ticketDefaults.set": {
+        const backend = this.requireBackendReady();
+        await backend.preferences.setNewTicketDefaults({
+          ...(payload.lane === undefined ? {} : { lane: payload.lane }),
+          ...(payload.handoffMode === undefined ? {} : { handoffMode: payload.handoffMode }),
+          ...(payload.approach === undefined ? {} : { approach: payload.approach })
+        });
+        const defaults = await backend.preferences.getNewTicketDefaults();
+        this.respond(request.requestId, { type: "prefs.ticketDefaults.set", ...defaults });
         return;
       }
       case "planner.open": {

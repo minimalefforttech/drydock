@@ -73,3 +73,13 @@ Planning becomes a place, not a mode. A single editor-area Planner panel
   `plan/<aspectId>/` collection directories.
 - Re-running materialization may propose items that already became subtasks;
   the preview is the current duplicate guard.
+
+## Amendment - 2026-07-24 (plan-first tickets)
+
+Plan-first tickets (ADR 0007 amendment) connect the Planner to execution
+from the ticket side: materialization prepends an auto-start planner step
+instructed to end with a handoff note, and gates every implementation step
+behind a `plan-approval` human gate (ADR 0016 amendment). Approval either
+starts the pre-wired steps or routes through this decision's previewed
+checklist-to-board materialization; the annotate-then-revise loop is
+unchanged and remains the discussion surface.

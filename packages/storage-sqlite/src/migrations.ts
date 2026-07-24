@@ -348,6 +348,9 @@ export function applyMigrations(connection: SqliteConnection): void {
   ensureColumn(connection, "work_tasks", "clone_workspace_set_id", "TEXT NULL");
   ensureColumn(connection, "work_tasks", "clone_project_ids_json", "TEXT NULL");
   ensureColumn(connection, "work_tasks", "clone_dirty_handling", "TEXT NULL");
+  // Remote picker provenance (plan D2): where a catalog project came from.
+  // NULL on plain local folders. Provenance only - never a live connection.
+  ensureColumn(connection, "project_records", "origin_json", "TEXT NULL");
 
   // LEGACY / ORPHANED (ADR 0012): the per-session plan-docs surface is retired
   // - the Planner panel (planner_* tables below) supersedes it and planDocStore
@@ -501,6 +504,19 @@ export function applyMigrations(connection: SqliteConnection): void {
   // verified_at is the human's stamp, cleared when the gate re-arms.
   ensureColumn(connection, "subtasks", "verify_mode", "TEXT NULL");
   ensureColumn(connection, "subtasks", "verified_at", "TEXT NULL");
+  // Ticket model (background-lane plan): lane/handoff/approach ride the task;
+  // stages and human gates ride the subtask. All NULL = classic behavior.
+  ensureColumn(connection, "work_tasks", "lane", "TEXT NULL");
+  ensureColumn(connection, "work_tasks", "handoff_mode", "TEXT NULL");
+  ensureColumn(connection, "work_tasks", "branch_name", "TEXT NULL");
+  ensureColumn(connection, "work_tasks", "landed_branch", "TEXT NULL");
+  ensureColumn(connection, "work_tasks", "approach", "TEXT NULL");
+  ensureColumn(connection, "subtasks", "stage_index", "INTEGER NULL");
+  ensureColumn(connection, "subtasks", "gate", "TEXT NULL");
+  ensureColumn(connection, "subtasks", "gate_satisfied_at", "TEXT NULL");
+  // Stage branch advance refused to fast-forward (BRANCH_DRIFTED); a person
+  // reconciles and retries. NULL = no drift park.
+  ensureColumn(connection, "subtasks", "branch_drift_at", "TEXT NULL");
 
   // Orchestrator holds (ADR 0015): queued/parked starts survive a window
   // reload. One row per subtask; a park replaces a queue entry.
@@ -511,6 +527,31 @@ export function applyMigrations(connection: SqliteConnection): void {
       origin TEXT NOT NULL,
       force INTEGER NOT NULL DEFAULT 0,
       held_at TEXT NOT NULL
+    );
+  `);
+  // Background lane (ADR 0015 extension): holds carry their queue band.
+  ensureColumn(connection, "subtask_holds", "lane", "TEXT NULL");
+
+  // Stage handoff notes (plan D4): one bounded note per producing subtask,
+  // forwarded into the next stage's briefing. Latest completion wins.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS subtask_handoffs (
+      subtask_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      note TEXT NOT NULL,
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+
+  // Product preferences (plan D10): workflow defaults as validated JSON per
+  // key - one rung of the config ladder (policy > machine > THESE > recipe >
+  // ticket > stage). Junk values degrade to defaults in the typed service.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS preferences (
+      key TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
   `);
 
@@ -544,6 +585,9 @@ export function applyMigrations(connection: SqliteConnection): void {
       updated_at TEXT NOT NULL
     );
   `);
+  // Ticket defaults a recipe pre-fills (lane/handoff/approach) as validated
+  // JSON; NULL = no defaults (classic recipes).
+  ensureColumn(connection, "task_recipes", "defaults_json", "TEXT NULL");
   seedTaskRecipes(connection);
 
   // Chain changesets (ADR 0014): durable outbound patches captured from a
@@ -573,6 +617,13 @@ export function applyMigrations(connection: SqliteConnection): void {
   // Landing overlap pre-check (ADR 0014): the patch's touched paths as JSON.
   // NULL on older captures - overlap is then unknown, not assumed absent.
   ensureColumn(connection, "task_changesets", "paths_json", "TEXT NULL");
+  // Inspection materialization: the commits a capture was built against, plus
+  // a full origin..HEAD patch blob when the base tree moved past the origin
+  // (seeds or mid-flight syncs). NULL on captures from before this shipped.
+  ensureColumn(connection, "task_changesets", "origin_commit", "TEXT NULL");
+  ensureColumn(connection, "task_changesets", "base_commit", "TEXT NULL");
+  ensureColumn(connection, "task_changesets", "full_patch_sha256", "TEXT NULL");
+  ensureColumn(connection, "task_changesets", "full_patch_bytes", "INTEGER NULL");
   // work_tasks.state is replaced by column_id (+ optional done_at); state is
   // kept transitionally (see WorkTaskRecord doc comment) until the board UI
   // lands and the webview stops reading it.

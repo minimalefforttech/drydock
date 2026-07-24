@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -20,7 +20,7 @@ const unrestrictedUser: UserSecurityPreferences = {
 };
 
 test("Studio and personal project allowlists intersect at the narrower root", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const studioRoot = path.join(root, "shows");
     const permitted = path.join(studioRoot, "show-a");
@@ -49,7 +49,7 @@ test("Studio and personal project allowlists intersect at the narrower root", as
 });
 
 test("Studio restrictions can only tighten clone, omission, deny, and network policy", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const projects = path.join(root, "projects");
     const denied = path.join(projects, "studio-admin");
@@ -85,7 +85,7 @@ test("Studio restrictions can only tighten clone, omission, deny, and network po
 });
 
 test("configured denied paths reject relative entries and preserve foreign absolute syntax", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-denied-paths-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-denied-paths-")));
   try {
     const policyPath = path.join(root, "no-policy.json");
     assert.throws(() => loadEffectiveSecurityPolicy({
@@ -108,7 +108,7 @@ test("configured denied paths reject relative entries and preserve foreign absol
 });
 
 test("a missing denied leaf remains denied through a symlinked parent", async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-denied-link-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-denied-link-")));
   try {
     const actualHome = path.join(root, "actual-home");
     const homeAlias = path.join(root, "home-alias");
@@ -138,7 +138,7 @@ test("a missing denied leaf remains denied through a symlinked parent", async (t
 });
 
 test("Invalid Studio policy fails closed instead of falling back", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const policyPath = path.join(root, "policy.json");
     await writeFile(policyPath, "{not-json", "utf8");
@@ -152,7 +152,7 @@ test("Invalid Studio policy fails closed instead of falling back", async () => {
 });
 
 test("A required managed policy cannot silently fall back to personal settings", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const policyPath = path.join(root, "policy.json");
     const requiredPath = path.join(root, "policy.required");
@@ -182,7 +182,7 @@ test("A required managed policy cannot silently fall back to personal settings",
 });
 
 test("A managed policy change or removal blocks access until reload", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const policyPath = path.join(root, "policy.json");
     const requiredPath = path.join(root, "policy.required");
@@ -219,7 +219,7 @@ test("A managed policy change or removal blocks access until reload", async () =
 });
 
 test("Deploying a managed policy during an unmanaged session blocks further access", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const project = path.join(root, "project");
     const policyPath = path.join(root, "policy.json");
@@ -239,7 +239,7 @@ test("Deploying a managed policy during an unmanaged session blocks further acce
 });
 
 test("Managed policy rejects unknown fields and defaults network allocation off", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const policyPath = path.join(root, "policy.json");
     await writeFile(policyPath, JSON.stringify({ version: 1, policyId: "managed" }), "utf8");
@@ -261,7 +261,7 @@ test("Managed policy rejects unknown fields and defaults network allocation off"
 });
 
 test("Omissions imply clone-only even for a personal policy", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const absentPolicyPath = path.join(root, "no-policy.json");
     const policy = loadEffectiveSecurityPolicy({
@@ -278,7 +278,7 @@ test("Omissions imply clone-only even for a personal policy", async () => {
 });
 
 test("Repository metadata cannot be presented as an omission", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     assert.throws(
       () => loadEffectiveSecurityPolicy({
@@ -294,7 +294,7 @@ test("Repository metadata cannot be presented as an omission", async () => {
 });
 
 test("AI-bound overlays ignore forbidden roots and omitted .drydock files", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const allowed = path.join(root, "allowed");
     const blocked = path.join(root, "blocked");
@@ -320,7 +320,7 @@ test("AI-bound overlays ignore forbidden roots and omitted .drydock files", asyn
 });
 
 test("AI-bound overlay files cannot link into a denied folder", async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const allowed = path.join(root, "allowed");
     const deniedOverlay = path.join(root, "denied", ".drydock");
@@ -348,7 +348,7 @@ test("AI-bound overlay files cannot link into a denied folder", async (t) => {
 });
 
 test("AI-bound overlay targets honor repo-relative omissions after canonicalization", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-policy-")));
   try {
     const project = path.join(root, "project");
     const omitted = path.join(project, "config", "local");

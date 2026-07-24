@@ -20,7 +20,7 @@ import { ProjectCatalogService } from "./projectCatalogService.js";
 import { WorkspaceSetService } from "./workspaceSetService.js";
 
 test("project registration is idempotent per normalized path and detects git", async () => {
-  const base = await mkdtemp(path.join(os.tmpdir(), "drydock-catalog-"));
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-catalog-")));
   try {
     const gitProject = path.join(base, "GitProject");
     await mkdir(path.join(gitProject, ".git"), { recursive: true });
@@ -54,7 +54,7 @@ test("project registration is idempotent per normalized path and detects git", a
 });
 
 test("project registration resolves symlink and junction aliases", async (context) => {
-  const base = await mkdtemp(path.join(os.tmpdir(), "drydock-catalog-link-"));
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-catalog-link-")));
   try {
     const projectPath = path.join(base, "project");
     const aliasPath = path.join(base, "alias");
@@ -86,7 +86,7 @@ test("project registration resolves symlink and junction aliases", async (contex
 });
 
 test("workspace sets resolve ordered mount roots and projections", async () => {
-  const base = await mkdtemp(path.join(os.tmpdir(), "drydock-sets-"));
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-sets-")));
   try {
     const catalogStore = new MemoryProjectCatalogStore();
     const catalog = new ProjectCatalogService({ ids: new RandomIdGenerator(), clock: fixedClock(), store: catalogStore });
@@ -126,7 +126,7 @@ test("workspace sets resolve ordered mount roots and projections", async () => {
 });
 
 test("workspace sets carry per-member read-only, update, and delete", async () => {
-  const base = await mkdtemp(path.join(os.tmpdir(), "drydock-sets-edit-"));
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "drydock-sets-edit-")));
   try {
     const catalogStore = new MemoryProjectCatalogStore();
     const catalog = new ProjectCatalogService({ ids: new RandomIdGenerator(), clock: fixedClock(), store: catalogStore });

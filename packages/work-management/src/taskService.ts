@@ -20,10 +20,13 @@ import type {
   SessionId,
   SubtaskId,
   SubtaskStore,
+  TaskApproach,
   TaskClonePolicy,
   TaskFaqRecord,
   TaskFaqStore,
+  TaskHandoffMode,
   TaskId,
+  TaskLane,
   WorkSessionRecord,
   WorkSessionStore,
   WorkTaskLinkRecord,
@@ -76,12 +79,50 @@ export interface TaskUpdateInput {
   readonly columnId?: string;
   /** ADR 0007: the per-task FAQ auto-answer toggle. */
   readonly autoAnswerFaq?: boolean;
+  /** Queue lane (background-lane plan): normal | background. */
+  readonly lane?: TaskLane;
+  /** How finished work returns: patch | branch. */
+  readonly handoffMode?: TaskHandoffMode;
+  /** "" clears the branch name; a string overwrites it (trimmed). */
+  readonly branchName?: string;
+  /** Actual branch created at landing ("" clears). Set by landing flows, not forms. */
+  readonly landedBranch?: string;
+  /** implement | plan-first. */
+  readonly approach?: TaskApproach;
+}
+
+/** Ticket-shape fields settable at creation (background-lane plan D1). */
+export interface TaskTicketInput {
+  readonly lane?: TaskLane;
+  readonly handoffMode?: TaskHandoffMode;
+  readonly branchName?: string;
+  readonly approach?: TaskApproach;
 }
 
 export interface TaskClonePolicyInput {
   readonly workspaceSetId: string;
   readonly projectIds: readonly string[];
   readonly dirtyHandling: "carry" | "fresh";
+}
+
+/**
+ * Trims a user-supplied branch name; "" resolves to undefined (cleared).
+ * Throws on names that can never be a valid git ref so bad input fails at
+ * the form, not at landing. The authoritative check stays git's own
+ * check-ref-format at land time (branch handoff, plan D3).
+ */
+function normalizeBranchName(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const name = raw.trim();
+  if (name === "") return undefined;
+  const badPattern = /[\s~^:?*[\\\x00-\x1f\x7f]/.test(name)
+    || name.includes("..") || name.includes("@{") || name.includes("//")
+    || name.startsWith("-") || name.startsWith("/") || name.startsWith(".")
+    || name.endsWith("/") || name.endsWith(".") || name.endsWith(".lock");
+  if (badPattern) {
+    throw new Error(`Branch name "${name}" is not a valid git branch name.`);
+  }
+  return name;
 }
 
 /** Legacy WorkTaskState -> seeded default BoardColumnRecord.columnId (mirrors the migration backfill). */
@@ -104,10 +145,11 @@ const CATEGORY_TO_STATE: Readonly<Record<ColumnCategory, WorkTaskState>> = {
 export class TaskService {
   constructor(private readonly options: TaskServiceOptions) {}
 
-  async createTask(title: string, description?: string): Promise<WorkTaskRecord> {
+  async createTask(title: string, description?: string, ticket?: TaskTicketInput): Promise<WorkTaskRecord> {
     if (title.trim() === "") {
       throw new Error("Task title must not be empty.");
     }
+    const branchName = normalizeBranchName(ticket?.branchName);
     const now = this.options.clock.isoNow();
     const record: WorkTaskRecord = {
       taskId: this.options.ids.taskId(),
@@ -116,7 +158,11 @@ export class TaskService {
       state: "todo",
       columnId: asId<"ColumnId">(STATE_TO_DEFAULT_COLUMN_ID.todo),
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      ...(ticket?.lane === undefined ? {} : { lane: ticket.lane }),
+      ...(ticket?.handoffMode === undefined ? {} : { handoffMode: ticket.handoffMode }),
+      ...(branchName === undefined ? {} : { branchName }),
+      ...(ticket?.approach === undefined ? {} : { approach: ticket.approach })
     };
     await this.options.store.insertTask(record);
     this.options.bus?.publish({ kind: "board-changed" });
@@ -127,6 +173,9 @@ export class TaskService {
     if (
       input.title === undefined && input.description === undefined && input.state === undefined
       && input.columnId === undefined && input.autoAnswerFaq === undefined
+      && input.lane === undefined && input.handoffMode === undefined
+      && input.branchName === undefined && input.landedBranch === undefined
+      && input.approach === undefined
     ) {
       throw new Error("Task update must change at least one field.");
     }
@@ -163,6 +212,12 @@ export class TaskService {
       // "" clears the description; the store maps null to a NULL column.
       ...(input.description === undefined ? {} : { description: input.description === "" ? null : input.description }),
       ...(input.autoAnswerFaq === undefined ? {} : { autoAnswerFaq: input.autoAnswerFaq }),
+      ...(input.lane === undefined ? {} : { lane: input.lane }),
+      ...(input.handoffMode === undefined ? {} : { handoffMode: input.handoffMode }),
+      // "" clears the branch name; the store maps null to a NULL column.
+      ...(input.branchName === undefined ? {} : { branchName: normalizeBranchName(input.branchName) ?? null }),
+      ...(input.landedBranch === undefined ? {} : { landedBranch: input.landedBranch === "" ? null : input.landedBranch }),
+      ...(input.approach === undefined ? {} : { approach: input.approach }),
       ...columnUpdate
     });
     const updated = await this.options.store.getTask(id);

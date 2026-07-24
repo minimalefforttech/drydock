@@ -57,6 +57,29 @@ test("updateTask validates fields, transitions legacy state, and clears descript
   assert.equal(cleared.description, undefined);
 });
 
+test("ticket fields ride create and update; branch names validate and clear", async () => {
+  const service = new TaskService(options());
+  const task = await service.createTask("PIPE-231 fix retry", undefined, {
+    lane: "background",
+    handoffMode: "branch",
+    branchName: "PIPE-231",
+    approach: "plan-first"
+  });
+  assert.equal(task.lane, "background");
+  assert.equal(task.handoffMode, "branch");
+  assert.equal(task.branchName, "PIPE-231");
+  assert.equal(task.approach, "plan-first");
+
+  // Names that can never be a git ref fail at the form, not at landing.
+  await assert.rejects(() => service.createTask("T", undefined, { branchName: "bad name" }), /not a valid git branch name/);
+  await assert.rejects(() => service.createTask("T", undefined, { branchName: "-lead" }), /not a valid git branch name/);
+  await assert.rejects(() => service.createTask("T", undefined, { branchName: "a..b" }), /not a valid git branch name/);
+
+  const cleared = await service.updateTask(task.taskId, { branchName: "", lane: "normal" });
+  assert.equal(cleared.branchName, undefined);
+  assert.equal(cleared.lane, "normal");
+});
+
 test("updateTask accepts columnId directly and stamps/clears doneAt by category", async () => {
   const columns = new MemoryBoardColumnStore();
   const service = new TaskService(options(undefined, undefined, columns));
@@ -386,7 +409,8 @@ class MemoryWorkTaskStore implements WorkTaskStore {
       columnId: update.columnId ?? existing.columnId,
       createdAt: existing.createdAt,
       updatedAt: update.updatedAt,
-      ...resolveDoneAt(existing, update)
+      ...resolveDoneAt(existing, update),
+      ...resolveTicketFields(existing, update)
     };
     this.tasks.set(taskId, next);
     return Promise.resolve();
@@ -592,4 +616,23 @@ function resolveDoneAt(existing: WorkTaskRecord, update: WorkTaskUpdate): { done
   }
   // null clears doneAt; a string stamps it.
   return update.doneAt === null ? {} : { doneAt: update.doneAt };
+}
+
+function resolveTicketFields(
+  existing: WorkTaskRecord,
+  update: WorkTaskUpdate
+): Pick<WorkTaskRecord, "lane" | "handoffMode" | "branchName" | "landedBranch" | "approach"> {
+  const lane = update.lane ?? existing.lane;
+  const handoffMode = update.handoffMode ?? existing.handoffMode;
+  // null clears; undefined keeps; a string overwrites.
+  const branchName = update.branchName === undefined ? existing.branchName : update.branchName ?? undefined;
+  const landedBranch = update.landedBranch === undefined ? existing.landedBranch : update.landedBranch ?? undefined;
+  const approach = update.approach ?? existing.approach;
+  return {
+    ...(lane === undefined ? {} : { lane }),
+    ...(handoffMode === undefined ? {} : { handoffMode }),
+    ...(branchName === undefined ? {} : { branchName }),
+    ...(landedBranch === undefined ? {} : { landedBranch }),
+    ...(approach === undefined ? {} : { approach })
+  };
 }

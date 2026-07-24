@@ -8,7 +8,7 @@
 
 import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
-import type { ProjectCatalogStore, ProjectId, ProjectRecord } from "@drydock/contracts";
+import type { ProjectCatalogStore, ProjectId, ProjectOrigin, ProjectRecord } from "@drydock/contracts";
 import {
   isHostPathAbsolute,
   isNativeHostPathAbsolute,
@@ -33,7 +33,7 @@ export class ProjectCatalogService {
    * Registers a host folder as a project. Idempotent: re-registering the same
    * normalized path returns the existing record.
    */
-  async registerProject(input: { readonly path: string; readonly name?: string }): Promise<ProjectRecord> {
+  async registerProject(input: { readonly path: string; readonly name?: string; readonly origin?: ProjectOrigin }): Promise<ProjectRecord> {
     const absolute = this.resolveProjectDirectory(input.path);
     const pathKey = normalizePathKey(absolute);
     const existing = await this.options.store.getProjectByPathKey(pathKey);
@@ -46,6 +46,7 @@ export class ProjectCatalogService {
       name: input.name ?? path.basename(absolute),
       path: absolute,
       kind: existsSync(path.join(absolute, ".git")) ? "git" : "folder",
+      ...(input.origin === undefined ? {} : { origin: input.origin }),
       createdAt: now,
       updatedAt: now
     };

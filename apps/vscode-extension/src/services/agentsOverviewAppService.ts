@@ -104,6 +104,10 @@ export function buildLandingItems(
         }
       }
     }
+    // Branch-handoff awareness (plan D3): these rows land as a ref advance,
+    // not a working-tree pull - and once stage advances landed the branch,
+    // the row is informational rather than pending work.
+    const branch = task?.handoffMode === "branch" ? (task.landedBranch ?? task.branchName) : undefined;
     items.push({
       taskId: first.taskId as string,
       taskTitle: task?.title ?? (first.taskId as string),
@@ -113,7 +117,10 @@ export function buildLandingItems(
       repos: group.map((row) => ({ repoName: row.repoName, fileCount: row.fileCount })),
       capturedAt: group.reduce((latest, row) => (row.capturedAt > latest ? row.capturedAt : latest), first.capturedAt),
       overlapsWith,
-      ...(overlapUnknown ? { overlapUnknown: true } : {})
+      ...(overlapUnknown ? { overlapUnknown: true } : {}),
+      ...(task?.handoffMode === undefined ? {} : { handoffMode: task.handoffMode }),
+      ...(branch === undefined ? {} : { branch }),
+      ...(task?.landedBranch === undefined ? {} : { branchLanded: true })
     });
   }
   items.sort((a, b) => {

@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drydock - background lane and inspection prototype</title>
+</head>
+<body>
+<!--
+  Static design prototype for docs/ideas/background-lane-and-inspection-workspaces.md.
+  Self-contained; VS Code dark palette hardcoded (matches code-review-panel.html).
+  Working bits: screen tabs, segmented controls with conditional fields, remote
+  project picker overlay, plan-gate approve swap, board inspect jump, inspection
+  flavor toggle, Return. Not wired to a host.
+-->
+<style>
+  :root {
+    --bg: #1e1e1e; --bg-side: #252526; --bg-card: #232323; --bg-header: #2d2d2d;
+    --bg-input: #3c3c3c; --border: #3c3c3c; --fg: #cccccc; --fg-dim: #8f8f8f;
+    --accent: #3794ff; --green: #3fb950; --red: #f14c4c; --warn: #cca700;
+    --purple: #c586c0;
+    --sel-bg: rgba(55, 148, 255, 0.16);
+    --mono: "Cascadia Code", Consolas, "Courier New", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #161616; color: var(--fg);
+    font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; min-height: 100vh;
+  }
+  button { font: inherit; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible {
+    outline: 1px solid var(--accent); outline-offset: 1px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+
+  /* ---------- prototype chrome ---------- */
+  .proto-bar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 8px 16px; background: #111; border-bottom: 1px solid #000;
+  }
+  .proto-bar .brand { font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+  .proto-bar .brand .dim { color: var(--fg-dim); font-weight: 400; }
+  .proto-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+  .proto-tabs button {
+    background: transparent; border: 1px solid var(--border); color: var(--fg-dim);
+    border-radius: 4px; padding: 3px 12px; font-size: 12px; cursor: pointer;
+  }
+  .proto-tabs button:hover { color: var(--fg); }
+  .proto-tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .proto-hint { margin-left: auto; font-size: 11.5px; color: var(--fg-dim); }
+
+  .screen { display: none; flex: 1; min-height: 0; }
+  .screen.active { display: block; }
+  .stage { padding: 26px 20px 40px; display: flex; justify-content: center; }
+  .foot-note {
+    max-width: 860px; margin: 18px auto 0; font-size: 11.5px; color: var(--fg-dim);
+    border-top: 1px solid #2a2a2a; padding: 10px 4px 0;
+  }
+  .foot-note b { color: var(--fg); font-weight: 600; }
+
+  /* ---------- shared bits ---------- */
+  .seg { display: inline-flex; border: 1px solid #4a4a4a; border-radius: 4px; overflow: hidden; }
+  .seg button {
+    border: 0; background: transparent; color: var(--fg); padding: 3px 12px;
+    font-size: 12px; cursor: pointer; opacity: 0.75; white-space: nowrap;
+  }
+  .seg button + button { border-left: 1px solid #4a4a4a; }
+  .seg button.active { background: var(--accent); color: #fff; opacity: 1; }
+  .seg.quiet button.active { background: #3f3f46; color: var(--fg); }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
+    border-radius: 9px; padding: 1px 8px; white-space: nowrap;
+  }
+  .chip.blue   { background: rgba(55,148,255,0.18); color: #7db8ff; }
+  .chip.green  { background: rgba(63,185,80,0.16);  color: #58c46a; }
+  .chip.amber  { background: rgba(204,167,0,0.16);  color: #d9b60a; }
+  .chip.purple { background: rgba(197,134,192,0.16);color: var(--purple); }
+  .chip.gray   { background: rgba(140,140,140,0.14);color: var(--fg-dim); }
+  .chip.red    { background: rgba(241,76,76,0.14);  color: #f07070; }
+  .chip .x { cursor: pointer; color: var(--fg-dim); font-size: 12px; }
+  .chip .x:hover { color: var(--fg); }
+  .btn {
+    background: #3f3f46; border: 1px solid #4a4a4a; color: var(--fg);
+    border-radius: 4px; padding: 4px 12px; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover { filter: brightness(1.15); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.subtle { background: transparent; }
+  .mono { font-family: var(--mono); }
+
+  /* ---------- screen 1: ticket form ---------- */
+  .panel {
+    width: 620px; max-width: 100%; background: var(--bg-side);
+    border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  }
+  .panel-head {
+    display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+    background: var(--bg-header); border-bottom: 1px solid var(--border);
+  }
+  .panel-head h1 { font-size: 13px; margin: 0; font-weight: 600; }
+  .panel-body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 14px; }
+  .frow { display: flex; flex-direction: column; gap: 5px; }
+  .frow > label, .flabel {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--fg-dim); font-weight: 600;
+  }
+  .frow input[type="text"], .frow textarea {
+    background: var(--bg-input); border: 1px solid transparent; color: var(--fg);
+    border-radius: 3px; padding: 5px 8px; font: inherit; width: 100%;
+  }
+  .frow textarea { resize: vertical; min-height: 56px; }
+  .frow input:focus, .frow textarea:focus { border-color: var(--accent); outline: none; }
+  .hint { font-size: 11.5px; color: var(--fg-dim); }
+  .hint .mono { font-size: 11px; }
+  .inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .add-proj {
+    background: transparent; border: 1px dashed #555; color: var(--fg-dim);
+    border-radius: 9px; padding: 1px 10px; font-size: 11px; cursor: pointer;
+  }
+  .add-proj:hover { color: var(--fg); border-color: var(--fg-dim); }
+  .branch-field { display: flex; align-items: center; gap: 8px; }
+  .branch-field input { flex: 1; font-family: var(--mono); font-size: 12px; }
+  .gate-chain {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    font-size: 11.5px; color: var(--fg-dim);
+  }
+  .gate-chain .node {
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px;
+    background: var(--bg-card); color: var(--fg); white-space: nowrap;
+  }
+  .gate-chain .node.locked { border-color: rgba(204,167,0,0.5); color: var(--warn); }
+  .gate-chain .node.dim { color: var(--fg-dim); }
+  .stagelist { display: flex; flex-direction: column; gap: 5px; }
+  .stagerow { display: flex; align-items: center; gap: 8px; }
+  .stagerow .sn {
+    width: 18px; height: 18px; border-radius: 50%; background: var(--bg-input);
+    color: var(--fg-dim); font-size: 11px; display: inline-flex; align-items: center;
+    justify-content: center; flex: 0 0 auto;
+  }
+  .stagerow input { flex: 1; }
+  .stagerow .linkish { flex: 0 0 auto; }
+  .pref-group { border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 7px; }
+  .pref-group.first { border-top: 0; padding-top: 0; }
+  .pref-group h3 {
+    margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--fg-dim); font-weight: 600;
+  }
+  .pref-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; flex-wrap: wrap; }
+  .pref-row .k { width: 185px; flex: 0 0 auto; }
+  .pref-row .prov { margin-left: auto; }
+  .prov {
+    font-size: 10px; border: 1px solid var(--border); border-radius: 3px;
+    padding: 0 5px; color: var(--fg-dim); white-space: nowrap;
+  }
+  .prov.lock { color: var(--warn); border-color: rgba(204,167,0,0.45); }
+  details.adv { border-top: 1px solid var(--border); padding-top: 10px; }
+  details.adv summary {
+    cursor: pointer; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--fg-dim); font-weight: 600; user-select: none;
+  }
+  details.adv[open] summary { margin-bottom: 8px; }
+  .adv-grid { display: grid; grid-template-columns: 150px 1fr; gap: 6px 12px; font-size: 12px; align-items: center; }
+  .adv-grid .k { color: var(--fg-dim); }
+  .panel-foot {
+    display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+    border-top: 1px solid var(--border); background: var(--bg-header);
+  }
+  .panel-foot .note { margin-right: auto; font-size: 11.5px; color: var(--fg-dim); }
+
+  /* ---------- picker overlay ---------- */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none;
+    justify-content: center; align-items: flex-start; padding-top: 9vh; z-index: 50;
+  }
+  .overlay.open { display: flex; }
+  .qp {
+    width: 560px; max-width: 92vw; background: var(--bg-header);
+    border: 1px solid #454545; border-radius: 6px; box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+    overflow: hidden;
+  }
+  .qp input {
+    width: 100%; background: var(--bg-input); border: 1px solid var(--accent);
+    color: var(--fg); font: inherit; padding: 6px 9px; border-radius: 3px;
+  }
+  .qp .qp-pad { padding: 8px; }
+  .qp-section {
+    padding: 4px 10px 2px; font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: 0.07em; color: var(--fg-dim); font-weight: 600;
+  }
+  .qp-row {
+    display: flex; align-items: center; gap: 8px; padding: 4px 12px;
+    cursor: pointer; font-size: 12.5px;
+  }
+  .qp-row:hover, .qp-row.hot { background: var(--sel-bg); }
+  .qp-row .ic { width: 16px; text-align: center; flex: 0 0 auto; }
+  .qp-row .name { white-space: nowrap; }
+  .qp-row .name b { font-weight: 600; }
+  .qp-row .desc { color: var(--fg-dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qp-row .right { margin-left: auto; font-size: 10.5px; color: var(--fg-dim); font-family: var(--mono); }
+  .qp-row.signin { color: var(--fg-dim); font-style: italic; }
+  .qp-foot {
+    border-top: 1px solid var(--border); padding: 7px 12px; font-size: 11px;
+    color: var(--fg-dim); background: var(--bg-card);
+  }
+
+  /* ---------- screen 2: board ---------- */
+  .board-wrap { max-width: 1120px; margin: 0 auto; padding: 18px 20px 40px; }
+  .inbox {
+    display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+    background: rgba(204,167,0,0.10); border-left: 3px solid var(--warn);
+    border-radius: 3px; color: #d8c887; font-weight: 600; font-size: 12.5px;
+  }
+  .inbox .rev { margin-left: auto; font-weight: 400; color: var(--fg-dim); }
+  .fleet-strip {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 2px; font-size: 12px; color: var(--fg-dim);
+  }
+  .fleet-strip .stat b { color: var(--fg); font-weight: 600; }
+  .fleet-strip .spacer { flex: 1; }
+  .cols { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: repeat(2, 1fr); } }
+  .col { background: #202020; border: 1px solid #2c2c2c; border-radius: 6px; padding: 8px; min-height: 120px; }
+  .col h2 {
+    margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--fg-dim); font-weight: 600; display: flex; gap: 6px; align-items: center;
+  }
+  .col h2 .cat { font-size: 10px; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 5px;
+    padding: 8px 10px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .card .t { font-weight: 600; font-size: 12.5px; }
+  .card .sub { font-size: 11px; color: var(--fg-dim); }
+  .card .row { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+  .card .actions { display: flex; gap: 6px; margin-top: 2px; }
+  .card.dim { opacity: 0.6; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
+  .dot.run { background: var(--green); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  .linkish { color: var(--accent); cursor: pointer; background: none; border: none; padding: 0; font-size: 11px; }
+  .linkish:hover { text-decoration: underline; }
+
+  /* ---------- screen 3: plan gate ---------- */
+  .plan-wrap { max-width: 960px; margin: 0 auto; padding: 18px 20px 40px; display: flex; flex-direction: column; gap: 12px; }
+  .gate-card {
+    border: 1px solid rgba(204,167,0,0.45); border-radius: 6px; background: rgba(204,167,0,0.06);
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .gate-card.approved { border-color: rgba(63,185,80,0.5); background: rgba(63,185,80,0.06); }
+  .gate-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .gate-head .lock { color: var(--warn); }
+  .gate-card.approved .gate-head .lock { color: var(--green); }
+  .gate-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .gate-small { font-size: 11.5px; color: var(--fg-dim); }
+  .plan-grid { display: grid; grid-template-columns: 1fr 300px; gap: 12px; align-items: start; }
+  @media (max-width: 820px) { .plan-grid { grid-template-columns: 1fr; } }
+  .doc {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+    padding: 16px 20px; max-width: 68ch;
+  }
+  .doc h3 { margin: 0 0 4px; font-size: 15px; }
+  .doc .meta { font-size: 11.5px; color: var(--fg-dim); margin-bottom: 12px; }
+  .doc h4 {
+    margin: 14px 0 6px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--fg-dim);
+  }
+  .doc p, .doc li { font-size: 12.5px; }
+  .doc ol { margin: 4px 0; padding-left: 20px; }
+  .doc li { margin: 3px 0; }
+  .doc li .pin { color: var(--accent); cursor: default; }
+  .annot {
+    margin: 8px 0 0 14px; border-left: 2px solid var(--accent); background: rgba(55,148,255,0.07);
+    border-radius: 0 4px 4px 0; padding: 6px 10px; font-size: 12px;
+  }
+  .annot .who { font-weight: 600; }
+  .annot .reply { color: var(--fg-dim); margin-top: 3px; }
+  .side-card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; font-size: 12px;
+  }
+  .side-card h4 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-dim); }
+  .kv { display: flex; justify-content: space-between; gap: 10px; }
+  .kv .k { color: var(--fg-dim); }
+
+  /* ---------- screen 4: inspection window ---------- */
+  .win {
+    max-width: 1060px; margin: 18px auto 40px; border: 1px solid #000; border-radius: 8px;
+    overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.55); background: var(--bg);
+    display: flex; flex-direction: column; min-height: 560px;
+  }
+  .titlebar {
+    display: flex; align-items: center; gap: 8px; background: var(--bg-header);
+    padding: 6px 12px; font-size: 12px; color: var(--fg-dim);
+  }
+  .tdots { display: flex; gap: 6px; }
+  .tdots i { width: 11px; height: 11px; border-radius: 50%; background: #555; }
+  .titlebar .tname { flex: 1; text-align: center; }
+  .restricted {
+    display: flex; align-items: center; gap: 10px; background: #35322a;
+    color: #d8c887; font-size: 12px; padding: 5px 14px;
+  }
+  .restricted .linkish { color: #7db8ff; }
+  .insp-banner {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    background: rgba(55,148,255,0.08); border-bottom: 1px solid var(--border);
+    border-left: 3px solid var(--accent); padding: 9px 14px;
+  }
+  .insp-banner .what { font-weight: 600; }
+  .insp-banner .what .dim { color: var(--fg-dim); font-weight: 400; }
+  .insp-banner .grow { flex: 1 1 100%; }
+  .insp-explain { font-size: 12px; color: var(--fg-dim); }
+  .insp-explain .mono { color: var(--fg); font-size: 11.5px; }
+  .insp-actions { display: flex; gap: 8px; margin-left: auto; }
+  .win-body { display: flex; flex: 1; min-height: 340px; }
+  .explorer {
+    width: 230px; flex: 0 0 auto; background: var(--bg-side);
+    border-right: 1px solid var(--border); padding: 8px 0; font-size: 12.5px;
+  }
+  .exp-h {
+    padding: 2px 14px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--fg-dim); font-weight: 600;
+  }
+  .file { display: flex; align-items: center; gap: 7px; padding: 2px 14px 2px 24px; cursor: default; }
+  .file:hover { background: rgba(128,128,128,0.08); }
+  .file.sel { background: var(--sel-bg); }
+  .file .g { font-family: var(--mono); font-size: 11px; width: 10px; text-align: center; }
+  .file .g.m { color: var(--warn); } .file .g.a { color: var(--green); }
+  .scm { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .editor { flex: 1; min-width: 0; overflow-x: auto; padding: 10px 0; }
+  .editor pre {
+    margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.55; min-width: 480px;
+  }
+  .ln { display: flex; }
+  .ln .no { width: 44px; flex: 0 0 auto; text-align: right; padding-right: 14px; color: #6e6e6e; user-select: none; }
+  .ln.add { background: rgba(63,185,80,0.13); }
+  .ln.add .no { color: var(--green); }
+  .code-kw { color: #569cd6; } .code-str { color: #ce9178; } .code-cm { color: #6a9955; }
+  .code-fn { color: #dcdcaa; }
+  .statusbar {
+    display: flex; align-items: center; gap: 16px; background: #0e639c;
+    color: #fff; font-size: 11.5px; padding: 3px 14px;
+  }
+  .statusbar .sb { display: inline-flex; align-items: center; gap: 5px; }
+  .statusbar .sb.click { cursor: pointer; }
+  .statusbar .sb.click:hover { text-decoration: underline; }
+  .statusbar .right { margin-left: auto; display: flex; gap: 16px; }
+  .statusbar .restrict { background: #35322a; color: #d8c887; margin: -3px -14px -3px 0; padding: 3px 12px; }
+</style>
+
+<div class="proto-bar">
+  <span class="brand">&#9875; Drydock <span class="dim">&middot; background lane + inspection workspaces &middot; UI prototype</span></span>
+  <nav class="proto-tabs" aria-label="Prototype screens">
+    <button data-screen="ticket" class="active">1 &middot; New ticket</button>
+    <button data-screen="board">2 &middot; Board + fleet</button>
+    <button data-screen="plan">3 &middot; Plan gate</button>
+    <button data-screen="inspect">4 &middot; Inspection window</button>
+    <button data-screen="prefs">5 &middot; Preferences</button>
+  </nav>
+  <span class="proto-hint">static mock &middot; click around, nothing touches a host</span>
+</div>
+
+<!-- ======================= 1 &middot; TICKET FORM ======================= -->
+<section id="screen-ticket" class="screen active">
+  <div class="stage"><div>
+    <div class="panel">
+      <div class="panel-head">
+        <h1>New task</h1>
+        <span class="chip gray">recipe: ticket &middot; worker &rarr; tester</span>
+        <span style="margin-left:auto"><button class="linkish">change recipe</button></span>
+      </div>
+      <div class="panel-body">
+
+        <div class="frow">
+          <label for="t-title">Title</label>
+          <input id="t-title" type="text" value="PIPE-231 double-submit on farm retry">
+        </div>
+
+        <div class="frow">
+          <label for="t-prompt">Prompt</label>
+          <textarea id="t-prompt">Farm submit fires twice when a retry lands while the first job is still queued. Repro lives in tests/test_retry.py. Fix the guard without changing the queue API.</textarea>
+        </div>
+
+        <div class="frow">
+          <span class="flabel">Projects</span>
+          <div class="chips">
+            <span class="chip blue">&#128193; farm_submit <span class="x" title="remove">&times;</span></span>
+            <span class="chip blue">&#128193; productiondb <span class="x" title="remove">&times;</span></span>
+            <span class="chip purple" id="added-remote" hidden>&#128225; OpenUSD &middot; remote <span class="x">&times;</span></span>
+            <button class="add-proj" id="open-picker">+ add project&hellip;</button>
+          </div>
+          <span class="hint">From the workspace set, the catalog, or GitHub / GitLab (sign in once). Mounts still go through the approval path.</span>
+        </div>
+
+        <div class="frow">
+          <span class="flabel">Source</span>
+          <div class="inline">
+            <div class="seg" data-group="source">
+              <button data-val="current">Current workspace</button>
+              <button data-val="clean" class="active">Clean local HEAD</button>
+              <button data-val="remote">Remote ref&hellip;</button>
+            </div>
+            <input type="text" class="mono" id="remote-ref" value="origin/main"
+                   data-show="source:remote" style="width:130px; font-size:12px" hidden>
+          </div>
+          <span class="hint" data-show="source:current" hidden>Carries your uncommitted changes into the clone (dirty overlay).</span>
+          <span class="hint" data-show="source:clean">A fresh clone of your local HEAD. Nothing dirty rides along.</span>
+          <span class="hint" data-show="source:remote" hidden>The host fetches origin first, then cuts the clone. The sandbox never touches the network.</span>
+        </div>
+
+        <div class="frow">
+          <span class="flabel">Handoff</span>
+          <div class="inline">
+            <div class="seg" data-group="handoff">
+              <button data-val="patch">Patch</button>
+              <button data-val="branch" class="active">Branch</button>
+            </div>
+            <div class="branch-field" data-show="handoff:branch" style="flex:1">
+              <input type="text" id="branch-name" value="PIPE-231">
+            </div>
+          </div>
+          <span class="hint" data-show="handoff:patch" hidden>Changeset lands into your working tree when you pull. You commit through normal git.</span>
+          <span class="hint" data-show="handoff:branch">Your branch name, defaulted from the ticket key. Taken already? Lands as <span class="mono">PIPE-231_1</span>, <span class="mono">_2</span>, &hellip; &middot; no checkout, no push.</span>
+        </div>
+
+        <div class="frow">
+          <span class="flabel">Approach</span>
+          <div class="seg" data-group="approach">
+            <button data-val="implement">Implement now</button>
+            <button data-val="plan" class="active">Plan first</button>
+          </div>
+          <div class="gate-chain" data-show="approach:plan">
+            <span class="node">plan &middot; read-only</span> &rarr;
+            <span class="node locked">&#128274; your approval</span> &rarr;
+            <span class="node dim">stages 1-3</span> &rarr;
+            <span class="node dim">verify</span>
+          </div>
+          <span class="hint" data-show="approach:plan">The planner presents a plan for discussion first. Nothing implements until you approve.</span>
+          <span class="hint" data-show="approach:implement" hidden>The worker starts as soon as a slot frees. Review still gates landing.</span>
+        </div>
+
+        <div class="frow">
+          <span class="flabel">Stages</span>
+          <div class="stagelist">
+            <div class="stagerow"><span class="sn">1</span><input type="text" value="Guard: add acquire_dispatch_slot to the queue client"><button class="linkish">prompt</button></div>
+            <div class="stagerow"><span class="sn">2</span><input type="text" value="Wire submit_hooks through the guard + unit tests"><button class="linkish">prompt</button></div>
+            <div class="stagerow"><span class="sn">3</span><input type="text" value="Docs + changelog sweep"><button class="linkish">prompt</button></div>
+            <button class="add-proj" style="align-self:flex-start">+ add stage</button>
+          </div>
+          <span class="hint">Stages run in order on the same branch (<span class="mono">PIPE-231</span>), each with fresh context. A small handoff note passes forward; read or edit it between stages.</span>
+        </div>
+
+        <div class="frow">
+          <span class="flabel">Lane</span>
+          <div class="inline">
+            <div class="seg" data-group="lane">
+              <button data-val="normal">Normal</button>
+              <button data-val="background" class="active">Background</button>
+            </div>
+            <span class="hint" data-show="lane:background">Uses spare slots only (cap 3 of 6). Manual starts always jump the queue. Forced clone isolation.</span>
+            <span class="hint" data-show="lane:normal" hidden>Queues ahead of background work.</span>
+          </div>
+        </div>
+
+        <details class="adv">
+          <summary>Advanced &middot; from recipe defaults</summary>
+          <div class="adv-grid">
+            <span class="k">Model routing</span>
+            <span>worker: <span class="mono">gpt-5.5-codex</span> &middot; tester: <span class="mono">claude-haiku</span> &middot; planner: <span class="mono">claude-sonnet</span></span>
+            <span class="k">Verification</span> <span>HITL: submit a test job to the staging farm and confirm single dispatch</span>
+            <span class="k">Task FAQ</span> <span><label class="opt"><input type="checkbox" checked> auto-answer from FAQ (logged to transcript; never access requests)</label></span>
+            <span class="k">Remote projects</span> <span><label class="opt"><input type="checkbox" checked> fetch origin on task start (host-side)</label></span>
+          </div>
+        </details>
+      </div>
+      <div class="panel-foot">
+        <span class="note">Creation and start are separate acts &middot; the cascade picks this up when a background slot frees.</span>
+        <button class="btn">Create task only</button>
+        <button class="btn primary">Create + queue</button>
+      </div>
+    </div>
+    <p class="foot-note"><b>Mull over:</b> every knob is recipe-prefilled data on the task record. Source maps to the existing carry/fresh clone plumbing; handoff, stages, and approach are new fields the orchestrator reads but never invents. Batch intake is this form collapsed to one pasted line per ticket.</p>
+  </div></div>
+</section>
+
+<!-- ======================= picker overlay ======================= -->
+<div class="overlay" id="picker" role="dialog" aria-label="Add project">
+  <div class="qp">
+    <div class="qp-pad"><input type="text" value="usd" aria-label="Search projects"></div>
+    <div class="qp-section">Catalog &middot; local</div>
+    <div class="qp-row"><span class="ic">&#128193;</span><span class="name">usd_pipeline</span><span class="desc">~/dev/usd_pipeline</span><span class="right">registered</span></div>
+    <div class="qp-section">github.com &middot; signed in as alex-t</div>
+    <div class="qp-row hot" id="pick-openusd"><span class="ic">&#128225;</span><span class="name"><b>PixarAnimationStudios/OpenUSD</b></span><span class="desc">Universal Scene Description</span><span class="right">clone &rarr; managed root</span></div>
+    <div class="qp-row"><span class="ic">&#128225;</span><span class="name">mystudio/usd_shot_tools</span><span class="desc">internal &middot; private</span><span class="right">clone &rarr; managed root</span></div>
+    <div class="qp-section">gitlab.mystudio.local</div>
+    <div class="qp-row signin"><span class="ic">&#128273;</span><span class="name">Sign in to search gitlab.mystudio.local&hellip;</span><span class="right">PAT &middot; read_api</span></div>
+    <div class="qp-foot">Remote picks clone host-side into <span class="mono">~/.drydock/projects/&lt;host&gt;/&lt;org&gt;/&lt;repo&gt;</span> and register in the catalog. The studio policy gate applies. Tokens stay in the keychain, never in a sandbox.</div>
+  </div>
+</div>
+
+<!-- ======================= 2 &middot; BOARD ======================= -->
+<section id="screen-board" class="screen">
+  <div class="board-wrap">
+    <div class="inbox">&#9888; 1 question &middot; 1 plan ready &middot; 1 to land <span class="rev">review &rsaquo;</span></div>
+    <div class="fleet-strip">
+      <span class="stat">slots <b>4/6</b></span>
+      <span class="stat">background <b>2</b> <span>(cap 3)</span></span>
+      <span class="stat">queued <b>1</b></span>
+      <span class="stat">parked <b>1</b></span>
+      <span class="spacer"></span>
+      <span>lane</span>
+      <div class="seg quiet" data-group="lanefilter">
+        <button data-val="all" class="active">All</button>
+        <button data-val="normal">Normal</button>
+        <button data-val="background">Background</button>
+      </div>
+      <span>detail</span>
+      <div class="seg quiet" data-group="detail">
+        <button data-val="minimal">minimal</button>
+        <button data-val="standard" class="active">standard</button>
+      </div>
+    </div>
+    <div class="cols">
+      <div class="col"><h2>ToDo <span class="cat">pending</span></h2>
+        <div class="card">
+          <span class="t">Coverage sweep: asset_api</span>
+          <div class="row"><span class="chip gray">background</span><span class="chip amber">queued #1</span><span class="chip gray">auto</span></div>
+          <span class="sub">starts when a background slot frees</span>
+        </div>
+        <div class="card">
+          <span class="t">Upgrade farm python to 3.12</span>
+          <div class="row"><span class="chip gray">background</span><span class="chip red">&#9208; parked &middot; retried once</span></div>
+          <div class="actions"><button class="linkish">&#8635; retry</button><button class="linkish">open chat</button></div>
+        </div>
+      </div>
+      <div class="col"><h2>In Progress <span class="cat">in-progress</span></h2>
+        <div class="card">
+          <span class="t">Alembic publish support</span>
+          <div class="row"><span class="dot run"></span><span class="chip blue">running &middot; yours</span><span class="chip gray">4 repos</span></div>
+          <span class="sub">owned by your other window</span>
+        </div>
+        <div class="card">
+          <span class="t">Docs pass: publish pipeline</span>
+          <div class="row"><span class="dot run"></span><span class="chip gray">background</span><span class="chip blue">turn 3</span><span class="chip purple">clone</span></div>
+        </div>
+        <div class="card">
+          <span class="t">PIPE-114 &middot; exporter warnings cleanup</span>
+          <div class="row"><span class="dot run"></span><span class="chip gray">background</span><span class="chip blue">stage 2/3</span><span class="chip green">handoff &#10003;</span></div>
+          <span class="sub">stage 1 landed on <span class="mono">PIPE-114</span> &middot; stage 2 started fresh with its handoff</span>
+        </div>
+        <div class="card">
+          <span class="t">Bump usd pin to 24.11</span>
+          <div class="row"><span class="chip gray">background</span><span class="chip amber">&#9998; plan ready</span></div>
+          <div class="actions"><button class="linkish" data-goto="plan">discuss plan &rsaquo;</button></div>
+        </div>
+      </div>
+      <div class="col"><h2>Review <span class="cat">done</span></h2>
+        <div class="card">
+          <span class="t">PIPE-231 &middot; double-submit on farm retry</span>
+          <div class="row"><span class="chip gray">background</span><span class="chip green">3 stages &#10003;</span><span class="chip blue mono" style="font-size:10.5px">PIPE-231</span></div>
+          <span class="sub">branch holds 3 stage commits &middot; HITL verify unmet</span>
+          <div class="actions">
+            <button class="btn" data-goto="inspect">Inspect &nearr;</button>
+            <button class="btn subtle">Land &#9662;</button>
+            <button class="linkish">review</button>
+          </div>
+        </div>
+      </div>
+      <div class="col"><h2>Finished <span class="cat">done</span></h2>
+        <div class="card dim">
+          <span class="t">Rename pass: asset_api_maya</span>
+          <div class="row"><span class="chip green">landed &middot; patch</span></div>
+          <span class="sub">pulled into working tree yesterday</span>
+        </div>
+      </div>
+    </div>
+    <p class="foot-note"><b>Mull over:</b> background is one chip and one queue band, not a second board. Stage progress is a chip; the handoff note sits on its hover card. Automation still never moves a card past Review; Inspect and Land sit exactly where the finished thing is. Waiting-on-you states never hide at any density.</p>
+  </div>
+</section>
+
+<!-- ======================= 3 &middot; PLAN GATE ======================= -->
+<section id="screen-plan" class="screen">
+  <div class="plan-wrap">
+    <div class="gate-card" id="gate">
+      <div class="gate-head"><span class="lock">&#128274;</span> Plan approval &middot; implementation stays parked until you decide</div>
+      <div class="gate-chain">
+        <span class="node">plan &#10003; done</span> &rarr;
+        <span class="node locked">&#128274; approval</span> &rarr;
+        <span class="node dim">implement &middot; background</span> &rarr;
+        <span class="node dim">verify &middot; HITL</span>
+      </div>
+      <div class="gate-actions">
+        <button class="btn primary" id="approve">Approve and start</button>
+        <button class="btn">Materialize checklist instead</button>
+        <button class="btn subtle">Send comments</button>
+      </div>
+      <span class="gate-small">Approve seeds the worker with this plan. Materialize turns the checklist into subtasks (previewed first). Comments send a revision turn, same loop as always.</span>
+    </div>
+    <div class="plan-grid">
+      <div class="doc">
+        <h3>Plan: bump usd pin to 24.11</h3>
+        <div class="meta">planner &middot; claude-sonnet &middot; read-only mounts &middot; revision 2</div>
+        <h4>Summary</h4>
+        <p>usd_core 24.11 fixes the instancing crash we patch around in asset_api. The pin moves in rez first; DCC plugin matrices rebuild after.</p>
+        <h4>Checklist</h4>
+        <ol>
+          <li>Pin <span class="mono">usd_core-24.11</span> in <span class="mono">rez/packages</span>, drop the local crash patch.</li>
+          <li>Rebuild the Houdini plugin matrix against 24.11. <span class="pin">&#9679; 1</span>
+            <div class="annot"><span class="who">alex</span> &middot; on &ldquo;Houdini plugin matrix&rdquo;: H20.5 build pins usd 24.08 &middot; check with r&amp;d before the matrix rebuild.
+              <div class="reply">planner &middot; revision 2: split H20.5 out; matrix rebuild now targets H21 only, H20.5 stays on 24.08 until r&amp;d signs off.</div>
+            </div>
+          </li>
+          <li>Soak on the staging farm: publish the alembic fixture suite nightly for 3 nights.</li>
+        </ol>
+        <h4>Risks</h4>
+        <p>Show fx_042 pins usd explicitly per-shot; the pin bump must not leak into locked shots. Farm soak catches it, but list the pinned shots in the task notes first.</p>
+      </div>
+      <div class="side-card">
+        <h4>Ticket</h4>
+        <div class="kv"><span class="k">lane</span><span>background</span></div>
+        <div class="kv"><span class="k">source</span><span>clean local HEAD</span></div>
+        <div class="kv"><span class="k">handoff</span><span class="mono" style="font-size:11px">branch &middot; usd-24-11</span></div>
+        <div class="kv"><span class="k">projects</span><span>rez_packages, asset_api</span></div>
+        <div class="kv"><span class="k">verify</span><span>HITL &middot; farm soak green</span></div>
+        <h4 style="margin-top:6px">Gate rules</h4>
+        <div class="gate-small">A fourth human gate beside question / access / manual-check. Auto-start never crosses it. Model agreement is never approval.</div>
+      </div>
+    </div>
+    <p class="foot-note"><b>Mull over:</b> plan-first is the same Planner and the same discuss loop you already use; the only new machinery is the gate flag the cascade respects, and this card in the inbox. Materialize can turn the checklist into stages. Try the Approve button.</p>
+  </div>
+</section>
+
+<!-- ======================= 4 &middot; INSPECTION WINDOW ======================= -->
+<section id="screen-inspect" class="screen">
+  <div class="win">
+    <div class="titlebar">
+      <span class="tdots"><i></i><i></i><i></i></span>
+      <span class="tname">inspect-7f3a (Workspace) [Restricted Mode] &middot; Visual Studio Code</span>
+    </div>
+    <div class="restricted">&#128737; Restricted Mode is intended for safe code browsing. Trust this folder to enable all features. <button class="linkish">Manage</button> <button class="linkish">Learn more</button></div>
+    <div class="insp-banner">
+      <span>&#9875;</span>
+      <span class="what">Inspecting: PIPE-231 &middot; double-submit on farm retry <span class="dim">&middot; stage 3/3</span></span>
+      <div class="seg quiet" data-group="flavor">
+        <button data-val="worktree" class="active">worktree &middot; branch</button>
+        <button data-val="copy">materialized copy &middot; patch</button>
+      </div>
+      <div class="insp-actions">
+        <button class="btn primary" data-goto="board">&#8617; Return</button>
+        <button class="btn">Open Task Review</button>
+        <button class="btn subtle">Clean up</button>
+      </div>
+      <span class="grow"></span>
+      <span class="insp-explain" data-show="flavor:worktree">Worktree of your real <span class="mono">farm_submit</span> at <span class="mono">PIPE-231</span> (3 stage commits). Instant and git-native; removing it never deletes the branch.</span>
+      <span class="insp-explain" data-show="flavor:copy" hidden>Fresh clone at origin <span class="mono">a1b2c3f</span>, changeset applied and left uncommitted. Exactly the tree the agent finished with.</span>
+      <span class="insp-explain" style="flex-basis:100%">Human-only: no sandbox mounts this folder. Edits here are not synced back &middot; keep tweaks as review comments or Export Patch.</span>
+    </div>
+    <div class="win-body">
+      <div class="explorer">
+        <div class="exp-h">Explorer &middot; farm_submit</div>
+        <div class="file"><span class="g m">M</span> submit_hooks.py</div>
+        <div class="file sel"><span class="g a">A</span> retry_guard.py</div>
+        <div class="file"><span class="g a">A</span> tests/test_retry.py</div>
+        <div class="file"><span class="g m">M</span> docs/retry.md</div>
+        <div class="scm">
+          <div class="exp-h">Source control &middot; changes (4)</div>
+          <div class="file"><span class="g m">M</span> submit_hooks.py</div>
+          <div class="file"><span class="g a">A</span> retry_guard.py</div>
+          <div class="file"><span class="g a">A</span> tests/test_retry.py</div>
+          <div class="file"><span class="g m">M</span> docs/retry.md</div>
+        </div>
+      </div>
+      <div class="editor"><pre>
+<span class="ln"><span class="no">1</span><span class="code-cm"># retry_guard.py - single-dispatch guard for farm retries</span></span>
+<span class="ln"><span class="no">2</span><span class="code-kw">from</span> farm_submit.queue <span class="code-kw">import</span> QueueClient, JobState</span>
+<span class="ln"><span class="no">3</span></span>
+<span class="ln add"><span class="no">4</span><span class="code-kw">def</span> <span class="code-fn">acquire_dispatch_slot</span>(client: QueueClient, job_id: <span class="code-kw">str</span>) -&gt; <span class="code-kw">bool</span>:</span>
+<span class="ln add"><span class="no">5</span>    <span class="code-str">"""Refuse a second dispatch while the first is still queued."""</span></span>
+<span class="ln add"><span class="no">6</span>    state = client.job_state(job_id)</span>
+<span class="ln add"><span class="no">7</span>    <span class="code-kw">if</span> state <span class="code-kw">in</span> (JobState.QUEUED, JobState.DISPATCHING):</span>
+<span class="ln add"><span class="no">8</span>        <span class="code-kw">return</span> <span class="code-kw">False</span></span>
+<span class="ln add"><span class="no">9</span>    <span class="code-kw">return</span> client.mark_dispatching(job_id)</span>
+<span class="ln"><span class="no">10</span></span>
+<span class="ln"><span class="no">11</span><span class="code-cm"># submit_hooks.py calls this before enqueue; see tests/test_retry.py</span></span>
+</pre></div>
+    </div>
+    <div class="statusbar">
+      <span class="sb click" data-goto="board">&#9875; inspect: farm retry &middot; Return</span>
+      <span class="sb mono">&#8916; PIPE-231</span>
+      <span class="sb mono">+128 &minus;14</span>
+      <span class="right"><span class="sb restrict">Restricted Mode</span></span>
+    </div>
+  </div>
+  <p class="foot-note" style="max-width:1060px; margin:0 auto; padding: 0 4px;"><b>Mull over:</b> jump-in is a new window so your main window's live workers survive. The tree is worker-authored, so it opens untrusted; the git UI does the diffing for free because the work sits uncommitted (copy flavor) or on a landed branch (worktree flavor). Return is just closing the window.</p>
+</section>
+
+<!-- ======================= 5 &middot; PREFERENCES ======================= -->
+<section id="screen-prefs" class="screen">
+  <div class="stage"><div>
+    <div class="panel" style="width:680px">
+      <div class="panel-head">
+        <h1>System &middot; Preferences</h1>
+        <span class="chip gray">cascade: policy &rsaquo; machine &rsaquo; preferences &rsaquo; recipe &rsaquo; ticket &rsaquo; stage</span>
+      </div>
+      <div class="panel-body">
+        <div class="pref-group first">
+          <h3>New tickets &middot; defaults</h3>
+          <div class="pref-row"><span class="k">Lane</span>
+            <div class="seg quiet" data-group="p-lane"><button data-val="n">Normal</button><button data-val="b" class="active">Background</button></div>
+            <span class="prov">you</span></div>
+          <div class="pref-row"><span class="k">Source</span>
+            <div class="seg quiet" data-group="p-src"><button data-val="cur">Current</button><button data-val="clean" class="active">Clean HEAD</button><button data-val="rem">Remote</button></div>
+            <span class="prov">default</span></div>
+          <div class="pref-row"><span class="k">Handoff</span>
+            <div class="seg quiet" data-group="p-hand"><button data-val="patch">Patch</button><button data-val="branch" class="active">Branch</button></div>
+            <span class="prov">you</span></div>
+          <div class="pref-row"><span class="k">Approach</span>
+            <div class="seg quiet" data-group="p-appr"><button data-val="impl" class="active">Implement now</button><button data-val="plan">Plan first</button></div>
+            <span class="prov">default</span></div>
+          <span class="hint">Recipes override these per shape; the ticket form overrides recipes.</span>
+        </div>
+        <div class="pref-group">
+          <h3>Orchestration &middot; machine</h3>
+          <div class="pref-row"><span class="k">Run slots</span><span>auto (6)</span><button class="linkish">open VS Code settings</button><span class="prov">machine</span></div>
+          <div class="pref-row"><span class="k">Background cap</span><span>auto (3) &middot; half the slots</span><span class="prov">machine</span></div>
+          <div class="pref-row"><span class="k">Clone-only work</span><span>forced on</span><span class="prov lock">&#128274; studio policy</span></div>
+        </div>
+        <div class="pref-group">
+          <h3>Repo providers</h3>
+          <div class="pref-row"><span class="k">github.com</span><span>signed in as alex-t</span><button class="linkish">sign out</button><span class="prov">keychain</span></div>
+          <div class="pref-row"><span class="k">gitlab.mystudio.local</span><span class="hint">not signed in</span><button class="linkish">sign in &middot; PAT</button><span class="prov">keychain</span></div>
+          <div class="pref-row"><span class="k">Projects root</span><span class="mono" style="font-size:11.5px">~/.drydock/projects</span><span class="prov">machine</span></div>
+          <div class="pref-row"><button class="add-proj">+ add GitLab host&hellip;</button></div>
+        </div>
+        <div class="pref-group">
+          <h3>Stage handoffs</h3>
+          <div class="pref-row"><span class="k">Auto-generate note</span>
+            <div class="seg quiet" data-group="p-ho"><button data-val="on" class="active">On</button><button data-val="off">Off</button></div>
+            <span class="prov">default</span></div>
+          <div class="pref-row"><span class="k">Style</span>
+            <div class="seg quiet" data-group="p-hos"><button data-val="c" class="active">Compact</button><button data-val="d">Digest</button></div>
+            <span class="prov">default</span></div>
+          <span class="hint">Bounded (~2 KB). Editable between stages whenever the chain is paused.</span>
+        </div>
+        <div class="pref-group">
+          <h3>Autonomy</h3>
+          <div class="pref-row"><span class="k">Task FAQ auto-answer</span>
+            <div class="seg quiet" data-group="p-faq"><button data-val="off" class="active">Off</button><button data-val="on">On</button></div>
+            <span class="prov">default</span></div>
+          <div class="pref-row"><span class="k">Idle park (background)</span><span>after 30 min &middot; flagged, never silent</span><span class="prov">you</span></div>
+        </div>
+        <div class="pref-group">
+          <h3>Inspection</h3>
+          <div class="pref-row"><span class="k">Keep workspaces</span><span>7 days &middot; longer while a window is open</span><span class="prov">default</span></div>
+          <div class="pref-row"><span class="k">Window trust</span><span>always Restricted Mode</span><span class="prov lock">&#128274; fixed</span></div>
+        </div>
+      </div>
+      <div class="panel-foot">
+        <span class="note">Machine facts live in VS Code settings; these workflow defaults are product data, team-shareable later like <span class="mono">.drydock/recipes.json</span>. Studio policy always wins.</span>
+      </div>
+    </div>
+    <p class="foot-note"><b>Mull over:</b> one precedence ladder for every knob, provenance on every row, and policy can only forbid, never grant. This is the ADR 0019 cascade mental model applied to configuration.</p>
+  </div></div>
+</section>
+
+<script>
+  (function () {
+    "use strict";
+    // screen tabs + any [data-goto] jump
+    var tabs = document.querySelectorAll(".proto-tabs button");
+    function show(name) {
+      document.querySelectorAll(".screen").forEach(function (s) {
+        s.classList.toggle("active", s.id === "screen-" + name);
+      });
+      tabs.forEach(function (t) { t.classList.toggle("active", t.dataset.screen === name); });
+      window.scrollTo(0, 0);
+    }
+    tabs.forEach(function (t) { t.addEventListener("click", function () { show(t.dataset.screen); }); });
+    document.querySelectorAll("[data-goto]").forEach(function (el) {
+      el.addEventListener("click", function () { show(el.dataset.goto); });
+    });
+
+    // segmented controls with conditional [data-show="group:value"]
+    document.querySelectorAll(".seg[data-group]").forEach(function (seg) {
+      var group = seg.dataset.group;
+      seg.querySelectorAll("button").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          seg.querySelectorAll("button").forEach(function (b) { b.classList.remove("active"); });
+          btn.classList.add("active");
+          document.querySelectorAll('[data-show^="' + group + ':"]').forEach(function (el) {
+            el.hidden = el.dataset.show !== group + ":" + btn.dataset.val;
+          });
+        });
+      });
+    });
+
+    // remote project picker
+    var picker = document.getElementById("picker");
+    var opener = document.getElementById("open-picker");
+    if (opener) opener.addEventListener("click", function () { picker.classList.add("open"); });
+    picker.addEventListener("click", function (e) { if (e.target === picker) picker.classList.remove("open"); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") picker.classList.remove("open"); });
+    var pick = document.getElementById("pick-openusd");
+    if (pick) pick.addEventListener("click", function () {
+      document.getElementById("added-remote").hidden = false;
+      picker.classList.remove("open");
+    });
+
+    // plan gate approve swap
+    var approve = document.getElementById("approve");
+    if (approve) approve.addEventListener("click", function () {
+      var gate = document.getElementById("gate");
+      gate.classList.add("approved");
+      gate.querySelector(".gate-head").innerHTML =
+        '<span class="lock">&#10003;</span> Plan approved &middot; implement queued (background &middot; next free slot)';
+      gate.querySelector(".gate-actions").innerHTML =
+        '<button class="btn" data-goto="board">Back to board</button>';
+      gate.querySelector("[data-goto]").addEventListener("click", function () { show("board"); });
+      var chain = gate.querySelector(".gate-chain");
+      chain.innerHTML = '<span class="node">plan &#10003;</span> &rarr; <span class="node">approved &#10003;</span> &rarr; <span class="node locked">implement &middot; queued #2</span> &rarr; <span class="node dim">verify &middot; HITL</span>';
+    });
+  }());
+</script>
+</body>
+</html>

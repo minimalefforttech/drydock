@@ -203,6 +203,13 @@ interface RecipeDraft {
   title: string;
   error: string | null;
   submitting: boolean;
+  /** Ticket shape (plan D1): undefined = inherit recipe/preference defaults. */
+  lane?: "normal" | "background";
+  handoffMode?: "patch" | "branch";
+  branchName: string;
+  approach?: "implement" | "plan-first";
+  /** Custom stages (plan D4), one per line: "title | optional prompt". Replaces the recipe's steps. */
+  stagesText: string;
 }
 
 /** Task FAQ modal draft (ADR 0007), or null when closed. */
@@ -554,10 +561,15 @@ function isAgedOut(columnId: string, doneAt: string | undefined): boolean {
   return Date.parse(doneAt) < cutoff;
 }
 
-/** Tasks passing the focus filter, in stable board order. */
+/** Queue-lane scope for the whole board (plan D7); webview-local. */
+let laneFilter: "all" | "normal" | "background" = "all";
+
+/** Tasks passing the focus + lane filters, in stable board order. */
 function visibleTasks(): WorkTaskSummary[] {
   if (board === null) return [];
-  return taskFilter === null ? [...board.tasks] : board.tasks.filter((task) => task.taskId === taskFilter);
+  const focused = taskFilter === null ? [...board.tasks] : board.tasks.filter((task) => task.taskId === taskFilter);
+  if (laneFilter === "all") return focused;
+  return focused.filter((task) => (task.lane ?? "normal") === laneFilter);
 }
 
 interface ColumnCards {
@@ -674,7 +686,7 @@ function renderToolbar(): void {
   setHelpTooltip(fromRecipe, "Create a task from a recipe, including its subtasks, dependencies, and role defaults. This action does not start an agent.");
   fromRecipe.addEventListener("click", () => {
     beginModal(() => toolbar.querySelector<HTMLElement>(".tb-from-recipe"));
-    recipeDraft = { recipes: null, selectedId: null, title: "", error: null, submitting: false };
+    recipeDraft = { recipes: null, selectedId: null, title: "", error: null, submitting: false, branchName: "", stagesText: "" };
     render();
     void loadRecipes();
   });
@@ -766,6 +778,25 @@ function renderToolbar(): void {
     render();
   });
   toolbar.append(detailSelect);
+
+  // Queue-lane filter (plan D7): scope the board to normal or background
+  // tickets. Webview-local state, never persisted host-side.
+  const laneSelect = document.createElement("select");
+  laneSelect.className = "tb-select tb-lane-filter";
+  laneSelect.title = "Filter tasks by queue lane (background tickets run on spare slots only)";
+  setHelpTooltip(laneSelect, "Show every task, only normal-lane tasks, or only background-lane tickets.");
+  for (const [value, label] of [["all", "Lane: all"], ["normal", "Lane: normal"], ["background", "Lane: background"]] as const) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    laneSelect.append(option);
+  }
+  laneSelect.value = laneFilter;
+  laneSelect.addEventListener("change", () => {
+    laneFilter = laneSelect.value === "normal" || laneSelect.value === "background" ? laneSelect.value : "all";
+    render();
+  });
+  toolbar.append(laneSelect);
 
   // Lanes toggle: groups columns into stacked per-category lanes instead of
   // one horizontal rail. Webview-local persisted state, same as the filters above.
@@ -1253,6 +1284,20 @@ function subtaskStateChip(subtask: SubtaskSummary): HTMLElement | null {
   if (subtask.verifyUnmet === true) {
     return verifyChip();
   }
+  if (subtask.branchDriftAt !== undefined) {
+    // The task branch moved under the chain (plan D4) - waiting-on-you.
+    const drift = el("span", "tb-drift-chip");
+    drift.textContent = "branch drifted";
+    drift.title = "The task branch moved and this stage's work cannot fast-forward. Reconcile the branch, then Retry land.";
+    return drift;
+  }
+  if (subtask.gateReady === true) {
+    // Plan gate satisfied only by a person (plan D5) - waiting-on-you.
+    const gate = el("span", "tb-gate-chip");
+    gate.textContent = "✎ plan ready";
+    gate.title = "Waiting on your approval - the plan gate blocks auto-start until you approve";
+    return gate;
+  }
   if (subtask.isRunning) {
     const running = el("span", "tb-running-chip");
     running.textContent = "running";
@@ -1329,6 +1374,14 @@ function buildTaskHoverCard(task: WorkTaskSummary): HTMLElement {
   if (task.faqCount !== undefined || task.autoAnswerFaq === true) {
     hover.append(hoverRow("FAQ", `${String(task.faqCount ?? 0)} · auto-answer ${task.autoAnswerFaq === true ? "on" : "off"}`));
   }
+  if (task.lane === "background") hover.append(hoverRow("lane", "background (spare slots only)"));
+  if (task.handoffMode !== undefined) {
+    hover.append(hoverRow(
+      "handoff",
+      task.handoffMode === "branch" ? `branch · ${task.landedBranch ?? task.branchName ?? "(from title)"}` : "patch"
+    ));
+  }
+  if (task.approach === "plan-first") hover.append(hoverRow("approach", "plan first (human gate)"));
   hover.append(hoverRow("created", agoText(task.createdAt)), hoverRow("updated", agoText(task.updatedAt)));
   if (task.doneAt !== undefined) hover.append(hoverRow("done", agoText(task.doneAt)));
   return hover;
@@ -1359,6 +1412,18 @@ function buildSubtaskHoverCard(subtask: SubtaskSummary): HTMLElement {
   if (subtask.verifyUnmet === true) hover.append(hoverRow("verification", "human check not recorded"));
   if (subtask.verifiedAt !== undefined) hover.append(hoverRow("verification", `recorded ${agoText(subtask.verifiedAt)}`));
   if (subtask.model !== undefined) hover.append(hoverRow("model", `${subtask.model.providerId}${subtask.model.model === undefined ? "" : ` · ${subtask.model.model}`}`));
+  if (subtask.stageIndex !== undefined) hover.append(hoverRow("stage", `${String(subtask.stageIndex)} · same branch, fresh context`));
+  if (subtask.branchDriftAt !== undefined) hover.append(hoverRow("branch", `drifted ${agoText(subtask.branchDriftAt)} - reconcile, then Retry land`));
+  if (subtask.gate !== undefined) {
+    hover.append(hoverRow(
+      "gate",
+      subtask.gateSatisfiedAt !== undefined
+        ? `approved ${agoText(subtask.gateSatisfiedAt)}`
+        : subtask.gateReady === true
+          ? "plan ready - approve to unblock"
+          : "plan approval (waits on the plan)"
+    ));
+  }
   hover.append(hoverRow("created", agoText(subtask.createdAt)), hoverRow("updated", agoText(subtask.updatedAt)));
   return hover;
 }
@@ -1377,6 +1442,25 @@ function buildTaskCard(
   const title = el("span", "tb-task-title");
   title.textContent = task.title;
   head.append(tag, title);
+  // Ticket-shape chips (plan D1): passive metadata - quiet at minimal (the
+  // hover card carries them), visible at standard/full per density rules.
+  if (detailLevel() !== "minimal") {
+    if (task.lane === "background") {
+      const lane = el("span", "tb-lane-chip");
+      lane.textContent = "background";
+      lane.title = "Background lane: auto runs use spare slots only and queue behind normal work";
+      head.append(lane);
+    }
+    const branch = task.landedBranch ?? task.branchName;
+    if (task.handoffMode === "branch" && branch !== undefined) {
+      const chip = el("span", "tb-branch-chip");
+      chip.textContent = branch;
+      chip.title = task.landedBranch !== undefined
+        ? `Work lands on local branch ${branch}`
+        : `Will land on local branch ${branch} (created at first land; collisions suffix _1, _2, …)`;
+      head.append(chip);
+    }
+  }
   card.append(head);
 
   const level = detailLevel();
@@ -1486,6 +1570,33 @@ function buildSubtaskCard(
       lock.setAttribute("aria-label", "blocked");
       head.append(lock);
     }
+    if (subtask.stageIndex !== undefined) {
+      // Stage chains (plan D4): same branch, fresh context, handoff forward.
+      const stage = el("span", "tb-stage-chip");
+      stage.textContent = `stage ${String(subtask.stageIndex)}`;
+      stage.title = "Stage chain: runs on the task branch, fresh context, a handoff note passes to the next stage";
+      head.append(stage);
+    }
+    if (subtask.gate !== undefined && subtask.gateSatisfiedAt === undefined && subtask.gateReady !== true) {
+      const gate = el("span", "tb-lock-chip");
+      gate.textContent = "🔒 plan";
+      gate.title = "Gated on plan approval (ADR 0016) - never auto-starts until a person approves";
+      head.append(gate);
+    }
+  }
+  // Waiting-on-you never hides: at standard/full these chips ride in the
+  // head (at minimal they ARE the one chip via subtaskStateChip).
+  if (level !== "minimal" && subtask.branchDriftAt !== undefined) {
+    const drift = el("span", "tb-drift-chip");
+    drift.textContent = "branch drifted";
+    drift.title = "The task branch moved and this stage's work cannot fast-forward. Reconcile the branch, then Retry land.";
+    head.append(drift);
+  }
+  if (level !== "minimal" && subtask.gateReady === true) {
+    const gate = el("span", "tb-gate-chip");
+    gate.textContent = "✎ plan ready";
+    gate.title = "Waiting on your approval - the plan gate blocks auto-start until you approve";
+    head.append(gate);
   }
   if (level !== "minimal" && subtask.hasUnlandedChangeset === true) {
     // Quiet passive marker (ADR 0014): output captured, not yet pulled local.
@@ -1534,7 +1645,7 @@ function buildSubtaskCard(
     scheduleEdgeRender();
   });
 
-  const actions = buildSubtaskActions(subtask, column, level);
+  const actions = buildSubtaskActions(subtask, parent, column, level);
   if (actions.childNodes.length > 0) card.append(actions);
 
   card.append(buildColorPicker(subtask, parent));
@@ -1558,7 +1669,7 @@ function buildSubtaskCard(
 }
 
 /** Run-state chips + start affordances for one subtask card. */
-function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary, level: CardDetailLevel): HTMLElement {
+function buildSubtaskActions(subtask: SubtaskSummary, parent: WorkTaskSummary, column: BoardColumnSummary, level: CardDetailLevel): HTMLElement {
   const actions = el("div", "tb-card-actions");
   const startable = subtask.prompt !== undefined && subtask.prompt.length > 0;
   const isDone = column.category === "done";
@@ -1584,6 +1695,48 @@ function buildSubtaskActions(subtask: SubtaskSummary, column: BoardColumnSummary
     actions.append(verified);
   } else if (subtask.verifiedAt !== undefined && level !== "minimal") {
     actions.append(verifiedChip(subtask.verifiedAt));
+  }
+  if (subtask.gateReady === true) {
+    // The plan gate's one verb (plan D5): a person approves; approved work
+    // then auto-starts if flagged. Model agreement is never approval.
+    const approve = button("Approve plan", "ghost small tb-approve-action");
+    approve.title = "Approve the plan: satisfies the human gate so gated work can start";
+    approve.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void approveGate(subtask.subtaskId);
+    });
+    actions.append(approve);
+  }
+  // Inspection (plan D6) stays offered after landing too: a landed branch is
+  // exactly when the instant worktree flavor becomes most useful.
+  const inspectable = isDone && (
+    subtask.hasUnlandedChangeset === true
+    || (parent.handoffMode === "branch" && parent.landedBranch !== undefined)
+  );
+  if (subtask.branchDriftAt !== undefined && isDone && !isDemoMode()) {
+    // Drift recovery (plan D4): after the human reconciles the branch, a
+    // same-column re-entry re-fires capture + branch advance for this stage.
+    const retryLandButton = button("↻ Retry land", "ghost small tb-retry-land");
+    retryLandButton.title = "Re-run capture and the branch advance for this stage (after you reconciled the branch)";
+    retryLandButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void retryLand(subtask.subtaskId, column.columnId);
+    });
+    actions.append(retryLandButton);
+  }
+  if (inspectable) {
+    // Step INTO the finished tree in a new window - this window's live
+    // agents keep running; the new window is untrusted.
+    const inspect = button("Inspect ↗", "ghost small tb-inspect-action");
+    inspect.disabled = isDemoMode();
+    inspect.title = isDemoMode()
+      ? "Demo data cannot open windows. Switch to Live data to inspect."
+      : "Open this finished work in a new window (branch worktree or exact copy)";
+    inspect.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void inspectSubtask(subtask.taskId, subtask.subtaskId);
+    });
+    actions.append(inspect);
   }
   if (subtask.isRunning) {
     // At minimal the head already wears the one running chip.
@@ -1713,6 +1866,37 @@ async function markVerified(subtaskId: string): Promise<void> {
   }
   await refetchBoard();
   showStatus("Verification recorded. Tests were not run and the card was not moved.");
+}
+
+async function retryLand(subtaskId: string, columnId: string): Promise<void> {
+  showStatus("Retrying branch land…");
+  const response = await request({ type: "board.moveCard", cardKind: "subtask", id: subtaskId, columnId });
+  if (!response.ok) {
+    showError(`retry land failed: ${response.error.message}`);
+    return;
+  }
+  await refetchBoard();
+  showStatus("Retry fired. If the branch still cannot fast-forward, the drift chip stays - reconcile and retry again.");
+}
+
+async function approveGate(subtaskId: string): Promise<void> {
+  const response = await request({ type: "subtask.approveGate", subtaskId });
+  if (!response.ok) {
+    showError(`approve failed: ${response.error.message}`);
+    return;
+  }
+  await refetchBoard();
+  showStatus("Plan approved - gated work is unblocked (auto-start work picks up as slots free).");
+}
+
+async function inspectSubtask(taskId: string, subtaskId: string): Promise<void> {
+  showStatus("Materializing inspection workspace…");
+  const response = await request({ type: "task.inspect", taskId, subtaskId });
+  if (!response.ok) {
+    showError(`inspect failed: ${response.error.message}`);
+    return;
+  }
+  showStatus(response.payload.type === "task.inspect" ? response.payload.message : "Inspection window opened.");
 }
 
 async function updateSeedMode(subtaskId: string, seedMode: "local" | "upstream"): Promise<void> {
@@ -2168,7 +2352,26 @@ async function submitRecipe(): Promise<void> {
   draft.submitting = true;
   draft.error = null;
   render();
-  const response = await request({ type: "task.createFromRecipe", recipeId: draft.selectedId, title });
+  const stages = draft.stagesText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [stageTitle, ...promptParts] = line.split("|");
+      const prompt = promptParts.join("|").trim();
+      return { title: (stageTitle ?? "").trim(), ...(prompt === "" ? {} : { prompt }) };
+    })
+    .filter((stage) => stage.title.length > 0);
+  const response = await request({
+    type: "task.createFromRecipe",
+    recipeId: draft.selectedId,
+    title,
+    ...(draft.lane === undefined ? {} : { lane: draft.lane }),
+    ...(draft.handoffMode === undefined ? {} : { handoffMode: draft.handoffMode }),
+    ...(draft.branchName.trim() === "" ? {} : { branchName: draft.branchName.trim() }),
+    ...(draft.approach === undefined ? {} : { approach: draft.approach }),
+    ...(stages.length === 0 ? {} : { stages })
+  });
   if (response.ok && response.payload.type === "task.createFromRecipe") {
     recipeDraft = null;
     clearStatus();
@@ -2273,6 +2476,44 @@ function renderRecipeModal(draft: RecipeDraft): void {
       }
       modal.append(preview);
     }
+
+    // Ticket shape (plan D1): unset controls inherit the recipe's defaults,
+    // then product preferences. Selecting again clears back to inherit.
+    const ticketRow = el("div", "tb-ticket-row");
+    ticketRow.append(
+      ticketSeg(draft, "lane", "Lane", [["normal", "Normal"], ["background", "Background"]]),
+      ticketSeg(draft, "handoffMode", "Handoff", [["patch", "Patch"], ["branch", "Branch"]]),
+      ticketSeg(draft, "approach", "Approach", [["implement", "Implement"], ["plan-first", "Plan first"]])
+    );
+    modal.append(ticketRow);
+    if (draft.handoffMode === "branch") {
+      const branchInput = document.createElement("input");
+      branchInput.type = "text";
+      branchInput.className = "tb-input tb-branch-input";
+      branchInput.placeholder = "Branch name - blank uses the title's ticket key (PIPE-231 …)";
+      branchInput.setAttribute("aria-label", "Branch name");
+      branchInput.value = draft.branchName;
+      branchInput.addEventListener("input", () => {
+        draft.branchName = branchInput.value;
+      });
+      modal.append(branchInput);
+    }
+    const ticketHint = el("div", "tb-modal-hint");
+    ticketHint.textContent = "Unset choices inherit the recipe's defaults, then your preferences. Background auto-runs use spare slots only.";
+    modal.append(ticketHint);
+
+    // Custom stages (plan D4): one per line, replacing the recipe's steps
+    // with a same-branch chain (fresh context per stage, handoff forward).
+    const stagesInput = document.createElement("textarea");
+    stagesInput.className = "tb-input tb-stages-input";
+    stagesInput.rows = 3;
+    stagesInput.placeholder = "Stages (optional, one per line): title | optional prompt - replaces the recipe's steps with a same-branch chain";
+    stagesInput.setAttribute("aria-label", "Custom stages, one per line");
+    stagesInput.value = draft.stagesText;
+    stagesInput.addEventListener("input", () => {
+      draft.stagesText = stagesInput.value;
+    });
+    modal.append(stagesInput);
   }
 
   const foot = el("div", "tb-modal-foot");
@@ -2296,6 +2537,31 @@ function renderRecipeModal(draft: RecipeDraft): void {
   prepareModalFocus(modal, titleInput);
   overlay.append(modal);
   modalRoot.append(overlay);
+}
+
+/** One inherit-or-choose segmented control for the recipe modal's ticket row. */
+function ticketSeg(
+  draft: RecipeDraft,
+  key: "lane" | "handoffMode" | "approach",
+  label: string,
+  options: readonly (readonly [string, string])[]
+): HTMLElement {
+  const wrap = el("span", "tb-ticket-seg");
+  const caption = el("span", "tb-ticket-label");
+  caption.textContent = label;
+  wrap.append(caption);
+  const current = draft[key];
+  for (const [value, text] of options) {
+    const opt = button(text, `ghost small tb-seg-option${current === value ? " selected" : ""}`);
+    opt.title = `${label}: ${text} - click again to clear back to the inherited default`;
+    opt.addEventListener("click", () => {
+      const record = draft as unknown as Record<string, string | undefined>;
+      record[key] = current === value ? undefined : value;
+      render();
+    });
+    wrap.append(opt);
+  }
+  return wrap;
 }
 
 function renderModal(): void {

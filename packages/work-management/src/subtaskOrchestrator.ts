@@ -35,6 +35,7 @@ import type {
   SubtaskModelSelection,
   SubtaskRecord,
   SubtaskSeedMode,
+  TaskLane,
   WorkTaskLinkRecord
 } from "@drydock/contracts";
 import type { Logger, ProductBusEvent, ProductEventBus } from "@drydock/core";
@@ -84,6 +85,8 @@ export type StartSubtaskRun = (input: {
   readonly dependsOn: readonly string[];
   /** Per-role model profile (ADR 0002); absent = provider default. */
   readonly model?: SubtaskModelSelection;
+  /** 1-based stage-chain position (plan D4); the bridge clones the task branch tip for stages past the first. */
+  readonly stageIndex?: number;
 }) => Promise<{
   readonly sessionId: string;
   /** Starts the first turn detached. The app bridge owns async failure logging. */
@@ -113,8 +116,27 @@ export interface SubtaskOrchestratorOptions {
    * machine spec; the orchestrator never guesses.
    */
   readonly maxConcurrentRuns?: () => number;
+  /**
+   * Background sub-budget (lane extension of ADR 0015), resolved live like
+   * maxConcurrentRuns. Caps how many AUTO-origin background-lane runs may be
+   * active at once; <= 0 means no dedicated cap (global budget only). Manual
+   * starts never consume the sub-budget - a human clicking start is attended
+   * work, whatever the task's lane.
+   */
+  readonly maxBackgroundRuns?: () => number;
+  /**
+   * Resolves the owning task's queue lane at start time; absent = every task
+   * is normal-lane. Lanes only reorder scheduling - they never change access.
+   */
+  readonly resolveTaskLane?: (taskId: string) => Promise<TaskLane>;
   /** Identifies adopted live sessions during restore so they consume fleet slots. */
   readonly isSessionLive?: (sessionId: string) => boolean;
+  /**
+   * Best-effort teardown for a session whose start failed AFTER the run was
+   * booted (link/moveCard threw): without it the booted clone session leaks
+   * until reconcile (concurrency audit L2). Absent keeps the old behavior.
+   */
+  readonly endOrphanedSession?: (sessionId: string, reason: string) => Promise<unknown>;
   /**
    * ADR 0015: durable mirror of queued/parked state. Every hold transition
    * writes through (best-effort, logged); `restore()` reloads and drains
@@ -175,14 +197,20 @@ export class SubtaskOrchestrator {
    * from starting the shared dependent with stale output.
    */
   private readonly doneEntryHookOutcomes = new Map<SubtaskId, Promise<boolean>>();
-  /** Starts held back by the run-slot budget (ADR 0015); mirrored durably when a hold store is configured. */
-  private readonly queue: { readonly subtaskId: SubtaskId; readonly force: boolean; readonly origin: "manual" | "auto" }[] = [];
+  /**
+   * Starts held back by the run-slot budget (ADR 0015); mirrored durably when
+   * a hold store is configured. Band-ordered invariantly: manual entries
+   * first, then normal-lane auto, then background-lane auto (see enqueue).
+   */
+  private readonly queue: { readonly subtaskId: SubtaskId; readonly force: boolean; readonly origin: "manual" | "auto"; readonly lane: TaskLane }[] = [];
   /** Auto runs that failed twice - automation gives up until a manual start clears it. */
   private readonly parked = new Set<SubtaskId>();
   /** Auto runs already retried once (cleared by success or a manual start). */
   private readonly retried = new Set<SubtaskId>();
   /** Origin of the in-flight run per subtask, for the failure policy. */
   private readonly originOf = new Map<SubtaskId, "manual" | "auto">();
+  /** Lane of the in-flight run per subtask, for the background sub-budget. */
+  private readonly laneOf = new Map<SubtaskId, TaskLane>();
   /** Serializes queue draining so concurrent completions preserve FIFO order. */
   private drainPromise: Promise<void> | undefined;
   private unsubscribe: (() => void) | undefined;
@@ -217,7 +245,8 @@ export class SubtaskOrchestrator {
     if (this.options.holds === undefined) return;
     const holds = await this.options.holds.listHolds();
     const manual: typeof this.queue = [];
-    const automatic: typeof this.queue = [];
+    const normalAuto: typeof this.queue = [];
+    const backgroundAuto: typeof this.queue = [];
     for (const hold of holds) {
       if (hold.kind === "parked") {
         this.parked.add(hold.subtaskId);
@@ -226,16 +255,18 @@ export class SubtaskOrchestrator {
       if (
         this.queue.some((entry) => entry.subtaskId === hold.subtaskId) ||
         manual.some((entry) => entry.subtaskId === hold.subtaskId) ||
-        automatic.some((entry) => entry.subtaskId === hold.subtaskId)
+        normalAuto.some((entry) => entry.subtaskId === hold.subtaskId) ||
+        backgroundAuto.some((entry) => entry.subtaskId === hold.subtaskId)
       ) continue;
-      const entry = { subtaskId: hold.subtaskId, force: hold.force, origin: hold.origin };
+      const entry = { subtaskId: hold.subtaskId, force: hold.force, origin: hold.origin, lane: hold.lane ?? "normal" as TaskLane };
       if (hold.origin === "manual") manual.push(entry);
-      else automatic.push(entry);
+      else if (entry.lane === "background") backgroundAuto.push(entry);
+      else normalAuto.push(entry);
     }
     // listHolds is oldest-first. Spread-unshift keeps that order while still
-    // restoring manual priority ahead of automatic queue entries.
+    // restoring the band invariant: manual, then normal auto, then background.
     this.queue.unshift(...manual);
-    this.queue.push(...automatic);
+    this.queue.push(...normalAuto, ...backgroundAuto);
     if (holds.length === 0) return;
     this.options.logger.info("orchestrator holds restored", { queued: this.queue.length, parked: this.parked.size });
     this.options.bus.publish({ kind: "board-changed" });
@@ -243,10 +274,54 @@ export class SubtaskOrchestrator {
   }
 
   /** Best-effort durable mirror of a hold transition (ADR 0015). */
-  private mirrorHold(subtaskId: SubtaskId, kind: "queued" | "parked", origin: "manual" | "auto", force: boolean): void {
-    void this.options.holds?.upsertHold({ subtaskId, kind, origin, force, heldAt: new Date().toISOString() }).catch((error: unknown) => {
+  private mirrorHold(subtaskId: SubtaskId, kind: "queued" | "parked", origin: "manual" | "auto", force: boolean, lane: TaskLane = "normal"): void {
+    void this.options.holds?.upsertHold({ subtaskId, kind, origin, force, lane, heldAt: new Date().toISOString() }).catch((error: unknown) => {
       this.options.logger.warn("hold mirror failed", { subtaskId, kind, error: error instanceof Error ? error.message : String(error) });
     });
+  }
+
+  /**
+   * Queue insertion preserving the band invariant: manual entries jump to
+   * the front (hotfix priority, unchanged), normal-lane auto entries sit
+   * ahead of every background-lane auto entry, background goes to the back.
+   */
+  private enqueue(entry: { readonly subtaskId: SubtaskId; readonly force: boolean; readonly origin: "manual" | "auto"; readonly lane: TaskLane }): void {
+    if (entry.origin === "manual") {
+      this.queue.unshift(entry);
+      return;
+    }
+    if (entry.lane !== "background") {
+      const firstBackground = this.queue.findIndex((queued) => queued.origin === "auto" && queued.lane === "background");
+      if (firstBackground === -1) this.queue.push(entry);
+      else this.queue.splice(firstBackground, 0, entry);
+      return;
+    }
+    this.queue.push(entry);
+  }
+
+  /** Auto-origin background-lane runs currently holding a slot (sub-budget accounting). */
+  backgroundActiveCount(): number {
+    let count = 0;
+    for (const id of this.running) {
+      if (this.originOf.get(id) === "auto" && this.laneOf.get(id) === "background") count += 1;
+    }
+    for (const id of this.starting) {
+      if (!this.running.has(id) && this.originOf.get(id) === "auto" && this.laneOf.get(id) === "background") count += 1;
+    }
+    return count;
+  }
+
+  /** Queue depth split by band, for fleet presentation. */
+  queueDepths(): { readonly manual: number; readonly normal: number; readonly background: number } {
+    let manual = 0;
+    let normal = 0;
+    let background = 0;
+    for (const entry of this.queue) {
+      if (entry.origin === "manual") manual += 1;
+      else if (entry.lane === "background") background += 1;
+      else normal += 1;
+    }
+    return { manual, normal, background };
   }
 
   private clearHold(subtaskId: SubtaskId): void {
@@ -318,22 +393,31 @@ export class SubtaskOrchestrator {
       // Run-slot budget (ADR 0015): a full fleet holds the start in the
       // visible queue instead of refusing. `starting` is part of the active
       // count: an admitted launch owns its slot across every await below.
+      // Background lane: an AUTO start of a background task additionally
+      // respects the sub-budget so unattended work never soaks every slot.
+      const lane = (await this.options.resolveTaskLane?.(subtask.taskId)) ?? "normal";
       const budget = this.options.maxConcurrentRuns?.() ?? 0;
-      if (budget > 0 && this.activeRunCount() >= budget) {
+      const backgroundBudget = this.options.maxBackgroundRuns?.() ?? 0;
+      const globalFull = budget > 0 && this.activeRunCount() >= budget;
+      const backgroundFull = origin === "auto" && lane === "background"
+        && backgroundBudget > 0 && this.backgroundActiveCount() >= backgroundBudget;
+      if (globalFull || backgroundFull) {
         const existingIndex = this.queue.findIndex((entry) => entry.subtaskId === id);
-        const entry = { subtaskId: id, force: options.force === true, origin };
+        const entry = { subtaskId: id, force: options.force === true, origin, lane };
         if (existingIndex >= 0) {
           if (origin === "manual" && existingIndex > 0) {
             this.queue.splice(existingIndex, 1);
             this.queue.unshift(entry);
-            this.mirrorHold(id, "queued", origin, entry.force);
+            this.mirrorHold(id, "queued", origin, entry.force, lane);
             this.options.bus.publish({ kind: "board-changed" });
           }
         } else {
-          if (origin === "manual") this.queue.unshift(entry);
-          else this.queue.push(entry);
-          this.mirrorHold(id, "queued", origin, entry.force);
-          this.options.logger.info("run-slot budget full; start queued", { subtaskId, origin, queueDepth: this.queue.length });
+          this.enqueue(entry);
+          this.mirrorHold(id, "queued", origin, entry.force, lane);
+          this.options.logger.info(
+            globalFull ? "run-slot budget full; start queued" : "background sub-budget full; start queued",
+            { subtaskId, origin, lane, queueDepth: this.queue.length }
+          );
           this.options.bus.publish({ kind: "board-changed" });
         }
         return subtask;
@@ -341,8 +425,12 @@ export class SubtaskOrchestrator {
 
       // This synchronous admission is the budget reservation. Do it before
       // dependency lookup or verification re-arming so concurrent starts see
-      // the occupied slot rather than oversubscribing the fleet.
+      // the occupied slot rather than oversubscribing the fleet. Origin and
+      // lane are recorded here too so sub-budget accounting covers the whole
+      // starting window, not just the running one.
       this.starting.add(id);
+      this.originOf.set(id, origin);
+      this.laneOf.set(id, lane);
       let preparedSessionId: string | undefined;
       try {
         // A verification stamp only attests to the previous result. Starting
@@ -359,7 +447,6 @@ export class SubtaskOrchestrator {
         this.running.add(id);
         this.starting.delete(id);
         this.startClaims.delete(id);
-        this.originOf.set(id, origin);
         const prepared = await this.options.startRun({
           taskId: subtask.taskId,
           subtaskId: id,
@@ -367,7 +454,8 @@ export class SubtaskOrchestrator {
           title: subtask.title,
           ...(subtask.seedMode === undefined ? {} : { seedMode: subtask.seedMode }),
           dependsOn,
-          ...(subtask.model === undefined ? {} : { model: subtask.model })
+          ...(subtask.model === undefined ? {} : { model: subtask.model }),
+          ...(subtask.stageIndex === undefined ? {} : { stageIndex: subtask.stageIndex })
         });
         const { sessionId } = prepared;
         preparedSessionId = sessionId;
@@ -386,8 +474,18 @@ export class SubtaskOrchestrator {
         this.running.delete(id);
         this.starting.delete(id);
         this.originOf.delete(id);
+        this.laneOf.delete(id);
         if (preparedSessionId !== undefined) {
           this.sessionToSubtask.delete(preparedSessionId);
+          // The run booted but never became orchestration state - tear it
+          // down instead of leaking a live clone session until reconcile.
+          const orphaned = preparedSessionId;
+          void this.options.endOrphanedSession?.(orphaned, "subtask start failed after boot").catch((teardownError: unknown) => {
+            this.options.logger.warn("orphaned session teardown failed", {
+              sessionId: orphaned,
+              error: teardownError instanceof Error ? teardownError.message : String(teardownError)
+            });
+          });
         }
         throw error;
       }
@@ -422,6 +520,13 @@ export class SubtaskOrchestrator {
     while (this.queue.length > 0) {
       const budget = this.options.maxConcurrentRuns?.() ?? 0;
       if (budget > 0 && this.activeRunCount() >= budget) return;
+      const head = this.queue[0];
+      if (head !== undefined && head.origin === "auto" && head.lane === "background") {
+        const backgroundBudget = this.options.maxBackgroundRuns?.() ?? 0;
+        // Band ordering means everything behind a background head is also
+        // background-auto - a full sub-budget ends this drain pass entirely.
+        if (backgroundBudget > 0 && this.backgroundActiveCount() >= backgroundBudget) return;
+      }
       const next = this.queue.shift();
       if (next === undefined) return;
       // The hold clears as the entry leaves the queue; a re-queue (budget
@@ -595,6 +700,7 @@ export class SubtaskOrchestrator {
     this.running.delete(subtaskId);
     const origin = this.originOf.get(subtaskId) ?? "manual";
     this.originOf.delete(subtaskId);
+    this.laneOf.delete(subtaskId);
     if (status !== "completed") {
       this.failures.set(subtaskId, { at: new Date().toISOString() });
       // Retry-then-park (ADR 0015), auto runs only: one automatic retry,
@@ -707,6 +813,12 @@ export class SubtaskOrchestrator {
       this.queue.some((entry) => entry.subtaskId === dependent.subtaskId) ||
       this.parked.has(dependent.subtaskId)
     ) {
+      return false;
+    }
+    // Human gates (ADR 0016 family): a gated dependent never auto-starts
+    // until a person satisfies the gate (plan approval). Manual start stays
+    // possible - the gate binds automation, not the human.
+    if (dependent.gate !== undefined && dependent.gateSatisfiedAt === undefined) {
       return false;
     }
     const upstreamIds = dependencies.filter((edge) => edge.toSubtaskId === dependent.subtaskId).map((edge) => edge.fromSubtaskId);

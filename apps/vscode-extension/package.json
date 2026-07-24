@@ -83,6 +83,26 @@
         "title": "Drydock: Apply Patch to Folder…"
       },
       {
+        "command": "drydock.inspect",
+        "title": "Drydock: Inspect Finished Work…"
+      },
+      {
+        "command": "drydock.inspection.return",
+        "title": "Drydock: Return from Inspection"
+      },
+      {
+        "command": "drydock.approvePlan",
+        "title": "Drydock: Approve Plan…"
+      },
+      {
+        "command": "drydock.addRemoteProject",
+        "title": "Drydock: Add Project from GitHub/GitLab…"
+      },
+      {
+        "command": "drydock.queueBackgroundTickets",
+        "title": "Drydock: Queue Background Tickets…"
+      },
+      {
         "command": "drydock.session.attachTerminal",
         "title": "Drydock: Attach Terminal to Sandbox (experimental)"
       },
@@ -246,6 +266,27 @@
           "minimum": 0,
           "maximum": 64,
           "markdownDescription": "Maximum agent runs in flight at once. Further starts wait in a visible queue (manual starts jump to the front). `0` = **auto** - derived from this machine's cores and RAM (clamped 1-8)."
+        },
+        "drydock.projectsRoot": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "markdownDescription": "Where remote-picked projects clone to (`Drydock: Add Project from GitHub/GitLab…`). Empty = `<stateRoot>/projects`. The studio policy's allowed project roots still apply when these projects are mounted."
+        },
+        "drydock.gitlabHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "scope": "machine",
+          "default": [],
+          "markdownDescription": "GitLab hosts offered by the remote project picker (e.g. `gitlab.com`, `gitlab.mystudio.local`). Each host's personal access token is requested once and kept in VS Code SecretStorage - never rendered, never given to a sandbox."
+        },
+        "drydock.orchestrator.maxBackgroundRuns": {
+          "type": "number",
+          "scope": "machine",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 64,
+          "markdownDescription": "Of the run slots, how many may be held by auto-started **background-lane** runs at once, so unattended work always leaves headroom. Background starts past this cap wait in the queue behind normal-lane work. Manual starts are never capped by this. `0` = **auto** - half the run slots (floor 1)."
         },
         "drydock.autoAnswer.questions": {
           "type": "boolean",

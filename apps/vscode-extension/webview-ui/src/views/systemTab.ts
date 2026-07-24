@@ -70,6 +70,80 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
   mcpFormButtons.append(mcpSaveButton, mcpCancelButton);
   mcpForm.append(mcpNameInput, mcpCommandInput, mcpArgsInput, mcpEnvInput, mcpNotesInput, mcpDefaultLabel, mcpSensitiveLabel, mcpFormButtons);
 
+  // New-ticket defaults (plan D10): the workflow-defaults rung of the config
+  // ladder - recipes override these per shape, the ticket form overrides
+  // recipes, and studio policy always caps. Machine budgets (run slots)
+  // stay in VS Code settings.
+  const prefsHeading = el("h3");
+  prefsHeading.textContent = "New-ticket defaults";
+  const prefsIntro = el("div", "muted");
+  prefsIntro.textContent = "Pre-fills new tasks. Recipes override these per shape; the ticket form overrides recipes. Click a selected option again to clear it.";
+  const prefsRows = el("div", "prefs-rows");
+  let ticketDefaults: { lane?: "normal" | "background"; handoffMode?: "patch" | "branch"; approach?: "implement" | "plan-first" } = {};
+
+  function applyTicketDefaultsPayload(payload: { lane?: "normal" | "background"; handoffMode?: "patch" | "branch"; approach?: "implement" | "plan-first" }): void {
+    ticketDefaults = {
+      ...(payload.lane === undefined ? {} : { lane: payload.lane }),
+      ...(payload.handoffMode === undefined ? {} : { handoffMode: payload.handoffMode }),
+      ...(payload.approach === undefined ? {} : { approach: payload.approach })
+    };
+    renderTicketDefaults();
+  }
+
+  function saveTicketDefaults(next: typeof ticketDefaults): void {
+    void request({
+      type: "prefs.ticketDefaults.set",
+      ...(next.lane === undefined ? {} : { lane: next.lane }),
+      ...(next.handoffMode === undefined ? {} : { handoffMode: next.handoffMode }),
+      ...(next.approach === undefined ? {} : { approach: next.approach })
+    }).then((response) => {
+      if (response.ok && response.payload.type === "prefs.ticketDefaults.set") {
+        applyTicketDefaultsPayload(response.payload);
+      } else if (!response.ok) {
+        logSystemLine(`save ticket defaults failed: ${response.error.message}`);
+      }
+    });
+  }
+
+  function prefSeg(
+    label: string,
+    key: "lane" | "handoffMode" | "approach",
+    options: readonly (readonly [string, string])[]
+  ): HTMLElement {
+    const wrap = el("div", "pref-row");
+    const caption = el("span", "pref-label");
+    caption.textContent = label;
+    wrap.append(caption);
+    const current = ticketDefaults[key];
+    for (const [value, text] of options) {
+      const opt = button(text, `ghost small${current === value ? " primary" : ""}`);
+      opt.title = `${label} default: ${text} - click a selected option again to clear it`;
+      opt.addEventListener("click", () => {
+        const cleared = current === value;
+        saveTicketDefaults({
+          ...ticketDefaults,
+          [key]: cleared ? undefined : value
+        } as typeof ticketDefaults);
+      });
+      wrap.append(opt);
+    }
+    return wrap;
+  }
+
+  function renderTicketDefaults(): void {
+    prefsRows.replaceChildren(
+      prefSeg("Lane", "lane", [["normal", "Normal"], ["background", "Background"]]),
+      prefSeg("Handoff", "handoffMode", [["patch", "Patch"], ["branch", "Branch"]]),
+      prefSeg("Approach", "approach", [["implement", "Implement now"], ["plan-first", "Plan first"]])
+    );
+  }
+  renderTicketDefaults();
+  void request({ type: "prefs.ticketDefaults.get" }).then((response) => {
+    if (response.ok && response.payload.type === "prefs.ticketDefaults.get") {
+      applyTicketDefaultsPayload(response.payload);
+    }
+  });
+
   const runtimesHeading = el("h3");
   runtimesHeading.textContent = "Runtimes";
   const showRemovedLabel = el("label", "checkbox-row");
@@ -105,6 +179,9 @@ export function createSystemTab(ctx: ViewContext): SystemTabView {
     mcpList,
     mcpAddButton,
     mcpForm,
+    prefsHeading,
+    prefsIntro,
+    prefsRows,
     runtimesHeading,
     runtimesControls,
     runtimesList,

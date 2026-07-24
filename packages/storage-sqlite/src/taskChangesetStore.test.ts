@@ -21,6 +21,10 @@ function record(input: {
   sessionId: string;
   repoName: string;
   landedAt?: string;
+  originCommit?: string;
+  baseCommit?: string;
+  fullPatchSha256?: string;
+  fullPatchBytes?: number;
 }): TaskChangesetRecord {
   return {
     changesetId: input.changesetId,
@@ -32,7 +36,11 @@ function record(input: {
     patchBytes: 128,
     fileCount: 3,
     capturedAt: "2026-07-12T00:00:00.000Z",
-    ...(input.landedAt === undefined ? {} : { landedAt: input.landedAt })
+    ...(input.landedAt === undefined ? {} : { landedAt: input.landedAt }),
+    ...(input.originCommit === undefined ? {} : { originCommit: input.originCommit }),
+    ...(input.baseCommit === undefined ? {} : { baseCommit: input.baseCommit }),
+    ...(input.fullPatchSha256 === undefined ? {} : { fullPatchSha256: input.fullPatchSha256 }),
+    ...(input.fullPatchBytes === undefined ? {} : { fullPatchBytes: input.fullPatchBytes })
   };
 }
 
@@ -52,9 +60,19 @@ test("replaceForSubtask swaps a subtask's set atomically and survives a reopen",
       record({ changesetId: "cs-3", subtaskId: "sub-2", sessionId: "session-2", repoName: "api" })
     ]);
 
-    // Latest wins for sub-1; sub-2 untouched.
+    // Latest wins for sub-1; sub-2 untouched. cs-4 carries the inspection
+    // fields (origin/base commits + full patch blob pointer).
     await store.replaceForSubtask(asId<"SubtaskId">("sub-1"), [
-      record({ changesetId: "cs-4", subtaskId: "sub-1", sessionId: "session-3", repoName: "api" })
+      record({
+        changesetId: "cs-4",
+        subtaskId: "sub-1",
+        sessionId: "session-3",
+        repoName: "api",
+        originCommit: "origin-sha",
+        baseCommit: "base-sha",
+        fullPatchSha256: "sha-full",
+        fullPatchBytes: 512
+      })
     ]);
     connection.close();
 
@@ -65,7 +83,16 @@ test("replaceForSubtask swaps a subtask's set atomically and survives a reopen",
     reopened.close();
 
     assert.deepEqual(rows.map((row) => row.changesetId).sort(), ["cs-3", "cs-4"]);
-    assert.equal(rows.find((row) => row.changesetId === "cs-4")?.patchBytes, 128);
+    const cs4 = rows.find((row) => row.changesetId === "cs-4");
+    assert.equal(cs4?.patchBytes, 128);
+    assert.equal(cs4?.originCommit, "origin-sha");
+    assert.equal(cs4?.baseCommit, "base-sha");
+    assert.equal(cs4?.fullPatchSha256, "sha-full");
+    assert.equal(cs4?.fullPatchBytes, 512);
+    // cs-3 predates the inspection fields - they stay absent, never invented.
+    const cs3 = rows.find((row) => row.changesetId === "cs-3");
+    assert.equal(cs3?.originCommit, undefined);
+    assert.equal(cs3?.fullPatchSha256, undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -35,6 +35,12 @@ export interface CapturedClonePatch {
   readonly fileCount: number;
   /** Touched repo-relative paths (landing overlap pre-check, ADR 0014). */
   readonly paths?: readonly string[];
+  /** The local commit the clone was cut from (inspection materialization). */
+  readonly originCommit?: string;
+  /** refs/sync/base at capture time - what `patch` applies onto. */
+  readonly baseCommit?: string;
+  /** origin..HEAD patch, present only when base tree moved past origin tree. */
+  readonly fullPatch?: string;
 }
 
 /** One patch to 3-way apply into a dependent's fresh clone, by repo name. */
@@ -75,6 +81,9 @@ export class ChangesetService {
     for (const patch of input.patches) {
       if (patch.patch.length === 0) continue;
       const stored = await this.options.blobs.putText(patch.patch);
+      const full = patch.fullPatch === undefined || patch.fullPatch.length === 0
+        ? undefined
+        : await this.options.blobs.putText(patch.fullPatch);
       records.push({
         changesetId: this.options.changesetId?.() ?? `changeset-${randomUUID().slice(0, 12)}`,
         taskId: asId<"TaskId">(input.taskId),
@@ -85,6 +94,9 @@ export class ChangesetService {
         patchBytes: stored.bytes,
         fileCount: patch.fileCount,
         ...(patch.paths === undefined ? {} : { paths: patch.paths }),
+        ...(patch.originCommit === undefined ? {} : { originCommit: patch.originCommit }),
+        ...(patch.baseCommit === undefined ? {} : { baseCommit: patch.baseCommit }),
+        ...(full === undefined ? {} : { fullPatchSha256: full.sha256, fullPatchBytes: full.bytes }),
         capturedAt
       });
     }
@@ -129,9 +141,72 @@ export class ChangesetService {
     return new Set(await this.options.store.listUnlandedSubtaskIds(subtaskIds.map((id) => asId<"SubtaskId">(id))));
   }
 
+  /**
+   * Per-repo patches for inspection materialization (plan D6): the full
+   * origin..HEAD patch when one was stored (seeds / mid-flight syncs moved
+   * the base), else the relative patch - either way, `exact` says whether
+   * applying onto `originCommit` rebuilds the finished tree precisely.
+   * A missing blob is a hard error, mirroring seedPatchesFor.
+   */
+  async inspectionPatchesFor(subtaskId: string): Promise<{
+    readonly repoName: string;
+    readonly patch: string;
+    readonly originCommit?: string;
+    readonly exact: boolean;
+  }[]> {
+    const rows = await this.options.store.listForSubtasks([asId<"SubtaskId">(subtaskId)]);
+    const patches: { repoName: string; patch: string; originCommit?: string; exact: boolean }[] = [];
+    for (const row of rows) {
+      const sha = row.fullPatchSha256 ?? row.patchSha256;
+      const patch = await this.options.blobs.readText(sha);
+      if (patch === null) {
+        throw new Error(`Changeset ${row.changesetId} (${row.repoName}) is missing its patch blob; re-run the subtask before inspecting.`);
+      }
+      patches.push({
+        repoName: row.repoName,
+        patch,
+        ...(row.originCommit === undefined ? {} : { originCommit: row.originCommit }),
+        exact: row.originCommit !== undefined
+      });
+    }
+    return patches;
+  }
+
   /** Every unlanded row - the fleet Landing drawer's source (ADR 0014). */
   listUnlanded(): Promise<TaskChangesetRecord[]> {
     return this.options.store.listUnlanded();
+  }
+
+  /**
+   * Durable landing inputs (plan D8): a session's unlanded rows with their
+   * patch text resolved - the relative patch for working-tree application,
+   * plus the full patch and origin commit when branch synthesis is possible.
+   * A missing blob is a hard error, mirroring seedPatchesFor.
+   */
+  async landableForSession(sessionId: string): Promise<{
+    readonly taskId: string;
+    readonly repoName: string;
+    readonly relativePatch: string;
+    readonly fullPatch?: string;
+    readonly originCommit?: string;
+  }[]> {
+    const rows = (await this.options.store.listUnlanded()).filter((row) => row.sessionId === asId<"SessionId">(sessionId));
+    const landable: { taskId: string; repoName: string; relativePatch: string; fullPatch?: string; originCommit?: string }[] = [];
+    for (const row of rows) {
+      const relativePatch = await this.options.blobs.readText(row.patchSha256);
+      if (relativePatch === null) {
+        throw new Error(`Changeset ${row.changesetId} (${row.repoName}) is missing its patch blob; re-run the subtask before landing.`);
+      }
+      const fullPatch = row.fullPatchSha256 === undefined ? null : await this.options.blobs.readText(row.fullPatchSha256);
+      landable.push({
+        taskId: row.taskId as string,
+        repoName: row.repoName,
+        relativePatch,
+        ...(fullPatch === null ? {} : { fullPatch }),
+        ...(row.originCommit === undefined ? {} : { originCommit: row.originCommit })
+      });
+    }
+    return landable;
   }
 
   /**

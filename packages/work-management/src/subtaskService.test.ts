@@ -66,6 +66,30 @@ test("updateSubtask clears description/prompt with empty string", async () => {
   await assert.rejects(() => service.updateSubtask(created.subtaskId, {}), /at least one field/);
 });
 
+test("stageIndex and gates ride create; gate satisfaction guards like verification", async () => {
+  const { service, tasks } = harness();
+  await tasks.insertTask(task("task-1"));
+
+  const stage = await service.createSubtask("task-1", { title: "Stage 2", stageIndex: 2, gate: "plan-approval" });
+  assert.equal(stage.stageIndex, 2);
+  assert.equal(stage.gate, "plan-approval");
+
+  await assert.rejects(() => service.createSubtask("task-1", { title: "Bad", stageIndex: 0 }), /integer >= 1/);
+
+  // Satisfying a gate stamps it; re-arming clears it; ungated subtasks refuse.
+  const satisfied = await service.updateSubtask(stage.subtaskId, { gateSatisfied: true });
+  assert.equal(satisfied.gateSatisfiedAt, "2026-07-03T00:00:00.000Z");
+  const rearmed = await service.updateSubtask(stage.subtaskId, { gateSatisfied: false });
+  assert.equal(rearmed.gateSatisfiedAt, undefined);
+
+  const plain = await service.createSubtask("task-1", { title: "Plain" });
+  await assert.rejects(() => service.updateSubtask(plain.subtaskId, { gateSatisfied: true }), /SUBTASK_GATE_NOT_ARMED/);
+
+  // Leaving the chain clears the index.
+  const left = await service.updateSubtask(stage.subtaskId, { stageIndex: null });
+  assert.equal(left.stageIndex, undefined);
+});
+
 test("autoStart defaults to false on create, is settable on create, and toggles via update", async () => {
   const { service, tasks } = harness();
   await tasks.insertTask(task("task-1"));
@@ -366,6 +390,20 @@ class MemorySubtaskStore implements SubtaskStore {
         delete (next as { verifiedAt?: string }).verifiedAt;
       } else {
         (next as { verifiedAt?: string }).verifiedAt = update.verifiedAt;
+      }
+    }
+    if (update.stageIndex !== undefined) {
+      if (update.stageIndex === null) {
+        delete (next as { stageIndex?: number }).stageIndex;
+      } else {
+        (next as { stageIndex?: number }).stageIndex = update.stageIndex;
+      }
+    }
+    if (update.gateSatisfiedAt !== undefined) {
+      if (update.gateSatisfiedAt === null) {
+        delete (next as { gateSatisfiedAt?: string }).gateSatisfiedAt;
+      } else {
+        (next as { gateSatisfiedAt?: string }).gateSatisfiedAt = update.gateSatisfiedAt;
       }
     }
     this.subtasks.set(subtaskId, next);

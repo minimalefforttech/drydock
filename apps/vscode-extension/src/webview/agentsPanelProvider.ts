@@ -41,6 +41,7 @@ import {
 import type { Logger, ProductBusEvent } from "@drydock/core";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import { buildAgentsOverview } from "../services/agentsOverviewAppService.js";
+import { repoRootsByCloneName } from "../services/repoNameMap.js";
 import { buildBoardState } from "./boardShared.js";
 import { isSessionRunningElsewhere, toAgentQuestionSummary, toChatSessionSummary } from "./controlPanelProvider.js";
 
@@ -285,22 +286,77 @@ export class AgentsPanelProvider {
         return;
       }
       case "agents.landSession": {
-        // Landing (ADR 0014): the SAME full pull as the Changes tray - clone
-        // work into the local working tree, then bookkeeping marks the
-        // session's changesets landed. Refusals (mid-turn, clone state lost
-        // with the window) surface verbatim via the error-response path.
-        const result = await backend.appService.clonePull(payload.sessionId);
-        try {
-          await backend.changesets.markLandedBySession(payload.sessionId);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logger.warn("landing bookkeeping failed", {
-            sessionId: payload.sessionId,
-            error: message
-          });
-          throw new Error(`Clone work was pulled, but Landing bookkeeping failed: ${message}`);
+        // Landing (ADR 0014 + plan D3/D8). Branch-handoff tasks land as a
+        // ref-only branch advance; patch tasks pull into the working tree.
+        // The durable path (stored changesets) runs ONLY when the live clone
+        // is genuinely gone - a present-but-busy clone (mid-turn) or a
+        // host-access refusal must surface, never silently land stale rows.
+        const rows = await backend.changesets.landableForSession(payload.sessionId);
+        const taskId = rows[0]?.taskId;
+        const task = taskId === undefined ? null : await backend.tasks.getTask(taskId);
+        const branchMode = task?.handoffMode === "branch" && (task.landedBranch ?? task.branchName) !== undefined;
+        let message: string;
+        if (backend.appService.isCloneSession(payload.sessionId)) {
+          if (branchMode && task !== null && taskId !== undefined) {
+            const requested = task.landedBranch ?? task.branchName ?? "";
+            const landed = await backend.appService.landSessionAsBranch(payload.sessionId, requested, {
+              onCollision: task.landedBranch === undefined ? "suffix" : "fail"
+            });
+            if (landed === null) throw new Error("This clone session has no repositories to land.");
+            if (landed.branch !== task.landedBranch) {
+              await backend.tasks.updateTask(taskId, { landedBranch: landed.branch });
+            }
+            message = `Landed branch ${landed.branch} (${landed.repos.join(", ")}) - ref-only; your working tree is untouched.`;
+          } else {
+            const result = await backend.appService.clonePull(payload.sessionId);
+            message = result.message;
+          }
+          await this.markLandedOrExplain(backend, payload.sessionId);
+          this.respond(request.requestId, { type: "agents.landSession", message });
+          return;
         }
-        this.respond(request.requestId, { type: "agents.landSession", message: result.message });
+        // Durable path (plan D8): the clone is gone; land from stored rows.
+        // Each repo is marked landed AS IT SUCCEEDS so a partial failure is
+        // resumable (a retry only re-lands the repos that did not finish) -
+        // never a double-apply, never a bulk mark over unfinished work.
+        if (rows.length === 0 || taskId === undefined) {
+          throw new Error("This session's clone state is gone and no captured changesets exist to land from.");
+        }
+        const policy = await backend.tasks.requireClonePolicy(taskId);
+        const { roots } = await backend.workspaceReview.resolveTaskCloneWorkspace(policy);
+        const rootsByName = await repoRootsByCloneName(backend.cloneSync, roots);
+        let branchTarget = branchMode ? (task?.landedBranch ?? task?.branchName) : undefined;
+        let collision: "suffix" | "fail" = task?.landedBranch === undefined ? "suffix" : "fail";
+        const landedBits: string[] = [];
+        for (const row of rows) {
+          const root = rootsByName.get(row.repoName);
+          if (root === undefined) {
+            throw new Error(`Captured repo "${row.repoName}" is not in the task's current clone policy; update the policy before landing. Already-landed repos are recorded (${landedBits.join(", ") || "none"}).`);
+          }
+          if (branchTarget !== undefined && row.originCommit !== undefined) {
+            const landed = await backend.cloneSync.landChangesetAsBranch(
+              root,
+              row.originCommit,
+              row.fullPatch ?? row.relativePatch,
+              branchTarget,
+              { onCollision: collision }
+            );
+            // Thread the resolved name across repos (a first-land suffix must
+            // not fork per-repo names) and hold later repos to ff-only.
+            branchTarget = landed.branch;
+            collision = "fail";
+            landedBits.push(`${row.repoName} → branch ${landed.branch}`);
+          } else {
+            const applied = await backend.cloneSync.applyChangesetToLocal(root, row.relativePatch);
+            landedBits.push(`${row.repoName} (${String(applied.appliedFiles)} file${applied.appliedFiles === 1 ? "" : "s"}${applied.conflictedFiles.length > 0 ? `, ${String(applied.conflictedFiles.length)} conflict${applied.conflictedFiles.length === 1 ? "" : "s"}` : ""})`);
+          }
+          await backend.changesets.markLandedBySession(payload.sessionId, row.repoName);
+        }
+        if (branchTarget !== undefined && task !== null && branchTarget !== task.landedBranch) {
+          await backend.tasks.updateTask(taskId, { landedBranch: branchTarget });
+        }
+        message = `Landed from stored changesets (the live clone was gone): ${landedBits.join(", ")}.`;
+        this.respond(request.requestId, { type: "agents.landSession", message });
         return;
       }
       default:
@@ -312,6 +368,17 @@ export class AgentsPanelProvider {
     const minutes = vscode.workspace.getConfiguration("drydock").get<number>("agentIdleThresholdMinutes", 5);
     const safeMinutes = Number.isFinite(minutes) ? Math.max(1, Math.min(120, minutes)) : 5;
     return safeMinutes * 60_000;
+  }
+
+  /** Bulk landing bookkeeping for the LIVE paths (their verbs are idempotent on retry). */
+  private async markLandedOrExplain(backend: BackendReady, sessionId: string): Promise<void> {
+    try {
+      await backend.changesets.markLandedBySession(sessionId);
+    } catch (error) {
+      const bookkeeping = error instanceof Error ? error.message : String(error);
+      this.logger.warn("landing bookkeeping failed", { sessionId, error: bookkeeping });
+      throw new Error(`Clone work was landed, but Landing bookkeeping failed: ${bookkeeping}`);
+    }
   }
 
   private respond(requestId: string, payload: PanelResponsePayload): void {
