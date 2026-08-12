@@ -111,6 +111,13 @@ elsewhere).
 
 ## Remaining work
 
+0. **A full repo audit ran 2026-08-13 (6 subagents).** ~30 findings, triaged, with two
+   headline bugs re-verified by hand: validation sync only applies pure-ADD changesets
+   (edits/deletes of pre-existing files fail — the feature's biggest gap), and a
+   `purgeRuntimes` FK-cascade violation that aborts startup reconciliation. **None fixed
+   yet.** Full ranked plan + execution order: `docs/design/audit-2026-08-13-handoff.md`.
+   Start there for the fix pass.
+
 1. **Origin history contains the pre-scrub identifiers.** `origin/ADR-22`
    points at `f205f76`, whose tree carries the real server/share names in the
    ADR + upgrade-plan (`origin/main` is clean). The working tree is scrubbed,
