@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700" font-family="Segoe UI, sans-serif">
+  <rect width="1000" height="700" fill="#1b1d21"/>
+  <text x="24" y="34" font-size="15" fill="#e8e8e8" font-weight="600">F6 — Where validation runs: presets, associations, explicit rerouting</text>
+  <text x="24" y="52" font-size="11" fill="#8a8f98">One model: named runtimes + association cascade + one default · annotated wireframe</text>
+
+  <!-- presets -->
+  <text x="24" y="88" font-size="11" fill="#6f7580" font-weight="600">TOPOLOGY PRESETS — STARTING CONFIGURATIONS OVER ONE MODEL</text>
+  <rect x="24" y="100" width="200" height="72" rx="6" fill="#24262b" stroke="#35383f"/>
+  <text x="40" y="122" font-size="12" fill="#d6d8dd" font-weight="600">Single VM</text>
+  <text x="40" y="140" font-size="10" fill="#9aa0aa">Everything on the default.</text>
+  <text x="40" y="154" font-size="10" fill="#9aa0aa">Create nothing.</text>
+  <rect x="240" y="100" width="200" height="72" rx="6" fill="#24262b" stroke="#3a5a8f" stroke-width="2"/>
+  <text x="256" y="122" font-size="12" fill="#4da3ff" font-weight="600">Default + named  ✓</text>
+  <text x="256" y="140" font-size="10" fill="#9aa0aa">Warm default; named VMs for</text>
+  <text x="256" y="154" font-size="10" fill="#9aa0aa">C++ builds, pipzone, testing…</text>
+  <rect x="456" y="100" width="208" height="72" rx="6" fill="#24262b" stroke="#35383f"/>
+  <text x="472" y="122" font-size="12" fill="#d6d8dd" font-weight="600">One per project</text>
+  <text x="472" y="140" font-size="10" fill="#9aa0aa">Auto-create on first job,</text>
+  <text x="472" y="154" font-size="10" fill="#9aa0aa">reap after N idle days.</text>
+
+  <!-- association editor -->
+  <text x="24" y="208" font-size="11" fill="#6f7580" font-weight="600">ASSOCIATION EDITOR — PROJECT → RUNTIME (scrolls; no row = default)</text>
+  <rect x="24" y="220" width="640" height="188" rx="8" fill="#24262b" stroke="#35383f"/>
+  <g font-size="11" fill="#6f7580">
+    <text x="44" y="242">PROJECT</text>
+    <text x="360" y="242">RUNTIME</text>
+  </g>
+  <line x1="44" y1="250" x2="632" y2="250" stroke="#35383f"/>
+  <g font-size="12">
+    <text x="44" y="272" fill="#6f7580" font-style="italic">any project without a row</text>
+    <text x="360" y="272" fill="#6f7580" font-style="italic">default</text>
+    <text x="44" y="298" fill="#d6d8dd">cpp_tools</text>
+    <text x="360" y="298" fill="#d6d8dd">cpp-builds ▾</text>
+    <text x="44" y="324" fill="#d6d8dd">pipzone</text>
+    <text x="360" y="324" fill="#d6d8dd">pipzone ▾</text>
+    <text x="44" y="350" fill="#d6d8dd">ShowA_finaling</text>
+    <text x="360" y="350" fill="#d6d8dd">production_tester ▾</text>
+  </g>
+  <rect x="500" y="336" width="118" height="18" rx="9" fill="#4a3535"/>
+  <text x="559" y="349" font-size="10" fill="#f0b429" text-anchor="middle">fixtures: ShowA_approved</text>
+  <g font-size="12">
+    <text x="44" y="376" fill="#9aa0aa">🔒 Education</text>
+    <text x="360" y="376" fill="#9aa0aa">default (studio policy)</text>
+  </g>
+  <text x="44" y="398" font-size="11" fill="#4da3ff">＋ Add association</text>
+  <rect x="640" y="252" width="6" height="140" rx="3" fill="#17181c"/>
+  <rect x="640" y="252" width="6" height="84" rx="3" fill="#3d414a"/>
+
+  <!-- task header picker -->
+  <text x="24" y="444" font-size="11" fill="#6f7580" font-weight="600">TASK HEADER — QUIET PICKER (rendered only when ≠ default)</text>
+  <rect x="24" y="456" width="640" height="32" rx="6" fill="#24262b" stroke="#35383f"/>
+  <text x="40" y="477" font-size="12" fill="#d6d8dd">Task FR-1182 · skin weights bug</text>
+  <text x="420" y="477" font-size="11" fill="#9aa0aa">runs on <tspan fill="#f0b429">production_tester</tspan> ▾</text>
+
+  <!-- reroute confirm -->
+  <text x="24" y="524" font-size="11" fill="#6f7580" font-weight="600">REROUTING IS EXPLICIT — POLICY DELTA SHOWN, NEVER SILENT</text>
+  <rect x="24" y="536" width="640" height="104" rx="6" fill="#24262b" stroke="#5a5230"/>
+  <text x="40" y="558" font-size="12" fill="#f0b429" font-weight="600">cpp-builds is offline — run this job on default instead?</text>
+  <g font-size="11" fill="#c3c7cf">
+    <text x="40" y="580">capabilities:  <tspan fill="#f2777a">− MSVC 2022</tspan> (recipe does not require it for this job)</text>
+    <text x="40" y="598">fixtures: same (none) · image: standard · isolation: identical</text>
+  </g>
+  <rect x="40" y="608" width="128" height="22" rx="4" fill="#2d5a9e"/>
+  <text x="104" y="623" font-size="11" fill="#ffffff" text-anchor="middle">Run on default</text>
+  <rect x="176" y="608" width="120" height="22" rx="4" fill="#2a2d34"/>
+  <text x="236" y="623" font-size="11" fill="#d6d8dd" text-anchor="middle">Keep parked</text>
+  <text x="312" y="623" font-size="10" fill="#6f7580">cross-profile reroutes require this confirm in BOTH directions</text>
+
+  <!-- boot honesty -->
+  <rect x="24" y="656" width="300" height="28" rx="14" fill="#24262b" stroke="#35383f"/>
+  <text x="40" y="675" font-size="11" fill="#4da3ff">⧗ starting cpp-builds · ~40 s · 1 job queued</text>
+  <text x="340" y="675" font-size="10" fill="#6f7580">on-demand boot renders as queue state, not a spinner</text>
+
+  <!-- pins -->
+  <g font-weight="700" font-size="11">
+    <line x1="668" y1="136" x2="700" y2="136" stroke="#f0b429" stroke-dasharray="2,3"/>
+    <circle cx="712" cy="136" r="10" fill="#f0b429"/><text x="712" y="140" text-anchor="middle" fill="#1b1d21">1</text>
+    <line x1="668" y1="310" x2="700" y2="310" stroke="#f0b429" stroke-dasharray="2,3"/>
+    <circle cx="712" cy="310" r="10" fill="#f0b429"/><text x="712" y="314" text-anchor="middle" fill="#1b1d21">2</text>
+    <line x1="668" y1="472" x2="700" y2="472" stroke="#f0b429" stroke-dasharray="2,3"/>
+    <circle cx="712" cy="472" r="10" fill="#f0b429"/><text x="712" y="476" text-anchor="middle" fill="#1b1d21">3</text>
+    <line x1="668" y1="588" x2="700" y2="588" stroke="#f0b429" stroke-dasharray="2,3"/>
+    <circle cx="712" cy="588" r="10" fill="#f0b429"/><text x="712" y="592" text-anchor="middle" fill="#1b1d21">4</text>
+  </g>
+
+  <!-- legend -->
+  <rect x="732" y="88" width="244" height="596" rx="8" fill="#202227" stroke="#35383f"/>
+  <text x="748" y="114" font-size="12" fill="#e8e8e8" font-weight="600">Annotations</text>
+  <g font-size="11" fill="#c3c7cf">
+    <circle cx="756" cy="138" r="8" fill="#f0b429"/><text x="756" y="142" text-anchor="middle" fill="#1b1d21" font-weight="700">1</text>
+    <text x="772" y="134">Presets configure the same model:</text>
+    <text x="772" y="148">named runtimes + cascade + one</text>
+    <text x="772" y="162">default. Managed policy can pin a</text>
+    <text x="772" y="176">preset or cap warm VMs.</text>
+    <circle cx="756" cy="204" r="8" fill="#f0b429"/><text x="756" y="208" text-anchor="middle" fill="#1b1d21" font-weight="700">2</text>
+    <text x="772" y="200">Resolution per job: chat/task</text>
+    <text x="772" y="214">override → project association →</text>
+    <text x="772" y="228">default. No row = default, so the</text>
+    <text x="772" y="242">common case is zero config.</text>
+    <text x="772" y="256">Studio-pinned rows render locked.</text>
+    <text x="772" y="270">Profile badges follow the runtime</text>
+    <text x="772" y="284">everywhere it appears.</text>
+    <circle cx="756" cy="312" r="8" fill="#f0b429"/><text x="756" y="316" text-anchor="middle" fill="#1b1d21" font-weight="700">3</text>
+    <text x="772" y="308">Routing furniture appears only</text>
+    <text x="772" y="322">when routing differs from default.</text>
+    <text x="772" y="336">Switching projects re-routes new</text>
+    <text x="772" y="350">jobs automatically; running jobs</text>
+    <text x="772" y="364">keep their runtime.</text>
+    <circle cx="756" cy="392" r="8" fill="#f0b429"/><text x="756" y="396" text-anchor="middle" fill="#1b1d21" font-weight="700">4</text>
+    <text x="772" y="388">Unavailable runtime ⇒ job parks</text>
+    <text x="772" y="402">with reason. Rerouting shows the</text>
+    <text x="772" y="416">policy delta and is explicit in both</text>
+    <text x="772" y="430">directions — narrower fails</text>
+    <text x="772" y="444">honestly, broader never sneaks.</text>
+  </g>
+  <g font-size="10" fill="#8a8f98">
+    <text x="748" y="640">Evidence always records the runtime</text>
+    <text x="748" y="656">(and profile) that produced it —</text>
+    <text x="748" y="672">review never has to guess.</text>
+  </g>
+</svg>

@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620" font-family="Segoe UI, sans-serif">
+  <rect width="1000" height="620" fill="#1b1d21"/>
+  <text x="24" y="34" font-size="15" fill="#e8e8e8" font-weight="600">F3 — Production fixture: a three-line decision</text>
+  <text x="24" y="52" font-size="11" fill="#8a8f98">Drag-in and agent request converge on one card · mechanics behind ⓘ · annotated wireframe</text>
+
+  <!-- default card -->
+  <text x="24" y="88" font-size="11" fill="#6f7580" font-weight="600">DEFAULT — THE WHOLE CARD (production tier)</text>
+  <rect x="24" y="100" width="640" height="104" rx="6" fill="#24262b" stroke="#8f4a4a"/>
+  <text x="40" y="124" font-size="12" fill="#f2777a" font-weight="600">Production file → snapshot</text>
+  <rect x="560" y="110" width="88" height="20" rx="10" fill="#8f4a4a"/>
+  <text x="604" y="124" font-size="11" fill="#ffffff" text-anchor="middle">production</text>
+  <text x="40" y="148" font-size="12" fill="#d6d8dd" font-family="Consolas, monospace">hero_rig.ma · 48 MB · X:\Projects\ShowA\rigs\</text>
+  <text x="620" y="148" font-size="11" fill="#4da3ff">ⓘ</text>
+  <rect x="40" y="162" width="180" height="26" rx="4" fill="#17181c" stroke="#35383f"/>
+  <text x="52" y="179" font-size="12" fill="#6f7580" font-family="Consolas, monospace">approve produc_</text>
+  <rect x="232" y="162" width="140" height="26" rx="4" fill="#5a3a3a"/>
+  <text x="302" y="179" font-size="12" fill="#c9c9c9" text-anchor="middle">Approve snapshot</text>
+  <rect x="384" y="162" width="64" height="26" rx="4" fill="#2a2d34"/>
+  <text x="416" y="179" font-size="12" fill="#d6d8dd" text-anchor="middle">Deny</text>
+
+  <!-- non production variant -->
+  <text x="24" y="240" font-size="11" fill="#6f7580" font-weight="600">NON-PRODUCTION VARIANT — one line, one click</text>
+  <rect x="24" y="252" width="640" height="32" rx="6" fill="#24262b" stroke="#35383f"/>
+  <text x="40" y="273" font-size="12" fill="#d6d8dd">Attach <tspan font-family="Consolas, monospace">shelf_prefs.json · 2 KB · H:\pipeline\work\</tspan></text>
+  <rect x="560" y="258" width="88" height="20" rx="4" fill="#2d5a9e"/>
+  <text x="604" y="272" font-size="11" fill="#ffffff" text-anchor="middle">Attach</text>
+
+  <!-- folder variant -->
+  <rect x="24" y="292" width="640" height="32" rx="6" fill="#24262b" stroke="#8f4a4a"/>
+  <text x="40" y="313" font-size="12" fill="#d6d8dd">Production folder → <tspan fill="#f0b429">214 files · 3.8 GB ▸</tspan></text>
+  <rect x="520" y="298" width="80" height="20" rx="4" fill="#2a2d34"/>
+  <text x="560" y="312" font-size="11" fill="#d6d8dd" text-anchor="middle">Narrow…</text>
+  <text x="640" y="313" font-size="11" fill="#6f7580" text-anchor="end">▸</text>
+
+  <!-- info expansion -->
+  <text x="24" y="360" font-size="11" fill="#6f7580" font-weight="600">ⓘ ON REQUEST — HOW SNAPSHOTS WORK</text>
+  <rect x="24" y="372" width="640" height="88" rx="6" fill="#202227" stroke="#35383f"/>
+  <g font-size="11" fill="#9aa0aa">
+    <text x="40" y="394">Copied once at approval — never a mount, never live. Content hash recorded in the grants ledger.</text>
+    <text x="40" y="412">Appears to the run at the same path (X:\Projects\ShowA\rigs\hero_rig.ma), backed by job-scoped content.</text>
+    <text x="40" y="430">Expires with this session · wiped between jobs · recorded in every validation receipt it feeds.</text>
+    <text x="40" y="448">Requested by: worker agent · session “skin weights bug” · task FR-1182.</text>
+  </g>
+
+  <!-- provenance -->
+  <text x="24" y="496" font-size="11" fill="#6f7580" font-weight="600">AFTER APPROVAL — PROVENANCE CHIP (hover for detail)</text>
+  <rect x="24" y="508" width="400" height="28" rx="14" fill="#24262b" stroke="#35383f"/>
+  <circle cx="44" cy="522" r="5" fill="#f0b429"/>
+  <text x="58" y="526" font-size="11" fill="#d6d8dd">hero_rig.ma · production snapshot · session-scoped</text>
+  <rect x="448" y="496" width="216" height="72" rx="6" fill="#26282e" stroke="#35383f"/>
+  <g font-size="10" fill="#9aa0aa">
+    <text x="462" y="514">ledger #g-2214 · sha256 9c41…e2</text>
+    <text x="462" y="530">granted by alex.telford · 14:32</text>
+    <text x="462" y="546">expires with session · 1 job fed</text>
+    <text x="462" y="562">View in grants ledger →</text>
+  </g>
+
+  <!-- pins -->
+  <g font-weight="700" font-size="11">
+    <line x1="668" y1="148" x2="700" y2="148" stroke="#f0b429" stroke-dasharray="2,3"/>
+    <circle cx="712" cy="148" r="10" fill="#f0b429"/><text x="712" y="152" text-anchor="middle" fill="#1b1d21">1</text>
+    <line x1="668" y1="175" x2="700" y2="175" stroke="#f0b429" stroke-dasharray="2,3"/>
+    <circle cx="712" cy="175" r="10" fill="#f0b429"/><text x="712" y="179" text-anchor="middle" fill="#1b1d21">2</text>
+    <line x1="668" y1="416" x2="700" y2="416" stroke="#f0b429" stroke-dasharray="2,3"/>
+    <circle cx="712" cy="416" r="10" fill="#f0b429"/><text x="712" y="420" text-anchor="middle" fill="#1b1d21">3</text>
+    <line x1="668" y1="522" x2="700" y2="522" stroke="#f0b429" stroke-dasharray="2,3"/>
+    <circle cx="712" cy="522" r="10" fill="#f0b429"/><text x="712" y="526" text-anchor="middle" fill="#1b1d21">4</text>
+  </g>
+
+  <!-- legend -->
+  <rect x="732" y="88" width="244" height="480" rx="8" fill="#202227" stroke="#35383f"/>
+  <text x="748" y="114" font-size="12" fill="#e8e8e8" font-weight="600">Annotations</text>
+  <g font-size="11" fill="#c3c7cf">
+    <circle cx="756" cy="138" r="8" fill="#f0b429"/><text x="756" y="142" text-anchor="middle" fill="#1b1d21" font-weight="700">1</text>
+    <text x="772" y="134">The decision needs two facts:</text>
+    <text x="772" y="148">what file, where from. Sizes and</text>
+    <text x="772" y="162">source path are the line; all</text>
+    <text x="772" y="176">mechanics are on request.</text>
+    <circle cx="756" cy="204" r="8" fill="#f0b429"/><text x="756" y="208" text-anchor="middle" fill="#1b1d21" font-weight="700">2</text>
+    <text x="772" y="200">The friction budget buys exactly</text>
+    <text x="772" y="214">one thing: typed confirm marks</text>
+    <text x="772" y="228">production tier (ADR 0001).</text>
+    <text x="772" y="242">Dev-area files are one click.</text>
+    <text x="772" y="256">Folders lead with count + size,</text>
+    <text x="772" y="270">Narrow… as the primary action.</text>
+    <circle cx="756" cy="298" r="8" fill="#f0b429"/><text x="756" y="302" text-anchor="middle" fill="#1b1d21" font-weight="700">3</text>
+    <text x="772" y="294">ⓘ answers “what am I agreeing</text>
+    <text x="772" y="308">to?” for those who ask — copy</text>
+    <text x="772" y="322">semantics, same-path trick,</text>
+    <text x="772" y="336">expiry, requester provenance.</text>
+    <circle cx="756" cy="364" r="8" fill="#f0b429"/><text x="756" y="368" text-anchor="middle" fill="#1b1d21" font-weight="700">4</text>
+    <text x="772" y="360">Afterwards: a one-line chip.</text>
+    <text x="772" y="374">Ledger id, hash, approver, expiry</text>
+    <text x="772" y="388">are hover detail; the full ledger</text>
+    <text x="772" y="402">is L3.</text>
+  </g>
+  <g font-size="10" fill="#8a8f98">
+    <text x="748" y="536">Deny is one click and names the</text>
+    <text x="748" y="552">alternative (different file, or a TD</text>
+    <text x="748" y="568">fixture set) — no dead ends.</text>
+  </g>
+</svg>
