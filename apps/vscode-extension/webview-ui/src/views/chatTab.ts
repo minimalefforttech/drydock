@@ -86,7 +86,9 @@ import {
 import { adoptSanitizedSvg } from "../svgAdopt.js";
 import type { PlanDocsMermaidApi } from "../planDocsMermaid.js";
 import type { ChatTabView, ViewContext } from "../viewContext.js";
+import type { AccessProductionFields } from "../validationTypes.js";
 import { renderAttentionStack, type AttentionItem } from "./attentionStack.js";
+import { createValidationChips } from "./validationChips.js";
 
 declare global {
   interface Window {
@@ -627,10 +629,15 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // shared chat scroller. Hidden whenever no question is open.
   const questionCardsWrap = el("div", "question-cards hidden");
 
+  // Validation chips (ADR 0022 F2): the run's status area, one line per live
+  // job plus the newest settled one. A sibling of the transcript, not a message
+  // in it - jobs outlive turns and must not renumber the log.
+  const validationChips = createValidationChips({ log: (line) => logChat(line) });
+
   // Transcript block inside the chat body. The outer chat-scroll owns overflow;
   // this block keeps a useful minimum so questions/changes cannot squeeze it.
   const transcriptRegion = el("div", "transcript-region");
-  transcriptRegion.append(lensStrip, chatLog, agentsLens, accessCardsWrap);
+  transcriptRegion.append(lensStrip, chatLog, agentsLens, validationChips.root, accessCardsWrap);
 
   // --- composer ---------------------------------------------------------------
   const promptInput = document.createElement("textarea");
@@ -2227,7 +2234,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       const path = el("span", "context-mount-path");
       path.textContent = grant.displayPath;
       const tag = el("span", "context-mount-tag");
-      tag.textContent = "granted";
+      // A snapshot is not a mount (ADR 0022 F3): the provenance says so, so
+      // nobody reads a session-scoped copy as standing access.
+      const snapshot = (grant as AccessProductionFields).disposition === "snapshot";
+      if (snapshot) tag.classList.add("context-mount-snapshot");
+      tag.textContent = snapshot ? "production snapshot · session-scoped" : "granted";
       row.append(modeChip, path, tag);
       mountsBody.append(row);
     }
@@ -2672,6 +2683,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   function renderChat(pinToBottom = true): void {
+    // The chip strip follows the selection (a no-op when it has not moved);
+    // everything after that is push-driven.
+    validationChips.setSession(state.selectedSessionId);
     // Idle sessions must never blink: timeline replays can leave the LAST
     // assistant message flagged streaming (no terminal event in old
     // transcripts), so strip stale flags at render time whenever no turn is

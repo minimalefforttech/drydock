@@ -186,6 +186,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ...(teamInstructions === undefined ? {} : { teamInstructions }),
     // Glob→tag rules extending the shipped defaults (memory tag selection).
     memoryTagRules: vscode.workspace.getConfiguration("drydock").get("memory.tagRules", []),
+    // ADR 0022: what the isolation probes attempt, where the package mirror
+    // lives, and which suite the manual run executes. All three are personal
+    // machine-scope settings; absent means the product says so rather than
+    // inventing a green probe or an unattributable run.
+    validationProbeConfig: vscode.workspace.getConfiguration("drydock").get("validation.probeConfig"),
+    validationMirrorRoot: vscode.workspace.getConfiguration("drydock").get<string>("validation.mirrorRoot", ""),
+    validationDefaultProfile: vscode.workspace.getConfiguration("drydock").get("validation.defaultProfile"),
     // `vscode-secret:<provider>` API keys live in the platform secret store
     // (OS keychain via VS Code SecretStorage); values never reach the webview,
     // logs, or the sqlite stores.
@@ -244,6 +251,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await taskHubPanel.open(typeof taskId === "string" ? taskId : undefined);
   }));
   context.subscriptions.push(vscode.commands.registerCommand("drydock.taskHub.back", () => taskHubPanel.back()));
+  // ADR 0022 F2: manual entry points feed the same queue and produce the same
+  // chip. The palette validates the ACTIVE task's newest chat, because that is
+  // the session whose changeset a developer means by "run validation".
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.validation.run", async () => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    const validation = backend.validation;
+    if (validation === undefined) {
+      void vscode.window.showErrorMessage(
+        "Validation runtimes need a Windows host with Hyper-V and OpenSSH; this machine cannot run them."
+      );
+      return;
+    }
+    const sessions = await backend.appService.listChatSessions(50);
+    const activeTaskId = backend.activeTasks.get();
+    const linked = activeTaskId === null
+      ? new Set<string>()
+      : new Set((await backend.tasks.listTaskSummaries())
+          .filter((task) => task.taskId === activeTaskId)
+          .flatMap((task) => task.linkedSessionIds));
+    const candidate = sessions.find((session) => linked.has(session.sessionId)) ?? sessions[0];
+    if (candidate === undefined) {
+      void vscode.window.showInformationMessage("Start a chat first - validation runs against a session's changeset.");
+      return;
+    }
+    try {
+      const result = await validation.runForSession(candidate.sessionId);
+      void vscode.window.showInformationMessage(result.message);
+    } catch (error) {
+      void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }));
   const configurePanel = new ConfigurePanelProvider(context.extensionUri, backend, logger, mcpProjectOverlays, plannerAspectOverlays);
   context.subscriptions.push(configurePanel);
   context.subscriptions.push(vscode.commands.registerCommand("drydock.configure.open", async () => {

@@ -62,6 +62,15 @@ export interface HubStateInput {
   readonly runtimes: readonly HubRuntimeInput[];
   readonly mounts: readonly HubMountInput[];
   readonly workspaceName?: string;
+  /**
+   * ADR 0022 F6: the resolved validation runtime's name, supplied ONLY when it
+   * differs from the default. The fold does not decide that - the host does,
+   * because "differs from the default" is a registry question - so this is
+   * carried through verbatim.
+   */
+  readonly validationRuntimeLabel?: string;
+  /** Runtimes the header picker may offer; absent = none configured. */
+  readonly validationRuntimes?: readonly { readonly runtimeId: string; readonly displayName: string }[];
   readonly generatedAt: string;
 }
 
@@ -132,6 +141,8 @@ export function buildHubState(input: HubStateInput): HubState {
     stats: buildStats(input, linked),
     system,
     ...(input.workspaceName === undefined ? {} : { workspaceName: input.workspaceName }),
+    ...(input.validationRuntimeLabel === undefined ? {} : { validationRuntimeLabel: input.validationRuntimeLabel }),
+    validationRuntimes: input.validationRuntimes ?? [],
     generatedAt: input.generatedAt
   };
 }

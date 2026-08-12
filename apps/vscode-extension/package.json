@@ -171,6 +171,10 @@
         "title": "Drydock: Export Security Events"
       },
       {
+        "command": "drydock.validation.run",
+        "title": "Drydock: Run Validation for Active Session"
+      },
+      {
         "command": "drydock.taskReview.addComment",
         "title": "Task Review: Add Review Comment"
       },
@@ -420,6 +424,92 @@
             ]
           },
           "markdownDescription": "Extra prototype theme stylesheets pushed into agent sandboxes alongside the built-ins (`qt-dark`, `slate-dark`, `vscode-dark`, `clean-light`). Agents link them from web prototypes to match a target application's look (ADR 0017)."
+        },
+        "drydock.validation.probeConfig": {
+          "type": "object",
+          "scope": "machine",
+          "properties": {
+            "productionUncPath": {
+              "type": "string",
+              "description": "The REAL production location the guest must not be able to read, e.g. \\\\therock\\Floats\\Projects."
+            },
+            "mirrorDriveRoot": {
+              "type": "string",
+              "description": "Root of the read-only package mirror as the guest maps it, e.g. X:\\."
+            },
+            "disallowedEgress": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "host",
+                  "port"
+                ],
+                "properties": {
+                  "host": {
+                    "type": "string"
+                  },
+                  "port": {
+                    "type": "number"
+                  }
+                }
+              },
+              "description": "Addresses the validation runtime must NOT reach; at minimum the NAS."
+            },
+            "toolsetResolveArgv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rez canary argv, e.g. [\"rez\", \"env\", \"fr_core\", \"--\", \"python\", \"-c\", \"print('ok')\"]."
+            }
+          },
+          "markdownDescription": "What the validation runtime's standing isolation probes attempt (ADR 0022): read real production, write the package mirror, connect past the egress allowlist, and resolve the studio toolsets. **Unset leaves every probe `unknown`** - never a pass - so health reads honestly on a workstation nobody has configured yet."
+        },
+        "drydock.validation.mirrorRoot": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "markdownDescription": "Host path of the read-only package mirror. Its manifest version and last sync time are stamped onto every validation receipt, so a green result says which package set it was green against."
+        },
+        "drydock.validation.defaultProfile": {
+          "type": "object",
+          "scope": "machine",
+          "properties": {
+            "profileRef": {
+              "type": "string",
+              "description": "Stable id of the suite; recorded in every receipt this profile produces."
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Executable + arguments, run as a process in the job workspace (never a shell string)."
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Extra guest environment; Drydock adds its own job-scoped variables on top."
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Capabilities the runtime must declare (msvc, maya, houdini…). A mismatch parks at queue time naming a runtime that has them."
+            },
+            "licenseWaitPatterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Extra regexes marking a line as a licence wait rather than a hang. Drydock's own patterns always apply."
+            }
+          },
+          "markdownDescription": "The validation suite **Drydock: Run Validation for Active Session** runs (ADR 0022). Without it the command says validation is not configured yet rather than inventing a suite - evidence has to be about something."
         }
       }
     }

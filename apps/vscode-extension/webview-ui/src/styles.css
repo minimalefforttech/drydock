@@ -2382,3 +2382,238 @@ body.vscode-high-contrast select {
   .spinner { animation: none; }
   .chat-working-dots .dot { animation: none; opacity: 0.8; }
 }
+
+/* --------------------------------------------------------------------------
+   Validation chips (ADR 0022, ux-flows F2)
+
+   The chip is the entire default experience: ONE line per live job plus the
+   newest settled one, in the transcript's status area. Green says a word;
+   red gets the extra line, because red is when a decision is needed.
+   -------------------------------------------------------------------------- */
+
+.validation-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 4px 0 8px;
+}
+
+.validation-chips:empty {
+  display: none;
+}
+
+.validation-chip {
+  border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  padding-left: 8px;
+}
+
+.validation-chip-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.validation-chip-line:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.validation-chip-glyph {
+  flex: none;
+  width: 12px;
+  text-align: center;
+}
+
+.validation-chip-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.validation-chip-suffix,
+.validation-chip-caret {
+  flex: none;
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
+.validation-chip-rerun,
+.validation-chip-reroute {
+  flex: none;
+}
+
+/* L0 colour: state only, one glyph's worth. */
+.validation-chip.verdict-passed .validation-chip-glyph {
+  color: var(--vscode-testing-iconPassed, #73c991);
+}
+
+.validation-chip.verdict-failed .validation-chip-glyph,
+.validation-chip.verdict-error .validation-chip-glyph,
+.validation-chip.state-failed .validation-chip-glyph {
+  color: var(--vscode-testing-iconFailed, #f14c4c);
+}
+
+.validation-chip.state-failed,
+.validation-chip.verdict-failed {
+  border-left-color: var(--vscode-testing-iconFailed, #f14c4c);
+}
+
+.validation-chip.state-parked,
+.validation-chip.state-license-wait {
+  border-left-color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.validation-chip.state-parked .validation-chip-glyph,
+.validation-chip.state-license-wait .validation-chip-glyph {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.validation-chip.state-running,
+.validation-chip.state-syncing,
+.validation-chip.state-starting,
+.validation-chip.state-resolving {
+  border-left-color: var(--vscode-charts-green, #89d185);
+}
+
+/* L2: the receipt, capped and scrolling inside itself. */
+.validation-chip-body {
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 4px 0 6px;
+  font-size: 0.88em;
+}
+
+.validation-receipt {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.validation-receipt-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.validation-receipt-key {
+  flex: 0 0 96px;
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
+.validation-receipt-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.validation-chip-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+/* The reroute confirm renders INSIDE the expansion - never a modal (H1). */
+.validation-delta {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--vscode-editorWarning-foreground, #cca700);
+  border-radius: 3px;
+}
+
+.validation-delta-head {
+  font-weight: 600;
+}
+
+.validation-delta-lines {
+  margin-top: 4px;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.validation-delta-line {
+  line-height: 1.5;
+}
+
+.validation-delta-warning {
+  margin-top: 5px;
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  line-height: 1.45;
+}
+
+/* --------------------------------------------------------------------------
+   Production fixture card (ADR 0022, ux-flows F3): three lines, one decision.
+   -------------------------------------------------------------------------- */
+
+.access-production {
+  border-left-color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+.chip-production {
+  border-color: var(--vscode-editorError-foreground, #f14c4c);
+  background: transparent;
+  color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+.access-file-line {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-top: 5px;
+  min-width: 0;
+  font-size: 0.9em;
+}
+
+.access-file-name {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access-file-size,
+.access-file-folder {
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access-snapshot {
+  margin-top: 6px;
+  font-size: 0.85em;
+}
+
+.access-snapshot-summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
+.access-snapshot-summary::-webkit-details-marker {
+  display: none;
+}
+
+.access-snapshot-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px 0 2px;
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+  line-height: 1.45;
+}
+
+/* A snapshot is not a mount: the provenance tag says so where grants list. */
+.context-mount-snapshot {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}

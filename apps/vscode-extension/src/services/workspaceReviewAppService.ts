@@ -7,6 +7,7 @@
  * and review comment threads. No `vscode` imports belong here.
  */
 
+import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import {
   asId,
@@ -61,6 +62,26 @@ export interface WorkspaceReviewAppServiceOptions {
    * satisfies this). Optional: absent → session diffs stay unfiltered.
    */
   readonly events?: { listEvents(sessionId: SessionId, fromSequence?: number): Promise<readonly { readonly eventType: string; readonly createdAt: string; readonly payload: Record<string, unknown> }[]> };
+  /**
+   * Production-tier fixture handling (ADR 0022, edge cases A1/B1). Paths the
+   * effective policy forbids MOUNTING are still legitimately needed as test
+   * material, so approving one takes the snapshot route instead: the file is
+   * copied host-side, the grant is recorded, and no mount is ever created.
+   * Absent (off Windows, or before validation is composed) leaves today's
+   * behaviour exactly as it was - such a path simply cannot be approved.
+   */
+  readonly productionFixtures?: ProductionFixturePort;
+}
+
+/** The snapshot half of the approval flow, structurally (ValidationAppService). */
+export interface ProductionFixturePort {
+  /** True when this path is a mount-prohibited production location. */
+  isProductionPath(hostPath: string): boolean;
+  /** Copies the file into the session's fixture staging area and records it. */
+  grantProductionFixture(input: {
+    readonly sessionId: string;
+    readonly hostPath: string;
+  }): Promise<{ readonly relativePath: string; readonly bytes: number; readonly manifestHash: string }>;
 }
 
 /** What the session's replay proves about agent work. */
@@ -120,7 +141,7 @@ export class WorkspaceReviewAppService {
     return {
       projects: visibleProjects.map(toProjectSummary),
       workspaceSets: visibleSets.map((set) => toWorkspaceSetSummary(set, byId)),
-      accessRequests: requests.map(toAccessRequestSummary),
+      accessRequests: requests.map((record) => this.summarize(record)),
       ...(this.options.securityPolicy === undefined ? {} : { security: this.options.securityPolicy.summary() })
     };
   }
@@ -282,13 +303,14 @@ export class WorkspaceReviewAppService {
     readonly reason: string;
   }): Promise<AccessRequestSummary> {
     await this.assertSessionCanWiden(input.sessionId);
+    this.assertNotProductionWrite(input.hostPath, input.mode);
     const record = await this.options.accessRequests.createRequest({
       sessionId: asId<"SessionId">(input.sessionId),
       hostPath: input.hostPath,
       mode: input.mode,
       reason: input.reason
     });
-    return toAccessRequestSummary(record);
+    return this.summarize(record);
   }
 
   /**
@@ -303,10 +325,34 @@ export class WorkspaceReviewAppService {
     if (!approve) {
       const denied = await this.options.accessRequests.denyRequest(id, "user");
       this.options.bus.publish({ kind: "access-resolved", request: denied });
-      return toAccessRequestSummary(denied);
+      return this.summarize(denied);
     }
     if (editedHostPath !== undefined) {
       await this.options.accessRequests.editRequestPath(id, editedHostPath);
+    }
+    // ADR 0022 A1/B1: a production-tier path is approved as a SNAPSHOT, never
+    // as a mount. This runs before prepareApproval on purpose - that call
+    // builds the mount and would (correctly) refuse a denied path outright,
+    // which would leave the sanctioned fixture route unreachable.
+    const production = await this.pendingProductionRequest(id);
+    if (production !== null) {
+      const fixtures = this.options.productionFixtures;
+      if (fixtures === undefined) throw new Error("Fixture snapshots are not available on this machine.");
+      // Deliberately no widen check: a snapshot adds no mount, so a clone-only
+      // session may receive one. The typed confirm on the card is the gate.
+      this.options.securityPolicy?.assertNetworkedAiAllowed();
+      const grant = await fixtures.grantProductionFixture({
+        sessionId: production.sessionId,
+        hostPath: production.hostPath
+      });
+      const approved = await this.options.accessRequests.markApproved(id, "user");
+      this.options.logger.info("production fixture approved as a session snapshot", {
+        sessionId: production.sessionId,
+        relativePath: grant.relativePath,
+        bytes: grant.bytes
+      });
+      this.options.bus.publish({ kind: "access-resolved", request: approved });
+      return this.summarize(approved);
     }
     const { request, mount } = await this.options.accessRequests.prepareApproval(id);
     await this.assertSessionCanWiden(request.sessionId);
@@ -314,12 +360,44 @@ export class WorkspaceReviewAppService {
     await this.options.chatService.expandSessionMounts(request.sessionId, [mount], "access-request-approved");
     const approved = await this.options.accessRequests.markApproved(id, "user");
     this.options.bus.publish({ kind: "access-resolved", request: approved });
-    return toAccessRequestSummary(approved);
+    return this.summarize(approved);
+  }
+
+  /** The pending request when it names a production-tier path; null otherwise. */
+  private async pendingProductionRequest(
+    accessRequestId: ReturnType<typeof asId<"AccessRequestId">>
+  ): Promise<AccessRequestRecord | null> {
+    const fixtures = this.options.productionFixtures;
+    if (fixtures === undefined) return null;
+    const pending = (await this.options.accessRequests.listRequests("pending"))
+      .find((request) => request.accessRequestId === accessRequestId);
+    if (pending === undefined) return null;
+    return fixtures.isProductionPath(pending.hostPath) ? pending : null;
+  }
+
+  /** Adds the production/disposition flags this composition can answer for. */
+  private summarize(record: AccessRequestRecord): AccessRequestSummary {
+    return toAccessRequestSummary(record, productionSummaryOptions(this.options.productionFixtures));
+  }
+
+  /**
+   * Edge A5: no product path writes to production. A read-write request on a
+   * production-tier path is refused with the sanctioned flow named, never
+   * escalated into a bigger approval.
+   */
+  private assertNotProductionWrite(hostPath: string, mode: "read-only" | "read-write"): void {
+    const fixtures = this.options.productionFixtures;
+    if (mode !== "read-write" || fixtures === undefined) return;
+    if (!fixtures.isProductionPath(hostPath)) return;
+    throw new Error(
+      "Production is read-only everywhere: results land in the dev area through review. " +
+        "Request read-only access instead to snapshot this file for the session."
+    );
   }
 
   /** Pending access requests as display-safe summaries (fleet/attention hydration). */
   async listPendingAccessRequests(): Promise<AccessRequestSummary[]> {
-    return (await this.options.accessRequests.listRequests("pending")).map(toAccessRequestSummary);
+    return (await this.options.accessRequests.listRequests("pending")).map((record) => this.summarize(record));
   }
 
   /**
@@ -347,6 +425,9 @@ export class WorkspaceReviewAppService {
         continue;
       }
       try {
+        // Edge A5: write-back to production is a policy invariant, not a
+        // bigger approval - the request is dropped with the review flow named.
+        this.assertNotProductionWrite(candidate.path, candidate.mode);
         const record = await this.options.accessRequests.createRequest({
           sessionId,
           hostPath: candidate.path,
@@ -355,7 +436,7 @@ export class WorkspaceReviewAppService {
         });
         pending.push(record);
         this.options.bus.publish({ kind: "access-requested", request: record });
-        summaries.push(toAccessRequestSummary(record));
+        summaries.push(this.summarize(record));
       } catch (error) {
         this.options.logger.warn("agent access request skipped", {
           sessionId,
@@ -807,12 +888,31 @@ function samePath(a: string, b: string): boolean {
   return normalizePathKey(a) === normalizePathKey(b);
 }
 
-export function toAccessRequestSummary(record: AccessRequestRecord): AccessRequestSummary {
+export function toAccessRequestSummary(
+  record: AccessRequestRecord,
+  options?: {
+    readonly isProduction?: (hostPath: string) => boolean;
+    /** F3 fact line: display size for production files; undefined = omit, never guess. */
+    readonly sizeLabelFor?: (hostPath: string) => string | undefined;
+  }
+): AccessRequestSummary {
   // sensitive (+ its display reason naming the matched trigger) is spread-in
   // only when matched so the fields stay absent otherwise (house style); the
   // approval card escalates to a typed confirmation and shows WHY.
   const match = sensitivePathMatch(record.hostPath);
+  // ADR 0022 F3: production tier changes what approval MEANS, so the card is
+  // told the disposition rather than left to assume a mount. With no classifier
+  // supplied the fields stay ABSENT - an unasked question is not a "no".
+  const classify = options?.isProduction;
+  const production = classify !== undefined && classify(record.hostPath);
+  const sizeLabel = production ? options?.sizeLabelFor?.(record.hostPath) : undefined;
   return {
+    ...(classify === undefined
+      ? {}
+      : production
+        ? { production: true, disposition: "snapshot" as const }
+        : { disposition: "mount" as const }),
+    ...(sizeLabel === undefined ? {} : { sizeLabel }),
     accessRequestId: record.accessRequestId,
     sessionId: record.sessionId,
     displayPath: record.hostPath,
@@ -827,6 +927,69 @@ export function toAccessRequestSummary(record: AccessRequestRecord): AccessReque
         : `"${match.match}" matches a credentials/secrets file pattern`
     })
   };
+}
+
+/**
+ * The one production-aware options bundle for access-request summaries, shared
+ * by every surface that projects them (facade + control panel pushes) so the
+ * card sees the same flags and size wherever the summary was built.
+ */
+export function productionSummaryOptions(
+  fixtures: Pick<ProductionFixturePort, "isProductionPath"> | undefined
+): { isProduction: (hostPath: string) => boolean; sizeLabelFor: (hostPath: string) => string | undefined } | undefined {
+  if (fixtures === undefined) return undefined;
+  return {
+    isProduction: (hostPath: string) => fixtures.isProductionPath(hostPath),
+    sizeLabelFor: (hostPath: string) => {
+      try {
+        const stat = statSync(hostPath);
+        return stat.isFile() ? formatSizeLabel(stat.size) : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+  };
+}
+
+/** `48 MB` style display size: one decimal under 10, whole above, GB past 1024 MB. */
+export function formatSizeLabel(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return kb < 10 ? `${kb.toFixed(1)} KB` : `${Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return mb < 10 ? `${mb.toFixed(1)} MB` : `${Math.round(mb)} MB`;
+  const gb = mb / 1024;
+  return gb < 10 ? `${gb.toFixed(1)} GB` : `${Math.round(gb)} GB`;
+}
+
+/**
+ * Create-side canonicalization for a production-tier request path (ADR 0022
+ * A1/B1). The normal gate (`assertHostPathAllowed`) correctly refuses denied
+ * paths, which would make the sanctioned fixture route unreachable - so the
+ * composition's `validateHostPath` binding routes production candidates here
+ * instead. The trade stays narrow: only an EXISTING regular file passes,
+ * folders get the narrower-ask message (A2/A3), and if the canonical target
+ * escapes the production tier (symlink/junction) the caller must re-run the
+ * normal gate on the returned path.
+ */
+export function canonicalizeProductionRequestPath(candidate: string): string {
+  let stat;
+  try {
+    stat = statSync(candidate);
+  } catch {
+    throw new Error(`${candidate} does not exist or is not readable from this machine, so there is nothing to snapshot.`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(
+      `${candidate} is a folder. Folders cannot be snapshotted in one grant - request the specific file(s) you need; narrower is faster.`
+    );
+  }
+  try {
+    return realpathSync.native(candidate);
+  } catch {
+    return candidate;
+  }
 }
 
 function toReviewCommentSummary(record: ReviewCommentRecord): ReviewCommentSummary {

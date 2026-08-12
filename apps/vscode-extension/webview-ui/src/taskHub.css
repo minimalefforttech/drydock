@@ -1020,3 +1020,77 @@ body {
     display: none;
   }
 }
+
+/* --- validation runtime picker + quarantine (ADR 0022) ------------------- */
+
+/* F6's quiet task-header picker. Present ONLY when the task's runtime differs
+   from the default, so the common case carries no routing furniture. */
+.hub-runtime-picker {
+  position: relative;
+  flex: none;
+}
+
+.hub-runtime-summary {
+  display: inline-block;
+  cursor: pointer;
+  list-style: none;
+}
+
+.hub-runtime-summary::-webkit-details-marker {
+  display: none;
+}
+
+.hub-runtime-summary:hover {
+  color: var(--vscode-foreground);
+}
+
+.hub-runtime-menu {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 5;
+  min-width: 180px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--hub-line);
+  border-radius: 5px;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.28);
+}
+
+.hub-runtime-menu .hub-menu-item:hover {
+  background: var(--hub-hover);
+}
+
+/* F5: the one deliberate exception to calm. Persistent, never dismissable,
+   and it sits above everything else the hub has to say. */
+.hub-quarantine {
+  border: 1px solid var(--hub-fail);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 9px 12px;
+  background: var(--hub-hover);
+}
+
+.hub-quarantine-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.hub-quarantine-name {
+  font-weight: 600;
+  color: var(--hub-fail);
+}
+
+.hub-quarantine-line {
+  margin: 4px 0 0;
+  line-height: 1.5;
+}
+
+.hub-quarantine-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 9px;
+}

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Webview harness - Task Hub</title>
+  <style>
+    /* Dark-theme values for the --vscode-* variables the real panel CSS uses.
+       A missing variable degrades to the fallback in var(), so this subset only
+       needs the load-bearing ones. */
+    :root {
+      --vscode-font-family: "Segoe UI", system-ui, sans-serif;
+      --vscode-font-size: 13px;
+      --vscode-foreground: #cccccc;
+      --vscode-descriptionForeground: #9d9d9d;
+      --vscode-errorForeground: #f48771;
+      --vscode-focusBorder: #007fd4;
+      --vscode-editor-background: #1e1e1e;
+      --vscode-editor-foreground: #d4d4d4;
+      --vscode-editor-font-family: Consolas, "Courier New", monospace;
+      --vscode-editorWidget-background: #252526;
+      --vscode-menu-background: #252526;
+      --vscode-menu-foreground: #cccccc;
+      --vscode-input-background: #3c3c3c;
+      --vscode-input-foreground: #cccccc;
+      --vscode-dropdown-background: #3c3c3c;
+      --vscode-dropdown-foreground: #cccccc;
+      --vscode-badge-background: #4d4d4d;
+      --vscode-badge-foreground: #ffffff;
+      --vscode-button-background: #0e639c;
+      --vscode-button-foreground: #ffffff;
+      --vscode-list-hoverBackground: #2a2d2e;
+      --vscode-panel-border: #3c3c3c;
+      --vscode-textLink-foreground: #3794ff;
+      --vscode-textCodeBlock-background: #2a2a2a;
+      --vscode-charts-orange: #cc6633;
+      --vscode-charts-green: #89d185;
+      --vscode-editorWarning-foreground: #d29922;
+    }
+    html, body { margin: 0; height: 100%; background: #1b1b1b; }
+    body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
+    /* Editor-panel-shaped stage: the hub centres its own ~940px column inside. */
+    #stage {
+      width: 1100px; height: calc(100vh - 32px); background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border); overflow: auto; box-sizing: border-box;
+    }
+    #stage-note { color: #7f7f7f; font-size: 12px; max-width: 260px; }
+    #stage-note code { color: #d7ba7d; }
+  </style>
+  <link rel="stylesheet" href="/assets/taskHub.css" />
+</head>
+<body class="vscode-dark">
+  <div id="stage">
+    <div id="app"></div>
+  </div>
+  <div id="stage-note">
+    <p><strong>Task Hub harness (UX overhaul P3 + ADR 0022 F5/F6).</strong> Real bundled hub bundle, mock host. Boots on the active task <code>t-1</code> ("Alembic publish support"): attention rail (2 pending questions), tiles, Chats (<code>s-live</code>, <code>s-clone</code>), Subtasks, Plans (<code>pl-1</code>), collapsed System.</p>
+    <p><strong>Validation cast:</strong> <code>hub.state</code> carries <code>validationRuntimeLabel: "production_tester"</code> (the task override <code>vr-prod</code> differs from the default <code>vr-default</code>), so the header shows the quiet <code>runs on production_tester ▾</code> picker; <code>validationRuntimes</code> lists <code>default / production_tester / cpp-builds</code>. Choosing one sends <code>validation.setTaskRuntime</code> and the hub refetches - picking <code>default</code> clears the override and the picker disappears.</p>
+    <p><strong>F5 banner:</strong> push-driven only. Run <code>__harness.scenario.validationQuarantine()</code> to mount the persistent banner (no dismiss, `Open Configure` action). It clears only when a <code>validation.changed</code> push is followed by a rail status that is no longer <code>blocked</code> - e.g. clear the quarantine from configure.html, or run <code>__harness.fixtures.validation.runtimes</code> surgery then <code>__harness.push({ type: "validation.changed" })</code>.</p>
+    <p>Inspect sends: <code>__harness.log</code> (<code>validation.setTaskRuntime</code> / <code>panel.openSurface</code> / <code>active.set</code> / <code>task.update</code> lines).</p>
+  </div>
+  <script src="/harness.js"></script>
+  <script src="/assets/taskHub.js"></script>
+</body>
+</html>

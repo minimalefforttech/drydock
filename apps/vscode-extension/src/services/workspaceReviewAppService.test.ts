@@ -20,7 +20,10 @@ import { MemoryLogger, RandomIdGenerator, SessionDiffService, SystemClock } from
 import { ContentAddressedBlobStore } from "@drydock/artifacts";
 import { applyMigrations, SqliteConnection, SqliteDiffBaselineStore } from "@drydock/storage-sqlite";
 import {
+  canonicalizeProductionRequestPath,
+  formatSizeLabel,
   isAgentWork,
+  productionSummaryOptions,
   WorkspaceReviewAppService,
   type WorkspaceReviewAppServiceOptions
 } from "./workspaceReviewAppService.js";
@@ -400,5 +403,44 @@ test("revert restores the row's own frame: a turn row rolls back to the send sta
     assert.equal((await h.service.diffStatus(SESSION, "session")).length, 1);
   } finally {
     await h.cleanup();
+  }
+});
+
+test("size labels format across the byte ladder without inventing precision", () => {
+  assert.equal(formatSizeLabel(512), "512 B");
+  assert.equal(formatSizeLabel(4.2 * 1024), "4.2 KB");
+  assert.equal(formatSizeLabel(48 * 1024 * 1024), "48 MB");
+  assert.equal(formatSizeLabel(1.5 * 1024 * 1024 * 1024), "1.5 GB");
+  assert.equal(formatSizeLabel(-5), "0 B");
+});
+
+test("production summaries carry a size for real files and omit it otherwise", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-fixture-size-"));
+  try {
+    const file = path.join(dir, "hero_rig.ma");
+    await writeFile(file, "x".repeat(2048), "utf8");
+    const options = productionSummaryOptions({ isProductionPath: (candidate) => candidate.startsWith(dir) });
+    assert.ok(options);
+    assert.equal(options.isProduction(file), true);
+    assert.equal(options.sizeLabelFor(file), "2.0 KB");
+    assert.equal(options.sizeLabelFor(path.join(dir, "missing.ma")), undefined);
+    assert.equal(options.sizeLabelFor(dir), undefined);
+    assert.equal(productionSummaryOptions(undefined), undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("production request paths pass only as existing regular files (A1/A2/A3)", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-fixture-canon-"));
+  try {
+    const file = path.join(dir, "shot.ma");
+    await writeFile(file, "scene", "utf8");
+    const canonical = canonicalizeProductionRequestPath(file);
+    assert.equal(path.basename(canonical), "shot.ma");
+    assert.throws(() => canonicalizeProductionRequestPath(dir), /folder.*specific file/i);
+    assert.throws(() => canonicalizeProductionRequestPath(path.join(dir, "gone.ma")), /nothing to snapshot/i);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Webview harness - Left rail (Tasks)</title>
+  <style>
+    /* Dark-theme values for the --vscode-* variables the real rail CSS uses.
+       A missing variable degrades to the fallback in var(), so this subset only
+       needs the load-bearing ones. */
+    :root {
+      --vscode-font-family: "Segoe UI", system-ui, sans-serif;
+      --vscode-font-size: 13px;
+      --vscode-foreground: #cccccc;
+      --vscode-descriptionForeground: #9d9d9d;
+      --vscode-errorForeground: #f48771;
+      --vscode-focusBorder: #007fd4;
+      --vscode-sideBar-background: #252526;
+      --vscode-editor-background: #1e1e1e;
+      --vscode-input-background: #3c3c3c;
+      --vscode-input-foreground: #cccccc;
+      --vscode-badge-background: #4d4d4d;
+      --vscode-badge-foreground: #ffffff;
+      --vscode-list-hoverBackground: #2a2d2e;
+      --vscode-panel-border: #3c3c3c;
+      --vscode-textLink-foreground: #3794ff;
+      --vscode-charts-orange: #cc6633;
+      --vscode-charts-green: #89d185;
+      --vscode-editorWarning-foreground: #d29922;
+    }
+    html, body { margin: 0; height: 100%; background: #1b1b1b; }
+    body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
+    /* Sidebar-shaped stage: the rail renders at the width VS Code gives it. */
+    #stage {
+      width: 300px; height: calc(100vh - 32px); background: var(--vscode-sideBar-background);
+      border: 1px solid var(--vscode-panel-border); overflow: auto; box-sizing: border-box;
+    }
+    #stage-note { color: #7f7f7f; font-size: 12px; max-width: 260px; }
+    #stage-note code { color: #d7ba7d; }
+  </style>
+  <link rel="stylesheet" href="/assets/rail.css" />
+</head>
+<body class="vscode-dark" data-view="tasks">
+  <div id="stage">
+    <div id="app"></div>
+  </div>
+  <div id="stage-note">
+    <p><strong>Left rail harness (UX overhaul P1 + ADR 0022 F4).</strong> Real bundled rail bundle mounted as the <code>tasks</code> view (<code>body[data-view]</code>). Cast: <code>t-1</code> (active, 3 subtasks, 2 pending questions → Needs you cluster), <code>t-2</code>, <code>t-3</code>.</p>
+    <p><strong>DCC dot:</strong> the tasks view requests <code>validation.railStatus</code> beside its existing fetches and renders one micro-dot + <code>DCC</code> with the host's line as the hover. The harness derives the status from the same validation fixtures the other pages use: a live quarantine → <code>blocked</code> (amber <code>dot-awaiting</code>); clear it and a running job → <code>running</code>; nothing running → <code>ok</code> (<code>dot-done</code>).</p>
+    <p>Drive: <code>__harness.scenario.validationQuarantine()</code> (→ blocked), <code>__harness.fixtures.validation.jobs</code> surgery + <code>__harness.push({ type: "validation.jobChanged", jobId: "vj-run", state: "running" })</code> to force a debounced re-read. <code>dot: "none"</code> renders nothing at all.</p>
+    <p>Inspect sends: <code>__harness.log</code> (<code>active.set</code> / <code>panel.openSurface</code> lines from row clicks).</p>
+  </div>
+  <script src="/harness.js"></script>
+  <script src="/assets/rail.js"></script>
+</body>
+</html>

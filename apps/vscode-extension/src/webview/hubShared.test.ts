@@ -313,3 +313,22 @@ test("buildHubState hoists subtasks and carries the workspace chip", () => {
   assert.equal(state.generatedAt, NOW);
   assert.equal(state.task.taskId, "task-a");
 });
+
+test("the validation picker fields pass through, and default to an empty registry", () => {
+  const bare = buildHubState(input({ task: task({ taskId: "task-a", title: "Hub" }) }));
+  // ADR 0022 F6: no label means "same as the default", so the header shows no
+  // picker at all - the absence IS the rule, not a missing value.
+  assert.equal(bare.validationRuntimeLabel, undefined);
+  assert.deepEqual(bare.validationRuntimes, []);
+
+  const routed = buildHubState(input({
+    task: task({ taskId: "task-a", title: "Hub" }),
+    validationRuntimeLabel: "production_tester",
+    validationRuntimes: [
+      { runtimeId: "vruntime-1", displayName: "default" },
+      { runtimeId: "vruntime-2", displayName: "production_tester" }
+    ]
+  }));
+  assert.equal(routed.validationRuntimeLabel, "production_tester");
+  assert.deepEqual(routed.validationRuntimes.map((entry) => entry.displayName), ["default", "production_tester"]);
+});

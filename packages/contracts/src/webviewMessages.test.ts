@@ -6,6 +6,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   CONFIG_SETTING_SECTIONS,
+  MAX_ID_LENGTH,
   MAX_MODEL_ID_LENGTH,
   MAX_RECENTS_LIMIT,
   PANEL_SURFACES,
@@ -1043,6 +1044,209 @@ test("config provider requests bound their provider and model ids", () => {
     parsePanelRequest(wrap({ type: "config.provider.setDefaultModel", providerId: "codex", model: "m".repeat(MAX_MODEL_ID_LENGTH + 1) })),
     null
   );
+});
+
+// ---------------------------------------------------------------------------
+// Validation runtimes (ADR 0022 M7)
+// ---------------------------------------------------------------------------
+
+test("validation reads take no arguments and validation ids are bounded", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "config.validation.state" })));
+  assert.ok(parsePanelRequest(wrap({ type: "validation.railStatus" })));
+
+  for (const type of [
+    "config.validation.setDefault",
+    "config.validation.runProbes",
+    "config.validation.adopt",
+    "config.validation.revertReprobe"
+  ]) {
+    const parsed = parsePanelRequest(wrap({ type, runtimeId: "vruntime-1" }));
+    assert.ok(parsed, `${type} accepts a bounded id`);
+    assert.deepEqual(parsed.payload, { type, runtimeId: "vruntime-1" });
+    assert.equal(parsePanelRequest(wrap({ type, runtimeId: "" })), null);
+    assert.equal(parsePanelRequest(wrap({ type })), null);
+    assert.equal(parsePanelRequest(wrap({ type, runtimeId: "v".repeat(MAX_ID_LENGTH + 1) })), null);
+  }
+});
+
+test("createRuntime validates its enum, its capability list, and its exec address", () => {
+  const base = {
+    type: "config.validation.createRuntime",
+    displayName: "cpp-builds",
+    image: "win11-msvc",
+    lifecycle: "on-demand",
+    capabilities: ["msvc", "msvc"],
+    policyProfileRef: "validation-standard"
+  };
+  const parsed = parsePanelRequest(wrap(base));
+  assert.ok(parsed);
+  assert.deepEqual(parsed.payload, { ...base, capabilities: ["msvc"] }, "duplicate capabilities collapse");
+
+  const connected = parsePanelRequest(wrap({
+    ...base,
+    profileException: true,
+    connection: { host: "10.0.0.5", port: 2222, user: "drydock" }
+  }));
+  assert.ok(connected);
+  assert.deepEqual(
+    connected.payload.type === "config.validation.createRuntime" ? connected.payload.connection : null,
+    { host: "10.0.0.5", port: 2222, user: "drydock" }
+  );
+
+  assert.equal(parsePanelRequest(wrap({ ...base, lifecycle: "always-on" })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, displayName: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, image: "i".repeat(201) })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, capabilities: "msvc" })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, capabilities: [7] })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, capabilities: new Array(33).fill("x") })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, profileException: "yes" })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, connection: { host: "10.0.0.5" } })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, connection: { host: "10.0.0.5", user: "d", port: 0 } })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, connection: { host: "10.0.0.5", user: "d", port: 70_000 } })), null);
+  // Creation cannot clear an address it never set.
+  assert.equal(parsePanelRequest(wrap({ ...base, connection: null })), null);
+});
+
+test("updateRuntime takes a partial edit and only null clears the address", () => {
+  const parsed = parsePanelRequest(wrap({
+    type: "config.validation.updateRuntime",
+    runtimeId: "vruntime-1",
+    update: { displayName: "renamed", capabilities: ["maya"], archived: true }
+  }));
+  assert.ok(parsed);
+  assert.deepEqual(
+    parsed.payload.type === "config.validation.updateRuntime" ? parsed.payload.update : null,
+    { displayName: "renamed", capabilities: ["maya"], archived: true }
+  );
+
+  const cleared = parsePanelRequest(wrap({
+    type: "config.validation.updateRuntime",
+    runtimeId: "vruntime-1",
+    update: { connection: null }
+  }));
+  assert.ok(cleared);
+  assert.deepEqual(
+    cleared.payload.type === "config.validation.updateRuntime" ? cleared.payload.update : null,
+    { connection: null }
+  );
+
+  // An empty edit, a junk edit, and a malformed field are all refused.
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.updateRuntime", runtimeId: "vruntime-1", update: {} })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.updateRuntime", runtimeId: "vruntime-1", update: [] })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.updateRuntime", runtimeId: "vruntime-1" })), null);
+  assert.equal(
+    parsePanelRequest(wrap({ type: "config.validation.updateRuntime", runtimeId: "vruntime-1", update: { lifecycle: "sometimes" } })),
+    null
+  );
+  assert.equal(
+    parsePanelRequest(wrap({ type: "config.validation.updateRuntime", runtimeId: "", update: { displayName: "x" } })),
+    null
+  );
+});
+
+test("deleteRuntime carries an optional reassignment target", () => {
+  const plain = parsePanelRequest(wrap({ type: "config.validation.deleteRuntime", runtimeId: "vruntime-1" }));
+  assert.ok(plain);
+  assert.deepEqual(plain.payload, { type: "config.validation.deleteRuntime", runtimeId: "vruntime-1" });
+  const reassigned = parsePanelRequest(wrap({
+    type: "config.validation.deleteRuntime",
+    runtimeId: "vruntime-1",
+    reassignTo: "vruntime-2"
+  }));
+  assert.ok(reassigned);
+  assert.deepEqual(reassigned.payload, {
+    type: "config.validation.deleteRuntime",
+    runtimeId: "vruntime-1",
+    reassignTo: "vruntime-2"
+  });
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.deleteRuntime", runtimeId: "vruntime-1", reassignTo: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.deleteRuntime" })), null);
+});
+
+test("registry settings take a preset, a whole-number cap, or an explicit clear", () => {
+  const preset = parsePanelRequest(wrap({ type: "config.validation.setSettings", topologyPreset: "per-project" }));
+  assert.ok(preset);
+  assert.deepEqual(preset.payload, { type: "config.validation.setSettings", topologyPreset: "per-project" });
+
+  const cleared = parsePanelRequest(wrap({ type: "config.validation.setSettings", warmCap: null }));
+  assert.ok(cleared);
+  assert.deepEqual(cleared.payload, { type: "config.validation.setSettings", warmCap: null });
+  assert.ok(parsePanelRequest(wrap({ type: "config.validation.setSettings", warmCap: 0 })));
+
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.setSettings" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.setSettings", topologyPreset: "many" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.setSettings", warmCap: -1 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.setSettings", warmCap: 1.5 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.setSettings", warmCap: 65 })), null);
+});
+
+test("association writes bound both ids", () => {
+  const set = parsePanelRequest(wrap({
+    type: "config.validation.setAssociation",
+    projectRootId: "project-a",
+    runtimeId: "vruntime-1"
+  }));
+  assert.ok(set);
+  assert.deepEqual(set.payload, {
+    type: "config.validation.setAssociation",
+    projectRootId: "project-a",
+    runtimeId: "vruntime-1"
+  });
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.setAssociation", projectRootId: "project-a" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.setAssociation", runtimeId: "vruntime-1" })), null);
+
+  const cleared = parsePanelRequest(wrap({ type: "config.validation.clearAssociation", projectRootId: "project-a" }));
+  assert.ok(cleared);
+  assert.deepEqual(cleared.payload, { type: "config.validation.clearAssociation", projectRootId: "project-a" });
+  assert.equal(parsePanelRequest(wrap({ type: "config.validation.clearAssociation", projectRootId: "" })), null);
+});
+
+test("job reads, aborts, requeues, and the manual run bound their ids", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "validation.jobs" })));
+  const filtered = parsePanelRequest(wrap({ type: "validation.jobs", taskId: "task-1", sessionId: "session-1" }));
+  assert.ok(filtered);
+  assert.deepEqual(filtered.payload, { type: "validation.jobs", taskId: "task-1", sessionId: "session-1" });
+  assert.equal(parsePanelRequest(wrap({ type: "validation.jobs", taskId: "" })), null);
+
+  const aborted = parsePanelRequest(wrap({ type: "validation.abortJob", jobId: "vjob-1" }));
+  assert.ok(aborted);
+  assert.deepEqual(aborted.payload, { type: "validation.abortJob", jobId: "vjob-1" });
+  assert.equal(parsePanelRequest(wrap({ type: "validation.abortJob" })), null);
+
+  const requeued = parsePanelRequest(wrap({
+    type: "validation.requeue",
+    jobId: "vjob-1",
+    rerouteTo: "vruntime-2",
+    confirmedDelta: true
+  }));
+  assert.ok(requeued);
+  assert.deepEqual(requeued.payload, {
+    type: "validation.requeue",
+    jobId: "vjob-1",
+    rerouteTo: "vruntime-2",
+    confirmedDelta: true
+  });
+  assert.ok(parsePanelRequest(wrap({ type: "validation.requeue", jobId: "vjob-1" })));
+  assert.equal(parsePanelRequest(wrap({ type: "validation.requeue", jobId: "vjob-1", confirmedDelta: "yes" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "validation.requeue", jobId: "vjob-1", rerouteTo: "" })), null);
+
+  const run = parsePanelRequest(wrap({ type: "validation.run", sessionId: "session-1" }));
+  assert.ok(run);
+  assert.deepEqual(run.payload, { type: "validation.run", sessionId: "session-1" });
+  assert.equal(parsePanelRequest(wrap({ type: "validation.run" })), null);
+});
+
+test("the task runtime override clears by OMITTING the runtime, never by empty string", () => {
+  const set = parsePanelRequest(wrap({ type: "validation.setTaskRuntime", taskId: "task-1", runtimeId: "vruntime-2" }));
+  assert.ok(set);
+  assert.deepEqual(set.payload, { type: "validation.setTaskRuntime", taskId: "task-1", runtimeId: "vruntime-2" });
+
+  const cleared = parsePanelRequest(wrap({ type: "validation.setTaskRuntime", taskId: "task-1" }));
+  assert.ok(cleared);
+  assert.deepEqual(cleared.payload, { type: "validation.setTaskRuntime", taskId: "task-1" });
+
+  assert.equal(parsePanelRequest(wrap({ type: "validation.setTaskRuntime", taskId: "task-1", runtimeId: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "validation.setTaskRuntime", runtimeId: "vruntime-2" })), null);
 });
 
 test("config.openFile bounds its path (the host still re-checks its own allowlist)", () => {

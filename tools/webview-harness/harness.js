@@ -124,7 +124,16 @@
     accessRequests: [
       { accessRequestId: "ar-rw", sessionId: "s-live", displayPath: "D:\\builds\\maya2026", mode: "read-write", reason: "verify compiled plugin load", status: "pending", requestedAt: iso(4) },
       { accessRequestId: "ar-sens", sessionId: "s-live", displayPath: "C:\\hitl\\demo-project\\.env", mode: "read-only", reason: "read runtime config", status: "pending", requestedAt: iso(3), sensitive: true, sensitiveReason: "\".env\" matches a credentials/secrets file pattern" },
-      { accessRequestId: "ar-ok", sessionId: "s-live", displayPath: "D:\\shared\\fixtures", mode: "read-only", reason: "test fixtures", status: "approved", requestedAt: iso(90) }
+      // ADR 0022 F3: a production-tier path cannot be mounted at all, so the
+      // card becomes the three-line fixture decision (snapshot + typed
+      // confirm). `sizeLabel` is webview-only for now - F3's line 2 wants a
+      // size and AccessRequestSummary has no field for one yet.
+      { accessRequestId: "ar-prod", sessionId: "s-live", displayPath: "X:\\Projects\\ShowA\\rigs\\hero_rig.ma", mode: "read-only", reason: "reproduce the skin-weights bug against the hero rig", status: "pending", requestedAt: iso(2), production: true, disposition: "snapshot", sizeLabel: "48 MB" },
+      { accessRequestId: "ar-ok", sessionId: "s-live", displayPath: "D:\\shared\\fixtures", mode: "read-only", reason: "test fixtures", status: "approved", requestedAt: iso(90) },
+      // An already-approved snapshot: the mounts list says "production
+      // snapshot · session-scoped" instead of "granted", because a copy is
+      // not a mount (F3's provenance chip).
+      { accessRequestId: "ar-snap-ok", sessionId: "s-live", displayPath: "X:\\Projects\\ShowA\\rigs\\hero_shirt.ma", mode: "read-only", reason: "earlier fixture snapshot", status: "approved", requestedAt: iso(120), production: true, disposition: "snapshot" }
     ],
     security: {
       managed: false,
@@ -341,8 +350,132 @@
       { label: "Studio standing instructions", path: "C:\\studio\\drydock-instructions.md", provenance: "settings", exists: true, bytes: 2048 }
     ],
     settings: configSettings,
-    editablePaths: ["C:\\studio\\mcp.json", "C:\\studio\\drydock-instructions.md"]
+    editablePaths: ["C:\\studio\\mcp.json", "C:\\studio\\drydock-instructions.md"],
+    validation: validationState()
   });
+
+  // --- validation runtimes fixture (ADR 0022 M7) ---------------------------
+  // Three runtimes: the warm default with a queue, a quarantined
+  // profile-exception runtime (drives the F5 banner + the ⚠ badge), and a
+  // stopped on-demand one. Mutations below mutate THESE objects, so a
+  // set-default / archive / association edit round-trips without a real host.
+  const validationRuntimes = [
+    {
+      runtimeId: "vr-default", displayName: "default", image: "win-dcc-2026.03", lifecycle: "keep-warm",
+      capabilities: ["maya", "python"], policyProfileRef: "validation.default", isDefault: true,
+      vmName: "drydock-validation-default", connectionHost: "172.30.4.11", availability: "available", queueDepth: 1,
+      probes: {
+        state: "pass", at: iso(30), greenAt: iso(30), lines: [
+          { probeId: "no-egress", title: "no network egress", state: "pass", detail: "curl to 1.1.1.1 refused after 2s" },
+          { probeId: "xroot-absent", title: "X:\\Projects not mounted", state: "pass", detail: "path absent in guest" },
+          { probeId: "mirror-readable", title: "mirror readable", state: "pass", detail: "\\\\host-mirror\\rez v214 listed 41 packages" }
+        ]
+      }
+    },
+    {
+      runtimeId: "vr-prod", displayName: "production_tester", image: "win-dcc-2026.03-showa", lifecycle: "keep-warm",
+      capabilities: ["maya", "fixtures:ShowA_approved"], policyProfileRef: "validation.production", profileException: true,
+      isDefault: false, vmName: "drydock-validation-production-tester", connectionHost: "172.30.4.12",
+      availability: "quarantined", queueDepth: 0,
+      probes: {
+        state: "breach", at: iso(12), greenAt: iso(240), lines: [
+          { probeId: "prod-isolation", title: "must-fail: read X:\\Projects", state: "breach", detail: "read SUCCEEDED - the guest reached a production path" },
+          { probeId: "no-egress", title: "no network egress", state: "pass", detail: "curl to 1.1.1.1 refused after 2s" }
+        ]
+      }
+    },
+    {
+      runtimeId: "vr-cpp", displayName: "cpp-builds", image: "win-msvc-2026.01", lifecycle: "on-demand",
+      capabilities: ["msvc"], policyProfileRef: "validation.default", isDefault: false,
+      vmName: "drydock-validation-cpp-builds", availability: "stopped", queueDepth: 0
+    }
+  ];
+  // One personal row and one studio-pinned row (H6): the pinned one renders
+  // locked with its policy source instead of a select.
+  const validationAssociations = [
+    { projectRootId: "p-asset", projectLabel: "asset_api", runtimeId: "vr-cpp", source: "personal" },
+    { projectRootId: "p-edu", projectLabel: "Education", runtimeId: "vr-default", source: "managed", pinned: true }
+  ];
+  const validationProjects = [
+    { projectRootId: "p-demo", label: "demo-project" },
+    { projectRootId: "p-asset", label: "asset_api" },
+    { projectRootId: "p-edu", label: "Education" }
+  ];
+  const validationSettings = { defaultRuntimeId: "vr-default", topologyPreset: "default-plus-named", warmCap: 2 };
+  const validationManaged = {
+    topologyPin: "default-plus-named",
+    warmCap: 3,
+    profileExceptionCreation: "allowed",
+    imageAllowlist: ["win-dcc-2026.03", "win-dcc-2026.03-showa", "win-msvc-2026.01"]
+  };
+  // Mutated IN PLACE (never reassigned) so `__harness.fixtures.validation.
+  // quarantines` stays a live handle for console-driven scenarios.
+  const validationQuarantines = [
+    { runtimeId: "vr-prod", displayName: "production_tester", probeId: "prod-isolation", detail: "production isolation check failed", at: iso(12) }
+  ];
+  let validationRuntimeSerial = 3;
+  // Flip `hostSupported` from the console (then push validation.changed) to see
+  // the off-Windows line: one calm sentence and nothing else.
+  const validationFlags = { hostSupported: true };
+  function validationState() {
+    return {
+      hostSupported: validationFlags.hostSupported,
+      runtimes: validationRuntimes,
+      associations: validationAssociations,
+      projects: validationProjects,
+      settings: validationSettings,
+      managed: validationManaged,
+      quarantines: validationQuarantines
+    };
+  }
+
+  // Jobs covering every chip state F2 names. The newest terminal job is the
+  // superseded pass (so the `· edited since ↻` suffix renders on boot);
+  // `scenario.validationJobProgress()` steps vj-step to a FAILED receipt,
+  // which then becomes the newest terminal and shows the promoted line.
+  const validationJobs = [
+    { jobId: "vj-run", state: "running", profileRef: "tool_smoke", runtimeDisplayName: "default", queuedAt: iso(3), startedAt: iso(1), sessionId: "s-live", taskId: "t-1", subtaskId: "st-1" },
+    { jobId: "vj-queued", state: "queued", profileRef: "tool_smoke", queuePosition: 2, runtimeDisplayName: "default", queuedAt: iso(2), sessionId: "s-live", taskId: "t-1" },
+    { jobId: "vj-license", state: "license-wait", profileRef: "maya_regression", runtimeDisplayName: "default", queuePosition: 2, licenseWaitMs: 125_000, queuedAt: iso(5), startedAt: iso(4), sessionId: "s-live", taskId: "t-1" },
+    { jobId: "vj-parked", state: "parked", profileRef: "cpp_plugin_build", runtimeDisplayName: "cpp-builds", parkedReason: "cpp-builds is offline - nothing has run for this job", queuedAt: iso(7), sessionId: "s-live", taskId: "t-1" },
+    {
+      jobId: "vj-passed", state: "completed", profileRef: "tool_smoke", runtimeDisplayName: "default", queuedAt: iso(20), startedAt: iso(19), completedAt: iso(17),
+      sessionId: "s-live", taskId: "t-1", subtaskId: "st-1",
+      receipt: {
+        verdict: "passed", summary: "Ran 14 tests in 89.2s - OK", changesetRef: "a3f21c9d4e7b18",
+        mirrorVersion: 214, mirrorFreshnessAt: iso(21), probesGreenAt: iso(30), licenseWaitMs: 0,
+        superseded: true, fixtureManifestHash: "9c41e2ab77d0"
+      }
+    },
+    { jobId: "vj-step", state: "queued", profileRef: "tool_smoke", queuePosition: 3, runtimeDisplayName: "default", queuedAt: iso(1), sessionId: "s-live", taskId: "t-1" }
+  ];
+
+  /** Drops one runtime's quarantine in place (keeps the exposed handle live). */
+  function removeQuarantine(runtimeId) {
+    for (let index = validationQuarantines.length - 1; index >= 0; index -= 1) {
+      if (validationQuarantines[index].runtimeId === runtimeId) validationQuarantines.splice(index, 1);
+    }
+  }
+
+  /** The rail's L0 derives from the same fixtures the panels read. */
+  function validationRailStatus() {
+    if (validationQuarantines.length > 0) {
+      return { dot: "blocked", line: "Validation blocked - production_tester is quarantined; its queue is stopped." };
+    }
+    if (validationJobs.some((job) => job.state === "running" || job.state === "syncing" || job.state === "starting")) {
+      return { dot: "running", line: "Validating on default - queue 1 - isolation verified 09:00" };
+    }
+    if (validationJobs.some((job) => job.state === "completed" && job.receipt && job.receipt.verdict !== "passed")) {
+      return { dot: "failed", line: "Last validation failed - test_icon_fallback" };
+    }
+    return { dot: "ok", line: "Validation ready - queue 0 - isolation verified 09:00" };
+  }
+
+  /** Notifies every open panel that the registry (or its health) moved. */
+  function pushValidationChanged() {
+    push({ type: "validation.changed" });
+    push({ type: "config.changed" });
+  }
 
   const runtimes = [
     { runtimeId: "r-1", externalName: "drydock-slive-gen1-worker", status: "running", startedAt: iso(60) }
@@ -1663,9 +1796,269 @@
         aspect.archived = payload.archived;
         return respond(requestId, { type, aspects: plannerAspects });
       }
+      // --- Task Hub (UX overhaul P3 + ADR 0022 F6) -----------------------
+      case "active.get":
+        return respond(requestId, { type, activeTaskId });
+      case "active.set":
+        activeTaskId = payload.taskId ?? null;
+        harnessLog(`active.set ${String(activeTaskId)}`);
+        push({ type: "activeTask", activeTaskId });
+        return respond(requestId, { type, activeTaskId });
+      case "hub.state": {
+        const state = hubState(payload.taskId);
+        if (!state) return respondError(requestId, `harness: unknown task ${String(payload.taskId)}`);
+        return respond(requestId, { type, state });
+      }
+      case "panel.openSurface":
+        harnessLog(`panel.openSurface ${String(payload.surface)}${payload.taskId ? ` ${String(payload.taskId)}` : ""}`);
+        return respond(requestId, { type, accepted: true });
+      case "ui.confirm":
+        harnessLog(`ui.confirm ${String(payload.message)}`);
+        return respond(requestId, { type, confirmed: true });
+
+      // --- validation runtimes: the TD registry (ADR 0022 M7) ------------
+      case "config.validation.state":
+        return respond(requestId, { type, state: validationState() });
+      case "config.validation.createRuntime": {
+        validationRuntimeSerial += 1;
+        const slug = String(payload.displayName).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+        validationRuntimes.push({
+          runtimeId: `vr-${String(validationRuntimeSerial)}`,
+          displayName: payload.displayName,
+          image: payload.image,
+          lifecycle: payload.lifecycle,
+          capabilities: payload.capabilities ?? [],
+          policyProfileRef: payload.policyProfileRef,
+          ...(payload.profileException ? { profileException: true } : {}),
+          isDefault: false,
+          vmName: `drydock-validation-${slug}`,
+          ...(payload.connection ? { connectionHost: payload.connection.host } : {}),
+          availability: "stopped",
+          queueDepth: 0
+        });
+        harnessLog(`config.validation.createRuntime ${String(payload.displayName)}${payload.profileException ? " (profile exception)" : ""}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "config.validation.ack" });
+      }
+      case "config.validation.updateRuntime": {
+        const runtime = validationRuntimes.find((entry) => entry.runtimeId === payload.runtimeId);
+        if (!runtime) return respondError(requestId, "harness: unknown runtime");
+        Object.assign(runtime, payload.update);
+        if (payload.update.connection === null) delete runtime.connectionHost;
+        else if (payload.update.connection) runtime.connectionHost = payload.update.connection.host;
+        harnessLog(`config.validation.updateRuntime ${String(payload.runtimeId)} ${Object.keys(payload.update).join(",")}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "config.validation.ack" });
+      }
+      case "config.validation.deleteRuntime": {
+        const index = validationRuntimes.findIndex((entry) => entry.runtimeId === payload.runtimeId);
+        if (index === -1) return respondError(requestId, "harness: unknown runtime");
+        validationRuntimes.splice(index, 1);
+        // H5: associations never dangle - they land on the named target (or
+        // fall back to the default, which is what an absent reassignTo means).
+        for (let i = validationAssociations.length - 1; i >= 0; i -= 1) {
+          if (validationAssociations[i].runtimeId !== payload.runtimeId) continue;
+          if (payload.reassignTo) validationAssociations[i].runtimeId = payload.reassignTo;
+          else validationAssociations.splice(i, 1);
+        }
+        removeQuarantine(payload.runtimeId);
+        harnessLog(`config.validation.deleteRuntime ${String(payload.runtimeId)}${payload.reassignTo ? ` → ${String(payload.reassignTo)}` : " → default"}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "config.validation.ack" });
+      }
+      case "config.validation.setDefault": {
+        const runtime = validationRuntimes.find((entry) => entry.runtimeId === payload.runtimeId);
+        if (!runtime) return respondError(requestId, "harness: unknown runtime");
+        for (const entry of validationRuntimes) entry.isDefault = entry.runtimeId === payload.runtimeId;
+        validationSettings.defaultRuntimeId = payload.runtimeId;
+        harnessLog(`config.validation.setDefault ${String(payload.runtimeId)}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "config.validation.ack" });
+      }
+      case "config.validation.setSettings": {
+        if (payload.topologyPreset !== undefined) validationSettings.topologyPreset = payload.topologyPreset;
+        if (payload.warmCap === null) delete validationSettings.warmCap;
+        else if (payload.warmCap !== undefined) validationSettings.warmCap = payload.warmCap;
+        harnessLog(`config.validation.setSettings ${JSON.stringify({ topologyPreset: payload.topologyPreset, warmCap: payload.warmCap })}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "config.validation.ack" });
+      }
+      case "config.validation.setAssociation": {
+        const existing = validationAssociations.find((entry) => entry.projectRootId === payload.projectRootId);
+        const project = validationProjects.find((entry) => entry.projectRootId === payload.projectRootId);
+        if (existing) existing.runtimeId = payload.runtimeId;
+        else {
+          validationAssociations.push({
+            projectRootId: payload.projectRootId,
+            projectLabel: project ? project.label : payload.projectRootId,
+            runtimeId: payload.runtimeId,
+            source: "personal"
+          });
+        }
+        harnessLog(`config.validation.setAssociation ${String(payload.projectRootId)} → ${String(payload.runtimeId)}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "config.validation.ack" });
+      }
+      case "config.validation.clearAssociation": {
+        const index = validationAssociations.findIndex((entry) => entry.projectRootId === payload.projectRootId);
+        if (index !== -1) validationAssociations.splice(index, 1);
+        harnessLog(`config.validation.clearAssociation ${String(payload.projectRootId)}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "config.validation.ack" });
+      }
+      case "config.validation.runProbes": {
+        const runtime = validationRuntimes.find((entry) => entry.runtimeId === payload.runtimeId);
+        if (!runtime) return respondError(requestId, "harness: unknown runtime");
+        harnessLog(`config.validation.runProbes ${String(payload.runtimeId)}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "config.validation.ack" });
+      }
+      case "config.validation.adopt":
+        harnessLog(`config.validation.adopt ${String(payload.runtimeId)}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "config.validation.ack" });
+      case "config.validation.revertReprobe": {
+        const runtime = validationRuntimes.find((entry) => entry.runtimeId === payload.runtimeId);
+        if (!runtime) return respondError(requestId, "harness: unknown runtime");
+        // The quarantine clears only because the re-probe passed - that is the
+        // whole point of the button.
+        const at = new Date().toISOString();
+        runtime.availability = "available";
+        runtime.probes = {
+          state: "pass", at, greenAt: at,
+          lines: (runtime.probes ? runtime.probes.lines : []).map((line) => ({
+            ...line,
+            state: "pass",
+            detail: line.probeId === "prod-isolation" ? "read refused after revert to clean baseline" : line.detail
+          }))
+        };
+        removeQuarantine(payload.runtimeId);
+        harnessLog(`config.validation.revertReprobe ${String(payload.runtimeId)}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "config.validation.ack" });
+      }
+
+      // --- validation jobs: what developers actually touch ---------------
+      case "validation.jobs": {
+        const jobs = validationJobs.filter((job) => {
+          if (payload.sessionId && job.sessionId !== payload.sessionId) return false;
+          if (payload.taskId && job.taskId !== payload.taskId) return false;
+          return true;
+        });
+        return respond(requestId, { type, jobs });
+      }
+      case "validation.abortJob": {
+        const job = validationJobs.find((entry) => entry.jobId === payload.jobId);
+        if (!job) return respondError(requestId, "harness: unknown job");
+        job.state = "aborted";
+        job.completedAt = new Date().toISOString();
+        harnessLog(`validation.abortJob ${String(payload.jobId)}`);
+        push({ type: "validation.jobChanged", jobId: job.jobId, state: job.state, sessionId: job.sessionId, taskId: job.taskId });
+        return respond(requestId, { type: "validation.ack" });
+      }
+      case "validation.requeue": {
+        const job = validationJobs.find((entry) => entry.jobId === payload.jobId);
+        if (!job) return respondError(requestId, "harness: unknown job");
+        harnessLog(`validation.requeue ${String(payload.jobId)} → ${String(payload.rerouteTo ?? "default")}${payload.confirmedDelta ? " (confirmed)" : ""}`);
+        if (!payload.confirmedDelta) {
+          // Cross-profile in BOTH directions needs the delta confirm (H1/H2).
+          return respond(requestId, {
+            type, result: {
+              kind: "needs-confirm",
+              toRuntimeId: "vr-default",
+              toDisplayName: "default",
+              delta: {
+                profileChanged: true,
+                fromProfile: "validation.production",
+                toProfile: "validation.default",
+                imageChanged: true,
+                capabilitiesAdded: ["python"],
+                capabilitiesRemoved: ["fixtures:ShowA_approved"],
+                profileException: false
+              }
+            }
+          });
+        }
+        job.state = "queued";
+        job.queuePosition = 1;
+        job.runtimeDisplayName = "default";
+        delete job.parkedReason;
+        push({ type: "validation.jobChanged", jobId: job.jobId, state: job.state, sessionId: job.sessionId, taskId: job.taskId });
+        return respond(requestId, { type, result: { kind: "queued" } });
+      }
+      case "validation.setTaskRuntime": {
+        hubValidationRuntimeId = payload.runtimeId ?? "vr-default";
+        harnessLog(`validation.setTaskRuntime ${String(payload.taskId)} → ${String(payload.runtimeId ?? "default")}`);
+        pushValidationChanged();
+        return respond(requestId, { type: "validation.ack" });
+      }
+      case "validation.railStatus":
+        return respond(requestId, { type, ...validationRailStatus() });
+      case "validation.run": {
+        const job = {
+          jobId: `vj-manual-${String(validationJobs.length + 1)}`, state: "queued", queuePosition: 1,
+          runtimeDisplayName: "default", queuedAt: new Date().toISOString(), sessionId: payload.sessionId, taskId: "t-1"
+        };
+        validationJobs.push(job);
+        harnessLog(`validation.run ${String(payload.sessionId)}`);
+        push({ type: "validation.jobChanged", jobId: job.jobId, state: job.state, sessionId: job.sessionId, taskId: job.taskId });
+        return respond(requestId, { type: "validation.ack" });
+      }
+
       default:
         return respondError(requestId, `harness: unhandled request ${String(type)}`);
     }
+  }
+
+  // --- Task Hub fixture (UX overhaul P3 + ADR 0022 F6) ---------------------
+  // The hub reads ONE composite; everything below is derived from the same
+  // session/task/runtime fixtures the other pages use, so the pages agree.
+  let activeTaskId = "t-1";
+  /** The task's validation override; the label shows only when ≠ the default. */
+  let hubValidationRuntimeId = "vr-prod";
+  function hubState(taskId) {
+    const task = tasks.find((entry) => entry.taskId === taskId);
+    if (!task) return undefined;
+    const linked = new Set(task.linkedSessionIds);
+    for (const subtask of task.subtasks) {
+      for (const sessionId of subtask.linkedSessionIds) linked.add(sessionId);
+    }
+    const chats = sessions.filter((session) => linked.has(session.sessionId)).map((session) => ({
+      sessionId: session.sessionId,
+      title: session.title,
+      taskId: task.taskId,
+      taskTitle: task.title,
+      status: session.status,
+      live: session.status === "active",
+      ...(session.runningElsewhere ? { runningElsewhere: true } : {}),
+      needsAttention: agentQuestions.some((question) => question.sessionId === session.sessionId && question.status === "pending"),
+      lastActivityAt: session.updatedAt,
+      providerId: session.providerId,
+      ...(session.model === undefined ? {} : { model: session.model })
+    }));
+    const runtime = validationRuntimes.find((entry) => entry.runtimeId === hubValidationRuntimeId);
+    const routesToDefault = runtime === undefined || runtime.isDefault === true;
+    return {
+      task,
+      chats,
+      subtasks: task.subtasks,
+      plans: plannerPlans.filter((plan) => plan.taskId === task.taskId).map(plannerPlanSummary),
+      attention: agentQuestions
+        .filter((question) => question.status === "pending" && linked.has(question.sessionId))
+        .map((question) => ({ kind: "question", sessionId: question.sessionId, headline: question.question })),
+      stats: { runtimeCount: runtimes.length, cpuPercent: 18.4, memBytes: 9_878_000_000, tokens: 412_000 },
+      system: {
+        runtimes,
+        mounts: ["rw C:\\hitl\\asset_api", "ro C:\\hitl\\demo-project"],
+        launchCommand: "sbx create --image drydock/agent:gen1 --mount C:\\hitl\\asset_api"
+      },
+      workspaceName: "pipeline",
+      ...(routesToDefault ? {} : { validationRuntimeLabel: runtime.displayName }),
+      validationRuntimes: validationRuntimes
+        .filter((entry) => entry.archived !== true)
+        .map((entry) => ({ runtimeId: entry.runtimeId, displayName: entry.displayName })),
+      generatedAt: new Date().toISOString()
+    };
   }
 
   // --- planner fixtures (ADR 0012) --------------------------------------------
@@ -1781,7 +2174,7 @@
   };
 
   window.__harness = {
-    fixtures: { sessions, catalogs, workspacePolicy, diffChanges, cloneRepos, tasks, boardColumns, memoryCandidates, taskReviewProjects, taskReviewSessions, taskReviewComments, planner: { plans: plannerPlans, artifacts: plannerArtifacts, annotations: plannerAnnotations, aspects: plannerAspects }, comments: [
+    fixtures: { sessions, catalogs, workspacePolicy, diffChanges, cloneRepos, tasks, boardColumns, memoryCandidates, taskReviewProjects, taskReviewSessions, taskReviewComments, planner: { plans: plannerPlans, artifacts: plannerArtifacts, annotations: plannerAnnotations, aspects: plannerAspects }, validation: { flags: validationFlags, runtimes: validationRuntimes, associations: validationAssociations, projects: validationProjects, settings: validationSettings, managed: validationManaged, quarantines: validationQuarantines, jobs: validationJobs }, comments: [
       { commentId: "c-1", filePath: "publish_hooks.py", startLine: 12, endLine: 14, body: "Guard the allowlist behind config.", author: "user", status: "open", createdAt: iso(30) }
     ] },
     log: [],
@@ -1906,6 +2299,71 @@
       memoryCandidate(candidate) {
         memoryCandidates.unshift(candidate);
         push({ type: "memory.candidateAdded", candidate });
+      },
+      /**
+       * ADR 0022 F5: a must-fail isolation probe SUCCEEDED. Fires the incident
+       * push every surface listens to (hub banner mounts; Configure refetches
+       * and grows the banner + the amber nav dot).
+       */
+      validationQuarantine(runtimeId = "vr-prod") {
+        const runtime = validationRuntimes.find((entry) => entry.runtimeId === runtimeId);
+        const at = new Date().toISOString();
+        const entry = {
+          runtimeId,
+          displayName: runtime ? runtime.displayName : runtimeId,
+          probeId: "prod-isolation",
+          detail: "production isolation check failed",
+          at
+        };
+        if (runtime) {
+          runtime.availability = "quarantined";
+          runtime.probes = {
+            state: "breach", at,
+            ...(runtime.probes && runtime.probes.greenAt ? { greenAt: runtime.probes.greenAt } : {}),
+            lines: [
+              { probeId: "prod-isolation", title: "must-fail: read X:\\Projects", state: "breach", detail: "read SUCCEEDED - the guest reached a production path" }
+            ]
+          };
+        }
+        if (!validationQuarantines.some((existing) => existing.runtimeId === runtimeId)) validationQuarantines.push(entry);
+        push({ type: "validation.quarantine", ...entry });
+        pushValidationChanged();
+        harnessLog(`scenario.validationQuarantine ${runtimeId}`);
+      },
+      /**
+       * Steps `vj-step` queued → running → completed (a FAILED receipt, so the
+       * chip's one promoted line - failing test + assertion - renders). Each
+       * step pushes validation.jobChanged; nothing polls.
+       */
+      validationJobProgress(jobId = "vj-step") {
+        const job = validationJobs.find((entry) => entry.jobId === jobId);
+        if (!job) return;
+        const bump = (state, extra = {}) => {
+          job.state = state;
+          Object.assign(job, extra);
+          push({ type: "validation.jobChanged", jobId: job.jobId, state, sessionId: job.sessionId, taskId: job.taskId });
+          harnessLog(`scenario.validationJobProgress ${jobId} → ${state}`);
+        };
+        delete job.queuePosition;
+        bump("running", { startedAt: new Date().toISOString() });
+        setTimeout(() => {
+          bump("completed", {
+            completedAt: new Date().toISOString(),
+            receipt: {
+              verdict: "failed",
+              summary: "1 of 14 failed",
+              failingTest: "test_icon_fallback",
+              failingAssertion: "AssertionError: expected default set",
+              changesetRef: "b71c04ee29aa31",
+              mirrorVersion: 214,
+              mirrorFreshnessAt: iso(2),
+              probesGreenAt: iso(30),
+              licenseWaitMs: 0,
+              superseded: false,
+              fixtureManifestHash: "9c41e2ab77d0"
+            }
+          });
+        }, 1_200);
       },
       /** Fires the task-review refetch push for a task (turn-boundary simulation). */
       taskReviewUpdated(taskId) {

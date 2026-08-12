@@ -367,3 +367,24 @@ body {
     animation: none;
   }
 }
+
+/* --- validation (ADR 0022): the developer's whole surface ---------------- */
+
+/* L0 ambient: a dot and a three-letter label; the one line is the hover. It
+   reflects whichever runtime the CURRENT task routes to, and renders nothing
+   at all when this machine has no validation. */
+.rail-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 5px;
+  font-size: 0.78em;
+  letter-spacing: 0.06em;
+  color: var(--rail-quiet);
+  border-bottom: 1px solid var(--rail-line);
+  margin-bottom: 3px;
+}
+
+.rail-status-label {
+  text-transform: uppercase;
+}

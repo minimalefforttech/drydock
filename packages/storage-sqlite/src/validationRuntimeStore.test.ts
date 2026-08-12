@@ -351,6 +351,64 @@ test("settings default to the single preset, take partial writes, and tolerate j
   }
 });
 
+test("task overrides and quarantine flags share the settings table without colliding", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  try {
+    const connection = new SqliteConnection(path.join(dir, "kv.sqlite"));
+    applyMigrations(connection);
+    const store = new SqliteValidationRuntimeStore(connection);
+
+    // Absent means "follows the cascade" / "not quarantined", never a guess.
+    assert.equal(await store.getTaskOverride(asId<"TaskId">("task-1")), null);
+    assert.equal(await store.getQuarantine(asId<"ValidationRuntimeId">("vrt-1")), null);
+
+    await store.setTaskOverride(asId<"TaskId">("task-1"), asId<"ValidationRuntimeId">("vrt-2"), "2026-08-12T09:00:00.000Z");
+    await store.setTaskOverride(asId<"TaskId">("task-2"), asId<"ValidationRuntimeId">("vrt-3"), "2026-08-12T09:00:00.000Z");
+    await store.setQuarantine(
+      asId<"ValidationRuntimeId">("vrt-1"),
+      { probeId: "probe.egress", detail: "EGRESS SUCCEEDED: reached nas:445", at: "2026-08-12T09:12:00.000Z" },
+      "2026-08-12T09:12:00.000Z"
+    );
+    // The registry settings keys are untouched by either namespace.
+    await store.setSettings({ topologyPreset: "default-plus-named" }, "2026-08-12T09:00:00.000Z");
+
+    assert.equal(await store.getTaskOverride(asId<"TaskId">("task-1")), asId<"ValidationRuntimeId">("vrt-2"));
+    assert.equal(await store.getTaskOverride(asId<"TaskId">("task-2")), asId<"ValidationRuntimeId">("vrt-3"));
+    assert.deepEqual(await store.getQuarantine(asId<"ValidationRuntimeId">("vrt-1")), {
+      probeId: "probe.egress",
+      detail: "EGRESS SUCCEEDED: reached nas:445",
+      at: "2026-08-12T09:12:00.000Z"
+    });
+    assert.deepEqual(await store.getSettings(), { topologyPreset: "default-plus-named" });
+
+    // The incident outlives the process that found it (edge case E5).
+    connection.close();
+    const reopened = new SqliteConnection(path.join(dir, "kv.sqlite"));
+    applyMigrations(reopened);
+    const reopenedStore = new SqliteValidationRuntimeStore(reopened);
+    assert.equal((await reopenedStore.getQuarantine(asId<"ValidationRuntimeId">("vrt-1")))?.probeId, "probe.egress");
+    assert.equal(await reopenedStore.getTaskOverride(asId<"TaskId">("task-1")), asId<"ValidationRuntimeId">("vrt-2"));
+
+    // Only an explicit clear removes either.
+    await reopenedStore.setQuarantine(asId<"ValidationRuntimeId">("vrt-1"), null, "2026-08-12T10:00:00.000Z");
+    await reopenedStore.setTaskOverride(asId<"TaskId">("task-1"), null, "2026-08-12T10:00:00.000Z");
+    assert.equal(await reopenedStore.getQuarantine(asId<"ValidationRuntimeId">("vrt-1")), null);
+    assert.equal(await reopenedStore.getTaskOverride(asId<"TaskId">("task-1")), null);
+    assert.equal(await reopenedStore.getTaskOverride(asId<"TaskId">("task-2")), asId<"ValidationRuntimeId">("vrt-3"));
+
+    // A hand-mangled payload reads as "no flag" rather than blocking a queue
+    // forever with a reason nobody can render.
+    reopened.database.exec(`
+      INSERT INTO validation_settings (key, value, updated_at)
+      VALUES ('quarantine.vrt-9', '{oops', 't');
+    `);
+    assert.equal(await reopenedStore.getQuarantine(asId<"ValidationRuntimeId">("vrt-9")), null);
+    reopened.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("jobs queue in submission order, take state patches, and filter by task/session/state", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
   const dbPath = path.join(dir, "jobs.sqlite");

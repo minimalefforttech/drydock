@@ -237,6 +237,51 @@ export const VALIDATION_SYNC_GUEST_SCRIPT = [
 ].join("\n");
 
 /**
+ * Writes the job's approved fixture files (stdin JSON `{ jobRoot, jobId,
+ * fixtures: [{ relativePath, contentBase64 }] }`).
+ *
+ * Separate from the sync script on purpose: fixtures are approved studio
+ * CONTENT (A1/A6), patches are the changeset, and a job that fails to receive
+ * its fixtures must not read as a changeset that would not apply. Paths are
+ * rebuilt segment by segment inside the guest and re-checked against the job's
+ * own fixture root, so nothing a manifest says can write outside it. Bytes are
+ * written with `WriteAllBytes` - a `.ma` file must arrive unchanged.
+ */
+export const VALIDATION_FIXTURE_GUEST_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "$request = [Console]::In.ReadToEnd() | ConvertFrom-Json",
+  "$jobRoot = [string]$request.jobRoot",
+  "$jobId = [string]$request.jobId",
+  "$fixtureRoot = Join-Path (Join-Path $jobRoot $jobId) 'fixtures'",
+  "New-Item -ItemType Directory -Force -Path $fixtureRoot | Out-Null",
+  "$root = [System.IO.Path]::GetFullPath($fixtureRoot)",
+  "$written = @()",
+  "$failures = @()",
+  "foreach ($entry in @($request.fixtures)) {",
+  "  $relative = [string]$entry.relativePath",
+  "  $target = $root",
+  "  $bad = $false",
+  "  foreach ($segment in $relative.Split('/')) {",
+  "    if ($segment -eq '' -or $segment -eq '.' -or $segment -eq '..') { $bad = $true; break }",
+  "    $target = Join-Path $target $segment",
+  "  }",
+  "  $full = ''",
+  "  if (-not $bad) { $full = [System.IO.Path]::GetFullPath($target) }",
+  "  if ($bad -or -not $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {",
+  "    $failures += @{ relativePath = $relative; detail = 'the fixture path leaves the job fixture directory' }",
+  "    continue",
+  "  }",
+  "  try {",
+  "    New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($full)) | Out-Null",
+  "    [System.IO.File]::WriteAllBytes($full, [System.Convert]::FromBase64String([string]$entry.contentBase64))",
+  "    $written += $relative",
+  "  } catch { $failures += @{ relativePath = $relative; detail = $_.Exception.Message } }",
+  "}",
+  "ConvertTo-Json -Compress -Depth 4 -InputObject @{ ok = ($failures.Count -eq 0); written = @($written); failures = @($failures) }",
+  "if ($failures.Count -gt 0) { exit 1 }"
+].join("\n");
+
+/**
  * Runs the validation profile (stdin JSON `{ env, argv, cwd }`).
  *
  * `argv` is spawned as a PROCESS, never a shell string, so nothing in a profile
@@ -854,10 +899,50 @@ export class ValidationJobService {
     } catch (error) {
       return `The changeset could not be shipped to "${context.runtime.displayName}": ${errorMessage(error)}`;
     }
-    if (result.exitCode === 0) return undefined;
+    if (result.exitCode !== 0) {
+      const detail = parseSyncFailure(result);
+      return `The changeset did not apply in "${context.runtime.displayName}": ${detail}`;
+    }
+    return this.shipFixtures(context);
+  }
 
-    const detail = parseSyncFailure(result);
-    return `The changeset did not apply in "${context.runtime.displayName}": ${detail}`;
+  /**
+   * Ships the approved fixture copies AFTER the changeset, in their own exec.
+   *
+   * A job whose fixtures cannot be delivered must not run: the suite would then
+   * fail for a reason that has nothing to do with the code, and the receipt
+   * would record a verdict about the wrong thing. So this returns an error
+   * sentence like every other setup step, and the job ends as infrastructure
+   * error rather than a test failure.
+   */
+  private async shipFixtures(context: RunContext): Promise<string | undefined> {
+    const fixtures = context.material.request.fixtures ?? [];
+    if (fixtures.length === 0) return undefined;
+    for (const fixture of fixtures) {
+      if (!isSafeFixturePath(fixture.relativePath)) {
+        return `Refusing to ship fixture "${fixture.relativePath}": fixture paths must stay inside the job's fixture directory.`;
+      }
+    }
+    let result: CommandResult;
+    try {
+      result = await context.adapter.exec(
+        validationGuestCommand(VALIDATION_FIXTURE_GUEST_SCRIPT),
+        GUEST_SETUP_TIMEOUT_MS,
+        JSON.stringify({
+          jobRoot: this.guestJobRoot,
+          jobId: context.job.jobId,
+          fixtures: fixtures.map((fixture) => ({
+            relativePath: fixture.relativePath,
+            contentBase64: fixture.contentBase64
+          }))
+        }),
+        context.entry.controller.signal
+      );
+    } catch (error) {
+      return `The approved fixtures could not be copied into "${context.runtime.displayName}": ${errorMessage(error)}`;
+    }
+    if (result.exitCode === 0) return undefined;
+    return `The approved fixtures did not land in "${context.runtime.displayName}": ${parseFixtureFailure(result)}`;
   }
 
   /** Runs the profile with the license-wait and stall watchdogs attached (E4). */
@@ -1305,6 +1390,45 @@ function parseSyncFailure(result: CommandResult): string {
           const repo = failure.repoName === undefined || failure.repoName === "" ? "the changeset" : failure.repoName;
           return `${repo}: ${truncate((failure.detail ?? "").trim(), 400)}`;
         })
+        .filter((line) => line.trim() !== "");
+      if (rendered.length > 0) return rendered.join("; ");
+    } catch {
+      // Fall through to the raw tail below.
+    }
+  }
+  const raw = `${result.stderr.trim()} ${trimmed}`.trim();
+  return truncate(raw === "" ? `the guest exited with code ${String(result.exitCode ?? -1)}` : raw, 400);
+}
+
+/**
+ * Host-side fixture-path gate, mirroring the guest script's own check. Relative,
+ * forward-slashed, no traversal, no drive letters: a manifest is data, and data
+ * never chooses where the product writes.
+ */
+function isSafeFixturePath(relativePath: string): boolean {
+  if (relativePath.length === 0 || relativePath.length > 400) return false;
+  if (relativePath.includes("\\") || relativePath.includes(":")) return false;
+  if (relativePath.startsWith("/")) return false;
+  const segments = relativePath.split("/");
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== ".."
+    // Control bytes and Windows-illegal characters: a fixture name is a
+    // file name, not an opportunity to express a stream or a wildcard.
+    && !/[\u0000-\u001f<>"|?*]/.test(segment));
+}
+
+/** Reads the fixture script's reply; unparseable output falls back to the tail. */
+function parseFixtureFailure(result: CommandResult): string {
+  const trimmed = result.stdout.trim();
+  if (trimmed !== "") {
+    try {
+      const parsed = JSON.parse(trimmed) as { readonly failures?: unknown };
+      const raw = parsed.failures;
+      const failures = (Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]) as readonly {
+        relativePath?: string;
+        detail?: string;
+      }[];
+      const rendered = failures
+        .map((failure) => `${failure.relativePath ?? "a fixture"}: ${truncate((failure.detail ?? "").trim(), 200)}`)
         .filter((line) => line.trim() !== "");
       if (rendered.length > 0) return rendered.join("; ");
     } catch {

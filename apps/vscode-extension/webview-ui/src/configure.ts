@@ -40,6 +40,7 @@ import {
   type ConfigTagRuleInput,
   type MemoryCandidateSummary,
   type MemoryScope,
+  type PanelRequestPayload,
   type PanelResponse
 } from "@drydock/contracts";
 import {
@@ -53,13 +54,48 @@ import {
   toggleField
 } from "./configureFields.js";
 import { onPush, request, startMessaging, vscode } from "./configureMessaging.js";
+import {
+  clockTime,
+  middleTruncate,
+  quarantineSentence,
+  type ValidationConfigState,
+  type ValidationLifecycle,
+  type ValidationRequest,
+  type ValidationResponseEnvelope,
+  type ValidationRuntimeRow,
+  type ValidationRuntimeUpdate,
+  type ValidationTopologyPreset
+} from "./validationTypes.js";
 
 /** How long a row says "saved" before returning to its resting state. */
 const SAVED_NOTE_MS = 1_600;
 /** Settings changed elsewhere arrive as one push; refetch once. */
 const REFRESH_DEBOUNCE_MS = 200;
 
-const SECTION_LABELS: Record<ConfigSection, string> = {
+/**
+ * The validation-runtimes section (ADR 0022 M7b) is a LOCAL addition to the
+ * nav: `CONFIG_SECTIONS` is owned by contracts, so this file inserts the
+ * section itself and skips the insert if a later contracts release ships it.
+ */
+const VALIDATION_SECTION = "validation";
+type Section = ConfigSection | typeof VALIDATION_SECTION;
+
+const SECTIONS: readonly Section[] = (CONFIG_SECTIONS as readonly string[]).includes(VALIDATION_SECTION)
+  ? (CONFIG_SECTIONS as readonly Section[])
+  : buildSections();
+
+/** Validation sits with the other machine-shaped rows: straight after Runtime. */
+function buildSections(): readonly Section[] {
+  const out: Section[] = [];
+  for (const entry of CONFIG_SECTIONS) {
+    out.push(entry);
+    if (entry === "runtime") out.push(VALIDATION_SECTION);
+  }
+  if (!out.includes(VALIDATION_SECTION)) out.push(VALIDATION_SECTION);
+  return out;
+}
+
+const SECTION_LABELS: Record<Section, string> = {
   providers: "Providers",
   mcp: "MCP Servers",
   models: "Agents & Models",
@@ -67,8 +103,21 @@ const SECTION_LABELS: Record<ConfigSection, string> = {
   recipes: "Skills & Recipes",
   memories: "Memories",
   runtime: "Runtime",
+  validation: "Validation runtimes",
   security: "Security"
 };
+
+const LIFECYCLE_OPTIONS: readonly { readonly value: ValidationLifecycle; readonly label: string }[] = [
+  { value: "keep-warm", label: "keep-warm" },
+  { value: "on-demand", label: "on-demand" },
+  { value: "pinned", label: "pinned" }
+];
+
+const TOPOLOGY_OPTIONS: readonly { readonly value: ValidationTopologyPreset; readonly label: string }[] = [
+  { value: "single", label: "Single VM for everything" },
+  { value: "default-plus-named", label: "Default + named runtimes" },
+  { value: "per-project", label: "One runtime per project" }
+];
 
 const PROVENANCE_LABELS = { local: "local", settings: "settings", project: "project" } as const;
 const PROVENANCE_TITLES = {
@@ -90,7 +139,7 @@ interface Row {
 const root = el("div", "cfg");
 let state: ConfigState | null = null;
 let scope: ConfigScope = "global";
-let section: ConfigSection = "providers";
+let section: Section = "providers";
 let query = "";
 let notice: string | null = null;
 let booted = false;
@@ -129,8 +178,22 @@ interface MemoryDraft {
 }
 const memoryDrafts = new Map<string, MemoryDraft>();
 
+// Validation runtimes (ADR 0022): the registry, associations and settings ride
+// the same refresh as config.state and heal off validation.changed pushes.
+
+/** Null until config.validation.state answers; null again when it fails. */
+let validation: ValidationConfigState | null = null;
+/** Why the section is unavailable, when it is. */
+let validationNotice: string | null = null;
+/**
+ * Which runtime rows are expanded RIGHT NOW. In-memory only: a mutation
+ * refetches and re-renders, and an expansion must survive that, but nothing
+ * remembers itself open across a panel open (the disclosure ladder's rule).
+ */
+const expandedRuntimeIds = new Set<string>();
+
 interface PersistedState {
-  readonly section?: ConfigSection;
+  readonly section?: Section;
   readonly scope?: ConfigScope;
 }
 
@@ -148,16 +211,44 @@ function persist(): void {
 // Data
 // ---------------------------------------------------------------------------
 
+/**
+ * The validation kinds are not in `PanelRequestPayload` until M7a lands, so the
+ * cast is confined to this ONE function; everything downstream is typed against
+ * the mirror in `validationTypes.ts`.
+ */
+function validationRequest(payload: ValidationRequest): Promise<ValidationResponseEnvelope> {
+  return request(payload as unknown as PanelRequestPayload) as unknown as Promise<ValidationResponseEnvelope>;
+}
+
 async function load(): Promise<void> {
   fetchToken += 1;
   const token = fetchToken;
-  // Memories ride the same refresh: one failing half must not blank the other.
-  const [response, memoryResponse] = await Promise.all([
+  // Memories and validation ride the same refresh: one failing part must not
+  // blank the others.
+  const [response, memoryResponse, validationResponse] = await Promise.all([
     request({ type: "config.state", scope }),
-    request({ type: "memory.list" })
+    request({ type: "memory.list" }),
+    validationRequest({ type: "config.validation.state" })
   ]);
   if (token !== fetchToken) return;
   booted = true;
+  // The registry arrives either as its own read or riding config.state; take
+  // whichever this host offers rather than blanking the section.
+  const inlineValidation = response.ok && response.payload.type === "config.state"
+    ? (response.payload.state as { readonly validation?: ValidationConfigState }).validation
+    : undefined;
+  if (validationResponse.ok && validationResponse.payload.type === "config.validation.state") {
+    validation = validationResponse.payload.state;
+    validationNotice = null;
+  } else if (inlineValidation !== undefined) {
+    validation = inlineValidation;
+    validationNotice = null;
+  } else {
+    validation = null;
+    validationNotice = validationResponse.ok
+      ? "Validation runtimes could not be read."
+      : validationResponse.error.message;
+  }
   if (response.ok && response.payload.type === "config.state") {
     state = response.payload.state;
     scope = state.scope;
@@ -947,8 +1038,667 @@ function numberControl(entry: ConfigSettingRow, locked: boolean): HTMLElement {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Validation runtimes (ADR 0022, ux-flows F4/F5/F6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every validation mutation is request → ack → refetch (the memories pattern),
+ * never an optimistic local write: routing, defaults and probe state are the
+ * host's truth and a half-applied registry is worse than a beat of latency.
+ */
+function validationMutate(payload: ValidationRequest, savedKeyName: string): void {
+  void validationRequest(payload).then((response) => {
+    if (response.ok && (response.payload.type === "config.validation.ack" || response.payload.type === "validation.ack")) {
+      flashSaved(savedKeyName);
+      void load();
+      return;
+    }
+    notice = response.ok ? "That change was not applied." : response.error.message;
+    render();
+    void load();
+  });
+}
+
+/** The one word an L1 runtime line spends on state (F4). */
+function runtimeStateWord(runtime: ValidationRuntimeRow): string {
+  switch (runtime.availability) {
+    case "available": return "running";
+    case "stopped": return `${runtime.lifecycle} (stopped)`;
+    case "quarantined": return "quarantined";
+    case "missing": return "missing";
+    default: return "state unknown";
+  }
+}
+
+function associationCount(current: ValidationConfigState, runtimeId: string): number {
+  return current.associations.filter((entry) => entry.runtimeId === runtimeId).length;
+}
+
+/** Runtimes a job can be pointed at: everything live, minus the archived. */
+function activeRuntimes(current: ValidationConfigState): readonly ValidationRuntimeRow[] {
+  return current.runtimes.filter((entry) => entry.archived !== true);
+}
+
+/**
+ * F5: the one deliberate exception to calm. Persistent (never auto-dismisses),
+ * full width, with the three actions the incident needs.
+ */
+function quarantineBanner(current: ValidationConfigState): HTMLElement {
+  const wrap = el("div", "cfg-quarantine");
+  wrap.setAttribute("role", "alert");
+  for (const entry of current.quarantines) {
+    const runtime = current.runtimes.find((candidate) => candidate.runtimeId === entry.runtimeId);
+    const block = el("div", "cfg-quarantine-entry");
+    const head = el("div", "cfg-quarantine-head");
+    const name = el("span", "cfg-quarantine-name", entry.displayName);
+    name.title = `${entry.displayName} · probe ${entry.probeId}`;
+    head.append(name, chip(entry.probeId, "cfg-micro"));
+    block.append(head);
+    block.append(el("p", "cfg-quarantine-line", quarantineSentence(entry.detail, entry.at, runtime?.probes?.greenAt)));
+    const actions = el("div", "cfg-quarantine-actions");
+    actions.append(button("cfg-button", "Probe log", "Open this runtime's isolation evidence", () => {
+      expandedRuntimeIds.add(entry.runtimeId);
+      render();
+      const node = content.querySelector(`[data-runtime-id="${cssEscape(entry.runtimeId)}"]`);
+      if (node instanceof HTMLElement) node.scrollIntoView({ block: "nearest" });
+    }));
+    const revert = button("cfg-button", "Revert & re-probe", "Roll the VM back to its clean baseline and re-run the isolation probes. The quarantine clears only if they pass.", () => {
+      validationMutate({ type: "config.validation.revertReprobe", runtimeId: entry.runtimeId }, `validation:revert:${entry.runtimeId}`);
+    });
+    actions.append(revert);
+    actions.append(confirmingButton(
+      "cfg-button cfg-danger",
+      "Remove",
+      "Confirm remove",
+      "Delete this runtime. Its associations must be reassigned first.",
+      () => {
+        validationMutate({ type: "config.validation.deleteRuntime", runtimeId: entry.runtimeId }, `validation:delete:${entry.runtimeId}`);
+      }
+    ));
+    block.append(actions);
+    wrap.append(block);
+  }
+  return wrap;
+}
+
+/** Attribute-selector-safe id (ids are host-minted, but never trust that). */
+function cssEscape(value: string): string {
+  return value.replace(/["\\]/g, "\\$&");
+}
+
+/** One runtime: an L1 line that expands in place to its three concern lines. */
+function validationRuntimeRow(current: ValidationConfigState, runtime: ValidationRuntimeRow): HTMLElement {
+  const fold = document.createElement("details");
+  fold.className = runtime.availability === "quarantined" ? "cfg-vr cfg-vr-quarantined" : "cfg-vr";
+  fold.dataset["runtimeId"] = runtime.runtimeId;
+  fold.open = expandedRuntimeIds.has(runtime.runtimeId);
+  fold.addEventListener("toggle", () => {
+    if (fold.open) expandedRuntimeIds.add(runtime.runtimeId);
+    else expandedRuntimeIds.delete(runtime.runtimeId);
+  });
+
+  const summary = document.createElement("summary");
+  summary.className = "cfg-vr-summary";
+  const name = el("span", "cfg-vr-name", middleTruncate(runtime.displayName, 30));
+  name.title = runtime.displayName;
+  summary.append(name);
+  if (runtime.isDefault) {
+    const marker = chip("default", "cfg-micro");
+    marker.title = "Jobs with no override and no project association run here.";
+    summary.append(marker);
+  }
+  summary.append(el("span", "cfg-vr-sep", "—"));
+  summary.append(el("span", "cfg-vr-state", runtimeStateWord(runtime)));
+  if (runtime.queueDepth > 0) {
+    summary.append(el("span", "cfg-vr-queue", `· queue ${String(runtime.queueDepth)}`));
+  }
+  const associations = associationCount(current, runtime.runtimeId);
+  if (associations > 0) {
+    summary.append(el("span", "cfg-vr-assoc", `· ${String(associations)} project${associations === 1 ? "" : "s"}`));
+  }
+  if (runtime.archived === true) summary.append(chip("archived", "cfg-micro"));
+  if (runtime.profileException === true) {
+    // The one ambient security marker in the list (F4): permanent, never a toast.
+    const badge = chip("⚠ profile exception", "cfg-warn-chip");
+    badge.title = "This runtime runs under a broader policy profile than the default. Every receipt it produces carries the badge.";
+    summary.append(badge);
+  }
+  fold.append(summary);
+
+  const body = el("div", "cfg-vr-body");
+  body.append(concernLine("Runtime", [
+    runtime.availability === "unknown" ? "availability unknown" : runtime.availability,
+    runtime.vmName,
+    runtime.image,
+    runtime.connectionHost ?? "no host recorded"
+  ].join(" · ")));
+  body.append(isolationBlock(runtime));
+  // Mirror freshness is per-JOB evidence in v1; the registry cannot verify it,
+  // so it renders unknown rather than inventing a green line (ADR 0021).
+  body.append(concernLine("Mirror", "unknown — the registry does not track a per-runtime mirror version yet; job receipts carry the version they ran against."));
+  body.append(concernLine("Lifecycle", runtime.lifecycle));
+  body.append(concernLine("Associations", associations === 0
+    ? "none — only jobs that name it explicitly run here"
+    : `${String(associations)} project${associations === 1 ? "" : "s"} route here`));
+  if (runtime.capabilities.length > 0) {
+    body.append(concernLine("Capabilities", runtime.capabilities.join(" · ")));
+  }
+  body.append(concernLine("Policy profile", runtime.policyProfileRef));
+  body.append(runtimeActions(current, runtime));
+  body.append(runtimeEditFold(current, runtime));
+  fold.append(body);
+  return fold;
+}
+
+function concernLine(label: string, value: string): HTMLElement {
+  const line = el("div", "cfg-vr-line");
+  line.append(el("span", "cfg-vr-label", label));
+  const text = el("span", "cfg-vr-value", value);
+  text.title = value;
+  line.append(text);
+  return line;
+}
+
+/** Isolation: the verdict line, then the probe log as its own mono scroller. */
+function isolationBlock(runtime: ValidationRuntimeRow): HTMLElement {
+  const wrap = el("div", "cfg-vr-isolation");
+  const probes = runtime.probes;
+  if (probes === undefined) {
+    wrap.append(concernLine("Isolation", "unknown — no probe run is on record. Run probes to establish a baseline."));
+    return wrap;
+  }
+  const verdict = probes.state === "pass"
+    ? `verified ${clockTime(probes.at)}`
+    : probes.state === "breach"
+      ? `BREACH at ${clockTime(probes.at)} — a must-fail probe passed`
+      : probes.state === "fail"
+        ? `failed at ${clockTime(probes.at)}`
+        : `unknown — last attempt ${clockTime(probes.at)}`;
+  const green = probes.greenAt === undefined ? "" : ` · last green ${clockTime(probes.greenAt)}`;
+  const isolation = concernLine("Isolation", `${verdict}${green}`);
+  // Red only where a decision is needed: a breach or a failed suite.
+  if (probes.state === "breach" || probes.state === "fail") isolation.classList.add("cfg-vr-line-alarm");
+  wrap.append(isolation);
+  if (probes.lines.length === 0) return wrap;
+  const log = el("div", "cfg-vr-probe-log");
+  for (const line of probes.lines) {
+    const entry = el("div", `cfg-vr-probe cfg-vr-probe-${line.state}`);
+    entry.append(el("span", "cfg-vr-probe-glyph", probeGlyph(line.state)));
+    entry.append(el("span", "cfg-vr-probe-id", line.probeId));
+    entry.append(el("span", "cfg-vr-probe-title", line.title));
+    entry.append(el("span", "cfg-vr-probe-detail", line.detail));
+    log.append(entry);
+  }
+  wrap.append(log);
+  return wrap;
+}
+
+function probeGlyph(state: string): string {
+  if (state === "pass") return "✓";
+  if (state === "breach") return "⚠";
+  if (state === "fail") return "✕";
+  return "?";
+}
+
+/** The row's `⋯` actions - destructive ones state their consequence here. */
+function runtimeActions(current: ValidationConfigState, runtime: ValidationRuntimeRow): HTMLElement {
+  const actions = el("div", "cfg-vr-actions");
+  actions.append(el("span", "cfg-vr-actions-label", "⋯"));
+  if (!runtime.isDefault && runtime.archived !== true) {
+    actions.append(button("cfg-button", "Set default", "Route every unassociated job here", () => {
+      validationMutate({ type: "config.validation.setDefault", runtimeId: runtime.runtimeId }, `validation:default`);
+    }));
+  }
+  actions.append(button("cfg-button", "Run probes", "Re-run the isolation probes now", () => {
+    validationMutate({ type: "config.validation.runProbes", runtimeId: runtime.runtimeId }, `validation:probes:${runtime.runtimeId}`);
+  }));
+  actions.append(button("cfg-button", "Adopt", "Take ownership of the VM behind this runtime (re-adopts an existing VM after a rebuild).", () => {
+    validationMutate({ type: "config.validation.adopt", runtimeId: runtime.runtimeId }, `validation:adopt:${runtime.runtimeId}`);
+  }));
+  const archived = runtime.archived === true;
+  actions.append(button(
+    "cfg-button",
+    archived ? "Unarchive" : "Archive",
+    archived
+      ? "Return this runtime to the routing table"
+      : "Stop routing new jobs here. Associations and evidence are kept.",
+    () => {
+      validationMutate(
+        { type: "config.validation.updateRuntime", runtimeId: runtime.runtimeId, update: { archived: !archived } },
+        `validation:archive:${runtime.runtimeId}`
+      );
+    }
+  ));
+
+  // Delete needs somewhere for the orphaned associations to land (H5), and the
+  // default runtime is never deletable - it is re-pointed instead.
+  const associations = associationCount(current, runtime.runtimeId);
+  let reassignTo = "";
+  if (associations > 0 && !runtime.isDefault) {
+    const options = [
+      { value: "", label: `default (${String(associations)} project${associations === 1 ? "" : "s"})` },
+      ...activeRuntimes(current)
+        .filter((entry) => entry.runtimeId !== runtime.runtimeId)
+        .map((entry) => ({ value: entry.runtimeId, label: `reassign to ${entry.displayName}` }))
+    ];
+    actions.append(selectField(options, "", `Where ${runtime.displayName}'s projects go`, (next) => {
+      reassignTo = next;
+    }));
+  }
+  const remove = confirmingButton(
+    "cfg-button cfg-danger",
+    "Delete…",
+    associations > 0 ? `Delete and move ${String(associations)}?` : "Confirm delete",
+    runtime.isDefault
+      ? "The default runtime cannot be deleted — point the default at another runtime first."
+      : "Deletes the runtime. Its projects fall back to the runtime chosen beside this button.",
+    () => {
+      validationMutate({
+        type: "config.validation.deleteRuntime",
+        runtimeId: runtime.runtimeId,
+        ...(reassignTo === "" ? {} : { reassignTo })
+      }, `validation:delete:${runtime.runtimeId}`);
+    }
+  );
+  if (runtime.isDefault) remove.disabled = true;
+  actions.append(remove);
+  return actions;
+}
+
+/** Inline field editing, folded away: the row stays one line until asked. */
+function runtimeEditFold(current: ValidationConfigState, runtime: ValidationRuntimeRow): HTMLElement {
+  const fold = document.createElement("details");
+  fold.className = "cfg-fold cfg-vr-edit";
+  const summary = document.createElement("summary");
+  summary.className = "cfg-fold-summary";
+  summary.textContent = "Edit fields";
+  fold.append(summary);
+  const form = el("div", "cfg-vr-form");
+  const commit = (update: ValidationRuntimeUpdate): void => {
+    validationMutate(
+      { type: "config.validation.updateRuntime", runtimeId: runtime.runtimeId, update },
+      `validation:edit:${runtime.runtimeId}`
+    );
+  };
+  form.append(fieldLine("Name", textField(runtime.displayName, { label: "Runtime name" }, (next) => {
+    const trimmed = next.trim();
+    if (trimmed.length === 0 || trimmed === runtime.displayName) return;
+    commit({ displayName: trimmed });
+  })));
+  form.append(fieldLine("Image", imageControl(current, runtime.image, (next) => {
+    if (next === runtime.image) return;
+    commit({ image: next });
+  })));
+  form.append(fieldLine("Lifecycle", selectField(
+    LIFECYCLE_OPTIONS.map((entry) => ({ value: entry.value, label: entry.label })),
+    runtime.lifecycle,
+    "Lifecycle",
+    (next) => { commit({ lifecycle: next as ValidationLifecycle }); }
+  )));
+  form.append(fieldLine("Policy profile", textField(runtime.policyProfileRef, { label: "Policy profile" }, (next) => {
+    const trimmed = next.trim();
+    if (trimmed.length === 0 || trimmed === runtime.policyProfileRef) return;
+    commit({ policyProfileRef: trimmed });
+  })));
+  const capabilities = el("div", "cfg-vr-field");
+  capabilities.append(el("span", "cfg-field-label", "Capabilities"));
+  capabilities.append(stringListField([...runtime.capabilities], { label: "Capabilities", placeholder: "add a capability" }, (next) => {
+    commit({ capabilities: [...next] });
+  }));
+  form.append(capabilities);
+  fold.append(form);
+  return fold;
+}
+
+function fieldLine(label: string, control: HTMLElement): HTMLElement {
+  const line = el("div", "cfg-vr-field");
+  line.append(el("span", "cfg-field-label", label));
+  line.append(control);
+  return line;
+}
+
+/** Studio image allowlists turn the free-text field into a pick (H2/managed). */
+function imageControl(current: ValidationConfigState, value: string, commit: (next: string) => void): HTMLElement {
+  const allowlist = current.managed?.imageAllowlist;
+  if (allowlist === undefined || allowlist.length === 0) {
+    return textField(value, { label: "Image", placeholder: "image reference" }, (next) => {
+      const trimmed = next.trim();
+      if (trimmed.length === 0) return;
+      commit(trimmed);
+    });
+  }
+  const options = allowlist.map((entry) => ({ value: entry, label: entry }));
+  if (!allowlist.includes(value) && value.length > 0) options.unshift({ value, label: `${value} (not in the studio allowlist)` });
+  return selectField(options, value, "Image", commit);
+}
+
+/** The collapsed create line: the minimal form, and nothing else (F6). */
+function validationCreateFold(current: ValidationConfigState): HTMLElement {
+  const fold = document.createElement("details");
+  fold.className = "cfg-fold";
+  const summary = document.createElement("summary");
+  summary.className = "cfg-fold-summary";
+  summary.textContent = "Add validation runtime";
+  fold.append(summary);
+  const form = el("div", "cfg-vr-form");
+
+  const name = document.createElement("input");
+  name.type = "text";
+  name.className = "cfg-input";
+  name.placeholder = "name (cpp-builds, production_tester…)";
+  name.setAttribute("aria-label", "New runtime name");
+
+  const allowlist = current.managed?.imageAllowlist ?? [];
+  const imageInput = document.createElement("input");
+  imageInput.type = "text";
+  imageInput.className = "cfg-input";
+  imageInput.placeholder = "image reference";
+  imageInput.setAttribute("aria-label", "New runtime image");
+  let imageValue = allowlist[0] ?? "";
+  const imageField: HTMLElement = allowlist.length > 0
+    ? selectField(allowlist.map((entry) => ({ value: entry, label: entry })), imageValue, "Image", (next) => { imageValue = next; })
+    : imageInput;
+
+  let lifecycle: ValidationLifecycle = "keep-warm";
+  const lifecycleField = selectField(
+    LIFECYCLE_OPTIONS.map((entry) => ({ value: entry.value, label: entry.label })),
+    lifecycle,
+    "Lifecycle",
+    (next) => { lifecycle = next as ValidationLifecycle; }
+  );
+
+  let capabilities: string[] = [];
+  const capabilitiesWrap = el("div", "cfg-vr-capabilities");
+  const paintCapabilities = (): void => {
+    capabilitiesWrap.replaceChildren(stringListField(capabilities, { label: "Capabilities", placeholder: "maya, msvc, …" }, (next) => {
+      capabilities = [...next];
+      paintCapabilities();
+    }));
+  };
+  paintCapabilities();
+
+  const profile = document.createElement("input");
+  profile.type = "text";
+  profile.className = "cfg-input";
+  profile.placeholder = "policy profile (validation.default)";
+  profile.setAttribute("aria-label", "Policy profile reference");
+
+  const host = document.createElement("input");
+  host.type = "text";
+  host.className = "cfg-input";
+  host.placeholder = "guest host";
+  host.setAttribute("aria-label", "Guest host");
+  const user = document.createElement("input");
+  user.type = "text";
+  user.className = "cfg-input";
+  user.placeholder = "guest user";
+  user.setAttribute("aria-label", "Guest user");
+  const port = document.createElement("input");
+  port.type = "number";
+  port.className = "cfg-input cfg-input-port";
+  port.placeholder = "port";
+  port.setAttribute("aria-label", "Guest SSH port");
+
+  // The TD gate (F6): studios may forbid creating profile-exception runtimes
+  // outright, in which case the control is ABSENT rather than disabled-and-teasing.
+  const exceptionAllowed = current.managed?.profileExceptionCreation !== "disabled";
+  let profileException = false;
+  const confirmWrap = el("div", "cfg-vr-confirm cfg-hidden");
+  const confirmLabel = el("label", "cfg-vr-confirm-label");
+  confirmLabel.append(document.createTextNode("To create a profile-exception runtime, type "));
+  const confirmToken = el("span", "cfg-confirm-token", "the runtime name");
+  confirmLabel.append(confirmToken);
+  const confirmInput = document.createElement("input");
+  confirmInput.type = "text";
+  confirmInput.className = "cfg-input";
+  confirmInput.placeholder = "type it to confirm";
+  confirmInput.setAttribute("aria-label", "Type the runtime name to confirm");
+  confirmWrap.append(confirmLabel, confirmInput);
+
+  const vmPreview = el("p", "cfg-vr-vmname", "VM name: drydock-validation-…");
+  const create = button("cfg-button", "Create", "Create this validation runtime", () => { submit(); });
+
+  const expectedToken = (): string => name.value.trim().toLowerCase();
+  const confirmSatisfied = (): boolean =>
+    !profileException || (expectedToken().length > 0 && confirmInput.value.trim().toLowerCase() === expectedToken());
+  const refresh = (): void => {
+    const slug = name.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    vmPreview.textContent = `VM name: drydock-validation-${slug.length === 0 ? "…" : slug}`;
+    confirmToken.textContent = name.value.trim().length === 0 ? "the runtime name" : name.value.trim();
+    create.disabled = !confirmSatisfied();
+  };
+  name.addEventListener("input", refresh);
+  confirmInput.addEventListener("input", refresh);
+
+  function submit(): void {
+    const displayName = name.value.trim();
+    const image = allowlist.length > 0 ? imageValue : imageInput.value.trim();
+    const policyProfileRef = profile.value.trim();
+    if (displayName.length === 0 || image.length === 0 || policyProfileRef.length === 0) {
+      notice = "A runtime needs a name, an image and a policy profile.";
+      render();
+      return;
+    }
+    if (!confirmSatisfied()) return;
+    const hostValue = host.value.trim();
+    const userValue = user.value.trim();
+    const portValue = Number(port.value);
+    const connection = hostValue.length > 0 && userValue.length > 0
+      ? {
+          host: hostValue,
+          user: userValue,
+          ...(Number.isFinite(portValue) && portValue > 0 ? { port: portValue } : {})
+        }
+      : undefined;
+    validationMutate({
+      type: "config.validation.createRuntime",
+      displayName,
+      image,
+      lifecycle,
+      capabilities,
+      policyProfileRef,
+      ...(profileException ? { profileException: true } : {}),
+      ...(connection === undefined ? {} : { connection })
+    }, "validation:create");
+  }
+
+  form.append(fieldLine("Name", name));
+  form.append(fieldLine("Image", imageField));
+  form.append(fieldLine("Lifecycle", lifecycleField));
+  const capabilitiesLine = el("div", "cfg-vr-field");
+  capabilitiesLine.append(el("span", "cfg-field-label", "Capabilities"), capabilitiesWrap);
+  form.append(capabilitiesLine);
+  form.append(fieldLine("Policy profile", profile));
+  if (exceptionAllowed) {
+    form.append(fieldLine("Profile exception", toggleField(false, "Profile exception", false, (next) => {
+      profileException = next;
+      confirmWrap.classList.toggle("cfg-hidden", !next);
+      refresh();
+    })));
+    form.append(confirmWrap);
+  }
+  const connectionLine = el("div", "cfg-vr-field");
+  connectionLine.append(el("span", "cfg-field-label", "Connection"), host, user, port);
+  form.append(connectionLine);
+  form.append(vmPreview);
+  const actions = el("div", "cfg-vr-actions");
+  actions.append(create);
+  form.append(actions);
+  refresh();
+  fold.append(form);
+  return fold;
+}
+
+/** F6's association editor: two columns, scrollable, no row = default. */
+function validationAssociations(current: ValidationConfigState): HTMLElement {
+  const wrap = el("div", "cfg-assoc");
+  const head = el("div", "cfg-assoc-head");
+  head.append(el("span", "cfg-assoc-col", "PROJECT"), el("span", "cfg-assoc-col", "RUNTIME"));
+  wrap.append(head);
+  const body = el("div", "cfg-assoc-body");
+  const byProject = new Map(current.associations.map((entry) => [entry.projectRootId, entry]));
+  const projects = [...current.projects];
+  // An association for a project this window cannot see still routes jobs; show
+  // it rather than pretending the table is complete.
+  for (const entry of current.associations) {
+    if (projects.some((project) => project.projectRootId === entry.projectRootId)) continue;
+    projects.push({ projectRootId: entry.projectRootId, label: entry.projectLabel });
+  }
+  if (projects.length === 0) {
+    body.append(el("p", "cfg-empty", "No projects are registered yet — associations appear once a project is known."));
+  }
+  for (const project of projects) {
+    const association = byProject.get(project.projectRootId);
+    const line = el("div", "cfg-assoc-row");
+    const label = el("span", "cfg-assoc-project", middleTruncate(project.label, 32));
+    label.title = project.label;
+    line.append(label);
+    if (association !== undefined && association.pinned === true) {
+      const locked = el("span", "cfg-assoc-locked");
+      const runtime = current.runtimes.find((entry) => entry.runtimeId === association.runtimeId);
+      locked.textContent = `🔒 ${runtime?.displayName ?? association.runtimeId}`;
+      locked.title = `Pinned by ${association.source === "managed" ? "studio policy" : "you"}.`;
+      line.append(locked, chip(association.source === "managed" ? "studio policy" : "personal", "cfg-micro"));
+      body.append(line);
+      continue;
+    }
+    const options = [
+      { value: "", label: "default" },
+      ...activeRuntimes(current).map((entry) => ({ value: entry.runtimeId, label: entry.displayName }))
+    ];
+    const select = selectField(options, association?.runtimeId ?? "", `Runtime for ${project.label}`, (next) => {
+      if (next === "") {
+        validationMutate({ type: "config.validation.clearAssociation", projectRootId: project.projectRootId }, `validation:assoc:${project.projectRootId}`);
+        return;
+      }
+      validationMutate({ type: "config.validation.setAssociation", projectRootId: project.projectRootId, runtimeId: next }, `validation:assoc:${project.projectRootId}`);
+    });
+    if (association === undefined) select.classList.add("cfg-assoc-inherited");
+    line.append(select);
+    body.append(line);
+  }
+  wrap.append(body);
+  return wrap;
+}
+
+/** Topology + warm cap, both honest about a studio pin sitting above them. */
+function validationSettingsRows(current: ValidationConfigState): Row[] {
+  const rows: Row[] = [];
+  const pin = current.managed?.topologyPin;
+  const topologyChips: HTMLElement[] = [];
+  if (pin !== undefined) {
+    const locked = chip("pinned by studio policy", "cfg-lock");
+    locked.title = "Managed policy fixes the topology for this machine.";
+    topologyChips.push(locked);
+  }
+  topologyChips.push(...noteChips("validation:settings"));
+  const selectedPreset = pin ?? current.settings.topologyPreset;
+  const topologyOptions = TOPOLOGY_OPTIONS.map((entry) => ({ value: entry.value as string, label: entry.label }));
+  // A preset this build does not know still renders as itself rather than
+  // silently reading as "single".
+  if (!topologyOptions.some((entry) => entry.value === selectedPreset)) {
+    topologyOptions.unshift({ value: selectedPreset, label: selectedPreset });
+  }
+  const topology = selectField(
+    topologyOptions,
+    selectedPreset,
+    "Topology preset",
+    (next) => { validationMutate({ type: "config.validation.setSettings", topologyPreset: next as ValidationTopologyPreset }, "validation:settings"); }
+  );
+  if (pin !== undefined) topology.disabled = true;
+  rows.push({
+    search: "topology preset single default named per project validation",
+    node: row({
+      title: "Topology",
+      detail: "A starting configuration over one model: named runtimes, a cascade, and one default. Changing it never moves a running job.",
+      chips: topologyChips,
+      control: topology
+    })
+  });
+
+  const studioCap = current.managed?.warmCap;
+  const mine = current.settings.personalWarmCap ?? current.settings.warmCap;
+  const effective = studioCap === undefined
+    ? mine
+    : mine === undefined ? studioCap : Math.min(mine, studioCap);
+  const capChips: HTMLElement[] = [];
+  if (studioCap !== undefined) {
+    const capChip = chip(`studio cap ${String(studioCap)}`, "cfg-lock");
+    capChip.title = "Managed policy caps concurrent warm runtimes; the lower of the two applies.";
+    capChips.push(capChip);
+  }
+  capChips.push(...noteChips("validation:warmcap"));
+  rows.push({
+    search: "warm cap concurrent runtimes ram budget validation",
+    node: row({
+      title: "Warm runtimes at once",
+      detail: effective === undefined
+        ? "No cap. Runtimes past your RAM budget queue behind a boot instead of thrashing."
+        : `Effective cap: ${String(effective)}. Extra runtimes start on demand and report the boot as queue state.`,
+      chips: capChips,
+      control: textField(mine === undefined ? "" : String(mine), { kind: "number", label: "Warm cap", min: 0 }, (next) => {
+        const trimmed = next.trim();
+        if (trimmed.length === 0) {
+          validationMutate({ type: "config.validation.setSettings", warmCap: null }, "validation:warmcap");
+          return;
+        }
+        const parsed = Number(trimmed);
+        if (!Number.isFinite(parsed) || parsed < 0) return;
+        validationMutate({ type: "config.validation.setSettings", warmCap: parsed }, "validation:warmcap");
+      })
+    })
+  });
+  return rows;
+}
+
+function validationRows(): Row[] {
+  const current = validation;
+  if (current === null) {
+    return [{
+      search: "validation runtimes",
+      node: row({
+        title: "Validation runtimes",
+        detail: validationNotice ?? "Reading validation runtimes…",
+        className: "cfg-row-readonly"
+      })
+    }];
+  }
+  // A host without Hyper-V gets ONE calm line and nothing else to read.
+  if (current.hostSupported === false) {
+    return [{
+      search: "validation runtimes windows hyper-v",
+      node: el("p", "cfg-empty", "Validation runtimes need a Windows host with Hyper-V.")
+    }];
+  }
+  const rows: Row[] = [];
+  if (current.quarantines.length > 0) {
+    rows.push({ search: "quarantine validation runtime blocked isolation", node: quarantineBanner(current) });
+  }
+  const list = el("div", "cfg-vr-list");
+  for (const runtime of current.runtimes) list.append(validationRuntimeRow(current, runtime));
+  if (current.runtimes.length === 0) {
+    list.append(el("p", "cfg-empty", "No runtimes yet. The first one you add becomes the default."));
+  }
+  rows.push({
+    search: `validation runtimes ${current.runtimes.map((entry) => `${entry.displayName} ${entry.image} ${entry.policyProfileRef}`).join(" ")}`,
+    node: list
+  });
+  rows.push({ search: "add validation runtime create named", node: validationCreateFold(current) });
+  rows.push({
+    search: `association editor project runtime ${current.projects.map((entry) => entry.label).join(" ")}`,
+    node: row({
+      title: "Project associations",
+      detail: "Resolution per job: chat or task override → this table → the default. A project with no row simply uses the default.",
+      below: validationAssociations(current)
+    })
+  });
+  rows.push(...validationSettingsRows(current));
+  return rows;
+}
+
 /** Every section's rows, plus the extras that are not searchable rows. */
-function sectionRows(current: ConfigState, target: ConfigSection): Row[] {
+function sectionRows(current: ConfigState, target: Section): Row[] {
   switch (target) {
     case "providers": return providerRows(current);
     case "mcp": return mcpRows(current);
@@ -957,12 +1707,13 @@ function sectionRows(current: ConfigState, target: ConfigSection): Row[] {
     case "recipes": return recipeSectionRows(current);
     case "memories": return memoryRows(current);
     case "runtime": return settingRows(settingsFor(current, "runtime"));
+    case "validation": return validationRows();
     case "security": return settingRows(settingsFor(current, "security"));
   }
 }
 
 /** The dim sentence under a section heading; the section's whole promise. */
-function sectionIntro(target: ConfigSection): string {
+function sectionIntro(target: Section): string {
   switch (target) {
     case "providers": return "Where the models come from. Sign-in happens in a terminal so no credential passes through Drydock.";
     case "mcp": return "Extra tools agents can call. Servers run INSIDE the sandbox under the same no-egress policy as the agent, and changes apply on each chat's next turn.";
@@ -971,11 +1722,12 @@ function sectionIntro(target: ConfigSection): string {
     case "recipes": return "Templates and planning aspects. Run a recipe from the Task Board; edit aspects in the Planner.";
     case "memories": return "What Drydock remembers between sessions: approved notes ride matching briefings by scope and tag. Agent proposals wait here for your review.";
     case "runtime": return "How Drydock runs its own tools on this machine.";
+    case "validation": return "Where validation jobs run: named Windows runtimes, one default, and the project associations that route to them. Developers never need this page — their whole surface is the rail dot.";
     case "security": return "What AI may reach. These are the strongest guarantees Drydock makes; most take effect on the next window.";
   }
 }
 
-function sectionCount(current: ConfigState, target: ConfigSection): number | null {
+function sectionCount(current: ConfigState, target: Section): number | null {
   switch (target) {
     case "providers": return current.providers.length;
     case "mcp": return current.mcp.length;
@@ -983,6 +1735,7 @@ function sectionCount(current: ConfigState, target: ConfigSection): number | nul
     case "recipes": return current.recipes.length + current.aspects.length;
     // The actionable number: proposals waiting for review, not the store size.
     case "memories": return pendingMemoryCount() > 0 ? pendingMemoryCount() : null;
+    case "validation": return validation === null ? null : validation.runtimes.length;
     default: return null;
   }
 }
@@ -1046,7 +1799,7 @@ function nav(current: ConfigState | null): HTMLElement {
   const list = el("nav", "cfg-nav");
   list.setAttribute("aria-label", "Configuration sections");
   const needsLogin = current?.providers.some((provider) => provider.authStatus === "needs-login") === true;
-  for (const target of CONFIG_SECTIONS) {
+  for (const target of SECTIONS) {
     const node = button(
       `cfg-nav-item${section === target && query.trim().length === 0 ? " active" : ""}`,
       SECTION_LABELS[target],
@@ -1067,6 +1820,11 @@ function nav(current: ConfigState | null): HTMLElement {
     if (target === "memories" && pendingMemoryCount() > 0) {
       const dot = el("span", "cfg-nav-dot");
       dot.title = "An agent's proposed memory is waiting for your review.";
+      node.append(dot);
+    }
+    if (target === "validation" && validation !== null && validation.quarantines.length > 0) {
+      const dot = el("span", "cfg-nav-dot");
+      dot.title = "A validation runtime is quarantined and its queue is blocked.";
       node.append(dot);
     }
     const count = current === null ? null : sectionCount(current, target);
@@ -1125,9 +1883,13 @@ function renderContent(): void {
     content.append(el("p", "cfg-footnote",
       "Nothing an agent proposes becomes standing context until you approve it here. Memories live in Drydock's local store on this machine, never in the repository."));
   }
+  if (section === "validation" && validation !== null && validation.hostSupported !== false) {
+    content.append(el("p", "cfg-footnote",
+      "Validation runtimes never reach production paths: fixtures are snapshots taken at approval, and a runtime that fails its isolation probes blocks its own queue rather than the fleet."));
+  }
 }
 
-function emptyLabel(target: ConfigSection, current: ConfigState): string {
+function emptyLabel(target: Section, current: ConfigState): string {
   switch (target) {
     case "mcp": return "No MCP servers yet. Add one below, or point drydock.mcp.configPath at an .mcp.json.";
     case "preprompts": return scope === "project" && current.projectLabel !== undefined
@@ -1135,6 +1897,7 @@ function emptyLabel(target: ConfigSection, current: ConfigState): string {
       : "No standing instructions file is configured.";
     case "recipes": return "No recipes or planning aspects yet.";
     case "providers": return "No providers are registered in this build.";
+    case "validation": return "No validation runtimes yet. Add one below — the first becomes the default.";
     default: return "Nothing to configure here yet.";
   }
 }
@@ -1142,7 +1905,7 @@ function emptyLabel(target: ConfigSection, current: ConfigState): string {
 /** Search flattens every section into one grouped list. */
 function renderSearch(current: ConfigState, trimmed: string): void {
   let matches = 0;
-  for (const target of CONFIG_SECTIONS) {
+  for (const target of SECTIONS) {
     const hits = sectionRows(current, target).filter((entry) => entry.search.toLowerCase().includes(trimmed));
     if (hits.length === 0) continue;
     matches += hits.length;
@@ -1166,13 +1929,21 @@ function render(): void {
 // ---------------------------------------------------------------------------
 
 const persisted = restore();
-if (persisted.section !== undefined && (CONFIG_SECTIONS as readonly string[]).includes(persisted.section)) {
+if (persisted.section !== undefined && (SECTIONS as readonly string[]).includes(persisted.section)) {
   section = persisted.section;
 }
 if (persisted.scope === "global" || persisted.scope === "project") scope = persisted.scope;
 
 startMessaging();
 onPush("config.changed", () => { scheduleRefresh(); });
+// Validation pushes are not in PanelPushPayload until M7a lands; the cast is
+// confined to this one subscribe helper. Both kinds mean the same thing here:
+// the registry moved, refetch it.
+function onValidationPush(type: "validation.changed" | "validation.quarantine", handler: () => void): void {
+  onPush(type as never, handler as never);
+}
+onValidationPush("validation.changed", () => { scheduleRefresh(); });
+onValidationPush("validation.quarantine", () => { scheduleRefresh(); });
 // A new agent proposal lands in the approval list (and the nav count) live.
 onPush("memory.candidateAdded", (payload) => {
   upsertMemoryCandidate(payload.candidate);

@@ -11,6 +11,10 @@ authoritative today.
 1. Create a Gen 2 VM named `drydock-validation-<name>` — `drydock-validation-default`
    for the default runtime. Inventory reconciles on that prefix, so the name is
    not cosmetic. Rename in the product instead of in Hyper-V (edge case H5).
+   *As shipped in M7a the product DERIVES the VM name from the runtime's display
+   name (lowercased, non-alphanumerics collapsed to `-`), so a rename currently
+   expects a matching VM rename too; the runtime row shows the exact name it
+   will look for. Capturing the name at adopt time is an open M8b item.*
 2. Attach **only** the internal switch (`drydock-internal`). No Default Switch,
    no external adapter, no gateway, no DNS. Give the guest a static address on
    the internal subnet; the host vNIC is its only route.

@@ -536,6 +536,26 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     case "config.provider.signIn":
     case "config.provider.setDefaultModel":
     case "config.openFile":
+    // Validation runtimes (ADR 0022): the registry is real machine
+    // configuration and the job queue is real evidence - Demo mode fabricates
+    // neither. The surfaces degrade quietly (no chips, no rail dot) on error.
+    case "config.validation.state":
+    case "config.validation.createRuntime":
+    case "config.validation.updateRuntime":
+    case "config.validation.deleteRuntime":
+    case "config.validation.setDefault":
+    case "config.validation.setSettings":
+    case "config.validation.setAssociation":
+    case "config.validation.clearAssociation":
+    case "config.validation.runProbes":
+    case "config.validation.adopt":
+    case "config.validation.revertReprobe":
+    case "validation.jobs":
+    case "validation.abortJob":
+    case "validation.requeue":
+    case "validation.setTaskRuntime":
+    case "validation.railStatus":
+    case "validation.run":
       return error(requestId);
     case "taskBoard.open":
     case "agents.open":

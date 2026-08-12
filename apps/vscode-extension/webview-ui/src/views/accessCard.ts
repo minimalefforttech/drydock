@@ -16,6 +16,14 @@
  * segment, so a post-arm path change re-gates the confirmation. Deny is always
  * one click.
  *
+ * Production fixtures (ADR 0022, ux-flows F3) are the same card in three
+ * lines: `Production file → snapshot` + tier badge, the file line, and the
+ * SAME typed confirm this module already owns (production forces the escalated
+ * path; the token stays the basename and the placeholder stays generic). The
+ * mechanics - copied at approval, hash recorded, expires with the session,
+ * wiped between jobs, no write-back - sit behind `ⓘ how snapshots work`,
+ * because the decision only needs two facts: what file, and where from.
+ *
  * SECURITY: all dynamic strings (path, reason, mode, expected segment) render
  * via textContent - never innerHTML.
  */
@@ -23,6 +31,7 @@
 import type { AccessRequestSummary } from "@drydock/contracts";
 import { button, card, chip, el, textInput } from "../components.js";
 import { request } from "../messaging.js";
+import { baseName, dirName, middleTruncate, type AccessProductionFields } from "../validationTypes.js";
 
 export interface AccessCardCallbacks {
   /** Called once the resolve request completes successfully (approve or deny). */
@@ -38,6 +47,35 @@ function basename(path: string): string {
 }
 
 /**
+ * `ⓘ how snapshots work` - the mechanics, on request only. Answers the one
+ * question the card cannot afford a line for: what am I actually agreeing to?
+ */
+function snapshotDetails(access: AccessRequestSummary): HTMLElement {
+  const details = document.createElement("details");
+  details.className = "access-snapshot";
+  const summary = document.createElement("summary");
+  summary.className = "access-snapshot-summary";
+  summary.textContent = "ⓘ how snapshots work";
+  details.append(summary);
+  const body = el("div", "access-snapshot-body");
+  for (const line of [
+    "Copied once at approval — never a mount, never live. The content hash is recorded in the grants ledger.",
+    `The run sees it at the same path (${access.displayPath}), backed by job-scoped content.`,
+    "Expires with this session · wiped between jobs · recorded in every validation receipt it feeds.",
+    "There is no write-back: nothing the run produces can reach the production copy."
+  ]) {
+    const node = el("div", "access-snapshot-line");
+    node.textContent = line;
+    body.append(node);
+  }
+  const requester = el("div", "access-snapshot-line");
+  requester.textContent = `Requested for: ${access.reason}`;
+  body.append(requester);
+  details.append(body);
+  return details;
+}
+
+/**
  * Builds one access-request card. `extraClass` lets callers add a container
  * class (e.g. `access-card` for the inline chat variant) without duplicating
  * the rest of the markup/behavior.
@@ -47,15 +85,23 @@ export function buildAccessCard(
   callbacks: AccessCardCallbacks,
   extraClass = ""
 ): HTMLElement {
-  // A request escalates when it widens host reach (rw) or reads a
-  // sensitive-looking path (credentials/keys/env). Both get the typed confirm.
-  const escalated = access.mode === "read-write" || access.sensitive === true;
-  const c = card(`attention-card ${extraClass}${escalated ? " access-escalated" : ""}`.trim());
+  // A production-tier path is a FIXTURE decision, not a mount decision: the
+  // policy forbids the mount outright, so approval means "snapshot it".
+  const production = (access as AccessProductionFields).production === true;
+  // A request escalates when it widens host reach (rw), reads a
+  // sensitive-looking path (credentials/keys/env), or is production tier. All
+  // get the same typed confirm.
+  const escalated = production || access.mode === "read-write" || access.sensitive === true;
+  const c = card(`attention-card ${extraClass}${escalated ? " access-escalated" : ""}${production ? " access-production" : ""}`.trim());
 
   const title = el("div", "attention-title");
-  title.textContent = "Agent requests access";
+  title.textContent = production ? "Production file → snapshot" : "Agent requests access";
 
-  const modeChip = chip(access.mode === "read-write" ? "rw" : "ro");
+  const modeChip = production ? chip("production") : chip(access.mode === "read-write" ? "rw" : "ro");
+  if (production) {
+    modeChip.classList.add("chip-production");
+    modeChip.title = "Production tier: approving copies the file into this session, never mounts it.";
+  }
 
   const headerRow = el("div", "access-card-header");
   headerRow.append(title, modeChip);
@@ -68,7 +114,7 @@ export function buildAccessCard(
   pathInput.value = access.displayPath;
 
   const actions = el("div", "card-actions");
-  const approve = button("Allow", "small primary");
+  const approve = button(production ? "Approve snapshot" : "Allow", "small primary");
   const deny = button("Deny", "ghost small");
   actions.append(approve, deny);
 
@@ -100,7 +146,32 @@ export function buildAccessCard(
 
   deny.addEventListener("click", () => send(false));
 
-  c.append(headerRow, reason, pathInput);
+  if (production) {
+    // Three lines, and that is the whole card. `pathInput` stays OUT of the
+    // DOM but keeps its value, so the typed-confirm machinery below (which
+    // derives the token from the current path) is untouched - and the path
+    // itself is not editable on a production request.
+    const fileLine = el("div", "access-file-line");
+    const base = baseName(access.displayPath);
+    const size = (access as AccessProductionFields).sizeLabel;
+    const folder = dirName(access.displayPath);
+    const name = el("span", "access-file-name");
+    name.textContent = middleTruncate(base, 40);
+    name.title = base;
+    fileLine.append(name);
+    if (size !== undefined && size.length > 0) {
+      const sizeNode = el("span", "access-file-size");
+      sizeNode.textContent = `· ${size}`;
+      fileLine.append(sizeNode);
+    }
+    const folderNode = el("span", "access-file-folder");
+    folderNode.textContent = folder.length === 0 ? "" : `· ${middleTruncate(folder, 44)}`;
+    folderNode.title = access.displayPath;
+    fileLine.append(folderNode);
+    c.append(headerRow, fileLine, snapshotDetails(access));
+  } else {
+    c.append(headerRow, reason, pathInput);
+  }
 
   if (!escalated) {
     // Plain read-only, non-sensitive: unchanged one-click Allow.
@@ -116,7 +187,12 @@ export function buildAccessCard(
   // generic line) and append the exposure phrase; a plain rw grant states the
   // write exposure. All strings render via textContent.
   const warning = el("div", "access-warning");
-  if (access.sensitive === true) {
+  if (production) {
+    // The production card spends its whole friction budget on the typed
+    // confirm (F3); a warning line would be a fourth line saying what the
+    // badge already says.
+    warning.textContent = "";
+  } else if (access.sensitive === true) {
     const exposure = access.mode === "read-write" ? "writes to your machine" : "readable by the model";
     warning.textContent = access.sensitiveReason !== undefined && access.sensitiveReason.length > 0
       ? `${access.sensitiveReason} - ${exposure}`
@@ -124,7 +200,8 @@ export function buildAccessCard(
   } else {
     warning.textContent = "writes to your machine";
   }
-  c.insertBefore(warning, pathInput);
+  // The production variant has no warning line and no path input to sit above.
+  if (!production) c.insertBefore(warning, pathInput);
 
   // The typed-confirm block is hidden until Allow arms it. The label NAMES the
   // exact token to type - the current path's final segment in a monospace span

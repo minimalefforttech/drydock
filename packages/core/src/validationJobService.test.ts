@@ -26,12 +26,14 @@ import type {
   ValidationJobPatch,
   ValidationJobRequest,
   ValidationProfile,
+  ValidationQuarantineRecord,
   ValidationReceipt,
   ValidationReceiptId,
   ValidationRegistrySettings,
   ValidationRegistrySettingsUpdate,
   ValidationRuntimeId,
   ValidationRuntimeStore,
+  TaskId,
   WorkspaceRootId
 } from "@drydock/contracts";
 import { ProductEventBus } from "./eventBus.js";
@@ -41,6 +43,7 @@ import {
   summarizeRun,
   ValidationJobService,
   VALIDATION_CLEANUP_GUEST_SCRIPT,
+  VALIDATION_FIXTURE_GUEST_SCRIPT,
   VALIDATION_RUN_GUEST_SCRIPT,
   VALIDATION_SYNC_GUEST_SCRIPT,
   validationGuestCommand,
@@ -103,6 +106,29 @@ class MemoryValidationStore implements ValidationRuntimeStore {
 
   async setSettings(update: ValidationRegistrySettingsUpdate): Promise<void> {
     this.settings = { ...this.settings, ...update } as ValidationRegistrySettings;
+  }
+
+  // M7's KV additions: the job service never reads either, so the fake keeps
+  // them as plain maps rather than pretending to durability it does not need.
+  readonly taskOverrides = new Map<string, ValidationRuntimeId>();
+  readonly quarantines = new Map<string, ValidationQuarantineRecord>();
+
+  async getTaskOverride(taskId: TaskId): Promise<ValidationRuntimeId | null> {
+    return this.taskOverrides.get(String(taskId)) ?? null;
+  }
+
+  async setTaskOverride(taskId: TaskId, runtimeId: ValidationRuntimeId | null): Promise<void> {
+    if (runtimeId === null) this.taskOverrides.delete(String(taskId));
+    else this.taskOverrides.set(String(taskId), runtimeId);
+  }
+
+  async getQuarantine(runtimeId: ValidationRuntimeId): Promise<ValidationQuarantineRecord | null> {
+    return this.quarantines.get(String(runtimeId)) ?? null;
+  }
+
+  async setQuarantine(runtimeId: ValidationRuntimeId, payload: ValidationQuarantineRecord | null): Promise<void> {
+    if (payload === null) this.quarantines.delete(String(runtimeId));
+    else this.quarantines.set(String(runtimeId), payload);
   }
 
   async insertJob(record: ValidationJob): Promise<void> {
@@ -169,6 +195,7 @@ interface RunHooks {
 interface AdapterScript {
   ensureRunning?: () => Promise<void>;
   sync?: (input: SyncInput) => Partial<CommandResult>;
+  fixtures?: (input: FixtureInput) => Partial<CommandResult>;
   run?: (hooks: RunHooks) => Promise<Partial<CommandResult>>;
 }
 
@@ -184,11 +211,18 @@ interface RunInput {
   readonly cwd: string;
 }
 
+interface FixtureInput {
+  readonly jobRoot: string;
+  readonly jobId: string;
+  readonly fixtures: readonly { readonly relativePath: string; readonly contentBase64: string }[];
+}
+
 class FakeAdapter implements ValidationExecAdapter {
   readonly kinds: string[] = [];
   readonly swept: string[] = [];
   ensureRunningCalls = 0;
   syncInput: SyncInput | undefined;
+  fixtureInput: FixtureInput | undefined;
   runInput: RunInput | undefined;
   cleanupInput: { jobRoot: string; keepJobId: string } | undefined;
 
@@ -217,6 +251,11 @@ class FakeAdapter implements ValidationExecAdapter {
       this.kinds.push("sync");
       this.syncInput = input as SyncInput;
       return commandResult(this.script.sync?.(this.syncInput) ?? { stdout: '{"ok":true,"applied":[],"failures":[]}' });
+    }
+    if (script === VALIDATION_FIXTURE_GUEST_SCRIPT) {
+      this.kinds.push("fixtures");
+      this.fixtureInput = input as FixtureInput;
+      return commandResult(this.script.fixtures?.(this.fixtureInput) ?? { stdout: '{"ok":true,"written":[],"failures":[]}' });
     }
     if (script === VALIDATION_RUN_GUEST_SCRIPT) {
       this.kinds.push("run");
@@ -891,6 +930,83 @@ test("receipts carry mirror freshness, probe greenness, and the fixture hash whe
   } finally {
     await rm(mirrorRoot, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Approved fixtures (A1/A6): copies, shipped after the changeset
+// ---------------------------------------------------------------------------
+
+test("approved fixtures ship after the patches, as their own exec, before the run", async () => {
+  const adapter = new FakeAdapter();
+  const bench = harness({ adapters: { default: adapter } });
+  const job = await bench.service.enqueue(request({
+    fixtures: [
+      { relativePath: "hero_rig.ma", contentBase64: Buffer.from("maya ascii", "utf8").toString("base64") },
+      { relativePath: "sets/shotA.json", contentBase64: Buffer.from("{}", "utf8").toString("base64") }
+    ],
+    fixtureManifestHash: "fixture-abc"
+  }));
+  await bench.service.whenIdle();
+  assert.ok(job);
+
+  // Order is the contract: workspace, then fixtures, then the suite.
+  assert.deepEqual(adapter.kinds, ["cleanup", "sync", "fixtures", "run"]);
+  assert.equal(adapter.fixtureInput?.jobId, job.jobId);
+  assert.equal(adapter.fixtureInput?.jobRoot, "C:\\drydock\\jobs");
+  assert.deepEqual(
+    adapter.fixtureInput?.fixtures.map((entry) => entry.relativePath),
+    ["hero_rig.ma", "sets/shotA.json"]
+  );
+  assert.equal(
+    Buffer.from(adapter.fixtureInput?.fixtures[0]?.contentBase64 ?? "", "base64").toString("utf8"),
+    "maya ascii"
+  );
+  // The manifest hash rides onto the receipt so evidence records what it saw.
+  assert.equal((await bench.store.getReceiptByJob(job.jobId))?.fixtureManifestHash, "fixture-abc");
+});
+
+test("a job with no fixtures never runs the fixture exec at all", async () => {
+  const adapter = new FakeAdapter();
+  const bench = harness({ adapters: { default: adapter } });
+  await bench.service.enqueue(request());
+  await bench.service.whenIdle();
+  assert.deepEqual(adapter.kinds, ["cleanup", "sync", "run"]);
+  assert.equal(adapter.fixtureInput, undefined);
+});
+
+test("a fixture path that leaves the fixture directory is refused before the guest sees it", async () => {
+  const adapter = new FakeAdapter();
+  const bench = harness({ adapters: { default: adapter } });
+  const job = await bench.service.enqueue(request({
+    fixtures: [{ relativePath: "../../windows/system32/evil.dll", contentBase64: "AA==" }]
+  }));
+  await bench.service.whenIdle();
+  assert.ok(job);
+  assert.deepEqual(adapter.kinds, ["cleanup", "sync"], "nothing was written and nothing ran");
+  // Infrastructure error, not a test verdict: the suite never expressed one.
+  assert.equal((await bench.store.getJob(job.jobId))?.state, "failed");
+  const receipt = await bench.store.getReceiptByJob(job.jobId);
+  assert.equal(receipt?.verdict, "error");
+  assert.match(receipt?.summary ?? "", /fixture paths must stay inside the job's fixture directory/);
+});
+
+test("fixtures that do not land fail the job instead of running the suite without them", async () => {
+  const adapter = new FakeAdapter({
+    fixtures: () => ({
+      exitCode: 1,
+      stdout: '{"ok":false,"written":[],"failures":[{"relativePath":"hero_rig.ma","detail":"access denied"}]}'
+    })
+  });
+  const bench = harness({ adapters: { default: adapter } });
+  const job = await bench.service.enqueue(request({
+    fixtures: [{ relativePath: "hero_rig.ma", contentBase64: "AA==" }]
+  }));
+  await bench.service.whenIdle();
+  assert.ok(job);
+  assert.deepEqual(adapter.kinds, ["cleanup", "sync", "fixtures"]);
+  const receipt = await bench.store.getReceiptByJob(job.jobId);
+  assert.equal(receipt?.verdict, "error");
+  assert.match(receipt?.summary ?? "", /approved fixtures did not land in "default": hero_rig\.ma: access denied/);
 });
 
 test("evidence whose working set moved on is marked superseded (D2)", async () => {

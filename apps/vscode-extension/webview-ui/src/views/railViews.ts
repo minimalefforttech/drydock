@@ -22,6 +22,7 @@ import {
   subtaskRollupStatus,
   type AgentQuestionSummary,
   type ChatSessionSummary,
+  type PanelRequestPayload,
   type RecentChatSummary,
   type TaskRollupStatus,
   type WorkspacePolicyState,
@@ -29,6 +30,7 @@ import {
   type WorkTaskSummary
 } from "@drydock/contracts";
 import { onPush, request, vscode } from "../railMessaging.js";
+import type { ValidationRailDot, ValidationRequest, ValidationResponseEnvelope } from "../validationTypes.js";
 
 export type RailView = "tasks" | "recents" | "workspaces";
 
@@ -132,6 +134,35 @@ async function fetchActiveTaskId(): Promise<string | null> {
   return response.ok && response.payload.type === "active.get" ? response.payload.activeTaskId : null;
 }
 
+/**
+ * The validation kinds are not in `PanelRequestPayload` until M7a lands; the
+ * cast lives here and everything downstream is typed against the mirror.
+ */
+function validationRequest(payload: ValidationRequest): Promise<ValidationResponseEnvelope> {
+  return request(payload as unknown as PanelRequestPayload) as unknown as Promise<ValidationResponseEnvelope>;
+}
+
+/**
+ * The developer's ENTIRE validation surface (ux-flows F4): one L0 dot whose
+ * hover says one line. A host without validation answers nothing, and the dot
+ * stays absent rather than inventing a state.
+ */
+async function fetchValidationRail(): Promise<{ readonly dot: ValidationRailDot; readonly line: string }> {
+  const response = await validationRequest({ type: "validation.railStatus" });
+  if (response.ok && response.payload.type === "validation.railStatus") {
+    return { dot: response.payload.dot, line: response.payload.line };
+  }
+  return { dot: "none", line: "" };
+}
+
+/** Rail dots speak the task roll-up vocabulary; validation maps into it. */
+const VALIDATION_DOT_STATUS: Record<Exclude<ValidationRailDot, "none">, TaskRollupStatus> = {
+  ok: "done",
+  running: "running",
+  failed: "failed",
+  blocked: "awaiting"
+};
+
 /** Moves the spine. Everything else (hub, chat rail, panels) follows the push. */
 function setActiveTask(taskId: string): void {
   void request({ type: "active.set", taskId });
@@ -183,6 +214,9 @@ function createTasksView(): RailMount {
   let sets: readonly WorkspaceSetSummary[] = [];
   let activeTaskId: string | null = null;
   const turnActive = new Set<string>();
+  /** Validation's L0: the dot follows the CURRENT task's resolved runtime. */
+  let validationDot: ValidationRailDot = "none";
+  let validationLine = "";
 
   function persist(): void {
     vscode.setState({ expandedTaskIds: [...expanded], earlierOpen, expandedSetIds: persisted.expandedSetIds ?? [] });
@@ -313,6 +347,15 @@ function createTasksView(): RailMount {
       .sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1));
 
     const children: HTMLElement[] = [];
+    // L0 ambient: a word's worth of state, and the one line lives in the
+    // hover. `none` renders nothing at all - no validation, no furniture.
+    if (validationDot !== "none") {
+      const strip = el("div", "rail-status");
+      strip.append(el("span", `dot dot-${VALIDATION_DOT_STATUS[validationDot]}`));
+      strip.append(el("span", "rail-status-label", "DCC"));
+      strip.title = validationLine;
+      children.push(strip);
+    }
     if (cluster.length > 0) {
       const section = el("section", "rail-cluster");
       section.append(el("div", "rail-section-label", "Needs you"));
@@ -363,18 +406,21 @@ function createTasksView(): RailMount {
   }
 
   async function refresh(): Promise<void> {
-    const [nextTasks, nextSessions, nextQuestions, workspace, active] = await Promise.all([
+    const [nextTasks, nextSessions, nextQuestions, workspace, active, rail] = await Promise.all([
       fetchTasks(),
       fetchSessions(),
       fetchQuestions(),
       fetchWorkspaceState(),
-      fetchActiveTaskId()
+      fetchActiveTaskId(),
+      fetchValidationRail()
     ]);
     tasks = nextTasks;
     sessions = nextSessions;
     questions = nextQuestions;
     sets = workspace?.workspaceSets ?? [];
     activeTaskId = active;
+    validationDot = rail.dot;
+    validationLine = rail.line;
     render();
   }
 
@@ -401,9 +447,18 @@ function createTasksView(): RailMount {
       onPush("task.updated", scheduleRefresh);
       onPush("task.deleted", scheduleRefresh);
       onPush("board.changed", scheduleRefresh);
+      // Validation heals off the same debounced refresh as everything else -
+      // the dot is derived state, and nothing here polls.
+      onValidationPush("validation.jobChanged", scheduleRefresh);
+      onValidationPush("validation.changed", scheduleRefresh);
       void refresh();
     }
   };
+}
+
+/** Push kinds land in `PanelPushPayload` with M7a; the cast is confined here. */
+function onValidationPush(type: "validation.jobChanged" | "validation.changed", handler: () => void): void {
+  onPush(type as never, handler as never);
 }
 
 // ---------------------------------------------------------------------------

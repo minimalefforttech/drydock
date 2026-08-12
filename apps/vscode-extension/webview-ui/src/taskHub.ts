@@ -26,6 +26,7 @@ import {
   type HubAttentionItem,
   type HubChatSummary,
   type HubState,
+  type PanelRequestPayload,
   type PanelSurface,
   type PlanSummary,
   type RuntimeSummary,
@@ -35,6 +36,13 @@ import {
 import { composerContextFor, createComposer } from "./hubComposer.js";
 import { icon } from "./hubIcons.js";
 import { onPush, request, startMessaging, vscode } from "./hubMessaging.js";
+import {
+  middleTruncate,
+  quarantineSentence,
+  type HubValidationFields,
+  type ValidationRequest,
+  type ValidationResponseEnvelope
+} from "./validationTypes.js";
 
 /** How long the transient back-chip stays up after a retarget (design: ~6s). */
 const BACK_CHIP_MS = 6_000;
@@ -132,6 +140,14 @@ function setActiveTask(target: string | null): void {
   void request({ type: "active.set", taskId: target });
 }
 
+/**
+ * The validation kinds are not in `PanelRequestPayload` until M7a lands; the
+ * cast lives here and everything downstream is typed against the mirror.
+ */
+function validationRequest(payload: ValidationRequest): Promise<ValidationResponseEnvelope> {
+  return request(payload as unknown as PanelRequestPayload) as unknown as Promise<ValidationResponseEnvelope>;
+}
+
 // ---------------------------------------------------------------------------
 // Webview-local persisted state
 // ---------------------------------------------------------------------------
@@ -166,6 +182,13 @@ let backChipNode: HTMLElement | null = null;
 let refreshTimer: number | undefined;
 /** Guards against an in-flight fetch for a task the spine has already left. */
 let fetchToken = 0;
+/**
+ * The F5 quarantine incident, push-driven (v1 `hub.state` does not carry it).
+ * It is PERSISTENT for the panel's lifetime - never auto-dismissed, never
+ * dismissable - and clears only when a `validation.changed` push is followed by
+ * a rail status that no longer reads `blocked`.
+ */
+let quarantine: { readonly displayName: string; readonly probeId: string; readonly detail: string; readonly at: string } | null = null;
 /** A refetch arrived while the composer held focus; it runs when the card frees. */
 let refreshDeferred = false;
 
@@ -313,6 +336,9 @@ function isUntouched(state: HubState): boolean {
 function render(): void {
   const children: HTMLElement[] = [];
   backChipNode = null;
+  // The incident owns the top of the panel until it is resolved - above the
+  // back-chip, above the header, above everything the task itself says.
+  if (quarantine !== null) children.push(buildQuarantineBanner(quarantine));
   if (backChipUntil > Date.now() && previousTaskId !== null) {
     backChipNode = buildBackChip();
     children.push(backChipNode);
@@ -347,6 +373,34 @@ function render(): void {
   }
   children.push(buildSystemCard(state));
   root.replaceChildren(...children);
+}
+
+/**
+ * F5's banner on the task hub. Same sentence as the Configure panel's, one
+ * action, and no dismiss: a quarantine owns the truth until a TD resolves it.
+ */
+function buildQuarantineBanner(entry: { readonly displayName: string; readonly probeId: string; readonly detail: string; readonly at: string }): HTMLElement {
+  const banner = el("section", "hub-quarantine");
+  banner.setAttribute("role", "alert");
+  const head = el("div", "hub-quarantine-head");
+  const name = el("span", "hub-quarantine-name", entry.displayName);
+  name.title = `${entry.displayName} · probe ${entry.probeId}`;
+  head.append(name, el("span", "hub-chip quiet", entry.probeId));
+  banner.append(head);
+  banner.append(el("p", "hub-quarantine-line", quarantineSentence(entry.detail, entry.at)));
+  const actions = el("div", "hub-quarantine-actions");
+  actions.append(button("hub-chip-action", "Open Configure", "Open Configure › Validation runtimes", () => {
+    // `configure` is not a PanelSurface yet (see the M7b report's DRIFT note);
+    // when the host refuses, the banner says how to get there instead of
+    // leaving a dead button.
+    void request({ type: "panel.openSurface", surface: "configure" as PanelSurface }).then((response) => {
+      if (response.ok) return;
+      notice = "Open Configure › Validation runtimes from the Command Palette (Drydock: Configure).";
+      render();
+    });
+  }));
+  banner.append(actions);
+  return banner;
 }
 
 function buildBackChip(): HTMLElement {
@@ -393,9 +447,58 @@ function buildHeader(state: HubState, allDone: boolean): HTMLElement {
   if (state.workspaceName !== undefined) {
     titleWrap.append(el("span", "hub-chip", state.workspaceName));
   }
+  // Routing furniture appears ONLY when routing differs from the default (F6).
+  const validation = state as HubState & HubValidationFields;
+  if (validation.validationRuntimeLabel !== undefined) {
+    titleWrap.append(buildRuntimePicker(state.task.taskId, validation));
+  }
   band.append(titleWrap, buildLinks(state), buildOverflow(state));
   header.append(band, buildMetaLine(state));
   return header;
+}
+
+/**
+ * F6's quiet task-header picker: `runs on production_tester ▾`. Present only
+ * when the task's runtime differs from the default, so the common case carries
+ * no routing furniture at all. Choosing `default` clears the override.
+ */
+function buildRuntimePicker(taskId_: string, validation: HubValidationFields): HTMLElement {
+  const label = validation.validationRuntimeLabel ?? "";
+  const picker = document.createElement("details");
+  picker.className = "hub-runtime-picker";
+  const summary = document.createElement("summary");
+  summary.className = "hub-chip quiet hub-runtime-summary";
+  summary.textContent = `runs on ${middleTruncate(label, 24)} ▾`;
+  summary.title = `Validation for this task runs on ${label}. The default runs everything else.`;
+  picker.append(summary);
+  const menu = el("div", "hub-runtime-menu");
+  const choose = (runtimeId?: string): void => {
+    picker.open = false;
+    void validationRequest({
+      type: "validation.setTaskRuntime",
+      taskId: taskId_,
+      ...(runtimeId === undefined ? {} : { runtimeId })
+    }).then((response) => {
+      if (!response.ok) {
+        notice = response.error.message;
+        render();
+        return;
+      }
+      // The label is derived host-side (it only shows when it differs from the
+      // default), so the refetch - not a local guess - decides what shows.
+      void load();
+    });
+  };
+  // Clearing the override is NOT the same as pinning the runtime that happens
+  // to be the default today, so the entry says which one it is.
+  menu.append(button("hub-menu-item", "default (follow the cascade)", "Clear this task's override - route by project association, then the default", () => choose()));
+  for (const runtime of validation.validationRuntimes ?? []) {
+    menu.append(button("hub-menu-item", runtime.displayName, `Run this task's validation on ${runtime.displayName}`, () => {
+      choose(runtime.runtimeId);
+    }));
+  }
+  picker.append(menu);
+  return picker;
 }
 
 function buildLinks(state: HubState): HTMLElement {
@@ -787,6 +890,38 @@ onPush("task.updated", (payload) => {
   if (payload.task.taskId !== taskId) return;
   scheduleRefresh();
 });
+/** Push kinds land in `PanelPushPayload` with M7a; the cast is confined here. */
+function onValidationPush(
+  type: "validation.quarantine" | "validation.changed" | "validation.jobChanged",
+  handler: (payload: unknown) => void
+): void {
+  onPush(type as never, handler as never);
+}
+
+// F5: the banner mounts on the incident push and never auto-dismisses.
+onValidationPush("validation.quarantine", (payload) => {
+  const entry = payload as { displayName?: string; probeId?: string; detail?: string; at?: string };
+  quarantine = {
+    displayName: entry.displayName ?? "Validation runtime",
+    probeId: entry.probeId ?? "isolation",
+    detail: entry.detail ?? "an isolation probe failed",
+    at: entry.at ?? new Date().toISOString()
+  };
+  render();
+});
+// It clears only on evidence: something changed AND the rail no longer reads
+// blocked. A registry change on its own proves nothing.
+onValidationPush("validation.changed", () => {
+  scheduleRefresh();
+  if (quarantine === null) return;
+  void validationRequest({ type: "validation.railStatus" }).then((response) => {
+    if (!response.ok || response.payload.type !== "validation.railStatus") return;
+    if (response.payload.dot === "blocked") return;
+    quarantine = null;
+    render();
+  });
+});
+
 for (const type of [
   "session.updated",
   "session.deleted",

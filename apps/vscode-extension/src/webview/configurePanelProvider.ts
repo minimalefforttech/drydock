@@ -4,10 +4,13 @@
  * ONE singleton editor-area WebviewPanel over everything that used to be
  * spread across the System tab and the settings JSON: Providers · MCP Servers ·
  * Agents & Models · Preprompts · Skills & Recipes · Memories · Runtime ·
- * Security. It owns its own dispatch - `parsePanelRequest` gates every inbound
- * message and this provider answers ONLY the `config.*` and `memory.*`
- * namespaces plus the `panel.init` boot, so a Configure webview can never
- * reach a chat, a runtime, or the board. The `memory.*` handlers are the ADR
+ * Validation · Security. It owns its own dispatch - `parsePanelRequest` gates
+ * every inbound message and this provider answers ONLY the `config.*` and
+ * `memory.*` namespaces plus the `panel.init` boot, so a Configure webview can
+ * never reach a chat, a runtime, or the board. That allowlist now includes the
+ * `config.validation.*` registry writes (ADR 0022 M7): they are TD-facing
+ * configuration, so they belong to this panel, while the developer-facing
+ * `validation.*` half is dispatched by the control panel. The `memory.*` handlers are the ADR
  * 0019 store (quick-add, browser, agent-proposal approval gate), re-homed here
  * after ADR 0020 retired the Tasks tab; they share `memoryShared.ts` with the
  * chat host so the two surfaces cannot drift.
@@ -58,10 +61,12 @@ import {
   type PanelPushPayload,
   type PanelRequest,
   type PanelResponsePayload,
-  type PlanAspectRecord
+  type PlanAspectRecord,
+  type ValidationConfigState
 } from "@drydock/contracts";
 import { DEFAULT_TAG_RULES, type Logger } from "@drydock/core";
 import type { Backend, BackendReady } from "../compositionRoot.js";
+import type { ValidationAppService } from "../services/validationAppService.js";
 import { MCP_OVERLAY_ID_PREFIX, type McpProjectServer } from "../services/mcpProjectOverlay.js";
 import { memoryUri } from "./memoryContentProvider.js";
 import { memoryAnchorPorts, memoryTaskTitles, resolveMemoryEdits, toMemoryCandidateSummary } from "./memoryShared.js";
@@ -276,8 +281,33 @@ export class ConfigurePanelProvider implements vscode.Disposable {
     // without a refetch. Deliberately NO toast - memory is never urgent.
     if (backend.available) {
       const unsubscribe = backend.bus.subscribe((event) => {
-        if (event.kind !== "memory-candidate-added") return;
-        this.push({ type: "memory.candidateAdded", candidate: toMemoryCandidateSummary(event.candidate) });
+        if (event.kind === "memory-candidate-added") {
+          this.push({ type: "memory.candidateAdded", candidate: toMemoryCandidateSummary(event.candidate) });
+          return;
+        }
+        // ADR 0022: the registry moved (a runtime, an association, a probe run),
+        // or a runtime was quarantined. The first is a coarse refetch signal;
+        // the second is the F5 banner, which never auto-dismisses.
+        if (event.kind === "validation-runtime-changed") {
+          this.push({ type: "validation.changed" });
+          return;
+        }
+        if (event.kind === "validation-quarantine") {
+          const validation = backend.available ? backend.validation : undefined;
+          const runtimeId = event.runtimeId;
+          void (validation?.displayNameFor(runtimeId) ?? Promise.resolve(String(runtimeId)))
+            .then((displayName) => {
+              this.push({
+                type: "validation.quarantine",
+                runtimeId: String(runtimeId),
+                displayName,
+                probeId: event.probeId,
+                detail: event.detail,
+                at: event.at
+              });
+            })
+            .catch(() => { /* the banner is best-effort; the state read still carries it */ });
+        }
       });
       this.subscriptions.push({ dispose: () => { unsubscribe(); } });
     }
@@ -338,6 +368,45 @@ export class ConfigurePanelProvider implements vscode.Disposable {
       throw new Error(this.backend.reason);
     }
     return this.backend;
+  }
+
+  /**
+   * The validation service, or a sentence saying why there is none. Off
+   * Windows the section still RENDERS (with `hostSupported: false`), but a
+   * write must fail loudly rather than look like it worked.
+   */
+  private requireValidation(): ValidationAppService {
+    const backend = this.requireBackend();
+    if (backend.validation === undefined) {
+      throw new Error("Validation runtimes need a Windows host with Hyper-V and OpenSSH; this machine cannot manage them.");
+    }
+    return backend.validation;
+  }
+
+  /** Every registry mutation answers the same ack and re-pushes the section. */
+  private ackValidation(requestId: string): void {
+    this.respond(requestId, { type: "config.validation.ack" });
+    this.push({ type: "validation.changed" });
+  }
+
+  /**
+   * The Validation section. With no service composed the panel still gets a
+   * shape - an empty registry marked `hostSupported: false` - so it can say
+   * "Windows host required" instead of rendering an empty list as a choice.
+   */
+  private async validationState(): Promise<ValidationConfigState> {
+    const validation = this.backend.available ? this.backend.validation : undefined;
+    if (validation === undefined) {
+      return {
+        hostSupported: false,
+        runtimes: [],
+        associations: [],
+        projects: [],
+        settings: { topologyPreset: "single" },
+        quarantines: []
+      };
+    }
+    return validation.state();
   }
 
   private async onMessage(raw: unknown): Promise<void> {
@@ -520,6 +589,79 @@ export class ConfigurePanelProvider implements vscode.Disposable {
         this.respond(request.requestId, { type: "memory.delete", memoryCandidateId: payload.memoryCandidateId });
         return;
       }
+      // ADR 0022 M7: the TD's validation-runtime surface. Reads answer with the
+      // whole section; every mutation answers `config.validation.ack` and
+      // re-pushes, keeping the panel's no-Save-button convention. Refusals
+      // (managed policy, the H5 delete guard) arrive as error responses whose
+      // message the panel renders verbatim.
+      case "config.validation.state": {
+        this.respond(request.requestId, { type: "config.validation.state", state: await this.validationState() });
+        return;
+      }
+      case "config.validation.createRuntime": {
+        await this.requireValidation().createRuntime({
+          displayName: payload.displayName,
+          image: payload.image,
+          lifecycle: payload.lifecycle,
+          capabilities: payload.capabilities,
+          policyProfileRef: payload.policyProfileRef,
+          ...(payload.profileException === undefined ? {} : { profileException: payload.profileException }),
+          ...(payload.connection === undefined ? {} : { connection: payload.connection })
+        });
+        this.ackValidation(request.requestId);
+        return;
+      }
+      case "config.validation.updateRuntime": {
+        await this.requireValidation().updateRuntime(payload.runtimeId, payload.update);
+        this.ackValidation(request.requestId);
+        return;
+      }
+      case "config.validation.deleteRuntime": {
+        await this.requireValidation().deleteRuntime(
+          payload.runtimeId,
+          payload.reassignTo === undefined ? undefined : payload.reassignTo
+        );
+        this.ackValidation(request.requestId);
+        return;
+      }
+      case "config.validation.setDefault": {
+        await this.requireValidation().setDefault(payload.runtimeId);
+        this.ackValidation(request.requestId);
+        return;
+      }
+      case "config.validation.setSettings": {
+        await this.requireValidation().setSettings({
+          ...(payload.topologyPreset === undefined ? {} : { topologyPreset: payload.topologyPreset }),
+          ...(payload.warmCap === undefined ? {} : { warmCap: payload.warmCap })
+        });
+        this.ackValidation(request.requestId);
+        return;
+      }
+      case "config.validation.setAssociation": {
+        await this.requireValidation().setAssociation(payload.projectRootId, payload.runtimeId);
+        this.ackValidation(request.requestId);
+        return;
+      }
+      case "config.validation.clearAssociation": {
+        await this.requireValidation().clearAssociation(payload.projectRootId);
+        this.ackValidation(request.requestId);
+        return;
+      }
+      case "config.validation.runProbes": {
+        await this.requireValidation().runProbes(payload.runtimeId);
+        this.ackValidation(request.requestId);
+        return;
+      }
+      case "config.validation.adopt": {
+        await this.requireValidation().adopt(payload.runtimeId);
+        this.ackValidation(request.requestId);
+        return;
+      }
+      case "config.validation.revertReprobe": {
+        await this.requireValidation().revertAndReprobe(payload.runtimeId);
+        this.ackValidation(request.requestId);
+        return;
+      }
       case "memory.open": {
         const candidate = await this.requireBackend().memory.getCandidate(payload.memoryCandidateId);
         if (candidate === null) {
@@ -583,12 +725,20 @@ export class ConfigurePanelProvider implements vscode.Disposable {
   private async buildState(scope: ConfigScope): Promise<ConfigState> {
     const projectLabel = (vscode.workspace.workspaceFolders ?? [])[0]?.name;
     const managed = await this.isManaged();
-    const [providers, mcp, recipes, aspects, preprompts] = await Promise.all([
+    const [providers, mcp, recipes, aspects, preprompts, validation] = await Promise.all([
       this.providerRows(),
       this.mcpRows(scope),
       this.recipeRows(scope),
       this.aspectRows(scope),
-      this.prepromptRows(scope)
+      this.prepromptRows(scope),
+      // The Validation section rides the one composite read like every other
+      // section; a failure there degrades that section, never the whole panel.
+      this.validationState().catch((error: unknown): ValidationConfigState | undefined => {
+        this.logger.warn("configure validation state failed", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return undefined;
+      })
     ]);
     // Every path any row offers to open, gathered once so the openFile guard
     // and the webview's links can never drift apart.
@@ -608,7 +758,8 @@ export class ConfigurePanelProvider implements vscode.Disposable {
       tagRules: this.tagRuleRows(),
       preprompts,
       settings: this.settingRows(managed),
-      editablePaths: [...openable]
+      editablePaths: [...openable],
+      ...(validation === undefined ? {} : { validation })
     };
   }
 

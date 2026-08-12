@@ -8,7 +8,7 @@
  */
 
 import { execFile as execFileCb } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import os from "node:os";
@@ -24,6 +24,9 @@ import {
   ChatSessionService,
   CloneSyncService,
   CodeReviewService,
+  computeChangesetRef,
+  ValidationJobService,
+  ValidationProbeService,
   extractAgentQuestions,
   extractPreviewAnnouncements,
   extractMemoryCandidates,
@@ -75,6 +78,7 @@ import {
   SqliteTaskChangesetStore,
   SqliteTaskFaqStore,
   SqliteTaskRecipeStore,
+  SqliteValidationRuntimeStore,
   SqliteMcpServerStore,
   SqliteWorkSessionStore,
   SqliteWorkspaceSetStore,
@@ -89,7 +93,8 @@ import { createSubtaskRunBridge } from "./services/subtaskRunBridge.js";
 import type { EffectiveSecurityPolicy } from "./services/securityPolicy.js";
 import { TaskReviewAppService } from "./services/taskReviewAppService.js";
 import { TaskFaqAutoAnswerCoordinator } from "./services/taskFaqAutoAnswer.js";
-import { WorkspaceReviewAppService } from "./services/workspaceReviewAppService.js";
+import { ValidationAppService } from "./services/validationAppService.js";
+import { canonicalizeProductionRequestPath, WorkspaceReviewAppService } from "./services/workspaceReviewAppService.js";
 
 /** app_state key holding the last successful live model discoveries. */
 const CATALOG_CACHE_KEY = "providerCatalogCache.v1";
@@ -140,6 +145,14 @@ export interface BackendReady {
   ) => import("@drydock/runtime-adapters").HyperVRuntimeAdapter;
   /** Host-wide Hyper-V queries (VM state, checkpoints, counters); same caveat. */
   readonly hyperVControl?: import("@drydock/runtime-adapters").HyperVControl;
+  /**
+   * Validation runtimes (ADR 0022 M7): the registry, the queue, the probes, and
+   * the fixture snapshots, behind one host-side service. Always present when the
+   * backend composed - off Windows it simply reports `hostSupported: false`, so
+   * every surface can say "Windows host required" instead of rendering an empty
+   * registry as though one could be filled in here.
+   */
+  readonly validation?: ValidationAppService;
   readonly sbxDisplayPath: string;
   /** Host Claude CLI, when present; powers the guided sign-in flow only. */
   readonly hostClaudePath?: string;
@@ -191,6 +204,22 @@ export interface CreateBackendOptions {
   readonly memoryTagRules?: unknown;
   /** Platform secret store (VS Code SecretStorage) for `vscode-secret:<provider>` API keys. */
   readonly providerSecrets?: ProviderSecretRefStore;
+  /**
+   * ADR 0022 validation settings, read at activation like every other
+   * `drydock.*` machine-scope setting and parsed defensively here:
+   *
+   * - `validationProbeConfig` is `drydock.validation.probeConfig`: the REAL
+   *   production path, mirror root, blocked endpoints, and toolset canary the
+   *   must-fail probes attempt. Absent leaves every probe `unknown` - which is
+   *   the honest answer, never a pass.
+   * - `validationMirrorRoot` is `drydock.validation.mirrorRoot`, stamped onto
+   *   receipts as mirror version + freshness (edge case G1).
+   * - `validationDefaultProfile` is `drydock.validation.defaultProfile`: the
+   *   suite the palette command runs. Absent makes the command say so.
+   */
+  readonly validationProbeConfig?: unknown;
+  readonly validationMirrorRoot?: string;
+  readonly validationDefaultProfile?: unknown;
 }
 
 /**
@@ -296,6 +325,94 @@ function discoverHostGitCommand(environment: NodeJS.ProcessEnv, managed: boolean
     }
   }
   return null;
+}
+
+/**
+ * Reads `drydock.validation.probeConfig` defensively. A malformed setting
+ * leaves the probes UNCONFIGURED (every probe reports `unknown`) rather than
+ * half-configured: a suite that silently skips the production-read check would
+ * be worse than one that admits it never ran (edge case G2).
+ */
+function parseValidationProbeConfig(
+  value: unknown,
+  logger: Logger
+): import("@drydock/core").ValidationProbeConfig | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    logger.warn("drydock.validation.probeConfig is not an object; validation probes stay unconfigured");
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const productionUncPath = typeof record["productionUncPath"] === "string" ? record["productionUncPath"] : "";
+  const mirrorDriveRoot = typeof record["mirrorDriveRoot"] === "string" ? record["mirrorDriveRoot"] : "";
+  const rawEgress = Array.isArray(record["disallowedEgress"]) ? record["disallowedEgress"] : [];
+  const disallowedEgress: { host: string; port: number }[] = [];
+  for (const entry of rawEgress) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const endpoint = entry as Record<string, unknown>;
+    const host = endpoint["host"];
+    const port = endpoint["port"];
+    if (typeof host !== "string" || host === "") continue;
+    if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) continue;
+    disallowedEgress.push({ host, port });
+  }
+  const rawArgv = record["toolsetResolveArgv"];
+  const toolsetResolveArgv = Array.isArray(rawArgv) && rawArgv.every((entry) => typeof entry === "string")
+    ? (rawArgv as string[])
+    : undefined;
+  if (productionUncPath === "" && mirrorDriveRoot === "" && disallowedEgress.length === 0 && toolsetResolveArgv === undefined) {
+    return undefined;
+  }
+  return {
+    productionUncPath,
+    mirrorDriveRoot,
+    disallowedEgress,
+    ...(toolsetResolveArgv === undefined ? {} : { toolsetResolveArgv })
+  };
+}
+
+/**
+ * Reads `drydock.validation.defaultProfile`. A profile with no `profileRef` or
+ * no command cannot produce attributable evidence, so it is rejected outright
+ * and the palette command says validation is not configured yet.
+ */
+function parseValidationProfile(
+  value: unknown,
+  logger: Logger
+): import("@drydock/contracts").ValidationProfile | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    logger.warn("drydock.validation.defaultProfile is not an object; validation has no default profile");
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const profileRef = record["profileRef"];
+  const argv = record["argv"];
+  if (typeof profileRef !== "string" || profileRef.trim() === "") return undefined;
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every((entry) => typeof entry === "string")) {
+    logger.warn("drydock.validation.defaultProfile declares no command to run; validation has no default profile");
+    return undefined;
+  }
+  const env: Record<string, string> = {};
+  const rawEnv = record["env"];
+  if (typeof rawEnv === "object" && rawEnv !== null && !Array.isArray(rawEnv)) {
+    for (const [key, entry] of Object.entries(rawEnv as Record<string, unknown>)) {
+      if (typeof entry === "string") env[key] = entry;
+    }
+  }
+  const capabilities = record["requiredCapabilities"];
+  const licenseWaitPatterns = record["licenseWaitPatterns"];
+  return {
+    profileRef,
+    argv: argv as string[],
+    ...(Object.keys(env).length === 0 ? {} : { env }),
+    ...(Array.isArray(capabilities) && capabilities.every((entry) => typeof entry === "string")
+      ? { requiredCapabilities: capabilities as string[] }
+      : {}),
+    ...(Array.isArray(licenseWaitPatterns) && licenseWaitPatterns.every((entry) => typeof entry === "string")
+      ? { licenseWaitPatterns: licenseWaitPatterns as string[] }
+      : {})
+  };
 }
 
 async function ensurePrivateDirectory(directory: string): Promise<void> {
@@ -771,6 +888,10 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     catalog: projectCatalogStore,
     store: workspaceSetStore
   });
+  // Late-bound (ADR 0022): the ValidationAppService that classifies production
+  // paths is constructed after the access-request service; the closure below
+  // reads this at call time, exactly like the runtimeAvailability knot.
+  let isProductionRequestPath: ((candidate: string) => boolean) | undefined;
   const accessRequests = new AccessRequestService({
     ids,
     clock,
@@ -778,7 +899,24 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     deniedPaths,
     ...(options.securityPolicy === undefined
       ? {}
-      : { validateHostPath: (candidate: string) => options.securityPolicy?.assertHostPathAllowed(candidate) ?? candidate })
+      : {
+          validateHostPath: (candidate: string) => {
+            // ADR 0022 A1/B1: a production-tier path must be REQUESTABLE so
+            // the snapshot flow can answer it - the normal gate would refuse
+            // it here and leave the sanctioned fixture route unreachable. It
+            // stays unmountable: prepareApproval still refuses denied paths,
+            // and approval routes through the fixture port instead. Only an
+            // existing regular file passes, and a canonical target that
+            // escapes the production tier (symlink/junction) falls back to
+            // the normal gate.
+            if (isProductionRequestPath?.(candidate) === true) {
+              const canonical = canonicalizeProductionRequestPath(candidate);
+              if (isProductionRequestPath(canonical) === true) return canonical;
+              return options.securityPolicy?.assertHostPathAllowed(canonical) ?? canonical;
+            }
+            return options.securityPolicy?.assertHostPathAllowed(candidate) ?? candidate;
+          }
+        })
   });
   // Agent questions (attention stack): same protocol family as access requests.
   // The bus announces resolutions so cross-surface pending sets stay live.
@@ -841,6 +979,205 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     })
   });
   const review = new CodeReviewService({ ids, clock, store: new SqliteReviewStore(connection) });
+
+  // -------------------------------------------------------------------------
+  // Validation runtimes (ADR 0022 M7)
+  // -------------------------------------------------------------------------
+  //
+  // Three services, one dependency knot, resolved once here:
+  //   probes -> exec channel        (needs an adapter for a named runtime)
+  //   jobs   -> availability        (needs the app service's quarantine ladder)
+  //   app    -> jobs + probes       (owns registry rules, fixtures, the rail)
+  //
+  // The knot is broken with ONE late binding (`validationApp`), because the job
+  // service only asks for availability while draining a queue - long after
+  // composition. Everything else is constructor-wired.
+  const validationStore = new SqliteValidationRuntimeStore(connection);
+  const validationProbeConfig = parseValidationProbeConfig(options.validationProbeConfig, logger);
+  const validationDefaultProfile = parseValidationProfile(options.validationDefaultProfile, logger);
+  const validationHostSupported = hyperVAdapterFactory !== undefined && hyperVControl !== undefined;
+  // One adapter (and one adopted handle) per named runtime, rebuilt when its
+  // exec address changes. The adapter's exec ignores the handle for addressing
+  // - the connection is fixed at construction - so probes can run before the
+  // adopt sequence has ever completed, which is exactly what a health check on
+  // a stopped runtime needs.
+  const validationAdapters = new Map<string, {
+    readonly key: string;
+    readonly adapter: HyperVRuntimeAdapter;
+    handle: import("@drydock/contracts").RuntimeHandle | null;
+    adopting: Promise<import("@drydock/contracts").RuntimeHandle> | null;
+  }>();
+  const validationVmName = (displayName: string): string => {
+    const slug = displayName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    return `drydock-validation-${slug === "" ? "runtime" : slug}`;
+  };
+  const validationAdapterFor = (
+    runtime: import("@drydock/contracts").NamedRuntimeConfig
+  ): import("@drydock/core").ValidationExecAdapter | null => {
+    const connection = runtime.connection;
+    if (hyperVAdapterFactory === undefined || connection === undefined) return null;
+    const key = `${connection.user}@${connection.host}:${String(connection.port ?? 22)}`;
+    const id = String(runtime.runtimeId);
+    let entry = validationAdapters.get(id);
+    if (entry === undefined || entry.key !== key) {
+      entry = { key, adapter: hyperVAdapterFactory(connection), handle: null, adopting: null };
+      validationAdapters.set(id, entry);
+    }
+    const held = entry;
+    const externalName = validationVmName(runtime.displayName);
+    const liteHandle = (): import("@drydock/contracts").RuntimeHandle => ({
+      runtimeId: asId<"RuntimeId">(`validation-${id}`),
+      runtimeGenerationId: asId<"RuntimeGenerationId">(`validation-gen-${id}`),
+      sessionId: asId<"SessionId">(`validation-${id}`),
+      adapter: "hyperv",
+      externalName,
+      workspacePath: externalName,
+      mounts: [],
+      status: "running"
+    });
+    return {
+      ensureRunning: async (): Promise<void> => {
+        if (held.handle !== null) return;
+        // Adopt ONCE per address; concurrent jobs share the same attempt rather
+        // than racing two Start-VM sequences at the same guest.
+        held.adopting ??= held.adapter.createRuntime(
+          {
+            sessionId: asId<"SessionId">(`validation-${id}`),
+            chatId: asId<"ChatId">(`validation-${id}`),
+            agentRole: "tester",
+            template: {
+              id: `validation-${id}`,
+              type: "hyperv",
+              image: runtime.image,
+              network: "disabled",
+              mounts: [],
+              environment: {},
+              adapterProviderIds: [],
+              advancedOptions: {}
+            },
+            workspacePath: externalName,
+            generationId: asId<"RuntimeGenerationId">(`validation-gen-${id}`),
+            runtimeId: asId<"RuntimeId">(`validation-${id}`)
+          },
+          externalName
+        ).finally(() => { held.adopting = null; });
+        held.handle = await held.adopting;
+      },
+      exec: (args, timeoutMs, input, signal, onStdoutLine) => held.adapter.exec(
+        held.handle ?? liteHandle(),
+        args,
+        timeoutMs,
+        input,
+        signal,
+        onStdoutLine
+      ),
+      sweepGuestJob: (jobToken, timeoutMs, signal) =>
+        held.adapter.sweepGuestJob(held.handle ?? liteHandle(), jobToken, timeoutMs, signal)
+    };
+  };
+  const validationProbes = new ValidationProbeService({
+    clock,
+    logger,
+    bus,
+    execFor: (runtime) => validationAdapterFor(runtime)?.exec ?? null,
+    config: () => validationProbeConfig,
+    // The incident is applied durably BEFORE the banner event fires, so a
+    // surface reacting to the event always finds a blocked queue (E5).
+    quarantine: async (runtimeId, probeId, detail) => {
+      await validationApp?.quarantine(runtimeId, probeId, detail);
+    }
+  });
+  let validationApp: ValidationAppService | undefined;
+  const validationJobs = new ValidationJobService({
+    store: validationStore,
+    clock,
+    logger,
+    bus,
+    runtimeAvailability: async (runtime) => (await validationApp?.availabilityForJob(runtime)) ?? "missing",
+    adapterFor: validationAdapterFor,
+    // The ADR 0014 capture seam, reused verbatim: a validation job ships the
+    // same outbound patches a subtask's changeset capture would, so evidence
+    // binds to exactly the snapshot the chain would have landed.
+    changesetSource: async (request) => {
+      const patches = await appService.buildOutboundPatches(String(request.sessionId));
+      if (patches === null || patches.length === 0) return null;
+      return {
+        changesetRef: computeChangesetRef(patches.map((patch) => ({
+          repoName: patch.repoName,
+          patchSha256: createHash("sha256").update(patch.patch, "utf8").digest("hex")
+        }))),
+        patches: patches.map((patch) => ({ repoName: patch.repoName, patch: patch.patch }))
+      };
+    },
+    // Only the configured default profile can be rehydrated after a restart;
+    // anything else parks with a readable sentence rather than guessing (E7).
+    profileFor: async (profileRef) =>
+      validationDefaultProfile?.profileRef === profileRef ? validationDefaultProfile : null,
+    ...(options.validationMirrorRoot === undefined || options.validationMirrorRoot === ""
+      ? {}
+      : { mirrorRoot: () => options.validationMirrorRoot }),
+    probesGreenAt: (runtimeId) => validationProbes.probesGreenAt(runtimeId)
+  });
+  validationApp = new ValidationAppService({
+    logger,
+    clock,
+    store: validationStore,
+    jobs: validationJobs,
+    probes: validationProbes,
+    bus,
+    host: {
+      supported: validationHostSupported,
+      ...(hyperVControl === undefined
+        ? {}
+        : {
+            vmState: async (vmName: string) => {
+              const vm = await hyperVControl.getVm(vmName);
+              return vm === null ? null : vm.state === "running" ? "running" : "other";
+            }
+          })
+    },
+    ...(options.securityPolicy === undefined ? {} : { securityPolicy: options.securityPolicy }),
+    projects: async () => (await projectCatalogStore.listProjects())
+      .map((project) => ({ projectRootId: String(project.projectId), label: project.name })),
+    // The association tier needs a project: a task's is the first member of the
+    // first workspace set it links. A task with no set simply has no
+    // association tier and falls through to the default.
+    taskProjectRootId: async (taskId) => {
+      const task = (await tasks.listTaskSummaries()).find((summary) => summary.taskId === taskId);
+      const setId = task?.linkedWorkspaceSetIds[0];
+      if (setId === undefined) return undefined;
+      const set = (await workspaceSets.listWorkspaceSets()).find((candidate) => candidate.workspaceSetId === setId);
+      const member = set?.members[0];
+      return member === undefined ? undefined : String(member.projectId);
+    },
+    ...(validationDefaultProfile === undefined ? {} : { defaultProfile: () => validationDefaultProfile }),
+    sessionContext: async (sessionId) => {
+      const session = await sessionStore.getSession(asId<"SessionId">(sessionId));
+      if (session === null) return null;
+      const links = await workTaskStore.listLinks();
+      const link = links.find((candidate) => candidate.sessionId === sessionId);
+      return {
+        chatId: String(session.chatId),
+        ...(link?.taskId === undefined ? {} : { taskId: String(link.taskId) }),
+        ...(link?.subtaskId === undefined || link.subtaskId === null ? {} : { subtaskId: String(link.subtaskId) })
+      };
+    },
+    fixtureStagingRoot: path.join(stateDir, "fixtures"),
+    securityEvent: (event) => {
+      appendSecurityEvent({
+        eventCode: event.eventCode,
+        outcome: event.outcome,
+        ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
+        ...(event.metadata === undefined ? {} : { metadata: event.metadata as import("@drydock/contracts").JsonObject })
+      });
+    },
+    ids: { validationRuntimeId: () => asId<"ValidationRuntimeId">(`vruntime-${randomUUID().replace(/-/g, "").slice(0, 12)}`) }
+  });
+  {
+    const classifierSource = validationApp;
+    isProductionRequestPath = (candidate: string) => classifierSource.isProductionPath(candidate);
+  }
+
   const workspaceReview = new WorkspaceReviewAppService({
     logger,
     projectCatalog,
@@ -852,7 +1189,11 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     bus,
     // agent.file_edit replay scopes session diffs to files the agent touched.
     events: eventStore,
-    ...(options.securityPolicy === undefined ? {} : { securityPolicy: options.securityPolicy })
+    ...(options.securityPolicy === undefined ? {} : { securityPolicy: options.securityPolicy }),
+    // ADR 0022 A1/B1: approving a production-tier path takes the snapshot
+    // route, never a mount. The validation service owns the copy and the ledger
+    // entry; the review service just knows which door to use.
+    productionFixtures: validationApp
   });
   // Cross-project task review: a VIEW over the task's linked sessions -
   // aggregates their changed files (baseline diffs + clone sync state) and
@@ -1179,6 +1520,15 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
         error: error instanceof Error ? error.message : String(error)
       });
     }
+    // The validation queue reloads on the same principle (E7): jobs the host
+    // left mid-flight requeue once, and the probe cadence arms behind them.
+    try {
+      await validationApp?.restore();
+    } catch (error) {
+      logger.warn("validation queue restore failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   };
   // Heartbeat keeps this window's live sessions marked "running here" for
   // sibling windows; its disposer stops the timer on backend teardown.
@@ -1208,6 +1558,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     reconcileOnActivate,
     ...(hyperVAdapterFactory === undefined ? {} : { hyperVAdapterFactory }),
     ...(hyperVControl === undefined ? {} : { hyperVControl }),
+    validation: validationApp,
     sbxDisplayPath: sbxPath,
     ...(hostClaudePath === null ? {} : { hostClaudePath }),
     runtimeEnvironment,
@@ -1219,6 +1570,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       // during window teardown.
       faqAutoAnswer.dispose();
       orchestrator.dispose();
+      // Stops the probe cadence timer and drops the fixture-cleanup listener.
+      validationApp?.dispose();
       stopSecurityEvidence();
       stopHeartbeats();
       try {

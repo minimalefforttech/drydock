@@ -740,6 +740,363 @@ body {
   border-color: var(--vscode-errorForeground, #f48771);
 }
 
+/* --- validation runtimes (ADR 0022) -------------------------------------- */
+
+/* F5's incident banner: the one deliberate exception to calm. Full width,
+   persistent, red - and never a toast, because it owns the truth until it is
+   resolved. */
+.cfg-quarantine {
+  margin: 0 0 14px;
+  border: 1px solid var(--vscode-errorForeground, #f48771);
+  border-left-width: 3px;
+  border-radius: 3px;
+  background: var(--cfg-hover);
+}
+
+.cfg-quarantine-entry {
+  padding: 9px 12px;
+  border-top: 1px solid var(--cfg-line);
+}
+
+.cfg-quarantine-entry:first-child {
+  border-top: none;
+}
+
+.cfg-quarantine-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.cfg-quarantine-name {
+  font-weight: 600;
+  color: var(--vscode-errorForeground, #f48771);
+}
+
+.cfg-quarantine-line {
+  margin: 4px 0 0;
+  line-height: 1.5;
+}
+
+.cfg-quarantine-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  flex-wrap: wrap;
+}
+
+/* The registry list scrolls in its own region: per-project runtimes grow
+   unbounded and the panel must not. */
+.cfg-vr-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-top: 1px solid var(--cfg-line);
+  border-bottom: 1px solid var(--cfg-line);
+}
+
+.cfg-vr {
+  border-bottom: 1px solid var(--cfg-line);
+}
+
+.cfg-vr:last-child {
+  border-bottom: none;
+}
+
+.cfg-vr-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px 7px 4px;
+  cursor: pointer;
+  list-style: none;
+  min-width: 0;
+}
+
+.cfg-vr-summary::-webkit-details-marker {
+  display: none;
+}
+
+.cfg-vr-summary::before {
+  content: "\25B8";
+  color: var(--cfg-quiet);
+  width: 12px;
+  flex: none;
+}
+
+.cfg-vr[open] > .cfg-vr-summary::before {
+  content: "\25BE";
+}
+
+.cfg-vr-summary:hover {
+  background: var(--cfg-hover);
+}
+
+/* The name is the last thing to give way in a narrow pane: the association
+   count truncates first, the name keeps a floor. */
+.cfg-vr-name {
+  font-weight: 600;
+  min-width: 7ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cfg-vr-sep,
+.cfg-vr-queue,
+.cfg-vr-assoc {
+  color: var(--cfg-quiet);
+  white-space: nowrap;
+}
+
+.cfg-vr-assoc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cfg-vr-state {
+  white-space: nowrap;
+}
+
+.cfg-vr-quarantined > .cfg-vr-summary .cfg-vr-state {
+  color: var(--vscode-errorForeground, #f48771);
+}
+
+/* L2 caps at ~40% of the panel and scrolls internally: expanding one row must
+   never push its siblings off-screen. */
+.cfg-vr-body {
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 4px 10px 12px 20px;
+}
+
+.cfg-vr-line {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  min-width: 0;
+}
+
+.cfg-vr-label {
+  flex: 0 0 104px;
+  color: var(--cfg-quiet);
+}
+
+.cfg-vr-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cfg-vr-isolation {
+  margin: 2px 0;
+}
+
+.cfg-vr-line-alarm .cfg-vr-value {
+  color: var(--vscode-errorForeground, #f48771);
+}
+
+/* Mono probe output wraps NEVER - it scrolls horizontally inside its own
+   block, which is the only horizontal scroll the panel allows. */
+.cfg-vr-probe-log {
+  margin: 4px 0 6px 112px;
+  padding: 6px 8px;
+  max-height: 140px;
+  overflow: auto;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
+  border-radius: 3px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+  white-space: pre;
+}
+
+.cfg-vr-probe {
+  display: flex;
+  gap: 8px;
+  line-height: 1.6;
+}
+
+.cfg-vr-probe-glyph {
+  flex: none;
+  width: 12px;
+}
+
+.cfg-vr-probe-id {
+  flex: none;
+  color: var(--cfg-quiet);
+}
+
+.cfg-vr-probe-title {
+  flex: none;
+}
+
+.cfg-vr-probe-detail {
+  flex: none;
+  color: var(--cfg-quiet);
+}
+
+.cfg-vr-probe-pass .cfg-vr-probe-glyph {
+  color: var(--cfg-ok);
+}
+
+.cfg-vr-probe-breach .cfg-vr-probe-glyph,
+.cfg-vr-probe-fail .cfg-vr-probe-glyph {
+  color: var(--vscode-errorForeground, #f48771);
+}
+
+.cfg-vr-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.cfg-vr-actions-label {
+  color: var(--cfg-quiet);
+}
+
+.cfg-vr-edit {
+  margin-top: 8px;
+}
+
+.cfg-vr-form {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 6px 0 2px;
+}
+
+.cfg-vr-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cfg-vr-field > .cfg-field-label {
+  flex: 0 0 104px;
+}
+
+.cfg-vr-capabilities {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.cfg-vr-capabilities .cfg-list {
+  margin-top: 0;
+}
+
+.cfg-input-port {
+  flex: 0 0 88px;
+}
+
+.cfg-vr-vmname {
+  margin: 2px 0 0 112px;
+  color: var(--cfg-quiet);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.88em;
+}
+
+/* Typed confirm, same shape as the fixture card's: the label NAMES the token,
+   the placeholder stays generic. */
+.cfg-vr-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-left: 112px;
+  padding: 7px 0 2px;
+  border-top: 1px dashed var(--cfg-line);
+}
+
+.cfg-vr-confirm-label {
+  color: var(--cfg-quiet);
+  font-size: 0.9em;
+}
+
+.cfg-confirm-token {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-foreground);
+}
+
+.cfg-hidden {
+  display: none;
+}
+
+/* F6's association editor: two columns, scrolling in-region. */
+.cfg-assoc {
+  margin-top: 8px;
+  border: 1px solid var(--cfg-line);
+  border-radius: 3px;
+}
+
+.cfg-assoc-head {
+  display: flex;
+  gap: 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--cfg-line);
+  font-size: 0.78em;
+  letter-spacing: 0.06em;
+  color: var(--cfg-quiet);
+}
+
+.cfg-assoc-col {
+  flex: 1 1 50%;
+}
+
+.cfg-assoc-body {
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.cfg-assoc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--cfg-line);
+}
+
+.cfg-assoc-row:last-child {
+  border-bottom: none;
+}
+
+.cfg-assoc-project {
+  flex: 1 1 50%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cfg-assoc-row .cfg-select {
+  flex: 1 1 50%;
+  min-width: 0;
+}
+
+/* No row = the default, and it says so quietly rather than looking chosen. */
+.cfg-assoc-inherited {
+  font-style: italic;
+  color: var(--cfg-quiet);
+}
+
+.cfg-assoc-locked {
+  flex: 1 1 50%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--cfg-quiet);
+}
+
 /* --- narrow panes ------------------------------------------------------- */
 
 @media (max-width: 640px) {

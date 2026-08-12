@@ -69,7 +69,8 @@ import {
   type IsolatedRunService
 } from "../services/isolatedRunService.js";
 import { ProviderConnectService } from "../services/providerConnectService.js";
-import { toAccessRequestSummary, type WorkspaceReviewAppService } from "../services/workspaceReviewAppService.js";
+import { productionSummaryOptions, toAccessRequestSummary, type WorkspaceReviewAppService } from "../services/workspaceReviewAppService.js";
+import type { ValidationAppService } from "../services/validationAppService.js";
 import { openBaselineDiff } from "./baselineDiff.js";
 import { memoryUri } from "./memoryContentProvider.js";
 import { memoryAnchorPorts, memoryTaskTitles, resolveMemoryEdits, toMemoryCandidateSummary } from "./memoryShared.js";
@@ -231,7 +232,8 @@ const SURFACE_COMMANDS: Readonly<Record<PanelSurface, string>> = {
   board: "drydock.taskBoard.open",
   agents: "drydock.agents.open",
   planner: "drydock.planner.open",
-  review: "drydock.taskReview.open"
+  review: "drydock.taskReview.open",
+  configure: "drydock.configure.open"
 };
 
 export class ControlPanelProvider {
@@ -383,7 +385,12 @@ export class ControlPanelProvider {
         // summary as its own push and flag the session for attention (badge +
         // hidden-panel toast). The badge derives from attention reasons now, so
         // no separate pending-request query is needed here.
-        this.push({ type: "policy.accessRequested", accessRequest: toAccessRequestSummary(event.request) });
+        // The production classifier rides along so the card knows whether
+        // approval means a mount or a session-scoped snapshot (ADR 0022 F3).
+        this.push({
+          type: "policy.accessRequested",
+          accessRequest: toAccessRequestSummary(event.request, this.productionClassifier())
+        });
         void this.flagAttention(event.request.sessionId, "access-request", "needs access approval");
         return;
       case "preview-available":
@@ -426,6 +433,38 @@ export class ControlPanelProvider {
           void this.pushInventory(this.backend.appService);
         }
         return;
+      // ADR 0022: validation is three pushes - one job moved, the registry
+      // moved, or a runtime was quarantined. The chip re-renders off the first,
+      // the rail dot off the second, and the F5 banner off the third.
+      case "validation-job-changed":
+        this.push({
+          type: "validation.jobChanged",
+          jobId: String(event.jobId),
+          state: event.state,
+          ...(event.taskId === undefined ? {} : { taskId: String(event.taskId) }),
+          ...(event.sessionId === undefined ? {} : { sessionId: String(event.sessionId) })
+        });
+        return;
+      case "validation-runtime-changed":
+        this.push({ type: "validation.changed" });
+        return;
+      case "validation-quarantine": {
+        const validation = this.backend.available ? this.backend.validation : undefined;
+        const runtimeId = String(event.runtimeId);
+        void (validation?.displayNameFor(runtimeId) ?? Promise.resolve(runtimeId))
+          .then((displayName) => {
+            this.push({
+              type: "validation.quarantine",
+              runtimeId,
+              displayName,
+              probeId: event.probeId,
+              detail: event.detail,
+              at: event.at
+            });
+          })
+          .catch(() => { /* best effort: the next state read still carries it */ });
+        return;
+      }
     }
   }
 
@@ -1673,6 +1712,62 @@ export class ControlPanelProvider {
         this.respond(request.requestId, { type: "hub.state", state });
         return;
       }
+      // ADR 0022 M7: the developer-facing half of validation. The TD's registry
+      // writes live in the Configure panel; everything here is what a chip, a
+      // rail dot, or a task header needs, and nothing here can create a runtime.
+      case "validation.jobs": {
+        const jobs = await this.requireValidation().listJobs({
+          ...(payload.taskId === undefined ? {} : { taskId: payload.taskId }),
+          ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId })
+        });
+        this.respond(request.requestId, { type: "validation.jobs", jobs });
+        return;
+      }
+      case "validation.abortJob": {
+        await this.requireValidation().abortJob(payload.jobId);
+        this.respond(request.requestId, { type: "validation.ack" });
+        return;
+      }
+      case "validation.requeue": {
+        const result = await this.requireValidation().requeue(payload.jobId, {
+          ...(payload.rerouteTo === undefined ? {} : { rerouteTo: payload.rerouteTo }),
+          ...(payload.confirmedDelta === undefined ? {} : { confirmedDelta: payload.confirmedDelta })
+        });
+        this.respond(request.requestId, { type: "validation.requeue", result });
+        return;
+      }
+      case "validation.setTaskRuntime": {
+        await this.requireValidation().setTaskRuntime(
+          payload.taskId,
+          payload.runtimeId === undefined ? undefined : payload.runtimeId
+        );
+        this.respond(request.requestId, { type: "validation.ack" });
+        return;
+      }
+      case "validation.railStatus": {
+        // The dot follows the CURRENT task (edge case H7), so it reads the
+        // spine rather than taking a target from the webview.
+        const validation = this.backend.available ? this.backend.validation : undefined;
+        if (validation === undefined) {
+          this.respond(request.requestId, {
+            type: "validation.railStatus",
+            dot: "none",
+            line: "Validation runtimes need a Windows host with Hyper-V."
+          });
+          return;
+        }
+        const activeTaskId = this.backend.available ? this.backend.activeTasks.get() : null;
+        const status = await validation.railStatus(activeTaskId ?? undefined);
+        this.respond(request.requestId, { type: "validation.railStatus", dot: status.dot, line: status.line });
+        return;
+      }
+      case "validation.run": {
+        const result = await this.requireValidation().runForSession(payload.sessionId);
+        // The queue answers immediately; the chip follows the job pushes.
+        this.respond(request.requestId, { type: "validation.ack" });
+        this.logger.info("validation run requested", { sessionId: payload.sessionId, message: result.message });
+        return;
+      }
       case "panel.openSurface": {
         // The webview names a surface from a closed enum; the host owns the
         // command. Board/Agents are window singletons, Planner takes an
@@ -1761,6 +1856,20 @@ export class ControlPanelProvider {
           : {})
       };
     });
+    // ADR 0022 F6: the header's `runs on … ▾` picker appears only when the
+    // task's resolved runtime differs from the default, so the label is
+    // computed here and simply absent otherwise. A composition without
+    // validation contributes an empty picker rather than a broken one.
+    const validation = backend.validation;
+    const [resolvedRuntime, validationRuntimes] = validation === undefined
+      ? [undefined, [] as readonly { readonly runtimeId: string; readonly displayName: string }[]]
+      : await Promise.all([
+        validation.resolvedRuntimeForTask(taskId).catch(() => undefined),
+        validation.pickerRuntimes().catch(() => [] as readonly { readonly runtimeId: string; readonly displayName: string }[])
+      ]);
+    const validationRuntimeLabel = resolvedRuntime?.differsFromDefault === true
+      ? resolvedRuntime.runtime?.displayName
+      : undefined;
     return buildHubState({
       task,
       sessions,
@@ -1770,6 +1879,8 @@ export class ControlPanelProvider {
       runtimes,
       mounts,
       ...(workspaceName === undefined ? {} : { workspaceName }),
+      ...(validationRuntimeLabel === undefined ? {} : { validationRuntimeLabel }),
+      validationRuntimes,
       generatedAt: new Date().toISOString()
     });
   }
@@ -2473,6 +2584,26 @@ export class ControlPanelProvider {
       throw new Error(this.backend.reason);
     }
     return this.backend;
+  }
+
+  /**
+   * The production-tier classifier for access-request summaries, or undefined
+   * when this host has no validation service - in which case the card says
+   * nothing about disposition rather than guessing "mount".
+   */
+  private productionClassifier(): ReturnType<typeof productionSummaryOptions> {
+    const validation = this.backend.available ? this.backend.validation : undefined;
+    if (validation === undefined) return undefined;
+    return productionSummaryOptions(validation);
+  }
+
+  /** The validation service, or the sentence saying why this host has none. */
+  private requireValidation(): ValidationAppService {
+    const backend = this.requireBackendReady();
+    if (backend.validation === undefined) {
+      throw new Error("Validation runtimes need a Windows host with Hyper-V and OpenSSH; this machine cannot run them.");
+    }
+    return backend.validation;
   }
 
   private requireWorkspaceReview(): WorkspaceReviewAppService {

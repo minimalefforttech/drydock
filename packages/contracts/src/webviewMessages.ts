@@ -32,6 +32,12 @@ import {
   type PlanSummary
 } from "./planner.js";
 import { COLUMN_CATEGORIES, WORK_TASK_STATES, type ColumnCategory, type SubtaskModelSelection, type SubtaskSeedMode, type TaskClonePolicy, type TaskFaqRecord, type TaskRecipeRecord, type WorkTaskState } from "./tasks.js";
+import type {
+  ValidationJobState,
+  ValidationPolicyDelta,
+  ValidationRuntimeLifecycle,
+  ValidationTopologyPreset
+} from "./validationRuntime.js";
 import type { AccessRequestStatus } from "./workspaces.js";
 
 export const WEBVIEW_PROTOCOL_VERSION = 1;
@@ -249,14 +255,56 @@ export type PanelRequestPayload =
   | { readonly type: "config.provider.signIn"; readonly providerId: string }
   | { readonly type: "config.provider.setDefaultModel"; readonly providerId: string; readonly model: string }
   /** "Edit the file ↗": the host opens it only if it is one of the paths it just advertised. */
-  | { readonly type: "config.openFile"; readonly path: string };
+  | { readonly type: "config.openFile"; readonly path: string }
+  /**
+   * Validation runtimes (ADR 0022 M7). The `config.validation.*` half is the
+   * TD's registry surface in the Configure panel; the `validation.*` half is
+   * what developers actually touch (the rail dot, the chips, one manual run).
+   * Every mutation answers `config.validation.ack` and re-pushes, so the panel
+   * keeps the Configure convention of "no Save button".
+   */
+  | { readonly type: "config.validation.state" }
+  | {
+      readonly type: "config.validation.createRuntime";
+      readonly displayName: string;
+      readonly image: string;
+      readonly lifecycle: ValidationRuntimeLifecycle;
+      readonly capabilities: readonly string[];
+      readonly policyProfileRef: string;
+      readonly profileException?: boolean;
+      readonly connection?: ValidationConnectionInput;
+    }
+  | {
+      readonly type: "config.validation.updateRuntime";
+      readonly runtimeId: string;
+      readonly update: ValidationRuntimeUpdateInput;
+    }
+  /** H5: deleting a runtime with associations requires naming where they go. */
+  | { readonly type: "config.validation.deleteRuntime"; readonly runtimeId: string; readonly reassignTo?: string }
+  | { readonly type: "config.validation.setDefault"; readonly runtimeId: string }
+  /** `warmCap: null` clears the personal cap (managed caps still apply). */
+  | { readonly type: "config.validation.setSettings"; readonly topologyPreset?: ValidationTopologyPreset; readonly warmCap?: number | null }
+  | { readonly type: "config.validation.setAssociation"; readonly projectRootId: string; readonly runtimeId: string }
+  | { readonly type: "config.validation.clearAssociation"; readonly projectRootId: string }
+  | { readonly type: "config.validation.runProbes"; readonly runtimeId: string }
+  | { readonly type: "config.validation.adopt"; readonly runtimeId: string }
+  /** F5: clears the quarantine flag and re-runs the probe suite immediately. */
+  | { readonly type: "config.validation.revertReprobe"; readonly runtimeId: string }
+  | { readonly type: "validation.jobs"; readonly taskId?: string; readonly sessionId?: string }
+  | { readonly type: "validation.abortJob"; readonly jobId: string }
+  | { readonly type: "validation.requeue"; readonly jobId: string; readonly rerouteTo?: string; readonly confirmedDelta?: boolean }
+  /** Absent `runtimeId` clears the task's override (back to the cascade). */
+  | { readonly type: "validation.setTaskRuntime"; readonly taskId: string; readonly runtimeId?: string }
+  | { readonly type: "validation.railStatus" }
+  /** Palette/manual trigger: validate this session's current changeset. */
+  | { readonly type: "validation.run"; readonly sessionId: string };
 
 /**
  * Editor-area surfaces a webview may ask the host to open. A closed enum, not
  * a command name: the webview never names a command, the host maps each entry
  * to the `drydock.*.open` command it already registers.
  */
-export const PANEL_SURFACES = ["hub", "board", "agents", "planner", "review"] as const;
+export const PANEL_SURFACES = ["hub", "board", "agents", "planner", "review", "configure"] as const;
 
 export type PanelSurface = (typeof PANEL_SURFACES)[number];
 
@@ -751,6 +799,24 @@ export interface AccessRequestSummary {
   readonly sensitive?: boolean;
   /** Why it is sensitive: display text naming the matched directory/pattern. */
   readonly sensitiveReason?: string;
+  /**
+   * Host-computed (ADR 0022, edge case A1/B1): the path is a production-tier
+   * location the policy forbids mounting. The card renders the production
+   * badge and the typed confirm, and approval takes the snapshot route.
+   */
+  readonly production?: boolean;
+  /**
+   * What approval will actually DO: add a mount, or copy a session-scoped
+   * snapshot. Absent on legacy rows; the card should read it before promising
+   * anything, because "approve" means two different things.
+   */
+  readonly disposition?: "mount" | "snapshot";
+  /**
+   * Host-computed display size for the fixture card's fact line (F3:
+   * `hero_rig.ma · 48 MB · X:\...`). Absent when the file cannot be statted -
+   * the card omits the segment rather than inventing one.
+   */
+  readonly sizeLabel?: string;
 }
 
 /** Why a session is waiting on the user (drives badge/toast/row markers). */
@@ -950,6 +1016,14 @@ export interface HubState {
   readonly system: HubSystemState;
   /** Workspace-set name for the header chip; absent when the task links none. */
   readonly workspaceName?: string;
+  /**
+   * ADR 0022 F6: the resolved validation runtime's display name, present ONLY
+   * when it differs from the default. The task header's quiet `runs on … ▾`
+   * picker is visible exactly when this field is.
+   */
+  readonly validationRuntimeLabel?: string;
+  /** Every runtime the picker may offer; empty off Windows or before setup. */
+  readonly validationRuntimes: readonly { readonly runtimeId: string; readonly displayName: string }[];
   readonly generatedAt: string;
 }
 
@@ -1095,6 +1169,7 @@ export const CONFIG_SECTIONS = [
   "recipes",
   "memories",
   "runtime",
+  "validation",
   "security"
 ] as const;
 
@@ -1242,7 +1317,195 @@ export interface ConfigState {
    * webview never invents a path; the host re-checks against this same list.
    */
   readonly editablePaths: readonly string[];
+  /**
+   * The Validation section (ADR 0022 M7). Present whenever the backend is
+   * composed - including off Windows, where it carries `hostSupported: false`
+   * so the section says "Windows host required" rather than rendering an empty
+   * registry as though one could be filled in here.
+   */
+  readonly validation?: ValidationConfigState;
 }
+
+// ---------------------------------------------------------------------------
+// Validation runtimes (ADR 0022 M7)
+// ---------------------------------------------------------------------------
+
+/** Exec address as the wizard edits it; credentials never cross this boundary. */
+export interface ValidationConnectionInput {
+  readonly host: string;
+  readonly port?: number;
+  readonly user: string;
+}
+
+/**
+ * A partial runtime edit. Omitted keys are left alone; `connection: null`
+ * clears the address (the runtime stays registered but unreachable, which is
+ * an honest state rather than a deletion).
+ */
+export interface ValidationRuntimeUpdateInput {
+  readonly displayName?: string;
+  readonly image?: string;
+  readonly lifecycle?: ValidationRuntimeLifecycle;
+  readonly capabilities?: readonly string[];
+  readonly policyProfileRef?: string;
+  readonly profileException?: boolean;
+  readonly archived?: boolean;
+  readonly connection?: ValidationConnectionInput | null;
+}
+
+/** One probe line inside a runtime row's L2 expansion (ux-flows F4). */
+export interface ValidationProbeLine {
+  readonly probeId: string;
+  readonly title: string;
+  /** `pass` | `breach` | `fail` | `unknown` - never inferred green (G2). */
+  readonly state: string;
+  /** One honest sentence in studio vocabulary; rendered verbatim. */
+  readonly detail: string;
+}
+
+/** The probe suite's last verdict for one runtime; absent means never run here. */
+export interface ValidationProbeSummary {
+  readonly state: "pass" | "breach" | "fail" | "unknown";
+  readonly at: string;
+  /** Set only when every probe passed; this is what receipts cite. */
+  readonly greenAt?: string;
+  readonly lines: readonly ValidationProbeLine[];
+}
+
+/**
+ * One row of the TD's runtime list. `vmName` is the Hyper-V name the product
+ * adopts (`drydock-validation-<slug>`), surfaced so a TD provisioning the VM
+ * knows exactly what to call it.
+ */
+export interface ValidationRuntimeRow {
+  readonly runtimeId: string;
+  readonly displayName: string;
+  readonly image: string;
+  readonly lifecycle: ValidationRuntimeLifecycle;
+  readonly capabilities: readonly string[];
+  readonly policyProfileRef: string;
+  readonly profileException?: boolean;
+  readonly archived?: boolean;
+  readonly isDefault: boolean;
+  readonly vmName: string;
+  readonly connectionHost?: string;
+  readonly availability: "available" | "stopped" | "quarantined" | "missing" | "unknown";
+  readonly queueDepth: number;
+  readonly probes?: ValidationProbeSummary;
+}
+
+/** One project → runtime row of the association editor (ux-flows F6, H6). */
+export interface ValidationAssociationRow {
+  readonly projectRootId: string;
+  readonly projectLabel: string;
+  readonly runtimeId: string;
+  readonly source: "personal" | "managed";
+  /** Managed + pinned: the row renders locked with its policy source. */
+  readonly pinned?: boolean;
+}
+
+/** A project the association editor can offer, whether or not it has a row. */
+export interface ValidationProjectRow {
+  readonly projectRootId: string;
+  readonly label: string;
+}
+
+/** The registry-wide settings the panel edits (personal, narrowed by managed). */
+export interface ValidationSettingsSummary {
+  readonly defaultRuntimeId?: string;
+  readonly topologyPreset: string;
+  /** The EFFECTIVE cap: min(personal, managed). Absent means no cap. */
+  readonly warmCap?: number;
+  /**
+   * The user's own cap before managed narrowing - the number the input edits.
+   * Showing the effective value while writing the personal one reads as a
+   * broken control when a studio cap is lower.
+   */
+  readonly personalWarmCap?: number;
+}
+
+/** Managed limits, echoed so the panel can say WHY a control is locked. */
+export interface ValidationManagedSummary {
+  readonly topologyPin?: string;
+  readonly warmCap?: number;
+  readonly profileExceptionCreation?: string;
+  readonly imageAllowlist?: readonly string[];
+}
+
+/** One live quarantine, which is the F5 banner's whole content. */
+export interface ValidationQuarantineRow {
+  readonly runtimeId: string;
+  readonly displayName: string;
+  readonly probeId: string;
+  readonly detail: string;
+  readonly at: string;
+}
+
+/**
+ * Everything the Configure panel's Validation section renders, in one read.
+ * `hostSupported: false` means this machine cannot run validation runtimes at
+ * all (not Windows, or no Hyper-V/ssh discovery) - the UI then says "Windows
+ * host required" instead of rendering an empty registry as if it were a choice.
+ */
+export interface ValidationConfigState {
+  readonly hostSupported: boolean;
+  readonly runtimes: readonly ValidationRuntimeRow[];
+  readonly associations: readonly ValidationAssociationRow[];
+  readonly projects: readonly ValidationProjectRow[];
+  readonly settings: ValidationSettingsSummary;
+  readonly managed?: ValidationManagedSummary;
+  readonly quarantines: readonly ValidationQuarantineRow[];
+}
+
+/** The evidence a finished job produced (ux-flows F2, L2 receipt rows). */
+export interface ValidationReceiptView {
+  readonly verdict: "passed" | "failed" | "error";
+  readonly summary?: string;
+  readonly failingTest?: string;
+  readonly failingAssertion?: string;
+  readonly changesetRef: string;
+  readonly mirrorVersion?: number;
+  readonly mirrorFreshnessAt?: string;
+  readonly probesGreenAt?: string;
+  readonly licenseWaitMs: number;
+  /** D2: the working set moved on after this evidence was produced. */
+  readonly superseded: boolean;
+  readonly fixtureManifestHash?: string;
+}
+
+/** One validation job as the chip and the queue render it. */
+export interface ValidationJobView {
+  readonly jobId: string;
+  readonly state: ValidationJobState;
+  /** The suite this job runs; the running chip names it (ux-flows F2). */
+  readonly profileRef: string;
+  readonly runtimeDisplayName?: string;
+  readonly queuePosition?: number;
+  /** Studio-vocabulary sentence, rendered verbatim (H1). */
+  readonly parkedReason?: string;
+  readonly licenseWaitMs?: number;
+  readonly queuedAt: string;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
+  readonly sessionId: string;
+  readonly taskId?: string;
+  readonly subtaskId?: string;
+  readonly receipt?: ValidationReceiptView;
+}
+
+/** What `validation.requeue` decided; `needs-confirm` renders the policy delta. */
+export type ValidationRequeueView =
+  | { readonly kind: "queued" }
+  | {
+      readonly kind: "needs-confirm";
+      readonly delta: ValidationPolicyDelta;
+      readonly toRuntimeId: string;
+      readonly toDisplayName: string;
+    }
+  | { readonly kind: "parked"; readonly reason: string };
+
+/** The rail's L0 dot plus its one-line hover (ux-flows F4). */
+export type ValidationRailDot = "none" | "ok" | "running" | "failed" | "blocked";
 
 export interface PanelInitState {
   readonly availability: BackendAvailability;
@@ -1411,7 +1674,14 @@ export type PanelResponsePayload =
   | { readonly type: "config.mcpAdd"; readonly servers: readonly ConfigMcpRow[] }
   | { readonly type: "config.provider.signIn"; readonly providerId: string; readonly launched: string; readonly mode: "guided" | "terminal" }
   | { readonly type: "config.provider.setDefaultModel"; readonly providerId: string; readonly model: string }
-  | { readonly type: "config.openFile"; readonly opened: boolean };
+  | { readonly type: "config.openFile"; readonly opened: boolean }
+  | { readonly type: "config.validation.state"; readonly state: ValidationConfigState }
+  /** Every registry mutation. Failures arrive as PanelResponseError instead. */
+  | { readonly type: "config.validation.ack" }
+  | { readonly type: "validation.jobs"; readonly jobs: readonly ValidationJobView[] }
+  | { readonly type: "validation.requeue"; readonly result: ValidationRequeueView }
+  | { readonly type: "validation.railStatus"; readonly dot: ValidationRailDot; readonly line: string }
+  | { readonly type: "validation.ack" };
 
 export interface PanelResponseOk {
   readonly protocolVersion: typeof WEBVIEW_PROTOCOL_VERSION;
@@ -1502,7 +1772,30 @@ export type PanelPushPayload =
   /** A `drydock.*` setting changed outside the Configure panel; it refetches config.state. */
   | { readonly type: "config.changed" }
   /** Terminal result of a planner.create / planner.startSession boot. */
-  | { readonly type: "planner.sessionReady"; readonly planId: string; readonly sessionId: string; readonly ok: boolean; readonly error?: string };
+  | { readonly type: "planner.sessionReady"; readonly planId: string; readonly sessionId: string; readonly ok: boolean; readonly error?: string }
+  /** One validation job moved (ADR 0022): the chip re-renders off this. */
+  | {
+      readonly type: "validation.jobChanged";
+      readonly jobId: string;
+      readonly state: ValidationJobState;
+      readonly taskId?: string;
+      readonly sessionId?: string;
+    }
+  /** Coarse registry invalidation: runtimes, associations, or health moved. */
+  | { readonly type: "validation.changed" }
+  /**
+   * F5 incident: a must-fail isolation probe SUCCEEDED. The one deliberate
+   * exception to calm - a persistent banner, never a toast, and never
+   * auto-dismissed.
+   */
+  | {
+      readonly type: "validation.quarantine";
+      readonly runtimeId: string;
+      readonly displayName: string;
+      readonly probeId: string;
+      readonly detail: string;
+      readonly at: string;
+    };
 
 export interface PanelPush {
   readonly protocolVersion: typeof WEBVIEW_PROTOCOL_VERSION;
@@ -1990,6 +2283,183 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const filePath = payload["path"];
       if (!isBoundedString(filePath, MAX_PATH_LENGTH)) return null;
       return { type: "config.openFile", path: filePath };
+    }
+    case "config.validation.state":
+    case "validation.railStatus":
+      return { type: payload["type"] };
+    case "config.validation.createRuntime": {
+      const displayName = payload["displayName"];
+      const image = payload["image"];
+      const lifecycle = payload["lifecycle"];
+      const policyProfileRef = payload["policyProfileRef"];
+      const profileException = payload["profileException"];
+      if (!isBoundedString(displayName, MAX_NAME_LENGTH)) return null;
+      if (!isBoundedString(image, MAX_NAME_LENGTH)) return null;
+      if (!isValidationLifecycle(lifecycle)) return null;
+      const capabilities = parseValidationCapabilities(payload["capabilities"]);
+      if (capabilities === null) return null;
+      if (!isBoundedString(policyProfileRef, MAX_NAME_LENGTH)) return null;
+      if (profileException !== undefined && typeof profileException !== "boolean") return null;
+      // A connection is optional here (the registry row can exist before the
+      // wizard records an address) but `null` is not: only updateRuntime clears.
+      const rawConnection = payload["connection"];
+      let connection: ValidationConnectionInput | undefined;
+      if (rawConnection !== undefined) {
+        const parsed = parseValidationConnection(rawConnection);
+        if (parsed === null) return null;
+        connection = parsed;
+      }
+      return {
+        type: "config.validation.createRuntime",
+        displayName,
+        image,
+        lifecycle,
+        capabilities,
+        policyProfileRef,
+        ...(profileException === undefined ? {} : { profileException }),
+        ...(connection === undefined ? {} : { connection })
+      };
+    }
+    case "config.validation.updateRuntime": {
+      const runtimeId = payload["runtimeId"];
+      if (!isBoundedString(runtimeId, MAX_ID_LENGTH)) return null;
+      const rawUpdate = payload["update"];
+      if (typeof rawUpdate !== "object" || rawUpdate === null || Array.isArray(rawUpdate)) return null;
+      const update = rawUpdate as Record<string, unknown>;
+      const displayName = update["displayName"];
+      const image = update["image"];
+      const lifecycle = update["lifecycle"];
+      const policyProfileRef = update["policyProfileRef"];
+      const profileException = update["profileException"];
+      const archived = update["archived"];
+      if (displayName !== undefined && !isBoundedString(displayName, MAX_NAME_LENGTH)) return null;
+      if (image !== undefined && !isBoundedString(image, MAX_NAME_LENGTH)) return null;
+      if (lifecycle !== undefined && !isValidationLifecycle(lifecycle)) return null;
+      if (policyProfileRef !== undefined && !isBoundedString(policyProfileRef, MAX_NAME_LENGTH)) return null;
+      if (profileException !== undefined && typeof profileException !== "boolean") return null;
+      if (archived !== undefined && typeof archived !== "boolean") return null;
+      let capabilities: readonly string[] | undefined;
+      if (update["capabilities"] !== undefined) {
+        const parsed = parseValidationCapabilities(update["capabilities"]);
+        if (parsed === null) return null;
+        capabilities = parsed;
+      }
+      // `null` clears the address; an object replaces it; absence leaves it.
+      let connection: ValidationConnectionInput | null | undefined;
+      if (update["connection"] === null) connection = null;
+      else if (update["connection"] !== undefined) {
+        const parsed = parseValidationConnection(update["connection"]);
+        if (parsed === null) return null;
+        connection = parsed;
+      }
+      const parsedUpdate: ValidationRuntimeUpdateInput = {
+        ...(displayName === undefined ? {} : { displayName }),
+        ...(image === undefined ? {} : { image }),
+        ...(lifecycle === undefined ? {} : { lifecycle }),
+        ...(capabilities === undefined ? {} : { capabilities }),
+        ...(policyProfileRef === undefined ? {} : { policyProfileRef }),
+        ...(profileException === undefined ? {} : { profileException }),
+        ...(archived === undefined ? {} : { archived }),
+        ...(connection === undefined ? {} : { connection })
+      };
+      // An empty edit is a bug on the sending side, not a no-op to absorb.
+      if (Object.keys(parsedUpdate).length === 0) return null;
+      return { type: "config.validation.updateRuntime", runtimeId, update: parsedUpdate };
+    }
+    case "config.validation.deleteRuntime": {
+      const runtimeId = payload["runtimeId"];
+      const reassignTo = payload["reassignTo"];
+      if (!isBoundedString(runtimeId, MAX_ID_LENGTH)) return null;
+      if (reassignTo !== undefined && !isBoundedString(reassignTo, MAX_ID_LENGTH)) return null;
+      return {
+        type: "config.validation.deleteRuntime",
+        runtimeId,
+        ...(reassignTo === undefined ? {} : { reassignTo })
+      };
+    }
+    case "config.validation.setDefault":
+    case "config.validation.runProbes":
+    case "config.validation.adopt":
+    case "config.validation.revertReprobe": {
+      const runtimeId = payload["runtimeId"];
+      if (!isBoundedString(runtimeId, MAX_ID_LENGTH)) return null;
+      return { type: payload["type"], runtimeId };
+    }
+    case "config.validation.setSettings": {
+      const topologyPreset = payload["topologyPreset"];
+      const warmCap = payload["warmCap"];
+      if (topologyPreset !== undefined && !isValidationTopologyPreset(topologyPreset)) return null;
+      // `null` clears the personal cap; a number is a small whole count.
+      if (warmCap !== undefined && warmCap !== null) {
+        if (typeof warmCap !== "number" || !Number.isInteger(warmCap) || warmCap < 0 || warmCap > MAX_VALIDATION_WARM_CAP) {
+          return null;
+        }
+      }
+      if (topologyPreset === undefined && warmCap === undefined) return null;
+      return {
+        type: "config.validation.setSettings",
+        ...(topologyPreset === undefined ? {} : { topologyPreset }),
+        ...(warmCap === undefined ? {} : { warmCap })
+      };
+    }
+    case "config.validation.setAssociation": {
+      const projectRootId = payload["projectRootId"];
+      const runtimeId = payload["runtimeId"];
+      if (!isBoundedString(projectRootId, MAX_ID_LENGTH)) return null;
+      if (!isBoundedString(runtimeId, MAX_ID_LENGTH)) return null;
+      return { type: "config.validation.setAssociation", projectRootId, runtimeId };
+    }
+    case "config.validation.clearAssociation": {
+      const projectRootId = payload["projectRootId"];
+      if (!isBoundedString(projectRootId, MAX_ID_LENGTH)) return null;
+      return { type: "config.validation.clearAssociation", projectRootId };
+    }
+    case "validation.jobs": {
+      const taskId = payload["taskId"];
+      const sessionId = payload["sessionId"];
+      if (taskId !== undefined && !isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (sessionId !== undefined && !isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      return {
+        type: "validation.jobs",
+        ...(taskId === undefined ? {} : { taskId }),
+        ...(sessionId === undefined ? {} : { sessionId })
+      };
+    }
+    case "validation.abortJob": {
+      const jobId = payload["jobId"];
+      if (!isBoundedString(jobId, MAX_ID_LENGTH)) return null;
+      return { type: "validation.abortJob", jobId };
+    }
+    case "validation.requeue": {
+      const jobId = payload["jobId"];
+      const rerouteTo = payload["rerouteTo"];
+      const confirmedDelta = payload["confirmedDelta"];
+      if (!isBoundedString(jobId, MAX_ID_LENGTH)) return null;
+      if (rerouteTo !== undefined && !isBoundedString(rerouteTo, MAX_ID_LENGTH)) return null;
+      if (confirmedDelta !== undefined && typeof confirmedDelta !== "boolean") return null;
+      return {
+        type: "validation.requeue",
+        jobId,
+        ...(rerouteTo === undefined ? {} : { rerouteTo }),
+        ...(confirmedDelta === undefined ? {} : { confirmedDelta })
+      };
+    }
+    case "validation.setTaskRuntime": {
+      const taskId = payload["taskId"];
+      const runtimeId = payload["runtimeId"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      // An ABSENT runtimeId clears the override; an empty string is a bug.
+      if (runtimeId !== undefined && !isBoundedString(runtimeId, MAX_ID_LENGTH)) return null;
+      return {
+        type: "validation.setTaskRuntime",
+        taskId,
+        ...(runtimeId === undefined ? {} : { runtimeId })
+      };
+    }
+    case "validation.run": {
+      const sessionId = payload["sessionId"];
+      if (!isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      return { type: "validation.run", sessionId };
     }
     case "mcp.list":
       return { type: "mcp.list" };
@@ -2684,6 +3154,53 @@ function parseModelSelection(value: unknown): ChatModelSelection | undefined | n
 
 function isBoundedString(value: unknown, maxLength: number): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= maxLength;
+}
+
+// ---------------------------------------------------------------------------
+// Validation runtimes (ADR 0022) - boundary parsing
+// ---------------------------------------------------------------------------
+
+/** A workstation runs a handful of VMs, not a fleet; the cap bounds the input. */
+const MAX_VALIDATION_WARM_CAP = 64;
+const MAX_VALIDATION_CAPABILITY_COUNT = 32;
+const MAX_VALIDATION_CAPABILITY_LENGTH = 64;
+
+function isValidationLifecycle(value: unknown): value is ValidationRuntimeLifecycle {
+  return value === "keep-warm" || value === "on-demand" || value === "pinned";
+}
+
+function isValidationTopologyPreset(value: unknown): value is ValidationTopologyPreset {
+  return value === "single" || value === "default-plus-named" || value === "per-project";
+}
+
+/** null = malformed (reject); an empty list is a legitimate "declares nothing". */
+function parseValidationCapabilities(value: unknown): readonly string[] | null {
+  if (!Array.isArray(value) || value.length > MAX_VALIDATION_CAPABILITY_COUNT) return null;
+  const capabilities: string[] = [];
+  for (const candidate of value) {
+    if (!isBoundedString(candidate, MAX_VALIDATION_CAPABILITY_LENGTH)) return null;
+    if (!capabilities.includes(candidate)) capabilities.push(candidate);
+  }
+  return capabilities;
+}
+
+/**
+ * The guest's exec address. Credentials never ride here (the adapter uses a
+ * product-owned identity file), so this is host/user/port and nothing else.
+ * null = malformed; callers decide whether absence is allowed.
+ */
+function parseValidationConnection(value: unknown): ValidationConnectionInput | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const host = record["host"];
+  const user = record["user"];
+  const port = record["port"];
+  if (!isBoundedString(host, MAX_NAME_LENGTH)) return null;
+  if (!isBoundedString(user, MAX_NAME_LENGTH)) return null;
+  if (port !== undefined && (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535)) {
+    return null;
+  }
+  return { host, ...(port === undefined ? {} : { port }), user };
 }
 
 const MAX_MEMORY_CONTENT_LENGTH = 2_000;

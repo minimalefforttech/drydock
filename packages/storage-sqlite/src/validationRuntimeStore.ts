@@ -31,6 +31,7 @@ import type {
   ValidationJobId,
   ValidationJobPatch,
   ValidationJobState,
+  ValidationQuarantineRecord,
   ValidationReceipt,
   ValidationReceiptId,
   ValidationRegistrySettings,
@@ -50,6 +51,13 @@ const SETTING_DEFAULT_RUNTIME_ID = "defaultRuntimeId";
 const SETTING_TOPOLOGY_PRESET = "topologyPreset";
 const SETTING_WARM_CAP = "warmCap";
 const SETTING_AUTO_CREATE = "autoCreate";
+/**
+ * Namespaced key prefixes sharing the same table. Both are one small durable
+ * fact per subject - a task's chosen runtime, a runtime's live incident - so
+ * they ride the settings KV rather than earning tables of their own.
+ */
+const SETTING_TASK_OVERRIDE_PREFIX = "override.task.";
+const SETTING_QUARANTINE_PREFIX = "quarantine.";
 
 type SqlValue = string | number | null;
 
@@ -275,6 +283,77 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
       db.exec("ROLLBACK;");
       throw error;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Task overrides + quarantine (same KV table, namespaced keys)
+  // -------------------------------------------------------------------------
+
+  async getTaskOverride(taskId: TaskId): Promise<ValidationRuntimeId | null> {
+    const value = this.readSetting(`${SETTING_TASK_OVERRIDE_PREFIX}${taskId}`);
+    return value === null || value.length === 0 ? null : (value as ValidationRuntimeId);
+  }
+
+  async setTaskOverride(taskId: TaskId, runtimeId: ValidationRuntimeId | null, updatedAt: string): Promise<void> {
+    this.writeSetting(`${SETTING_TASK_OVERRIDE_PREFIX}${taskId}`, runtimeId, updatedAt);
+  }
+
+  /** An unreadable payload reads as "no quarantine flag" - see the note below. */
+  async getQuarantine(runtimeId: ValidationRuntimeId): Promise<ValidationQuarantineRecord | null> {
+    const raw = this.readSetting(`${SETTING_QUARANTINE_PREFIX}${runtimeId}`);
+    if (raw === null || raw.length === 0) return null;
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      // Deliberate: a corrupt flag row is reported as a corrupt flag by the
+      // service layer's own probe run, not silently treated as an incident that
+      // blocks the queue forever with no readable detail.
+      return null;
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const record = value as Record<string, unknown>;
+    const probeId = record["probeId"];
+    const detail = record["detail"];
+    const at = record["at"];
+    if (typeof probeId !== "string" || typeof detail !== "string" || typeof at !== "string") return null;
+    return { probeId, detail, at };
+  }
+
+  async setQuarantine(
+    runtimeId: ValidationRuntimeId,
+    payload: ValidationQuarantineRecord | null,
+    updatedAt: string
+  ): Promise<void> {
+    this.writeSetting(
+      `${SETTING_QUARANTINE_PREFIX}${runtimeId}`,
+      payload === null ? null : JSON.stringify({ probeId: payload.probeId, detail: payload.detail, at: payload.at }),
+      updatedAt
+    );
+  }
+
+  private readSetting(key: string): string | null {
+    const row = this.connection.database.prepare(`
+      SELECT value
+      FROM validation_settings
+      WHERE key = ?
+    `).get(key) as { readonly value: string } | undefined;
+    return row === undefined ? null : row.value;
+  }
+
+  /** `null` deletes the row, matching setSettings' clear semantics. */
+  private writeSetting(key: string, value: string | null, updatedAt: string): void {
+    if (value === null) {
+      this.connection.database.prepare(`DELETE FROM validation_settings WHERE key = ?`).run(key);
+      return;
+    }
+    this.connection.database.prepare(`
+      INSERT INTO validation_settings (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `).run(key, value, updatedAt);
   }
 
   // -------------------------------------------------------------------------

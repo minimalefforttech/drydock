@@ -166,6 +166,19 @@ export interface ValidationRegistrySettingsUpdate {
 }
 
 /**
+ * A live quarantine (edge case E5). Durable because the incident outlives the
+ * process that found it: the banner, the blocked queue, and the flagged
+ * evidence all key off this record until a TD explicitly clears it.
+ */
+export interface ValidationQuarantineRecord {
+  /** The must-fail probe that succeeded. */
+  readonly probeId: string;
+  /** The probe's own sentence, in studio vocabulary; rendered verbatim. */
+  readonly detail: string;
+  readonly at: string;
+}
+
+/**
  * What the product can currently observe about a runtime (ADR 0022). `missing`
  * means an adopted VM is gone from the hypervisor - the only availability that
  * parks; `stopped` is honest queue state (the job service surfaces the boot).
@@ -246,6 +259,21 @@ export interface ValidationJobRequest {
   readonly profile: ValidationProfile;
   /** Hash of the per-job fixture set (A6); copied onto the receipt verbatim. */
   readonly fixtureManifestHash?: string;
+  /**
+   * Approved fixture files shipped into this job's `fixtures` directory
+   * (A1/A6). Content travels BASE64 because these are studio assets, not text,
+   * and the guest writes the exact bytes. The host stages the copies at
+   * approval time; the job service only carries them across, wipes with the
+   * job dir, and never mounts anything.
+   */
+  readonly fixtures?: readonly ValidationFixturePayload[];
+}
+
+/** One approved fixture file, ready to ship into a job's fixture root. */
+export interface ValidationFixturePayload {
+  /** Path under the job's `fixtures` dir; forward slashes, no `..`, no root. */
+  readonly relativePath: string;
+  readonly contentBase64: string;
 }
 
 /**
@@ -431,6 +459,28 @@ export interface ValidationRuntimeStore {
   /** Missing/malformed keys fall back to `{ topologyPreset: "single" }`. */
   getSettings(): Promise<ValidationRegistrySettings>;
   setSettings(update: ValidationRegistrySettingsUpdate, updatedAt: string): Promise<void>;
+
+  /**
+   * The task-level runtime override (the cascade's first tier, ux-flows F6).
+   * Stored in the same key/value table under `override.task.<taskId>`, because
+   * it is one small durable preference per task rather than a table's worth of
+   * structure. `null` means the task follows the cascade.
+   */
+  getTaskOverride(taskId: TaskId): Promise<ValidationRuntimeId | null>;
+  setTaskOverride(taskId: TaskId, runtimeId: ValidationRuntimeId | null, updatedAt: string): Promise<void>;
+
+  /**
+   * The durable quarantine flag (edge case E5, ux-flows F5) under
+   * `quarantine.<runtimeId>`. It must survive a host restart: an isolation
+   * breach that a window reload could clear would be a breach the product
+   * forgot. `null` clears it - only an explicit revert-and-reprobe does that.
+   */
+  getQuarantine(runtimeId: ValidationRuntimeId): Promise<ValidationQuarantineRecord | null>;
+  setQuarantine(
+    runtimeId: ValidationRuntimeId,
+    payload: ValidationQuarantineRecord | null,
+    updatedAt: string
+  ): Promise<void>;
 
   insertJob(record: ValidationJob): Promise<void>;
   getJob(jobId: ValidationJobId): Promise<ValidationJob | null>;
