@@ -35,13 +35,13 @@ interface Fixture {
 }
 
 async function makeFixture(): Promise<Fixture> {
-  const root = await mkdtemp(path.join(tmpdir(), "drydock-xroot-"));
+  const root = await mkdtemp(path.join(tmpdir(), "drydock-pkgroot-"));
   const sourceRoot = path.join(root, "share");
-  const mirrorRoot = path.join(root, "xroot");
+  const mirrorRoot = path.join(root, "pkgroot");
   const files: readonly string[] = [
-    `${INTERNAL}\\fr_core\\1.0.0\\package.py`,
-    `${INTERNAL}\\fr_core\\1.0.0\\python\\fr_core\\__init__.py`,
-    `${INTERNAL}\\fr_rig\\2.3.1\\package.py`
+    `${INTERNAL}\\pipe_core\\1.0.0\\package.py`,
+    `${INTERNAL}\\pipe_core\\1.0.0\\python\\pipe_core\\__init__.py`,
+    `${INTERNAL}\\pipe_rig\\2.3.1\\package.py`
   ];
   for (const file of files) {
     const abs = joinUnderRoot(sourceRoot, file);
@@ -49,18 +49,18 @@ async function makeFixture(): Promise<Fixture> {
     await writeFile(abs, "# fixture\n", "utf8");
   }
   // Torn version: payload without a definition file.
-  await mkdir(joinUnderRoot(sourceRoot, `${INTERNAL}\\fr_core\\2.0.0`), { recursive: true });
-  await writeFile(joinUnderRoot(sourceRoot, `${INTERNAL}\\fr_core\\2.0.0\\half.py`), "# torn\n", "utf8");
+  await mkdir(joinUnderRoot(sourceRoot, `${INTERNAL}\\pipe_core\\2.0.0`), { recursive: true });
+  await writeFile(joinUnderRoot(sourceRoot, `${INTERNAL}\\pipe_core\\2.0.0\\half.py`), "# torn\n", "utf8");
 
   const manifest: MirrorManifest = {
     version: 7,
     updatedAt: "2026-08-12T09:00:00.000Z",
     sourceRoot,
     mirrorRoot,
-    shareName: "xroot",
+    shareName: "pkgroot",
     subtrees: [INTERNAL],
     stubDirs: ["Projects"],
-    redirects: [{ env: "FR_ASSET_API_SILEX_ROOT", from: "X:\\Projects", mode: "stub" }]
+    redirects: [{ env: "STUDIO_ASSET_API_ROOT", from: "P:\\Projects", mode: "stub" }]
   };
   return { root, manifest, cleanup: async (): Promise<void> => rm(root, { recursive: true, force: true }) };
 }
@@ -83,7 +83,7 @@ test("real robocopy: initial mirror, no-change run, deletion, torn skip, state f
   const { manifest } = fixture;
   try {
     const plan = buildSyncPlan(manifest.sourceRoot, manifest.subtrees);
-    assert.deepEqual(plan.skippedVersions, [`${INTERNAL}\\fr_core\\2.0.0`]);
+    assert.deepEqual(plan.skippedVersions, [`${INTERNAL}\\pipe_core\\2.0.0`]);
 
     // 1. Initial sync: files copied is exit code 1, which is success.
     const first = await syncMirror(manifest, plan, { now: () => new Date("2026-08-12T10:00:00.000Z") });
@@ -95,17 +95,17 @@ test("real robocopy: initial mirror, no-change run, deletion, torn skip, state f
     assert.equal(firstResult.copied, 3);
     assert.equal(firstResult.error, undefined);
 
-    const mirroredDefinition = joinUnderRoot(manifest.mirrorRoot, `${INTERNAL}\\fr_core\\1.0.0\\package.py`);
+    const mirroredDefinition = joinUnderRoot(manifest.mirrorRoot, `${INTERNAL}\\pipe_core\\1.0.0\\package.py`);
     assert.equal(await exists(mirroredDefinition), true, "definition file must be mirrored");
 
     // 2. The torn version never reaches the mirror (edge case E2).
     assert.equal(
-      await exists(joinUnderRoot(manifest.mirrorRoot, `${INTERNAL}\\fr_core\\2.0.0`)),
+      await exists(joinUnderRoot(manifest.mirrorRoot, `${INTERNAL}\\pipe_core\\2.0.0`)),
       false,
       "torn version must be excluded from the mirror"
     );
 
-    // 3. Stub directory exists and is empty (X:\Projects fails closed).
+    // 3. Stub directory exists and is empty (P:\Projects fails closed).
     const stub = joinUnderRoot(manifest.mirrorRoot, "Projects");
     assert.deepEqual(first.stubDirs, [stub]);
     assert.deepEqual(await readdir(stub), []);
@@ -117,7 +117,7 @@ test("real robocopy: initial mirror, no-change run, deletion, torn skip, state f
     assert.equal(state["manifestVersion"], 7);
     assert.equal(state["syncedAt"], "2026-08-12T10:00:00.000Z");
     assert.deepEqual(state["subtrees"], [{ subtree: INTERNAL, ok: true, exitCode: 1 }]);
-    assert.deepEqual(state["skippedVersions"], [`${INTERNAL}\\fr_core\\2.0.0`]);
+    assert.deepEqual(state["skippedVersions"], [`${INTERNAL}\\pipe_core\\2.0.0`]);
 
     // 5. Re-run with nothing to do: exit 0, still ok.
     const second = await syncMirror(manifest, plan);
@@ -128,7 +128,7 @@ test("real robocopy: initial mirror, no-change run, deletion, torn skip, state f
     assert.equal(secondResult.copied, 0);
 
     // 6. /MIR removes what the source dropped; extras-removed is exit bit 2.
-    await rm(joinUnderRoot(manifest.sourceRoot, `${INTERNAL}\\fr_core\\1.0.0\\python\\fr_core\\__init__.py`));
+    await rm(joinUnderRoot(manifest.sourceRoot, `${INTERNAL}\\pipe_core\\1.0.0\\python\\pipe_core\\__init__.py`));
     const third = await syncMirror(manifest, plan);
     const thirdResult = third.results[0];
     if (thirdResult === undefined) throw new Error("no subtree result");
@@ -136,7 +136,7 @@ test("real robocopy: initial mirror, no-change run, deletion, torn skip, state f
     assert.equal(thirdResult.exitCode & 2, 2, `expected the extras bit, got ${String(thirdResult.exitCode)}`);
     assert.equal(thirdResult.removed, 1);
     assert.equal(
-      await exists(joinUnderRoot(manifest.mirrorRoot, `${INTERNAL}\\fr_core\\1.0.0\\python\\fr_core\\__init__.py`)),
+      await exists(joinUnderRoot(manifest.mirrorRoot, `${INTERNAL}\\pipe_core\\1.0.0\\python\\pipe_core\\__init__.py`)),
       false,
       "/MIR must remove files the source dropped"
     );
@@ -212,7 +212,7 @@ test("arguments are a fixed list plus validated paths", async () => {
     const plan = buildSyncPlan(fixture.manifest.sourceRoot, fixture.manifest.subtrees);
     const command = buildRobocopyCommands(plan, fixture.manifest.mirrorRoot)[0];
     if (command === undefined) throw new Error("no command built");
-    const torn = joinUnderRoot(fixture.manifest.sourceRoot, `${INTERNAL}\\fr_core\\2.0.0`);
+    const torn = joinUnderRoot(fixture.manifest.sourceRoot, `${INTERNAL}\\pipe_core\\2.0.0`);
     assert.deepEqual(command.args, [
       joinUnderRoot(fixture.manifest.sourceRoot, INTERNAL),
       joinUnderRoot(fixture.manifest.mirrorRoot, INTERNAL),
@@ -238,7 +238,7 @@ test("per-file records separate copies from /MIR deletions", () => {
 });
 
 test("stub directories are created empty and are idempotent", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "drydock-xroot-"));
+  const root = await mkdtemp(path.join(tmpdir(), "drydock-pkgroot-"));
   try {
     const first = await ensureStubDirs(root, ["Projects", "Scratch\\Deep"]);
     assert.deepEqual(first, [path.join(root, "Projects"), path.join(root, "Scratch", "Deep")]);

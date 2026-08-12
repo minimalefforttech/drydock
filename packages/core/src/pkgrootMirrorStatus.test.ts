@@ -9,10 +9,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { MIRROR_STATE_FILE_NAME, readMirrorStatus } from "./xrootMirrorStatus.js";
+import { MIRROR_STATE_FILE_NAME, readMirrorStatus } from "./pkgrootMirrorStatus.js";
 
 async function withMirrorRoot(body: (root: string) => Promise<void>): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), "drydock-xroot-"));
+  const root = await mkdtemp(join(tmpdir(), "drydock-pkgroot-"));
   try {
     await body(root);
   } finally {
@@ -35,14 +35,14 @@ test("reads a written state file", async () => {
           { subtree: "Pipeline\\rez\\packages\\internal", ok: true, exitCode: 1 },
           { subtree: "Pipeline\\rez\\packages\\external", ok: true, exitCode: 0 }
         ],
-        skippedVersions: ["Pipeline\\rez\\packages\\internal\\fr_core\\2.0.0"]
+        skippedVersions: ["Pipeline\\rez\\packages\\internal\\pipe_core\\2.0.0"]
       })
     );
     assert.deepEqual(await readMirrorStatus(root), {
       manifestVersion: 7,
       syncedAt: "2026-08-12T10:00:00.000Z",
       ok: true,
-      skippedVersions: ["Pipeline\\rez\\packages\\internal\\fr_core\\2.0.0"]
+      skippedVersions: ["Pipeline\\rez\\packages\\internal\\pipe_core\\2.0.0"]
     });
   });
 });

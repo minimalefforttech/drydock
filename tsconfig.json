@@ -11,6 +11,6 @@
     { "path": "./apps/vscode-extension" },
     { "path": "./apps/vscode-extension/webview-ui" },
     { "path": "./tools/runtime-smoke" },
-    { "path": "./tools/xroot-mirror" }
+    { "path": "./tools/pkgroot-mirror" }
   ]
 }

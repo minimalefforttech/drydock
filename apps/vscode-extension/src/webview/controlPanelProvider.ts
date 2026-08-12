@@ -2087,7 +2087,7 @@ export class ControlPanelProvider {
     const current = this.openFolderRoots();
     // A mapped drive and its UNC target are the same folder. Compare canonical
     // filesystem identities, but retain the original spellings for VS Code UI
-    // mutations (switching X:\\ to \\\\server\\share can trip VS Code's UNC gate).
+    // mutations (switching P:\\ to \\\\server\\share can trip VS Code's UNC gate).
     const currentKeys = new Set(current.map(hostPathIdentityKey));
     const targetKeys = new Set(target.roots.map(hostPathIdentityKey));
     const toAdd = target.roots.filter((root) => !currentKeys.has(hostPathIdentityKey(root)));

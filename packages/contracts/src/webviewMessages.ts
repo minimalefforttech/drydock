@@ -813,7 +813,7 @@ export interface AccessRequestSummary {
   readonly disposition?: "mount" | "snapshot";
   /**
    * Host-computed display size for the fixture card's fact line (F3:
-   * `hero_rig.ma · 48 MB · X:\...`). Absent when the file cannot be statted -
+   * `hero_rig.ma · 48 MB · P:\...`). Absent when the file cannot be statted -
    * the card omits the segment rather than inventing one.
    */
   readonly sizeLabel?: string;

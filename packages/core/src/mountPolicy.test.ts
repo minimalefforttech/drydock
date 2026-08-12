@@ -69,7 +69,7 @@ test("clone mode does not mount live workspace roots", () => {
 test("workspace roots advertise the real sandbox mount path, not a synthetic label", () => {
   const [mount] = buildMountPolicy({
     mode: "implementation",
-    workspaceRoots: ["X:\\workspace\\sample-project"],
+    workspaceRoots: ["D:\\workspace\\sample-project"],
     sharedRead: [],
     sharedWrite: [],
     approvedAt: "2026-07-01T00:00:00.000Z",
@@ -79,12 +79,12 @@ test("workspace roots advertise the real sandbox mount path, not a synthetic lab
   // `/workspace/root-N` fiction sent writes into an unmounted overlay.
   assert.notEqual(mount?.runtimePath, "/workspace/root-1");
   if (process.platform === "win32") {
-    assert.equal(mount?.runtimePath, "/x/workspace/sample-project");
+    assert.equal(mount?.runtimePath, "/d/workspace/sample-project");
   }
 });
 
 test("sandboxRuntimePath mirrors a Windows drive path into the container", () => {
-  assert.equal(sandboxRuntimePath("X:\\workspace\\project"), "/x/workspace/project");
+  assert.equal(sandboxRuntimePath("D:\\workspace\\project"), "/d/workspace/project");
   assert.equal(sandboxRuntimePath("C:/proj/app"), "/c/proj/app");
   assert.equal(sandboxRuntimePath("\\\\server\\share\\project"), "//server/share/project");
 });

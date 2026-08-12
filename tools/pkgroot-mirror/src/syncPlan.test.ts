@@ -19,12 +19,12 @@ const EXTERNAL = "Pipeline\\rez\\packages\\external";
 const CONFIGS = "Pipeline\\rez\\configs";
 
 async function makeFixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
-  const root = await mkdtemp(path.join(tmpdir(), "drydock-xroot-"));
+  const root = await mkdtemp(path.join(tmpdir(), "drydock-pkgroot-"));
   const files: readonly string[] = [
     // internal: one healthy family, one torn version, one yaml-defined version
-    `${INTERNAL}\\fr_core\\1.0.0\\package.py`,
-    `${INTERNAL}\\fr_core\\1.0.0\\python\\fr_core\\__init__.py`,
-    `${INTERNAL}\\fr_rig\\2.3.1\\package.yaml`,
+    `${INTERNAL}\\pipe_core\\1.0.0\\package.py`,
+    `${INTERNAL}\\pipe_core\\1.0.0\\python\\pipe_core\\__init__.py`,
+    `${INTERNAL}\\pipe_rig\\2.3.1\\package.yaml`,
     // external: healthy
     `${EXTERNAL}\\pyside\\6.5.0\\package.py`,
     // configs: no package definitions anywhere -> copied whole
@@ -37,8 +37,8 @@ async function makeFixture(): Promise<{ root: string; cleanup: () => Promise<voi
     await writeFile(abs, "# fixture\n", "utf8");
   }
   // The torn one: a version directory with payload but no definition file.
-  await mkdir(joinUnderRoot(root, `${INTERNAL}\\fr_core\\2.0.0\\python`), { recursive: true });
-  await writeFile(joinUnderRoot(root, `${INTERNAL}\\fr_core\\2.0.0\\python\\half.py`), "# torn\n", "utf8");
+  await mkdir(joinUnderRoot(root, `${INTERNAL}\\pipe_core\\2.0.0\\python`), { recursive: true });
+  await writeFile(joinUnderRoot(root, `${INTERNAL}\\pipe_core\\2.0.0\\python\\half.py`), "# torn\n", "utf8");
 
   return { root, cleanup: async (): Promise<void> => rm(root, { recursive: true, force: true }) };
 }
@@ -57,13 +57,13 @@ test("package repos exclude torn versions and copy everything else", async () =>
     const internal = entryFor(plan.entries, INTERNAL);
     assert.equal(internal.mode, "package-repo");
     assert.equal(internal.sourceExists, true);
-    assert.deepEqual(internal.excludeDirs, [joinUnderRoot(fixture.root, `${INTERNAL}\\fr_core\\2.0.0`)]);
+    assert.deepEqual(internal.excludeDirs, [joinUnderRoot(fixture.root, `${INTERNAL}\\pipe_core\\2.0.0`)]);
 
     const external = entryFor(plan.entries, EXTERNAL);
     assert.equal(external.mode, "package-repo");
     assert.deepEqual(external.excludeDirs, []);
 
-    assert.deepEqual(plan.skippedVersions, [`${INTERNAL}\\fr_core\\2.0.0`]);
+    assert.deepEqual(plan.skippedVersions, [`${INTERNAL}\\pipe_core\\2.0.0`]);
   } finally {
     await fixture.cleanup();
   }
@@ -73,7 +73,7 @@ test("package.yaml counts as a package definition", async () => {
   const fixture = await makeFixture();
   try {
     const plan = buildSyncPlan(fixture.root, [INTERNAL]);
-    const yamlVersion = joinUnderRoot(fixture.root, `${INTERNAL}\\fr_rig\\2.3.1`);
+    const yamlVersion = joinUnderRoot(fixture.root, `${INTERNAL}\\pipe_rig\\2.3.1`);
     const internal = entryFor(plan.entries, INTERNAL);
     assert.ok(!internal.excludeDirs.includes(yamlVersion), "yaml-defined version must not be treated as torn");
   } finally {
@@ -107,19 +107,19 @@ test("a missing source subtree is planned but flagged, not silently dropped", as
 });
 
 test("unversioned packages keep their payload directories", () => {
-  // In-memory facade: fr_tools has its definition in the family directory, so
+  // In-memory facade: pipe_tools has its definition in the family directory, so
   // its subdirectories are payload rather than half-published versions.
   const root = path.join("R", "repo");
   const tree = new Map<string, readonly string[]>([
-    [root, ["fr_tools", "fr_other"]],
-    [path.join(root, "fr_tools"), ["bin"]],
-    [path.join(root, "fr_tools", "bin"), []],
-    [path.join(root, "fr_other"), ["1.0.0"]],
-    [path.join(root, "fr_other", "1.0.0"), []]
+    [root, ["pipe_tools", "pipe_other"]],
+    [path.join(root, "pipe_tools"), ["bin"]],
+    [path.join(root, "pipe_tools", "bin"), []],
+    [path.join(root, "pipe_other"), ["1.0.0"]],
+    [path.join(root, "pipe_other", "1.0.0"), []]
   ]);
   const files = new Set([
-    path.join(root, "fr_tools", "package.py"),
-    path.join(root, "fr_other", "1.0.0", "package.py")
+    path.join(root, "pipe_tools", "package.py"),
+    path.join(root, "pipe_other", "1.0.0", "package.py")
   ]);
   const fake: SyncFsFacade = {
     listDirectories: (dir) => tree.get(dir) ?? [],

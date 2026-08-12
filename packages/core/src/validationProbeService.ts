@@ -76,20 +76,20 @@ export interface ValidationProbeEndpoint {
 
 /**
  * What the probes attempt (ADR 0022 `security-and-mounts.md` §Probes). These
- * are the REAL locations, not stubs: reading `X:\Projects` inside the curated
+ * are the REAL locations, not stubs: reading `P:\Projects` inside the curated
  * namespace proves nothing, so `productionUncPath` is the production UNC path
  * itself and `disallowedEgress` includes the NAS.
  */
 export interface ValidationProbeConfig {
-  /** The real production location, e.g. `\\therock\Floats\Projects`. */
+  /** The real production location, e.g. `\\studio-fs\share\Projects`. */
   readonly productionUncPath: string;
-  /** Root of the read-only package mirror as the guest maps it, e.g. `X:\`. */
+  /** Root of the read-only package mirror as the guest maps it, e.g. `P:\`. */
   readonly mirrorDriveRoot: string;
   /** Addresses outside the allowlist; at minimum the NAS. Empty = unconfigured. */
   readonly disallowedEgress: readonly ValidationProbeEndpoint[];
   /**
    * The studio's rez canary argv, e.g.
-   * `["rez", "env", "fr_core", "--", "python", "-c", "print('ok')"]`. Absent
+   * `["rez", "env", "pipe_core", "--", "python", "-c", "print('ok')"]`. Absent
    * means the canary is not configured and the probe reports `unknown`.
    */
   readonly toolsetResolveArgv?: readonly string[];

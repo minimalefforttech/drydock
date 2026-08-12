@@ -23,10 +23,10 @@ authoritative today.
    `Restore-VMSnapshot` ([spike-report.md](spike-report.md)), so the revert
    cadence cannot silently drop the network posture.
 4. Install in the guest: Windows + OpenSSH **server**, git, the DCC installs
-   (Maya/Houdini), then bootstrap rez from `X:\Pipeline\rez\configs`.
-5. Map the mirror as `X:` from `\\<host-internal>\xroot` using the reader
+   (Maya/Houdini), then bootstrap rez from `P:\Pipeline\rez\configs`.
+5. Map the mirror as `P:` from `\\<host-internal>\pkgroot` using the reader
    account created by `setup-share.ps1` (`cmdkey /add:<host-internal>
-   /user:<host>\drydock-xroot /pass:`). The password prints once.
+   /user:<host>\drydock-pkgroot /pass:`). The password prints once.
 6. Guest hygiene: enable Win32 long paths (F7); `git config --system
    core.autocrlf false` (D4); run jobs as a dedicated non-admin account that
    holds no provider credentials.
@@ -40,21 +40,21 @@ authoritative today.
 
 The manifest is the allowlist; nothing is mirrored that it does not name. Its
 schema (subtrees, stub dirs, redirects, version) is in
-`tools/xroot-mirror/src/manifest.ts`.
+`tools/pkgroot-mirror/src/manifest.ts`.
 
 1. Elevated, once per host:
-   `pwsh -File tools/xroot-mirror/scripts/setup-share.ps1 -MirrorRoot D:\xroot`
+   `pwsh -File tools/pkgroot-mirror/scripts/setup-share.ps1 -MirrorRoot D:\pkgroot`
    (`-WhatIf` first). Creates the single-purpose reader account, read-only NTFS
    + share, caching off, access-based enumeration on, and an inbound 445 allow
    scoped to the internal switch.
-2. `node tools/xroot-mirror/dist/index.js plan --manifest <path>` — read what
+2. `node tools/pkgroot-mirror/dist/index.js plan --manifest <path>` — read what
    would be copied and which half-written package versions are skipped (E2).
 3. `... sync --manifest <path>` — robocopy the subtrees, create the stub dirs,
    write the state file. `--dry-run` prints the exact commands instead.
 4. `... status --manifest <path>` — freshness and manifest version; this is
    what receipts stamp (G1).
 5. Standing: `... diff --manifest <path> --strict` at package-release time.
-   A newly referenced `X:` root is a manifest proposal to review, never a
+   A newly referenced `P:` root is a manifest proposal to review, never a
    silent addition (F2).
 
 ## Clean baseline
@@ -105,7 +105,7 @@ quarantine → revert-to-clean or rebuild; queued jobs park with the reason.
 
 ## Storage and license server
 
-- `DRYDOCK_HYPERV_ROOT` (VM disk) and `DRYDOCK_XROOT_MIRROR` (mirror root) must
+- `DRYDOCK_HYPERV_ROOT` (VM disk) and `DRYDOCK_PKGROOT_MIRROR` (mirror root) must
   be **local** volumes — never the studio share. The combined floor is 150 GB;
   `npm run prevalidate` reports the measurement as `hyperv.storage`.
 - `DRYDOCK_LICENSE_SERVER=host:port[,host:port]` is the license configuration

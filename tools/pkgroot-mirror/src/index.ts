@@ -1,10 +1,10 @@
 /**
- * `xroot-mirror` CLI — maintain and inspect the curated `X:` mirror (ADR 0022).
+ * `pkgroot-mirror` CLI — maintain and inspect the curated package mirror (ADR 0022).
  *
  * Subcommands: `plan` (what a sync would copy and skip), `sync` (do it, then
- * write the state file), `scan` (which `X:` roots packages reference), `diff`
- * (scan vs manifest drift), `status` (mirror freshness). Everything prints JSON
- * on stdout so the extension, a hook, or a human with `jq` all read the same
+ * write the state file), `scan` (which pipeline-drive roots packages reference),
+ * `diff` (scan vs manifest drift), `status` (mirror freshness). Everything prints
+ * JSON on stdout so the extension, a hook, or a human with `jq` all read the same
  * thing; failures print one line on stderr and exit 1.
  *
  * There are no implicit defaults for the manifest path. The manifest is the
@@ -23,19 +23,23 @@ import {
   MIRROR_STATE_FILE_NAME,
   syncMirror
 } from "./robocopyRunner.js";
-import { scanReferenceRoots } from "./referenceScan.js";
+import { DEFAULT_PIPELINE_DRIVE, scanReferenceRoots } from "./referenceScan.js";
 import type { ReferenceScanResult } from "./referenceScan.js";
 import { diffReferencesAgainstManifest } from "./driftDiff.js";
 
-const USAGE = `xroot-mirror — curated X: mirror tooling (ADR 0022)
+const USAGE = `pkgroot-mirror — curated package-mirror tooling (ADR 0022)
 
   plan   --manifest <path>                     what a sync would copy and skip
   sync   --manifest <path> [--dry-run]         run robocopy, write the state file
                            [--robocopy <exe>]
-  scan   <dir> [<dir>...] [--files a,b]        X: roots referenced by package definitions
+  scan   <dir> [<dir>...] [--files a,b]        pipeline-drive roots referenced by package definitions
+                          [--drive <letter>]
   diff   --manifest <path> [<dir>...]          scan vs manifest drift ("--strict" exits 1 on new roots)
+                          [--drive <letter>]
   status --manifest <path> | --mirror-root <path>   mirror freshness
 
+The pipeline drive letter defaults to "${DEFAULT_PIPELINE_DRIVE}"; "diff" prefers
+the drive prefix of the manifest's sourceRoot when it has one.
 All output is JSON on stdout.`;
 
 const BOOLEAN_FLAGS = new Set(["dry-run", "strict", "help"]);
@@ -121,9 +125,9 @@ async function commandSync(argv: Argv): Promise<void> {
 
 async function commandScan(argv: Argv): Promise<void> {
   if (argv.positionals.length === 0) {
-    throw new Error('scan needs at least one directory: xroot-mirror scan "X:\\Pipeline\\rez\\packages\\internal".');
+    throw new Error('scan needs at least one directory: pkgroot-mirror scan "P:\\Pipeline\\rez\\packages\\internal".');
   }
-  emit(await runScan(argv, argv.positionals));
+  emit(await runScan(argv, argv.positionals, stringFlag(argv, "drive")));
 }
 
 async function commandDiff(argv: Argv): Promise<void> {
@@ -131,7 +135,7 @@ async function commandDiff(argv: Argv): Promise<void> {
   const dirs = argv.positionals.length > 0
     ? argv.positionals
     : manifest.subtrees.map((subtree) => joinUnderRoot(manifest.sourceRoot, subtree));
-  const scan = await runScan(argv, dirs);
+  const scan = await runScan(argv, dirs, stringFlag(argv, "drive") ?? driveLetterOf(manifest.sourceRoot));
   const drift = diffReferencesAgainstManifest(scan, manifest);
   emit({
     manifestVersion: manifest.version,
@@ -143,11 +147,17 @@ async function commandDiff(argv: Argv): Promise<void> {
   });
   if (argv.flags.get("strict") === true && drift.newRoots.length > 0) {
     process.stderr.write(
-      `${String(drift.newRoots.length)} X: root(s) referenced but not in manifest version ${String(manifest.version)}: ` +
+      `${String(drift.newRoots.length)} pipeline-drive root(s) referenced but not in manifest version ${String(manifest.version)}: ` +
       `${drift.newRoots.map((entry) => entry.root).join(", ")}. Review and bump the manifest.\n`
     );
     process.exitCode = 1;
   }
+}
+
+/** Drive prefix of a root, when it has one (`P:\Pipeline` → `P`); UNC roots do not. */
+function driveLetterOf(root: string): string | undefined {
+  const match = /^([A-Za-z]):/.exec(root.trim());
+  return match?.[1];
 }
 
 async function commandStatus(argv: Argv): Promise<void> {
@@ -195,12 +205,15 @@ async function resolveMirrorRoot(argv: Argv): Promise<string> {
   return manifest.mirrorRoot;
 }
 
-async function runScan(argv: Argv, dirs: readonly string[]): Promise<ReferenceScanResult> {
+async function runScan(argv: Argv, dirs: readonly string[], driveLetter?: string): Promise<ReferenceScanResult> {
   const files = stringFlag(argv, "files");
   const fileNames = files === undefined
     ? undefined
     : files.split(",").map((name) => name.trim()).filter((name) => name.length > 0);
-  return scanReferenceRoots(dirs, fileNames === undefined ? {} : { fileNames });
+  return scanReferenceRoots(dirs, {
+    ...(fileNames === undefined ? {} : { fileNames }),
+    ...(driveLetter === undefined ? {} : { driveLetter })
+  });
 }
 
 function emit(value: unknown): void {

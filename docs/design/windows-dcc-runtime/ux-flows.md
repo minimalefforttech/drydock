@@ -76,7 +76,7 @@ itself run automatically and collapse to `✓ label`. Only a row that needs
 the TD expands — showing the minimal control and nothing else (the storage
 pick shows two eligible volumes; the group-membership fix is one elevated
 button + a sign-out note). Auto-detected values (mirror roots and the
-`FR_ASSET_API_SILEX_ROOT` redirect from the rezconfig scan) arrive
+`STUDIO_ASSET_API_ROOT` redirect from the rezconfig scan) arrive
 pre-filled with an edit affordance, not as forms. Finish state is a single
 line — "Runtime ready · probes green 14:32" — plus Done.
 
@@ -107,12 +107,12 @@ the same chip — manual-first workflows are first-class.
 
 ## F3 — Fixture from a prohibited location — `images/fixture-approval.svg`
 
-Trigger A (user): drag `X:\Projects\...\hero.ma` into chat, or composer
+Trigger A (user): drag `P:\Projects\...\hero.ma` into chat, or composer
 paperclip → picker. Trigger B (agent): access request. One card either way,
 **three lines tall**:
 
 1. `Production file → snapshot` + tier badge
-2. `hero_rig.ma · 48 MB · X:\Projects\ShowA\rigs\`
+2. `hero_rig.ma · 48 MB · P:\Projects\ShowA\rigs\`
 3. typed-confirm field + `Approve snapshot` / `Deny`
 
 That is the whole card. The friction budget is spent on exactly one thing —
@@ -199,8 +199,8 @@ UX surfaces, in ladder order:
 - **Banners**: quarantine, mirror unsyncable, VM unreachable — states that
   own the truth until resolved.
 - **Message style:** what + why + one action, studio vocabulary:
-  "hero_test failed: X:\Projects is not available in validation runs —
+  "hero_test failed: P:\Projects is not available in validation runs —
   attach the file as a fixture (button)". Never
-  "EACCES on \\\\host-internal\\xroot\\Projects".
+  "EACCES on \\\\host-internal\\pkgroot\\Projects".
 - **Never invent green** (ADR 0021): unverifiable states render unknown
   with Refresh — as one calm line, like everything else.

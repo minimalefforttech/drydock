@@ -92,7 +92,7 @@ export class EffectiveSecurityPolicy {
   readonly deniedPaths: readonly string[];
   /**
    * The STUDIO-managed data denials only (ADR 0022): the production locations
-   * an administrator's policy forbids mounting, e.g. `X:\Projects`. This is the
+   * an administrator's policy forbids mounting, e.g. `P:\Projects`. This is the
    * ONLY set that qualifies as production-tier for the snapshot fixture flow -
    * the built-in credential defaults and personal denials never do, so keys and
    * secrets can never be routed through the snapshot carve-out. Empty on an

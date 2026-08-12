@@ -46,6 +46,7 @@ import {
   VALIDATION_FIXTURE_GUEST_SCRIPT,
   VALIDATION_RUN_GUEST_SCRIPT,
   VALIDATION_SYNC_GUEST_SCRIPT,
+  VALIDATION_TAG_COMMENT,
   validationGuestCommand,
   type ValidationChangeset,
   type ValidationExecAdapter,
@@ -258,7 +259,7 @@ class FakeAdapter implements ValidationExecAdapter {
       this.fixtureInput = input as FixtureInput;
       return commandResult(this.script.fixtures?.(this.fixtureInput) ?? { stdout: '{"ok":true,"written":[],"failures":[]}' });
     }
-    if (script === VALIDATION_RUN_GUEST_SCRIPT) {
+    if (script === `${VALIDATION_RUN_GUEST_SCRIPT}\n${VALIDATION_TAG_COMMENT}`) {
       this.kinds.push("run");
       this.runInput = input as RunInput;
       this.runArgs = args;
@@ -528,7 +529,7 @@ test("a resolved job queues, runs, and lands a passing receipt", async () => {
   // element, never spliced into script text) so sweepGuestJob can find and reap
   // it - an env-only token is invisible to Win32_Process.
   const ran = bench.adapters.get("default");
-  assert.equal(ran?.runArgs?.[4], VALIDATION_RUN_GUEST_SCRIPT);
+  assert.equal(ran?.runArgs?.[4], `${VALIDATION_RUN_GUEST_SCRIPT}\n${VALIDATION_TAG_COMMENT}`);
   assert.ok(ran?.runArgs?.includes(job.jobId), "the job id tags the wrapper process");
 
   const receipt = await bench.store.getReceiptByJob(job.jobId);
@@ -811,7 +812,7 @@ test("the guest receives the job layout, the patch bytes, and a job-scoped envir
   const adapter = new FakeAdapter();
   const bench = harness({ adapters: { default: adapter } });
   const job = await bench.service.enqueue(request({
-    profile: profile({ env: { REZ_CONFIG_FILE: "X:\\Pipeline\\rez\\configs\\studio.py" } })
+    profile: profile({ env: { REZ_CONFIG_FILE: "P:\\Pipeline\\rez\\configs\\studio.py" } })
   }));
   await bench.service.whenIdle();
   assert.ok(job);
@@ -830,7 +831,7 @@ test("the guest receives the job layout, the patch bytes, and a job-scoped envir
   assert.equal(env["HOUDINI_USER_PREF_DIR"], `${jobDir}\\prefs\\houdini`);
   assert.equal(env["DRYDOCK_FIXTURE_ROOT"], `${jobDir}\\fixtures`);
   assert.equal(env["DRYDOCK_JOB_TOKEN"], job.jobId);
-  assert.equal(env["REZ_CONFIG_FILE"], "X:\\Pipeline\\rez\\configs\\studio.py");
+  assert.equal(env["REZ_CONFIG_FILE"], "P:\\Pipeline\\rez\\configs\\studio.py");
   // One repo means the profile runs inside it.
   assert.equal(adapter.runInput?.cwd, `${jobDir}\\ws\\pipeline`);
   assert.deepEqual(adapter.runInput?.argv, ["mayapy", "-m", "pytest", "tests"]);
@@ -1503,6 +1504,14 @@ test("a repository name that is not a plain segment never reaches the guest", as
 test("guest commands are fixed-literal PowerShell with parameters on stdin", () => {
   const argv = validationGuestCommand(VALIDATION_RUN_GUEST_SCRIPT);
   assert.deepEqual(argv.slice(0, 4), ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]);
+  assert.equal(argv[4], VALIDATION_RUN_GUEST_SCRIPT, "an untagged script gains no terminator");
+  // PowerShell -Command space-joins every following argv element into the
+  // script text, so a tagged script must end on a comment line for the tag to
+  // land on - otherwise the join produces `exit $LASTEXITCODE vjob-1`, a parse
+  // error, and no guest command ever runs.
+  const tagged = validationGuestCommand(VALIDATION_RUN_GUEST_SCRIPT, "vjob-1");
+  assert.equal(tagged[4], `${VALIDATION_RUN_GUEST_SCRIPT}\n${VALIDATION_TAG_COMMENT}`);
+  assert.equal(tagged[5], "vjob-1");
   for (const script of [VALIDATION_RUN_GUEST_SCRIPT, VALIDATION_SYNC_GUEST_SCRIPT, VALIDATION_CLEANUP_GUEST_SCRIPT]) {
     assert.match(script, /\[Console\]::In\.ReadToEnd\(\) \| ConvertFrom-Json/);
   }

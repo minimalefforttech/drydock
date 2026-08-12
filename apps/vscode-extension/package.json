@@ -431,11 +431,11 @@
           "properties": {
             "productionUncPath": {
               "type": "string",
-              "description": "The REAL production location the guest must not be able to read, e.g. \\\\therock\\Floats\\Projects."
+              "description": "The REAL production location the guest must not be able to read, e.g. \\\\studio-fs\\share\\Projects."
             },
             "mirrorDriveRoot": {
               "type": "string",
-              "description": "Root of the read-only package mirror as the guest maps it, e.g. X:\\."
+              "description": "Root of the read-only package mirror as the guest maps it, e.g. P:\\."
             },
             "disallowedEgress": {
               "type": "array",
@@ -461,7 +461,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "The rez canary argv, e.g. [\"rez\", \"env\", \"fr_core\", \"--\", \"python\", \"-c\", \"print('ok')\"]."
+              "description": "The rez canary argv, e.g. [\"rez\", \"env\", \"pipe_core\", \"--\", \"python\", \"-c\", \"print('ok')\"]."
             }
           },
           "markdownDescription": "What the validation runtime's standing isolation probes attempt (ADR 0022): read real production, write the package mirror, connect past the egress allowlist, and resolve the studio toolsets. **Unset leaves every probe `unknown`** - never a pass - so health reads honestly on a workstation nobody has configured yet."

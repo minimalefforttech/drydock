@@ -100,7 +100,7 @@ const PROBE_COMMAND: readonly string[] = ["cmd", "/c", "exit", "0"];
  * de-duplicated set. The sweeping process itself is skipped so a sweep can never
  * kill its own shell, and the `$targets` set makes the walk cycle-safe.
  */
-const SWEEP_GUEST_JOB_SCRIPT = [
+export const SWEEP_GUEST_JOB_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
   "$request = [Console]::In.ReadToEnd() | ConvertFrom-Json",
   "$token = [string]$request.jobToken",

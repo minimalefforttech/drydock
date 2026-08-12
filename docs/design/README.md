@@ -34,7 +34,7 @@ you are changing.
 | [subagent-workflows](subagent-workflows.md) | Subagent visibility and role-session workflows across Codex and Claude Code transports. |
 | [prevalidation-coverage](prevalidation-coverage.md) | Original Stage 0 coverage map; useful for the environment/provider gate, not a current feature inventory. |
 | [ux-overhaul-implementation](ux-overhaul-implementation.md) | Phased build plan for the calm-workbench shell (left rail, active-task spine, task hub, chat rail, quick chat, agents clarity, configure, control-panel retirement). Design: `docs/ideas/ux-overhaul-calm-workbench.md`. |
-| [windows-dcc-runtime/](windows-dcc-runtime/README.md) | ADR 0022 docset (proposed): pooled Hyper-V validation runtime for Windows-native mayapy/hython + studio rez packages — upgrade plan, curated-`X:` security model, fixture flow, UX flows with annotated mockups, edge-case catalog. |
+| [windows-dcc-runtime/](windows-dcc-runtime/README.md) | ADR 0022 docset (proposed): pooled Hyper-V validation runtime for Windows-native mayapy/hython + studio rez packages — upgrade plan, curated-`P:` security model, fixture flow, UX flows with annotated mockups, edge-case catalog. |
 
 Note: the webview visual-test guide lives at
 `tools/webview-harness/visual-tests.md`, not here.

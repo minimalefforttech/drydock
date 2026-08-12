@@ -35,17 +35,17 @@ import {
   type ValidationProbeExec
 } from "./validationProbeService.js";
 
-const PRODUCTION_PATH = "\\\\therock\\Floats\\Projects";
-const MIRROR_ROOT = "X:\\";
+const PRODUCTION_PATH = "\\\\studio-fs\\share\\Projects";
+const MIRROR_ROOT = "P:\\";
 const MIRROR_PROBE_FILE = ".drydock-probe-write-check.tmp";
-const CANARY_ARGV = ["rez", "env", "fr_core", "--", "python", "-c", "print('ok')"];
+const CANARY_ARGV = ["rez", "env", "pipe_core", "--", "python", "-c", "print('ok')"];
 
 const CONFIG: ValidationProbeConfig = {
   productionUncPath: PRODUCTION_PATH,
   mirrorDriveRoot: MIRROR_ROOT,
   disallowedEgress: [
-    { host: "therock", port: 445 },
-    { host: "therock", port: 139 }
+    { host: "studio-fs", port: 445 },
+    { host: "studio-fs", port: 139 }
   ],
   toolsetResolveArgv: CANARY_ARGV
 };
@@ -81,8 +81,8 @@ function refusedReplies(): Record<string, GuestReply> {
     "probe.egress": {
       json: {
         endpoints: [
-          { address: "therock", port: 445, connected: false, error: "connect timed out" },
-          { address: "therock", port: 139, connected: false, error: "connect timed out" }
+          { address: "studio-fs", port: 445, connected: false, error: "connect timed out" },
+          { address: "studio-fs", port: 139, connected: false, error: "connect timed out" }
         ]
       }
     },
@@ -112,7 +112,7 @@ test("a refused guest makes every must-fail probe pass and stamps the run green"
   assert.ok(detail(run, "probe.production-read").includes(PRODUCTION_PATH));
   assert.ok(detail(run, "probe.production-read").includes("The network path was not found."));
   assert.match(detail(run, "probe.mirror-write"), /refuses writes from the validation runtime/);
-  assert.equal(detail(run, "probe.egress"), "No connection to 2 blocked endpoints (therock:445, therock:139).");
+  assert.equal(detail(run, "probe.egress"), "No connection to 2 blocked endpoints (studio-fs:445, studio-fs:139).");
 });
 
 test("a production read that succeeds quarantines the runtime and raises the incident", async () => {
@@ -186,8 +186,8 @@ test("one connected endpoint breaches and names the host:port that answered", as
   h.replies["probe.egress"] = {
     json: {
       endpoints: [
-        { address: "therock", port: 445, connected: false, error: "connect timed out" },
-        { address: "therock", port: 139, connected: true, error: "" }
+        { address: "studio-fs", port: 445, connected: false, error: "connect timed out" },
+        { address: "studio-fs", port: 139, connected: true, error: "" }
       ]
     }
   };
@@ -198,7 +198,7 @@ test("one connected endpoint breaches and names the host:port that answered", as
   assert.equal(probe.state, "breach");
   assert.equal(
     probe.detail,
-    "EGRESS SUCCEEDED: the validation runtime connected to therock:139, which is outside the allowlist."
+    "EGRESS SUCCEEDED: the validation runtime connected to studio-fs:139, which is outside the allowlist."
   );
   assert.equal(h.events.length, 2);
 });
@@ -211,7 +211,7 @@ test("the toolset canary passes on exit 0 and fails - without quarantine - on an
   const broken = harness();
   broken.replies["probe.toolset-resolve"] = {
     exitCode: 1,
-    stderr: "rez: package family not found: fr_core\n"
+    stderr: "rez: package family not found: pipe_core\n"
   };
 
   const run = await broken.service.runProbes(RUNTIME);
@@ -221,7 +221,7 @@ test("the toolset canary passes on exit 0 and fails - without quarantine - on an
   assert.equal(probe.state, "fail");
   assert.equal(
     probe.detail,
-    "The validation toolset canary failed (exit 1): rez: package family not found: fr_core"
+    "The validation toolset canary failed (exit 1): rez: package family not found: pipe_core"
   );
   // A broken canary blocks jobs; it is not a security incident.
   assert.equal(broken.quarantined.length, 0);
@@ -293,7 +293,7 @@ test("probesGreenAt serves the latest run only - a breach stops the last green f
 
   h.setNow("2026-08-12T10:00:00.000Z");
   h.replies["probe.egress"] = {
-    json: { endpoints: [{ address: "therock", port: 445, connected: true, error: "" }] }
+    json: { endpoints: [{ address: "studio-fs", port: 445, connected: true, error: "" }] }
   };
   const breached = await h.service.runProbes(RUNTIME);
 
@@ -318,8 +318,8 @@ test("parameters travel as stdin JSON and never enter the script text", async ()
   assert.deepEqual(JSON.parse(egress.input ?? ""), {
     timeoutMs: 3000,
     endpoints: [
-      { address: "therock", port: 445 },
-      { address: "therock", port: 139 }
+      { address: "studio-fs", port: 445 },
+      { address: "studio-fs", port: 139 }
     ]
   });
 
@@ -330,7 +330,7 @@ test("parameters travel as stdin JSON and never enter the script text", async ()
     // Zero interpolation: no parameter value appears anywhere in the script.
     assert.ok(!script.includes(PRODUCTION_PATH));
     assert.ok(!script.includes(MIRROR_ROOT));
-    assert.ok(!script.includes("therock"));
+    assert.ok(!script.includes("studio-fs"));
   }
 });
 
@@ -379,7 +379,7 @@ test("an empty blocked-endpoint list is unknown rather than a silent pass", asyn
 });
 
 test("a long endpoint list raises the exec budget above the default", async () => {
-  const endpoints = Array.from({ length: 8 }, (_value, index) => ({ host: "therock", port: 400 + index }));
+  const endpoints = Array.from({ length: 8 }, (_value, index) => ({ host: "studio-fs", port: 400 + index }));
   const h = harness({ config: { ...CONFIG, disallowedEgress: endpoints } });
   h.replies["probe.egress"] = {
     json: { endpoints: endpoints.map((endpoint) => ({ address: endpoint.host, port: endpoint.port, connected: false, error: "connect timed out" })) }
@@ -389,7 +389,7 @@ test("a long endpoint list raises the exec budget above the default", async () =
 
   // 8 dials x 3 s plus 5 s of slack beats the 20 s default.
   assert.equal(call(h, EGRESS_GUEST_SCRIPT).timeoutMs, 29_000);
-  assert.equal(find(run, "probe.egress").detail, "No connection to 8 blocked endpoints (therock:400, therock:401, therock:402, +5 more).");
+  assert.equal(find(run, "probe.egress").detail, "No connection to 8 blocked endpoints (studio-fs:400, studio-fs:401, studio-fs:402, +5 more).");
 });
 
 test("a quarantine callback that throws still announces the incident", async () => {

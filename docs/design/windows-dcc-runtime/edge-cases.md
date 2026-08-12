@@ -5,7 +5,7 @@ call before Phase 3 exits. "VM" = the pooled validation runtime.
 
 ## A. Prohibited content
 
-**A1. AI must analyze a file that lives in `X:\Projects`.**
+**A1. AI must analyze a file that lives in `P:\Projects`.**
 → Fixture flow (`security-and-mounts.md`): user drag/pick or agent request →
 risk-tiered card (typed confirm for production) → snapshot copy into session
 uploads or job fixture root → grants-ledger entry with hash + expiry →
@@ -47,7 +47,7 @@ Why: copies inherit the classification of their source.
 ## B. Access & identity
 
 **B1. User drags a file the *host* user can read but policy denies (e.g.
-`X:\Projects` via drag instead of picker).**
+`P:\Projects` via drag instead of picker).**
 → Same card as A1 — drag is a trigger, not an approval bypass. Denied paths
 config cannot be dragged past.
 Why: one gate, many doors.
@@ -145,13 +145,13 @@ Why: matches the existing crash-consistency posture of runtime inventory.
 
 ## F. Packages & environment
 
-**F1. Package hardcodes `X:\Projects` (e.g. `FR_ASSET_API_SILEX_ROOT`).**
+**F1. Package hardcodes `P:\Projects` (e.g. `STUDIO_ASSET_API_ROOT`).**
 → Fail-closed by default (path absent/stub); per-job fixture composition
 seeds exact relative paths when granted; optional wrapper-level env
 override for explicit redirection. No package edits required.
 Why: found in the reference scan; the namespace design absorbs it.
 
-**F2. Package references an X: root outside the manifest (new class).**
+**F2. Package references a P: root outside the manifest (new class).**
 → Release-time scan diffs references vs manifest and raises a proposal;
 in-guest canary resolve asserts every env path exists.
 Why: the allowlist must evolve by review, not by breakage.

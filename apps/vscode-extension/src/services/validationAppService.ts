@@ -1014,7 +1014,7 @@ export class ValidationAppService {
     }
     const directory = this.sessionFixtureDir(input.sessionId);
     // Namespace each grant by a hash of its SOURCE path so two files that share
-    // a basename (X:\shots\010\scene.ma and X:\shots\020\scene.ma) never
+    // a basename (P:\shots\010\scene.ma and P:\shots\020\scene.ma) never
     // overwrite each other - a silent overwrite would ship one file while the
     // receipt attests another.
     const relativePath = fixtureRelPath(input.hostPath);

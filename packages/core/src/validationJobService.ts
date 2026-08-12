@@ -72,7 +72,7 @@ import { assertPatchSafeForWindowsGuest } from "./cloneSyncService.js";
 import type { ProductEventBus } from "./eventBus.js";
 import type { Logger } from "./logger.js";
 import { computeReroute, pickAssociation, resolveValidationRuntime } from "./validationRoutingService.js";
-import { readMirrorStatus } from "./xrootMirrorStatus.js";
+import { readMirrorStatus } from "./pkgrootMirrorStatus.js";
 
 // ---------------------------------------------------------------------------
 // Ports
@@ -184,6 +184,16 @@ export type ValidationRequeueResult =
 // ---------------------------------------------------------------------------
 
 /**
+ * Trailing comment line a tagged guest script ends with. PowerShell's `-Command`
+ * space-joins every argv element that follows it into the ONE script string, so
+ * without this line a trailing tag would land on the script's last statement
+ * (`exit $LASTEXITCODE vjob-1`) and turn the whole command into a parse error.
+ * Tags are charset-checked ids (`SAFE_JOB_TOKEN`), so whatever joins onto a `#`
+ * line is inert text.
+ */
+export const VALIDATION_TAG_COMMENT = "# drydock-job-token:";
+
+/**
  * Argv for a fixed-literal guest PowerShell script. Deliberately identical to
  * `guestJsonCommand` in `@drydock/runtime-adapters` - core cannot import that
  * package (adapters depend on core, not the other way round), and duplicating
@@ -193,10 +203,13 @@ export type ValidationRequeueResult =
  * into the script text - so they appear on the guest process's CommandLine where
  * `sweepGuestJob` can find it (Win32_Process exposes no environment block, so an
  * env-only token is invisible to a sweep). The wrapper ignores them; they exist
- * only to label the process.
+ * only to label the process. A tagged script gains the constant
+ * `VALIDATION_TAG_COMMENT` terminator because `-Command` joins the tags into the
+ * script text (see that constant's note).
  */
 export function validationGuestCommand(fixedScript: string, ...tags: readonly string[]): string[] {
-  return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", fixedScript, ...tags];
+  const script = tags.length > 0 ? `${fixedScript}\n${VALIDATION_TAG_COMMENT}` : fixedScript;
+  return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, ...tags];
 }
 
 /**

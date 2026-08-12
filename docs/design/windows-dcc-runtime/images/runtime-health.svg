@@ -53,7 +53,7 @@
 
   <!-- partial row + scrollbar -->
   <rect x="44" y="494" width="588" height="14" rx="4" fill="#1f2126" opacity="0.5"/>
-  <text x="60" y="506" font-size="11" fill="#6f7580" opacity="0.7">○ tmp-FR-1201 — per-project · reaps in 4 d…</text>
+  <text x="60" y="506" font-size="11" fill="#6f7580" opacity="0.7">○ tmp-TSK-1201 — per-project · reaps in 4 d…</text>
   <rect x="640" y="224" width="6" height="284" rx="3" fill="#17181c"/>
   <rect x="640" y="224" width="6" height="150" rx="3" fill="#3d414a"/>
 

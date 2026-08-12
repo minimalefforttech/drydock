@@ -1,7 +1,7 @@
 # Upgrade plan — Windows DCC validation runtime
 
 Scope: deliver ADR 0022 end to end: `hyperv` adapter, named validation
-runtimes, curated `X:` mirror, fixture flow, probes, and the UX in
+runtimes, curated `P:` mirror, fixture flow, probes, and the UX in
 `ux-flows.md`. The milestone-level, file-anchored breakdown lives in
 [implementation-plan.md](implementation-plan.md).
 
@@ -18,7 +18,7 @@ work is one new adapter package, one job service, policy tooling, and UI.
 | `hyperv` adapter (adopt, exec via SSH, checkpoint, telemetry) | `packages/runtime-adapters` | M |
 | Validation job service (queue on run slots, changeset ship, evidence) | `packages/core` + extension services | M |
 | Runtime registry + routing cascade (named runtimes, associations, topology presets, warm caps) | `packages/core` + extension services | S–M |
-| Mirror + curated `X:` tooling (sync, manifest, redirect map) | new `tools/xroot-mirror` | M |
+| Mirror + curated `P:` tooling (sync, manifest, redirect map) | new `tools/pkgroot-mirror` | M |
 | Probe suite (negative tests, scheduled + on-adopt) | `tools/prevalidate` + adapter | S |
 | Setup wizard + health/maintenance UI + fixture cards | extension + webview | M–L |
 | Docs: threat model deltas, runbook | `docs/` | S |
@@ -59,7 +59,7 @@ verification runs end to end.
 
 **Phase 3 — Policy layer (security review gate).** Port ACLs default-deny
 (+ host internal IP, + license IP:ports); mirror sync with manifest;
-`X:\Projects` and UNC equivalents in drydock denied paths; probe suite wired
+`P:\Projects` and UNC equivalents in drydock denied paths; probe suite wired
 to quarantine; fixture copy path with grants-ledger entries and expiry.
 *Exit:* security review sign-off; probes green for one week of daily use.
 
@@ -86,14 +86,14 @@ Codex-side parity for anything Claude-first.
 - If Phase 1 misses the 3× round-trip ceiling, the concept fails the
   seamless-or-bypassed constraint and stops.
 
-## Reference environment findings (FR-ONYX, 2026-08-12)
+## Reference environment findings (STUDIO-ONYX, 2026-08-12)
 
 Hyper-V fully enabled (all features installed, `vmms` running, module,
 `hvc.exe`, `ssh.exe` present); Hyper-V Administrators group empty — one-time
 membership + re-logon required; 32 GB RAM (one 8–16 GB validation VM
-comfortable beside sbx); `X:` = `\\therock\Floats` with `Pipeline` and
-`Projects` as sibling folders; rez repo at `X:\Pipeline\rez\packages`
+comfortable beside sbx); `P:` = `\\studio-fs\share` with `Pipeline` and
+`Projects` as sibling folders; rez repo at `P:\Pipeline\rez\packages`
 (`internal`/`external`/`staging`/`user\${USERNAME}`); studio rezconfig
 already enables local package caching (`cache_packages_path` on `C:`);
-multiple packages hardcode `env.FR_ASSET_API_SILEX_ROOT = "X:\Projects"` —
+multiple packages hardcode `env.STUDIO_ASSET_API_ROOT = "P:\Projects"` —
 handled by the stub/fixture design in `security-and-mounts.md`.

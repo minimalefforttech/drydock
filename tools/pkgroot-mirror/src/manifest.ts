@@ -1,8 +1,8 @@
 /**
- * Mirror manifest: the allowlist that defines the curated `X:` namespace.
+ * Mirror manifest: the allowlist that defines the curated package namespace.
  *
  * ADR 0022 replaces path translation with a curated namespace. The host mirrors
- * exactly the subtrees this manifest names, so every `X:\Pipeline\...` string in
+ * exactly the subtrees this manifest names, so every `P:\Pipeline\...` string in
  * a package definition, `packages_path`, or baked context resolves byte-for-byte
  * unchanged in the guest. Everything the manifest does not name is unnamed in
  * the guest, not merely denied (security-and-mounts.md).
@@ -22,9 +22,9 @@ import { readFile, writeFile } from "node:fs/promises";
 export type RedirectMode = "stub" | "fixture";
 
 export interface MirrorRedirect {
-  /** Environment variable a package assigns, e.g. `FR_ASSET_API_SILEX_ROOT`. */
+  /** Environment variable a package assigns, e.g. `STUDIO_ASSET_API_ROOT`. */
   readonly env: string;
-  /** The prohibited root it points at, spelled the way packages spell it (`X:\Projects`). */
+  /** The prohibited root it points at, spelled the way packages spell it (`P:\Projects`). */
   readonly from: string;
   /** `stub` fails closed against an empty directory; `fixture` is per-job composition. */
   readonly mode: RedirectMode;
@@ -35,11 +35,11 @@ export interface MirrorManifest {
   readonly version: number;
   /** ISO timestamp of the last edit. */
   readonly updatedAt: string;
-  /** Absolute root the subtrees are relative to (the studio share, e.g. `X:\`). */
+  /** Absolute root the subtrees are relative to (the studio share, e.g. `P:\`). */
   readonly sourceRoot: string;
-  /** Absolute local root of the mirror ("xroot"). */
+  /** Absolute local root of the mirror ("pkgroot"). */
   readonly mirrorRoot: string;
-  /** Bare SMB share name the guest maps as `X:`. */
+  /** Bare SMB share name the guest maps as the pipeline drive. */
   readonly shareName: string;
   /** Source-root-relative directories that are mirrored, e.g. `Pipeline\rez\packages\internal`. */
   readonly subtrees: readonly string[];
@@ -50,7 +50,7 @@ export interface MirrorManifest {
 }
 
 /** Conventional file name for the manifest; nothing enforces it. */
-export const MANIFEST_FILE_NAME = "xroot-manifest.json";
+export const MANIFEST_FILE_NAME = "pkgroot-manifest.json";
 
 const ABSOLUTE_ROOT = /^(?:[A-Za-z]:[\\/]|\\\\[^\\/]|\/)/;
 const DRIVE_PREFIX = /^[A-Za-z]:/;
@@ -155,7 +155,7 @@ function readManifestValue(value: unknown): ManifestReadResult {
   if (typeof shareName !== "string" || shareName.trim() === "") {
     problems.push("shareName must be a non-empty SMB share name.");
   } else if (/[\\/]/.test(shareName)) {
-    problems.push(`shareName "${shareName}" must be a bare share name, not a path — the guest maps \\\\<host>\\<shareName> as X:.`);
+    problems.push(`shareName "${shareName}" must be a bare share name, not a path — the guest maps \\\\<host>\\<shareName> as the pipeline drive.`);
   }
 
   const subtrees = checkEntries(problems, "subtrees", record["subtrees"]);
@@ -187,7 +187,7 @@ function checkRoot(problems: string[], field: string, value: unknown): void {
     return;
   }
   if (!ABSOLUTE_ROOT.test(value.trim())) {
-    problems.push(`${field} "${value.trim()}" must be an absolute path (drive or UNC), e.g. "X:\\" or "\\\\therock\\Floats".`);
+    problems.push(`${field} "${value.trim()}" must be an absolute path (drive or UNC), e.g. "P:\\" or "\\\\studio-fs\\share".`);
   }
 }
 
@@ -292,11 +292,11 @@ function checkRedirects(problems: string[], raw: unknown): readonly MirrorRedire
     const mode = record["mode"];
     let ok = true;
     if (typeof env !== "string" || !ENV_NAME.test(env.trim())) {
-      problems.push(`${label}.env must be an environment variable name, e.g. "FR_ASSET_API_SILEX_ROOT"; got ${describe(env)}.`);
+      problems.push(`${label}.env must be an environment variable name, e.g. "STUDIO_ASSET_API_ROOT"; got ${describe(env)}.`);
       ok = false;
     }
     if (typeof from !== "string" || from.trim() === "") {
-      problems.push(`${label}.from must name the root the variable points at, e.g. "X:\\Projects"; got ${describe(from)}.`);
+      problems.push(`${label}.from must name the root the variable points at, e.g. "P:\\Projects"; got ${describe(from)}.`);
       ok = false;
     }
     if (mode !== "stub" && mode !== "fixture") {

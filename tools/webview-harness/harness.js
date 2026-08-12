@@ -128,12 +128,12 @@
       // card becomes the three-line fixture decision (snapshot + typed
       // confirm). `sizeLabel` is webview-only for now - F3's line 2 wants a
       // size and AccessRequestSummary has no field for one yet.
-      { accessRequestId: "ar-prod", sessionId: "s-live", displayPath: "X:\\Projects\\ShowA\\rigs\\hero_rig.ma", mode: "read-only", reason: "reproduce the skin-weights bug against the hero rig", status: "pending", requestedAt: iso(2), production: true, disposition: "snapshot", sizeLabel: "48 MB" },
+      { accessRequestId: "ar-prod", sessionId: "s-live", displayPath: "P:\\Projects\\ShowA\\rigs\\hero_rig.ma", mode: "read-only", reason: "reproduce the skin-weights bug against the hero rig", status: "pending", requestedAt: iso(2), production: true, disposition: "snapshot", sizeLabel: "48 MB" },
       { accessRequestId: "ar-ok", sessionId: "s-live", displayPath: "D:\\shared\\fixtures", mode: "read-only", reason: "test fixtures", status: "approved", requestedAt: iso(90) },
       // An already-approved snapshot: the mounts list says "production
       // snapshot · session-scoped" instead of "granted", because a copy is
       // not a mount (F3's provenance chip).
-      { accessRequestId: "ar-snap-ok", sessionId: "s-live", displayPath: "X:\\Projects\\ShowA\\rigs\\hero_shirt.ma", mode: "read-only", reason: "earlier fixture snapshot", status: "approved", requestedAt: iso(120), production: true, disposition: "snapshot" }
+      { accessRequestId: "ar-snap-ok", sessionId: "s-live", displayPath: "P:\\Projects\\ShowA\\rigs\\hero_shirt.ma", mode: "read-only", reason: "earlier fixture snapshot", status: "approved", requestedAt: iso(120), production: true, disposition: "snapshot" }
     ],
     security: {
       managed: false,
@@ -367,7 +367,7 @@
       probes: {
         state: "pass", at: iso(30), greenAt: iso(30), lines: [
           { probeId: "no-egress", title: "no network egress", state: "pass", detail: "curl to 1.1.1.1 refused after 2s" },
-          { probeId: "xroot-absent", title: "X:\\Projects not mounted", state: "pass", detail: "path absent in guest" },
+          { probeId: "pkgroot-absent", title: "P:\\Projects not mounted", state: "pass", detail: "path absent in guest" },
           { probeId: "mirror-readable", title: "mirror readable", state: "pass", detail: "\\\\host-mirror\\rez v214 listed 41 packages" }
         ]
       }
@@ -379,7 +379,7 @@
       availability: "quarantined", queueDepth: 0,
       probes: {
         state: "breach", at: iso(12), greenAt: iso(240), lines: [
-          { probeId: "prod-isolation", title: "must-fail: read X:\\Projects", state: "breach", detail: "read SUCCEEDED - the guest reached a production path" },
+          { probeId: "prod-isolation", title: "must-fail: read P:\\Projects", state: "breach", detail: "read SUCCEEDED - the guest reached a production path" },
           { probeId: "no-egress", title: "no network egress", state: "pass", detail: "curl to 1.1.1.1 refused after 2s" }
         ]
       }
@@ -2321,7 +2321,7 @@
             state: "breach", at,
             ...(runtime.probes && runtime.probes.greenAt ? { greenAt: runtime.probes.greenAt } : {}),
             lines: [
-              { probeId: "prod-isolation", title: "must-fail: read X:\\Projects", state: "breach", detail: "read SUCCEEDED - the guest reached a production path" }
+              { probeId: "prod-isolation", title: "must-fail: read P:\\Projects", state: "breach", detail: "read SUCCEEDED - the guest reached a production path" }
             ]
           };
         }

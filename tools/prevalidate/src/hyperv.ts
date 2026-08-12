@@ -3,7 +3,7 @@
  *
  * These checks report whether this workstation could host a Hyper-V validation
  * runtime: Hyper-V feature state, Hyper-V Administrators membership, local
- * storage headroom for the VM disk and the curated `X:` mirror, the native
+ * storage headroom for the VM disk and the curated package mirror, the native
  * `ssh.exe` exec channel, and DCC license-server configuration. They are
  * registered as optional checks while ADR 0022 is Proposed, so a workstation
  * without Hyper-V reports fix-needed rows without blocking the Stage 0 gate.
@@ -49,7 +49,7 @@ const REQUIRED_FEATURES = [
 const HYPERV_ADMINISTRATORS_SID = "S-1-5-32-578";
 const ADMINISTRATORS_SID = "S-1-5-32-544";
 
-/** Combined floor for the VM disk plus the curated `X:` mirror (upgrade-plan Phase 0). */
+/** Combined floor for the VM disk plus the curated package mirror (upgrade-plan Phase 0). */
 const STORAGE_FLOOR_BYTES = 150 * 1024 ** 3;
 
 const LICENSE_ENDPOINT_PATTERN = /^([A-Za-z0-9][A-Za-z0-9._-]*):([0-9]{1,5})$/;
@@ -232,7 +232,7 @@ export async function checkHyperVAdmin(context: CheckContext, deps: HyperVCheckD
 
 /**
  * Free space on the volumes that would hold the validation VM disk and the
- * curated `X:` mirror, measured against the 150 GB combined floor.
+ * curated package mirror, measured against the 150 GB combined floor.
  */
 export async function checkHyperVStorage(context: CheckContext, deps: HyperVCheckDeps): Promise<CheckOutcome> {
   const unsupported = windowsOnlyOutcome("validation runtime storage");
@@ -243,7 +243,7 @@ export async function checkHyperVStorage(context: CheckContext, deps: HyperVChec
 
   const stateRoot = path.join(process.env.ProgramData ?? "C:\\ProgramData", "Drydock");
   const vmRoot = process.env.DRYDOCK_HYPERV_ROOT?.trim() || path.join(stateRoot, "hyperv");
-  const mirrorRoot = process.env.DRYDOCK_XROOT_MIRROR?.trim() || path.join(stateRoot, "xroot");
+  const mirrorRoot = process.env.DRYDOCK_PKGROOT_MIRROR?.trim() || path.join(stateRoot, "pkgroot");
 
   const result = await deps.run(powershell, [...POWERSHELL_ARGS, HYPERV_STORAGE_SCRIPT], {
     cwd: context.root,
@@ -256,7 +256,7 @@ export async function checkHyperVStorage(context: CheckContext, deps: HyperVChec
   });
 
   const rows = parseJsonArray(result.stdout).map((row) => asRecord(row));
-  const labels = ["VM disk root (DRYDOCK_HYPERV_ROOT)", "Curated X: mirror root (DRYDOCK_XROOT_MIRROR)"];
+  const labels = ["VM disk root (DRYDOCK_HYPERV_ROOT)", "Curated package-mirror root (DRYDOCK_PKGROOT_MIRROR)"];
   const planned = [vmRoot, mirrorRoot];
   const volumes = new Map<string, number>();
   const details: string[] = [];
@@ -292,7 +292,7 @@ export async function checkHyperVStorage(context: CheckContext, deps: HyperVChec
   if (failures.length > 0) {
     return {
       status: "warn",
-      summary: `Free space could not be measured for ${failures.join(" and ")}, so the storage floor is unproven; point DRYDOCK_HYPERV_ROOT and DRYDOCK_XROOT_MIRROR at local volumes, because the VM disk and the curated X: mirror cannot live on a network path.`,
+      summary: `Free space could not be measured for ${failures.join(" and ")}, so the storage floor is unproven; point DRYDOCK_HYPERV_ROOT and DRYDOCK_PKGROOT_MIRROR at local volumes, because the VM disk and the curated package mirror cannot live on a network path.`,
       details,
       data
     };
@@ -301,7 +301,7 @@ export async function checkHyperVStorage(context: CheckContext, deps: HyperVChec
   if (freeAcrossVolumes < STORAGE_FLOOR_BYTES) {
     return {
       status: "warn",
-      summary: `Planned VM disk and mirror roots have ${formatGigabytes(freeAcrossVolumes)} free, below the ${formatGigabytes(STORAGE_FLOOR_BYTES)} floor; free space on ${[...volumes.keys()].join(" and ") || "the target volume"} or set DRYDOCK_HYPERV_ROOT and DRYDOCK_XROOT_MIRROR to a volume with more headroom.`,
+      summary: `Planned VM disk and mirror roots have ${formatGigabytes(freeAcrossVolumes)} free, below the ${formatGigabytes(STORAGE_FLOOR_BYTES)} floor; free space on ${[...volumes.keys()].join(" and ") || "the target volume"} or set DRYDOCK_HYPERV_ROOT and DRYDOCK_PKGROOT_MIRROR to a volume with more headroom.`,
       details,
       data
     };

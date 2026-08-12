@@ -49,7 +49,7 @@
   <!-- task header picker -->
   <text x="24" y="444" font-size="11" fill="#6f7580" font-weight="600">TASK HEADER — QUIET PICKER (rendered only when ≠ default)</text>
   <rect x="24" y="456" width="640" height="32" rx="6" fill="#24262b" stroke="#35383f"/>
-  <text x="40" y="477" font-size="12" fill="#d6d8dd">Task FR-1182 · skin weights bug</text>
+  <text x="40" y="477" font-size="12" fill="#d6d8dd">Task TSK-1182 · skin weights bug</text>
   <text x="420" y="477" font-size="11" fill="#9aa0aa">runs on <tspan fill="#f0b429">production_tester</tspan> ▾</text>
 
   <!-- reroute confirm -->

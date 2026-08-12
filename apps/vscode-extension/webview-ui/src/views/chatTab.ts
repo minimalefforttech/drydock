@@ -2306,7 +2306,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   /**
    * Client mirror of core's sandboxRuntimePath: the real in-container mount
-   * point for a host folder (`X:\a\b` → `/x/a/b`). Used for the pre-start mount
+   * point for a host folder (`D:\a\b` → `/d/a/b`). Used for the pre-start mount
    * preview so the advertised path matches where sbx actually mounts it.
    */
   function hostPathToSandboxPath(hostPath: string): string {

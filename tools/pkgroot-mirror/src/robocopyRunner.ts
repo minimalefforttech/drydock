@@ -1,5 +1,5 @@
 /**
- * Robocopy execution for the curated `X:` mirror.
+ * Robocopy execution for the curated package mirror.
  *
  * The mirror is a security surface (ADR 0022): whatever lands under the mirror
  * root is what the validation guest can see. So the argument list is a fixed
@@ -155,7 +155,7 @@ export async function runRobocopy(command: RobocopyCommand): Promise<SubtreeSync
 }
 
 /**
- * Create the manifest's stub directories as empty directories. `X:\Projects`
+ * Create the manifest's stub directories as empty directories. `P:\Projects`
  * exists so that a package resolving it fails closed on an empty tree rather
  * than resolving to a path the guest cannot name at all.
  */

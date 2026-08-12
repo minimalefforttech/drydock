@@ -41,25 +41,25 @@ function runCli(args: readonly string[]): Promise<CliRun> {
 }
 
 test("plan prints the sync plan as JSON", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "drydock-xroot-"));
+  const root = await mkdtemp(path.join(tmpdir(), "drydock-pkgroot-"));
   try {
     const sourceRoot = path.join(root, "share");
-    const definition = joinUnderRoot(sourceRoot, `${INTERNAL}\\fr_core\\1.0.0\\package.py`);
+    const definition = joinUnderRoot(sourceRoot, `${INTERNAL}\\pipe_core\\1.0.0\\package.py`);
     await mkdir(path.dirname(definition), { recursive: true });
-    await writeFile(definition, 'name = "fr_core"\n', "utf8");
-    await mkdir(joinUnderRoot(sourceRoot, `${INTERNAL}\\fr_core\\2.0.0`), { recursive: true });
+    await writeFile(definition, 'name = "pipe_core"\n', "utf8");
+    await mkdir(joinUnderRoot(sourceRoot, `${INTERNAL}\\pipe_core\\2.0.0`), { recursive: true });
 
     const manifest: MirrorManifest = {
       version: 2,
       updatedAt: "2026-08-12T09:00:00.000Z",
       sourceRoot,
-      mirrorRoot: path.join(root, "xroot"),
-      shareName: "xroot",
+      mirrorRoot: path.join(root, "pkgroot"),
+      shareName: "pkgroot",
       subtrees: [INTERNAL],
       stubDirs: ["Projects"],
       redirects: []
     };
-    const manifestPath = path.join(root, "xroot-manifest.json");
+    const manifestPath = path.join(root, "pkgroot-manifest.json");
     await saveManifest(manifestPath, manifest);
 
     const run = await runCli(["plan", "--manifest", manifestPath]);
@@ -70,7 +70,7 @@ test("plan prints the sync plan as JSON", async () => {
       skippedVersions: string[];
     };
     assert.equal(parsed.manifestVersion, 2);
-    assert.deepEqual(parsed.skippedVersions, [`${INTERNAL}\\fr_core\\2.0.0`]);
+    assert.deepEqual(parsed.skippedVersions, [`${INTERNAL}\\pipe_core\\2.0.0`]);
     assert.equal(parsed.entries.length, 1);
     assert.equal(parsed.entries[0]?.mode, "package-repo");
   } finally {

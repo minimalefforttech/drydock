@@ -18,12 +18,12 @@ function validManifest(): MirrorManifest {
   return {
     version: 3,
     updatedAt: "2026-08-12T09:00:00.000Z",
-    sourceRoot: "X:\\",
-    mirrorRoot: "D:\\xroot",
-    shareName: "xroot",
+    sourceRoot: "P:\\",
+    mirrorRoot: "D:\\pkgroot",
+    shareName: "pkgroot",
     subtrees: ["Pipeline\\rez\\packages\\internal", "Pipeline\\rez\\packages\\external"],
     stubDirs: ["Projects"],
-    redirects: [{ env: "FR_ASSET_API_SILEX_ROOT", from: "X:\\Projects", mode: "stub" }]
+    redirects: [{ env: "STUDIO_ASSET_API_ROOT", from: "P:\\Projects", mode: "stub" }]
   };
 }
 
@@ -42,7 +42,7 @@ function rejects(value: unknown, needle: string): void {
 }
 
 async function withTempDir(body: (dir: string) => Promise<void>): Promise<void> {
-  const dir = await mkdtemp(path.join(tmpdir(), "drydock-xroot-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "drydock-pkgroot-"));
   try {
     await body(dir);
   } finally {
@@ -52,7 +52,7 @@ async function withTempDir(body: (dir: string) => Promise<void>): Promise<void> 
 
 test("valid manifest round-trips through save and load", async () => {
   await withTempDir(async (dir) => {
-    const file = path.join(dir, "xroot-manifest.json");
+    const file = path.join(dir, "pkgroot-manifest.json");
     const manifest = validManifest();
     await saveManifest(file, manifest);
     assert.deepEqual(await loadManifest(file), manifest);
@@ -76,7 +76,7 @@ test("absolute subtree entries are rejected", () => {
 });
 
 test("drive letters inside entries are rejected", () => {
-  rejects({ ...validManifest(), subtrees: ["X:\\Pipeline\\rez"] }, "carries a drive letter");
+  rejects({ ...validManifest(), subtrees: ["P:\\Pipeline\\rez"] }, "carries a drive letter");
 });
 
 test("parent-directory segments are rejected", () => {
@@ -103,19 +103,19 @@ test("nested subtrees are rejected", () => {
 
 test("redirect entries need an env name, a source root and a known mode", () => {
   rejects(
-    { ...validManifest(), redirects: [{ env: "FR ASSET", from: "X:\\Projects", mode: "stub" }] },
+    { ...validManifest(), redirects: [{ env: "STUDIO ASSET", from: "P:\\Projects", mode: "stub" }] },
     "must be an environment variable name"
   );
   rejects(
-    { ...validManifest(), redirects: [{ env: "FR_ASSET_API_SILEX_ROOT", from: "X:\\Projects", mode: "open" }] },
+    { ...validManifest(), redirects: [{ env: "STUDIO_ASSET_API_ROOT", from: "P:\\Projects", mode: "open" }] },
     'must be "stub"'
   );
   rejects(
     {
       ...validManifest(),
       redirects: [
-        { env: "FR_ASSET_API_SILEX_ROOT", from: "X:\\Projects", mode: "stub" },
-        { env: "FR_ASSET_API_SILEX_ROOT", from: "X:\\Projects", mode: "fixture" }
+        { env: "STUDIO_ASSET_API_ROOT", from: "P:\\Projects", mode: "stub" },
+        { env: "STUDIO_ASSET_API_ROOT", from: "P:\\Projects", mode: "fixture" }
       ]
     },
     "one entry per variable"
@@ -123,11 +123,11 @@ test("redirect entries need an env name, a source root and a known mode", () => 
 });
 
 test("share name must be a bare share name", () => {
-  rejects({ ...validManifest(), shareName: "host\\xroot" }, "must be a bare share name");
+  rejects({ ...validManifest(), shareName: "host\\pkgroot" }, "must be a bare share name");
 });
 
 test("roots must be absolute", () => {
-  rejects({ ...validManifest(), mirrorRoot: "xroot" }, "must be an absolute path");
+  rejects({ ...validManifest(), mirrorRoot: "pkgroot" }, "must be an absolute path");
 });
 
 test("a missing manifest file says so without a stack trace", async () => {

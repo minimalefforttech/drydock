@@ -1,7 +1,7 @@
 /**
- * Reads the curated `X:` mirror's state file for receipts.
+ * Reads the curated package mirror's state file for receipts.
  *
- * The mirror sync (`tools/xroot-mirror`) drops `.drydock-mirror.json` in the
+ * The mirror sync (`tools/pkgroot-mirror`) drops `.drydock-mirror.json` in the
  * mirror root after every run. Validation receipts cite the manifest version and
  * the sync time so evidence can never claim more than it knows (ADR 0022 edge
  * cases E1/G1): a job that ran against a stale mirror says so, and a job that

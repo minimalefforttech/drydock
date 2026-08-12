@@ -24,7 +24,7 @@ Commits on `ADR-22` (newest first), all green at each step:
 | `6050edb` | M6: standing must-fail probe suite + quarantine |
 | `61f8539` | M8a: threat-model deltas, managed validationRuntimes policy keys, runbook |
 | `561567a` | M3: hyperv adapter, multi-adapter core services, bus kinds |
-| `2a328b0` | M5: xroot-mirror tooling + mirror status reader |
+| `2a328b0` | M5: pkgroot-mirror tooling + mirror status reader |
 | `299f4f8` | M0: prevalidate Hyper-V gates |
 | `9e3ee02` | M2: contracts, sqlite store, routing cascade |
 | `77b6e81` | M1a: Hyper-V hardware smoke scripts + spike report |
@@ -37,7 +37,7 @@ package:vsix`) before handing a build to test — this was NOT yet re-done.
 ## Environment (this machine — personal laptop THINKPAD, not the work machine)
 
 - Hyper-V fully installed; user IS in `Hyper-V Administrators` (control plane runs non-elevated);
-  `ssh.exe` present; ~875 GB free on C:. **No `X:` drive, no Maya/Houdini, no license server.**
+  `ssh.exe` present; ~875 GB free on C:. **No studio package share, no Maya/Houdini, no license server.**
 - Consequence: **M1a hardware smoke ran for real and PASSED** (6.2 s control-plane round trip;
   extended ACLs survive checkpoint restore — `docs/design/windows-dcc-runtime/spike-report.md`).
   **The M1 full kill-gate spike is environment-blocked** (needs a studio workstation) and is the
@@ -52,7 +52,7 @@ package:vsix`) before handing a build to test — this was NOT yet re-done.
   `parseValidationConnection`).
 - Core: `validationRoutingService.ts` (pure cascade), `validationJobService.ts` (per-runtime
   serialized queue), `validationProbeService.ts` (must-fail probes), `validationChangesetRef.ts`,
-  `xrootMirrorStatus.ts`, `cloneSyncService.ts` (`assertPatchSafeForWindowsGuest`), `eventBus.ts`
+  `pkgrootMirrorStatus.ts`, `cloneSyncService.ts` (`assertPatchSafeForWindowsGuest`), `eventBus.ts`
   (validation bus kinds). Multi-adapter registry in `runtimeLifecycleService`/`runtimeCleanupService`/`runtimeReconcileService`.
 - Runtime adapter: `packages/runtime-adapters/src/hyperVControl.ts` + `hyperVRuntimeAdapter.ts`
   (adopt-only — **no `Remove-VM` path exists**, test-asserted) + `commandDiscovery.ts`.
@@ -64,7 +64,7 @@ package:vsix`) before handing a build to test — this was NOT yet re-done.
 - Webview: `webview-ui/src/configure.ts` (Validation runtimes section), `views/validationChips.ts`,
   `views/accessCard.ts` (production fixture card), `taskHub.ts` (picker + banner), `views/railViews.ts`
   (DCC dot), `validationTypes.ts` (re-exports contracts).
-- Tools: `tools/prevalidate/src/hyperv.ts` (M0 gates), `tools/xroot-mirror/` (M5), `tools/hyperv-spike/`
+- Tools: `tools/prevalidate/src/hyperv.ts` (M0 gates), `tools/pkgroot-mirror/` (M5), `tools/hyperv-spike/`
   (M1a), `tools/webview-harness/` (configure.html + taskHub.html + rail.html pages, `harness.js`
   validation fixtures, `visual-tests.md` V79–V84).
 

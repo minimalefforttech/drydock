@@ -9,7 +9,7 @@ Status: Proposed - 2026-08-12 · Implemented behind the Phase-1 gate - 2026-08-1
 > extended ACLs survive checkpoint restore) - see
 > `docs/design/windows-dcc-runtime/spike-report.md`. The M1 kill-gate
 > numbers (warm-restore, exec latency, stream latency, round-trip ratio)
-> require a studio workstation with the X: share, DCC installs, and license
+> require a studio workstation with the P: share, DCC installs, and license
 > server; this ADR flips to Accepted only when that spike passes its
 > ceilings. One spike finding already shapes the code: Windows OpenSSH has
 > no ControlMaster, so exec is per-process behind a swappable transport
@@ -28,9 +28,11 @@ Docker Sandbox runtime is a Linux microVM and can never execute that stack.
 Running validation on the host violates ADR 0001.
 
 The studio policy is: read-write to the dev area, read-only to the package
-area (`X:\Pipeline`), and no access to production (`X:\Projects`). Both live
-on one SMB share (`\\therock\Floats`), so network- or share-level separation
-is not available without restructuring storage.
+area (`P:\Pipeline`), and no access to production (`P:\Projects`). Both live
+on one SMB share (`\\studio-fs\share`), so network- or share-level separation
+is not available without restructuring storage (server, share, and
+drive-letter names in this docset are anonymized examples; the real values
+live in studio configuration).
 
 ## Decision
 
@@ -63,9 +65,9 @@ must not broaden access; broader-to-narrower fallback just fails confusingly).
   is default-deny with allows for the host's internal-switch address and the
   DCC license server ports only.
 - **Curated namespace, not path translation.** The VM maps a host-maintained
-  read-only mirror as `X:` whose tree contains only allowlisted subtrees
+  read-only mirror as `P:` whose tree contains only allowlisted subtrees
   (`Pipeline\rez\packages\...`). Package definitions, `packages_path`, and
-  baked contexts resolve byte-for-byte unchanged. `X:\Projects` exists only
+  baked contexts resolve byte-for-byte unchanged. `P:\Projects` exists only
   as an empty stub or a per-job fixture root — production is unroutable and
   unnamed, not merely denied.
 - **Fixtures, never mounts.** Content from prohibited locations reaches a

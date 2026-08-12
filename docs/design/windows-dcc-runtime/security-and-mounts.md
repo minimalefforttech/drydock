@@ -9,37 +9,37 @@ the prompt says".
 | Studio policy | Mechanism | Layer |
 |---|---|---|
 | Read-write dev area | Changeset snapshot copied into a per-job workspace; results return as patch + report through review. Live dev files are never writable by running test code. | Host copy path |
-| Read-only package area | Host-local mirror of allowlisted `X:\Pipeline` subtrees, shared read-only over the internal switch, mapped as `X:` in the guest. | SMB share ACL + NTFS |
-| No production access | `X:\Projects` is unrouted (no NAS route from the guest), unnamed (absent or stub in the curated tree), uncredentialed (no account in the guest can open it), and denied in drydock mount policy. | Routing + namespace + ACL + `mountPolicy` denied paths |
+| Read-only package area | Host-local mirror of allowlisted `P:\Pipeline` subtrees, shared read-only over the internal switch, mapped as `P:` in the guest. | SMB share ACL + NTFS |
+| No production access | `P:\Projects` is unrouted (no NAS route from the guest), unnamed (absent or stub in the curated tree), uncredentialed (no account in the guest can open it), and denied in drydock mount policy. | Routing + namespace + ACL + `mountPolicy` denied paths |
 | No internet from validation | vNIC default-deny extended port ACLs; allows = host internal-switch IP, license server IP:ports. No gateway, no DNS, no Default Switch. | Hyper-V port ACL |
 | No provider secrets near test code | Validation VM holds no LLM credentials; agents keep theirs in session runtimes. | Placement |
 
-The `X:\Projects` denial (and UNC equivalents) ships in the
+The `P:\Projects` denial (and UNC equivalents) ships in the
 administrator-managed policy file (`studio-security-policy.md`), not personal
 settings — every workstation inherits it, and no session on any runtime kind
 can approve production into a mount set.
 
-## The curated `X:` namespace
+## The curated `P:` namespace
 
-The host maintains `xroot` (local disk): robocopy mirrors of exactly the
+The host maintains `pkgroot` (local disk): robocopy mirrors of exactly the
 subtrees the manifest allows — initially
 `Pipeline\rez\packages\{internal,external,staging}` plus whatever the
-reference scan adds. The guest maps `\\<host-internal>\xroot` as `X:`.
+reference scan adds. The guest maps `\\<host-internal>\pkgroot` as `P:`.
 
-- Every `X:\Pipeline\...` string in `package.py`, `packages_path`, and baked
+- Every `P:\Pipeline\...` string in `package.py`, `packages_path`, and baked
   `.rxt` contexts resolves unchanged. No package edits, no config forks.
 - Package cache stays guest-local (`C:\Users\<agent>\.rez\package_cache`) —
   the studio rezconfig already configures this.
-- `rez release` targets `X:` and fails read-only by construction.
-- `X:\Projects`: absent by default. When a job carries approved fixtures,
-  the host seeds `xroot\Projects\<show>\...` server-side at the exact
+- `rez release` targets `P:` and fails read-only by construction.
+- `P:\Projects`: absent by default. When a job carries approved fixtures,
+  the host seeds `pkgroot\Projects\<show>\...` server-side at the exact
   expected relative paths before the job and removes it after. Jobs are
   serialized, so the composition is deterministic. Packages that export
-  `FR_ASSET_API_SILEX_ROOT = X:\Projects` therefore fail closed by default
+  `STUDIO_ASSET_API_ROOT = P:\Projects` therefore fail closed by default
   and resolve to job fixtures when granted — with the production-identical
   path string preserved.
 - The mirror manifest is versioned. A standing scan of all `package.py`
-  files diffs referenced `X:\...` roots against the manifest on every
+  files diffs referenced `P:\...` roots against the manifest on every
   package release; new roots surface as a proposal, never a silent break.
 
 ## Getting prohibited content to the AI (fixture flow)
@@ -92,8 +92,8 @@ Rules that keep that honest:
 
 Run at adopt, on schedule, and before first job after any revert:
 
-- Read `X:\Projects` (real path, not stub) → must fail.
-- Write anywhere under mirrored `X:` → must fail.
+- Read `P:\Projects` (real path, not stub) → must fail.
+- Write anywhere under mirrored `P:` → must fail.
 - Connect to any address outside the allowlist (including the NAS) → must
   fail.
 - Resolve the standard validation toolsets → must succeed; every path in

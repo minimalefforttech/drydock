@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Publish the curated X: mirror ("xroot") read-only to the validation VM.
+  Publish the curated package mirror ("pkgroot") read-only to the validation VM.
 
 .DESCRIPTION
   TD action. Run from an ELEVATED PowerShell on the host that owns the mirror.
@@ -12,7 +12,8 @@
        no "allow log on locally" right) and holding no password the guest's
        users know;
     2. NTFS read + execute for that account on the mirror root, and nothing
-       else — `rez release` into X: must fail by construction, not by policy;
+       else — `rez release` into the pipeline drive must fail by construction,
+       not by policy;
     3. an SMB share with -ReadAccess for that account only, caching off (the
        guest must never serve stale package definitions from a client cache)
        and access-based enumeration on (unreadable content is unnamed, not
@@ -30,24 +31,24 @@
   to roll it.
 
 .NOTES
-  Related: tools/xroot-mirror (manifest, sync, drift scan),
+  Related: tools/pkgroot-mirror (manifest, sync, drift scan),
   tools/hyperv-spike/m1a-hardware-smoke.ps1 (internal switch).
 
 .EXAMPLE
-  pwsh -File tools/xroot-mirror/scripts/setup-share.ps1 -MirrorRoot D:\xroot -WhatIf
+  pwsh -File tools/pkgroot-mirror/scripts/setup-share.ps1 -MirrorRoot D:\pkgroot -WhatIf
 
 .EXAMPLE
-  pwsh -File tools/xroot-mirror/scripts/setup-share.ps1 -MirrorRoot D:\xroot
+  pwsh -File tools/pkgroot-mirror/scripts/setup-share.ps1 -MirrorRoot D:\pkgroot
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
   # Local directory holding the mirrored subtrees (the robocopy destination).
   [Parameter(Mandatory = $true)]
   [string]$MirrorRoot,
-  # Share name the guest maps as X:  ->  \\<host-internal>\<ShareName>
-  [string]$ShareName = "xroot",
+  # Share name the guest maps as the pipeline drive  ->  \\<host-internal>\<ShareName>
+  [string]$ShareName = "pkgroot",
   # Local account the guest authenticates as. Nothing else uses it.
-  [string]$ServiceAccountName = "drydock-xroot",
+  [string]$ServiceAccountName = "drydock-pkgroot",
   # Host vNIC of the Hyper-V internal switch; the only interface 445 is served on.
   [string]$InternalSwitchAlias = "vEthernet (drydock-internal)",
   # Roll the service account password and print the new one.
@@ -57,9 +58,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$firewallRuleName = "drydock-xroot-smb"
-$firewallRuleDisplayName = "Drydock xroot SMB (internal switch only)"
-$accountDescription = "Drydock validation runtime: read-only reader for the curated X: mirror."
+$firewallRuleName = "drydock-pkgroot-smb"
+$firewallRuleDisplayName = "Drydock pkgroot SMB (internal switch only)"
+$accountDescription = "Drydock validation runtime: read-only reader for the curated package mirror."
 $accountIdentity = "$env:COMPUTERNAME\$ServiceAccountName"
 $notes = [System.Collections.Generic.List[string]]::new()
 
@@ -110,7 +111,7 @@ if ($null -eq $account) {
   if ($PSCmdlet.ShouldProcess($accountIdentity, "Create local service account (no group membership)")) {
     $plain = New-ServicePassword
     $secure = ConvertTo-SecureString -String $plain -AsPlainText -Force
-    New-LocalUser -Name $ServiceAccountName -Password $secure -FullName "Drydock xroot reader" `
+    New-LocalUser -Name $ServiceAccountName -Password $secure -FullName "Drydock pkgroot reader" `
       -Description $accountDescription -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires | Out-Null
     # New-LocalUser joins no group. An account in no group holds no "Allow log
     # on locally" right, which is how this account stays non-interactive
@@ -174,7 +175,7 @@ if ($null -eq $share) {
   if ($PSCmdlet.ShouldProcess("\\$env:COMPUTERNAME\$ShareName", "Create read-only SMB share of $MirrorRoot")) {
     New-SmbShare -Name $ShareName -Path $MirrorRoot -ReadAccess $accountIdentity `
       -CachingMode None -FolderEnumerationMode AccessBased `
-      -Description "Drydock curated X: mirror (read-only)" | Out-Null
+      -Description "Drydock curated package mirror (read-only)" | Out-Null
     $share = Get-SmbShare -Name $ShareName
   } else {
     $notes.Add("share would be created")
@@ -208,7 +209,7 @@ $firewallRule = Get-NetFirewallRule -Name $firewallRuleName -ErrorAction Silentl
 if ($null -eq $firewallRule) {
   if ($PSCmdlet.ShouldProcess($firewallRuleName, "Create inbound TCP 445 allow scoped to $InternalSwitchAlias")) {
     New-NetFirewallRule -Name $firewallRuleName -DisplayName $firewallRuleDisplayName `
-      -Description "Serves the curated X: mirror to the validation runtime only." `
+      -Description "Serves the curated package mirror to the validation runtime only." `
       -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 `
       -InterfaceAlias $InternalSwitchAlias -Profile Any -Enabled True | Out-Null
     $firewallRule = Get-NetFirewallRule -Name $firewallRuleName

@@ -33,4 +33,4 @@ export * from "./validationChangesetRef.js";
 export * from "./validationJobService.js";
 export * from "./validationProbeService.js";
 export * from "./validationRoutingService.js";
-export * from "./xrootMirrorStatus.js";
+export * from "./pkgrootMirrorStatus.js";

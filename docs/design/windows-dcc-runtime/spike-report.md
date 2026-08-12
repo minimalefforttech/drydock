@@ -38,7 +38,7 @@ Findings:
 ## M1 — full spike (kill gate) — **environment-blocked**
 
 Status 2026-08-12: not runnable on this machine. The reference laptop has no
-`X:` (`\\therock\Floats`) route, no Maya/Houdini installs, no rez configs,
+`P:` (`\\studio-fs\share`) route, no Maya/Houdini installs, no rez configs,
 and no license-server reachability. The four kill-gate numbers
 (warm-restore ≤ 20 s; multiplexed-SSH exec ≤ 300 ms; line-stream latency vs
 the ADR 0021 watchdog; validation round trip ≤ 2× local, ceiling 3×) must be

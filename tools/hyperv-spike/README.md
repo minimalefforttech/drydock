@@ -30,7 +30,7 @@ Results are recorded in
 ## M1 — full spike (guest image required)
 
 Blocked on a studio-adjacent environment: Windows guest image + license,
-Maya/Houdini installs, rez bootstrap from `X:\Pipeline\rez\configs`, and
+Maya/Houdini installs, rez bootstrap from `P:\Pipeline\rez\configs`, and
 license-server reachability. The four kill-gate numbers and the runbook live
 in `docs/design/windows-dcc-runtime/upgrade-plan.md` (Phase 1). Not runnable
 on a machine without the studio share.

@@ -23,7 +23,7 @@ which are unblocked regardless of environment state.
 ## Before the next session (user checklist)
 
 1. Elevated: `Add-LocalGroupMember -Group "Hyper-V Administrators" -Member
-   "floating-rock\alex.telford"`, then sign out/in. (`Get-VM` must return
+   "EXAMPLE\td.user"`, then sign out/in. (`Get-VM` must return
    without error.)
 2. Storage decision: `C:` has 36 GB free — below the 150 GB floor. Free
    space or add a local volume for VM disk + mirror.
@@ -66,7 +66,7 @@ timings; failures map to prevalidate gaps.
 ### M1 — Full spike + kill gate
 
 Hand-provision the guest per the runbook (Windows + OpenSSH + Maya/Houdini
-+ rez bootstrap from `X:\Pipeline\rez\configs`); measure the four numbers
++ rez bootstrap from `P:\Pipeline\rez\configs`); measure the four numbers
 (warm-restore ready time ≤ 20 s; multiplexed-SSH exec ≤ 300 ms;
 line-stream latency vs the ADR 0021 watchdog; validation round trip ≤ 2×
 local, ceiling 3×). Record results in `spike-report.md`; record the
@@ -117,9 +117,9 @@ License-wait detection pauses the watchdog clock and surfaces as state.
 
 ### M5 — Mirror + reference scan
 
-`tools/xroot-mirror/`: manifest schema (subtrees, redirects, version);
+`tools/pkgroot-mirror/`: manifest schema (subtrees, redirects, version);
 robocopy runner with fixed args + torn-package skip (definition-file
-check); `package.py` reference scanner producing the X:-root class list;
+check); `package.py` reference scanner producing the package-root class list;
 drift diff against the manifest; host share creation script (single
 service account, internal-switch scoped). Core reads freshness/version for
 receipts.

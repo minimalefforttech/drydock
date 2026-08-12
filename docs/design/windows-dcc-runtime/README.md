@@ -10,7 +10,7 @@ Read in this order:
 |---|---|
 | [upgrade-plan.md](upgrade-plan.md) | Phased delivery plan, gates, kill criteria, reference environment findings |
 | [implementation-plan.md](implementation-plan.md) | Executable milestone breakdown (M0–M8) with file anchors, definitions of done, and the next-session agenda |
-| [security-and-mounts.md](security-and-mounts.md) | Policy → enforcement mapping, curated `X:` namespace, fixture flow, probes |
+| [security-and-mounts.md](security-and-mounts.md) | Policy → enforcement mapping, curated `P:` namespace, fixture flow, probes |
 | [ux-flows.md](ux-flows.md) | Setup, daily use, maintenance, and incident UX with annotated mockups |
 | [edge-cases.md](edge-cases.md) | Edge-case catalog with decided behaviors and open questions |
 | [runbook.md](runbook.md) | TD maintenance tasks: provision, mirror sync, clean baseline, image update, incident response |

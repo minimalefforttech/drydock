@@ -1,12 +1,13 @@
 /**
  * Drift between what packages reference and what the manifest allows.
  *
- * Edge case F2: a package that references an `X:` root outside the manifest must
- * raise a proposal, not break in the guest three minutes into a validation run.
- * This diff is the proposal's input — it is informational by construction and
- * never edits the allowlist. Roots reached through a documented redirect count
- * as covered: `X:\Projects` is named by the manifest as a stub or fixture root,
- * so a package that assigns it is expected to fail closed, not to be a surprise.
+ * Edge case F2: a package that references a pipeline-drive root outside the
+ * manifest must raise a proposal, not break in the guest three minutes into a
+ * validation run. This diff is the proposal's input — it is informational by
+ * construction and never edits the allowlist. Roots reached through a documented
+ * redirect count as covered: `P:\Projects` is named by the manifest as a stub or
+ * fixture root, so a package that assigns it is expected to fail closed, not to
+ * be a surprise.
  *
  * `staleSubtrees` runs the comparison the other way: a mirrored subtree nothing
  * references any more is worth reviewing, but it is never an error — plenty of
