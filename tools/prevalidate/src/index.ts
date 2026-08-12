@@ -22,9 +22,18 @@ import {
 import os from "node:os";
 import path from "node:path";
 
+import {
+  checkHyperVAdmin,
+  checkHyperVFeatures,
+  checkHyperVLicenseServer,
+  checkHyperVSsh,
+  checkHyperVStorage,
+  type HyperVCheckDeps
+} from "./hyperv.js";
+
 type CheckStatus = "pass" | "fail" | "warn" | "skip" | "optional";
 
-type JsonValue =
+export type JsonValue =
   | null
   | boolean
   | number
@@ -42,7 +51,7 @@ interface CliOptions {
   reportPath: string;
 }
 
-interface CommandResult {
+export interface CommandResult {
   command: string;
   args: string[];
   cwd: string;
@@ -55,7 +64,7 @@ interface CommandResult {
   error?: string;
 }
 
-interface CommandProbe {
+export interface CommandProbe {
   key: string;
   names: string[];
   path: string | null;
@@ -64,7 +73,7 @@ interface CommandProbe {
   versionResult?: CommandResult;
 }
 
-interface CheckResult {
+export interface CheckResult {
   id: string;
   title: string;
   category: string;
@@ -118,7 +127,7 @@ interface PrevalidationReport {
   nextActions: string[];
 }
 
-interface CheckContext {
+export interface CheckContext {
   root: string;
   docsDir: string;
   designDocsDir: string;
@@ -163,6 +172,13 @@ async function main(): Promise<void> {
   await mkdir(docsDir, { recursive: true });
 
   const checks: CheckResult[] = [];
+  const hypervDeps: HyperVCheckDeps = {
+    run,
+    findCommandOnPath,
+    commandResultData,
+    oneLine,
+    timeoutMs: CHECK_TIMEOUT_MS
+  };
   try {
     checks.push(await runCheck(context, "artifacts.product-plan", "Product plan is saved", "artifacts", true, validateProductPlan));
     checks.push(await runCheck(context, "artifacts.threat-model", "Threat model is saved", "artifacts", true, validateThreatModel));
@@ -204,6 +220,14 @@ async function main(): Promise<void> {
       checks.push(await runCheck(context, "agent.codex-docker-container", "Docker container Codex login and app-server protocol", "agent", true, validateDockerContainerCodexCommunication));
       checks.push(await runCheck(context, "agent.codex-sandbox-json-events", "Docker Sandbox Codex JSONL file-event smoke", "agent", true, validateCodexSandboxJsonEventStream));
     }
+
+    // ADR 0022 validation-runtime gates. They stay optional while the ADR is
+    // Proposed: a workstation without Hyper-V reports fixes without blocking.
+    checks.push(await runCheck(context, "hyperv.features", "Hyper-V feature state", "hyperv", false, (ctx) => checkHyperVFeatures(ctx, hypervDeps)));
+    checks.push(await runCheck(context, "hyperv.admin", "Hyper-V Administrators membership", "hyperv", false, (ctx) => checkHyperVAdmin(ctx, hypervDeps)));
+    checks.push(await runCheck(context, "hyperv.storage", "Validation runtime storage floor", "hyperv", false, (ctx) => checkHyperVStorage(ctx, hypervDeps)));
+    checks.push(await runCheck(context, "hyperv.ssh", "Validation runtime exec channel client", "hyperv", false, (ctx) => checkHyperVSsh(ctx, hypervDeps)));
+    checks.push(await runCheck(context, "hyperv.license-server", "DCC license server configuration", "hyperv", false, (ctx) => checkHyperVLicenseServer(ctx, hypervDeps)));
 
     checks.push(await runCheck(context, "agent.codex-acp", "Codex ACP compatibility probe", "agent", false, validateCodexAcp));
     checks.push(await runCheck(context, "agent.claude-cli-surface", "Claude CLI adapter surface", "agent", false, validateClaudeCliSurface));

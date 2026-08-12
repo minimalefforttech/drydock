@@ -16,6 +16,9 @@ This document maps the product feature set to Stage 0 validation checks. The goa
 | Optional runtimes | WSL discovery/status | Optional for v1 |
 | Docker Sandbox isolation | Create shell sandbox, mount workspace, configured shared read-only, configured shared write, cleanup | Required |
 | Docker fallback isolation | Hardened Docker run with no network, dropped caps, no-new-privileges, mounts | Required |
+| Windows validation runtime host | `hyperv.features` reads `Win32_OptionalFeature` install state for Hyper-V, hypervisor, services, and the management PowerShell module plus the `vmms` service state; `hyperv.admin` reads Hyper-V Administrators SID membership in the current logon token | Optional while ADR 0022 is Proposed; fix-needed rows name the enable/join command and never block the Stage 0 gate |
+| Validation runtime storage and exec channel | `hyperv.storage` measures free space on the planned VM disk and curated `X:` mirror volumes against the 150 GB combined floor; `hyperv.ssh` resolves the native Windows OpenSSH `ssh.exe` the star-topology exec channel spawns | Optional while ADR 0022 is Proposed; shim scripts on PATH report as fix-needed because the adapter spawns `ssh.exe` directly |
+| DCC license server configuration | `hyperv.license-server` validates the `DRYDOCK_LICENSE_SERVER` host:port shape that seeds the validation runtime's vNIC allowlist | Optional until the endpoint is configured; configuration presence only, no reachability probe |
 | Codex host protocol | Standalone Codex login, doctor, app-server schema, app-server JSON-RPC thread start, exec JSON, MCP server | Required |
 | Codex Docker Sandbox protocol | Codex sandbox create, login, app-server schema, app-server JSON-RPC thread start, exec JSON, MCP server | Required |
 | Codex Docker container protocol | Disposable Linux Codex image, explicit auth import, app-server JSON-RPC thread start, login, exec JSON, MCP server | Required |
@@ -78,4 +81,7 @@ This document maps the product feature set to Stage 0 validation checks. The goa
 - Shared path defaults come from config: studio/package paths are read-only, approved shared libraries are read-write, and workspace roots still follow the active agent role/session mode.
 - Local development may use developer-selected branches. Any Git branch used to move code across a network boundary is a temporary product-generated ref linked to the task/review session.
 - Packaging stays VSIX-only until that policy changes, so validation should prove package creation and version increments rather than marketplace publishing.
+- The Hyper-V gates report configuration facts and take no side effects. They run fixed-literal PowerShell with parameters passed as environment variables and read as `$env:NAME`, and they create no switch, no VM, and no network connection. The first state change belongs to the M1a hardware smoke, not to prevalidation.
+- Hyper-V Administrators membership is a logon-token fact, so an account added to the group still reports fix-needed until the user signs out and back in. That is the honest state: `Get-VM` and the `hyperv` adapter fail with access denied until the token carries `S-1-5-32-578`.
+- The license server is configuration-gated, not reachability-gated. The studio license service is not reachable from every workstation, so a red row for a correct-but-unreachable endpoint would train people to ignore the section; the validation runtime proves reachability during the M1 spike instead.
 
