@@ -347,6 +347,76 @@ test("AI-bound overlay files cannot link into a denied folder", async (t) => {
   }
 });
 
+test("Managed validation-runtime limits parse, surface, and stay absent when unset", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-validation-policy-"));
+  try {
+    const policyPath = path.join(root, "policy.json");
+    await writeFile(policyPath, JSON.stringify({
+      version: 1,
+      policyId: "validation-limits",
+      validationRuntimes: {
+        topologyPin: "default-plus-named",
+        warmCap: 2,
+        profileExceptionCreation: "td-only",
+        imageAllowlist: ["win11-maya2026", "win11-hou20.5"]
+      }
+    }), "utf8");
+
+    const policy = loadEffectiveSecurityPolicy({ studioPolicyPath: policyPath, baseDeniedPaths: [], user: unrestrictedUser });
+    assert.deepEqual(policy.validationRuntimes, {
+      topologyPin: "default-plus-named",
+      warmCap: 2,
+      profileExceptionCreation: "td-only",
+      imageAllowlist: ["win11-maya2026", "win11-hou20.5"]
+    });
+    assert.match(policy.summary().label, /Validation: topology pinned, warm cap 2, 2 allowed images/);
+
+    const withoutKey = path.join(root, "plain.json");
+    await writeFile(withoutKey, JSON.stringify({ version: 1, policyId: "no-validation-limits" }), "utf8");
+    const plain = loadEffectiveSecurityPolicy({ studioPolicyPath: withoutKey, baseDeniedPaths: [], user: unrestrictedUser });
+    assert.equal(plain.validationRuntimes, undefined);
+    assert.equal(plain.summary().label, "Managed · Network blocked");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Malformed validation-runtime limits fail closed and name the field", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-validation-policy-"));
+  try {
+    const policyPath = path.join(root, "policy.json");
+    const write = async (validationRuntimes: unknown): Promise<void> => {
+      await writeFile(policyPath, JSON.stringify({ version: 1, policyId: "validation-limits", validationRuntimes }), "utf8");
+    };
+    const load = (): unknown => loadEffectiveSecurityPolicy({ studioPolicyPath: policyPath, baseDeniedPaths: [], user: unrestrictedUser });
+
+    await write({ warmCap: "2" });
+    assert.throws(load, /validationRuntimes\.warmCap must be a non-negative whole number/);
+
+    await write({ warmCap: -1 });
+    assert.throws(load, /validationRuntimes\.warmCap must be a non-negative whole number/);
+
+    await write({ topologyPin: "one-per-task" });
+    assert.throws(load, /validationRuntimes\.topologyPin must be one of single, default-plus-named, per-project/);
+
+    await write({ profileExceptionCreation: "anyone" });
+    assert.throws(load, /validationRuntimes\.profileExceptionCreation must be td-only or disabled/);
+
+    await write({ imageAllowlist: "win11-maya2026" });
+    assert.throws(load, /validationRuntimes\.imageAllowlist must be an array of strings/);
+
+    await write(["default-plus-named"]);
+    assert.throws(load, /validationRuntimes must be an object/);
+
+    // Strict inside the object too: a misspelled limit must not silently leave
+    // a validation runtime unrestricted.
+    await write({ warmCapp: 2 });
+    assert.throws(load, /validationRuntimes contains unknown field: warmCapp/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("AI-bound overlay targets honor repo-relative omissions after canonicalization", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
   try {

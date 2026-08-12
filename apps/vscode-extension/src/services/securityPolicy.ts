@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
+import type { ValidationTopologyPreset } from "@drydock/contracts";
 import {
   assertMountAllowed,
   isHostPathAbsolute,
@@ -40,6 +41,22 @@ export interface SecurityPolicySummary {
   readonly omissionsEnabled: boolean;
 }
 
+/**
+ * Managed limits on ADR 0022 validation runtimes. Studio-only for now: the
+ * personal counterpart arrives with the Configure UI, so every field here is
+ * currently the whole truth rather than one side of a narrowing.
+ */
+export interface ValidationRuntimePolicy {
+  /** Pins the topology preset; personal preset changes are ignored while pinned. */
+  readonly topologyPin?: ValidationTopologyPreset;
+  /** Managed ceiling on concurrently warm validation VMs; effective cap = min(personal, managed). */
+  readonly warmCap?: number;
+  /** Gates creating policy-profile-exception runtimes such as `production_tester`. */
+  readonly profileExceptionCreation?: "td-only" | "disabled";
+  /** Named runtimes may reference only these images; absent permits any image. */
+  readonly imageAllowlist?: readonly string[];
+}
+
 interface StudioSecurityPolicyDocument {
   readonly version: 1;
   readonly policyId: string;
@@ -50,6 +67,7 @@ interface StudioSecurityPolicyDocument {
   readonly omittedRepoPaths?: readonly string[];
   /** IT sets this true only on workstations allocated for networked AI. */
   readonly allowNetworkedAiOnThisMachine?: boolean;
+  readonly validationRuntimes?: ValidationRuntimePolicy;
 }
 
 export interface LoadSecurityPolicyOptions {
@@ -73,6 +91,13 @@ export class EffectiveSecurityPolicy {
   readonly cloneOnly: boolean;
   readonly allowNetworkedAiOnThisMachine: boolean;
   readonly cloneOmission: ClonePathOmission;
+  /**
+   * Managed validation-runtime limits, present only when the studio policy
+   * declares them. Nothing enforces them yet: the registry service reads this
+   * surface in M7 to honor the pin, the cap, the creation gate, and the image
+   * allowlist. Absent means "no managed limit", not "denied".
+   */
+  readonly validationRuntimes?: ValidationRuntimePolicy;
 
   constructor(input: {
     readonly managed: boolean;
@@ -85,6 +110,7 @@ export class EffectiveSecurityPolicy {
     readonly cloneOnly: boolean;
     readonly allowNetworkedAiOnThisMachine: boolean;
     readonly cloneOmission: ClonePathOmission;
+    readonly validationRuntimes?: ValidationRuntimePolicy;
   }) {
     this.managed = input.managed;
     if (input.policyId !== undefined) this.policyId = input.policyId;
@@ -94,6 +120,7 @@ export class EffectiveSecurityPolicy {
     this.cloneOnly = input.cloneOnly;
     this.allowNetworkedAiOnThisMachine = input.allowNetworkedAiOnThisMachine;
     this.cloneOmission = input.cloneOmission;
+    if (input.validationRuntimes !== undefined) this.validationRuntimes = input.validationRuntimes;
     if (input.studioPolicyPath !== undefined) this.studioPolicyPath = input.studioPolicyPath;
     if (input.studioPolicyRequiredPath !== undefined) this.studioPolicyRequiredPath = input.studioPolicyRequiredPath;
   }
@@ -174,6 +201,8 @@ export class EffectiveSecurityPolicy {
       parts.push(`${String(this.allowedProjectRoots.length)} allowed root${this.allowedProjectRoots.length === 1 ? "" : "s"}`);
     }
     if (this.cloneOmission.sensitive || this.cloneOmission.paths.length > 0) parts.push("Omissions on");
+    const validation = describeValidationRuntimes(this.validationRuntimes);
+    if (validation !== undefined) parts.push(validation);
     parts.push(this.allowNetworkedAiOnThisMachine ? "Network approved" : "Network blocked");
     return {
       managed: this.managed,
@@ -236,7 +265,10 @@ export function loadEffectiveSecurityPolicy(options: LoadSecurityPolicyOptions):
     ]),
     cloneOnly,
     allowNetworkedAiOnThisMachine,
-    cloneOmission: { sensitive: omitSensitiveFiles, paths: omittedRepoPaths }
+    cloneOmission: { sensitive: omitSensitiveFiles, paths: omittedRepoPaths },
+    // Studio-only today. When personal validation settings ship they narrow
+    // this the same way every other layer does; they never widen it.
+    ...(studio?.validationRuntimes === undefined ? {} : { validationRuntimes: studio.validationRuntimes })
   });
 }
 
@@ -324,7 +356,8 @@ function readStudioPolicy(policyPath: string): {
     "cloneOnly",
     "omitSensitiveFiles",
     "omittedRepoPaths",
-    "allowNetworkedAiOnThisMachine"
+    "allowNetworkedAiOnThisMachine",
+    "validationRuntimes"
   ]);
   const unknown = Object.keys(value).filter((field) => !knownFields.has(field));
   if (unknown.length > 0) {
@@ -342,10 +375,60 @@ function readStudioPolicy(policyPath: string): {
       throw new Error(`Studio security policy ${policyPath}: ${field} must be a boolean.`);
     }
   }
+  assertValidationRuntimePolicy(value["validationRuntimes"], policyPath);
   return {
     document: value as unknown as StudioSecurityPolicyDocument,
     fingerprint: fingerprint(raw)
   };
+}
+
+const TOPOLOGY_PINS: readonly ValidationTopologyPreset[] = ["single", "default-plus-named", "per-project"];
+const PROFILE_EXCEPTION_GATES: readonly string[] = ["td-only", "disabled"];
+
+/**
+ * Validates the optional `validationRuntimes` object field by field. It is
+ * strict inside the object as well: a misspelled limit must fail loudly rather
+ * than silently leave a validation runtime unrestricted.
+ */
+function assertValidationRuntimePolicy(entry: unknown, policyPath: string): void {
+  if (entry === undefined) return;
+  if (!isRecord(entry)) {
+    throw new Error(`Studio security policy ${policyPath}: validationRuntimes must be an object.`);
+  }
+  const knownFields = new Set(["topologyPin", "warmCap", "profileExceptionCreation", "imageAllowlist"]);
+  const unknown = Object.keys(entry).filter((field) => !knownFields.has(field));
+  if (unknown.length > 0) {
+    throw new Error(`Studio security policy ${policyPath}: validationRuntimes contains unknown field${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}.`);
+  }
+  const topologyPin = entry["topologyPin"];
+  if (topologyPin !== undefined && !TOPOLOGY_PINS.includes(topologyPin as ValidationTopologyPreset)) {
+    throw new Error(`Studio security policy ${policyPath}: validationRuntimes.topologyPin must be one of ${TOPOLOGY_PINS.join(", ")}.`);
+  }
+  const warmCap = entry["warmCap"];
+  if (warmCap !== undefined && (typeof warmCap !== "number" || !Number.isInteger(warmCap) || warmCap < 0)) {
+    throw new Error(`Studio security policy ${policyPath}: validationRuntimes.warmCap must be a non-negative whole number.`);
+  }
+  const profileExceptionCreation = entry["profileExceptionCreation"];
+  if (profileExceptionCreation !== undefined && !PROFILE_EXCEPTION_GATES.includes(profileExceptionCreation as string)) {
+    throw new Error(`Studio security policy ${policyPath}: validationRuntimes.profileExceptionCreation must be ${PROFILE_EXCEPTION_GATES.join(" or ")}.`);
+  }
+  const imageAllowlist = entry["imageAllowlist"];
+  if (imageAllowlist !== undefined && (!Array.isArray(imageAllowlist) || !imageAllowlist.every((item) => typeof item === "string"))) {
+    throw new Error(`Studio security policy ${policyPath}: validationRuntimes.imageAllowlist must be an array of strings.`);
+  }
+}
+
+/** One terse glance line; `td-only` is ADR 0022's default, so only a removal is worth a word. */
+function describeValidationRuntimes(policy: ValidationRuntimePolicy | undefined): string | undefined {
+  if (policy === undefined) return undefined;
+  const facts: string[] = [];
+  if (policy.topologyPin !== undefined) facts.push("topology pinned");
+  if (policy.warmCap !== undefined) facts.push(`warm cap ${String(policy.warmCap)}`);
+  if (policy.profileExceptionCreation === "disabled") facts.push("no profile exceptions");
+  if (policy.imageAllowlist !== undefined) {
+    facts.push(`${String(policy.imageAllowlist.length)} allowed image${policy.imageAllowlist.length === 1 ? "" : "s"}`);
+  }
+  return facts.length === 0 ? undefined : `Validation: ${facts.join(", ")}`;
 }
 
 const STALE_POLICY_MESSAGE = "The managed security policy changed after startup. Reload the window before continuing.";

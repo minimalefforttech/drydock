@@ -37,6 +37,8 @@
 - Local orchestrator: trusted local control plane. It manages sessions, policies, runtime lifecycle, event store, diffs, plans, tasks, and memory review.
 - Runtime adapter: trusted policy translator for Docker Sandbox, Docker, WSL, and later runtimes.
 - MicroVM/container/runtime: enforcement boundary for agent commands and filesystem access.
+- Validation runtime: enforcement boundary for DCC validation jobs. It holds no provider credentials, runs no prompts or chat turns, and reaches the host only over the internal-switch exec channel; agent runtimes have no route to it.
+- Curated package mirror share: single-purpose, single-account, read-only publication of the allowlisted package subtrees a validation runtime may name. It is not a general file service and carries no write path.
 - Agent backend: untrusted worker from a security perspective. It can request actions only through approved protocol and runtime boundaries.
 - Agent adapter: trusted protocol bridge for Codex, Claude, ACP, or other providers. It normalizes capabilities and events but is not a security boundary.
 - Workspace roots: user-owned project files; readable/writable only according to session mode and policy.
@@ -68,12 +70,18 @@
 - Treating agreement between multiple models as human approval or as an access-control decision.
 - Treating review comments, doc comments, or subtask creation as permission to broaden access.
 - Reusing arbitrary local branch names for cross-boundary code or patch transfer. Network-bound Git handoff uses product-generated temporary branch refs.
+- Mounting production paths into any runtime. Approved production content reaches a job only as a snapshot copy.
+- Writing back to the curated package mirror or to production from a validation runtime.
+- Rerouting a validation job across policy profiles without the delta confirmation, in either direction.
+- Treating a passed must-fail probe as anything less than an incident.
+- Sharing mounts between runtime kinds. Content moves between them as snapshots through the host.
 
 ## Runtime Assumptions
 
 - Docker Sandbox is the preferred v1 isolation target because it provides one isolated microVM per agent session.
 - Docker container fallback must use hardened flags such as no network by default, `--cap-drop=ALL`, `--security-opt no-new-privileges`, CPU/memory limits, explicit mounts, and isolated working directories.
 - WSL is optional for v1 and must be treated as a later adapter, not an implicit host escape hatch.
+- Hyper-V validation runtimes are a second runtime class that only ever runs validation jobs. A pooled, product-adopted VM relaxes the one-disposable-runtime-per-session rule for this class only; the compensations are mandatory, not optional: jobs are serialized into job-scoped workspaces and environment directories, the VM is reverted to a clean checkpoint on a policy cadence, and standing negative probes (read production, write the mirror, reach a non-allowlisted address) quarantine the runtime and block its queue the moment a must-fail check succeeds. Its vNIC is default-deny with allows for the host's internal-switch address and the DCC license server ports only, so the class has no internet and no route to agent runtimes. Validation evidence binds to the changeset hash, the mirror manifest version, and the probe state it ran under, so a receipt cannot outlive the conditions that produced it.
 - Codex is a required Stage 0 dependency, but the product must call it through an adapter. Stage 0 validates host discovery, login/protocol availability, and schema/capability visibility only as inert host checks; Docker Sandbox and Docker-container checks validate the executable agent surfaces. Product prompts, turns, tools, chat sessions, and model output generation belong inside isolated runtimes only.
 - Literal ACP is a compatibility target when exposed; app-server JSON-RPC, MCP server, and exec JSON are the required current control surfaces to prove.
 - Claude and other provider backends must use the same adapter contract: explicit auth status, noninteractive execution, event streaming or parseable output, cancellation, filesystem snapshot support, and provider-specific permission controls where available.
@@ -100,6 +108,7 @@
 - Git remains the authoritative source for repository history, not for per-session review state.
 - Per-session diff checkpoints define what the AI changed during a session, independent of Git staging or commits.
 - Runtime-local artifacts that are not on mounted paths are ephemeral unless the orchestrator copies them to a checkpoint/shared-write location before restart.
+- Fixture grants are snapshot copies, never mounts. Each grant records provenance, content hash, and expiry in the grants ledger; evidence stores the fixture manifest hash rather than the content, and expiry removes the copy.
 - Generated memory must be proposed with evidence and reviewed before becoming shared memory.
 - Context packs should record classification metadata such as public/internal/secret-like, source type, and guard result. This keeps security visible without asking the user to read every token.
 - Review comments should record source file, line range, author, intent, and
@@ -108,6 +117,7 @@
 - Prompt and artifact retention should be configurable by class so low-risk diagnostics can expire while reviewed memory and task-linked audit evidence remain available.
 - Redacted structured logging is the default. Expanded logs and metrics are an explicit configuration choice, not a hidden debugging mode.
 - When expanded logging is enabled, records must carry retention class and PII policy so they can be expired, redacted, or excluded from prompts.
+- The prevalidation artifacts (`prevalidation.json` and the generated report) carry identity-bearing environment detail such as account names, group SIDs, host paths, and command output, so they are local diagnostics and stay gitignored. Each check records only the fields its gate reasons about — the two Hyper-V group SIDs and a group count, never the full token; the planned storage roots and their free space, never a volume inventory — so the artifact does not become an environment dump.
 - Branch names recorded in tasks, reviews, or telemetry must not encode secrets, ticket bodies, prompt text, or absolute host paths.
 
 ## Stage 0 Security Gate
@@ -137,4 +147,11 @@ Before VS Code implementation begins, the prevalidation harness must prove or cl
   tasks without treating model agreement or plan state as human approval.
 - Multiple orchestrated role sessions can run independently and one can be cancelled without killing the rest.
 - Role timeline, task registry, related project history, prompt history, memory review, automated-test, and HITL records can be represented before UI implementation begins.
+- Hyper-V is installed with the hypervisor, services, and management module, and the `vmms` service is running (`hyperv.features`).
+- The signed-in account holds Hyper-V Administrators in its current logon token, so validation-runtime control runs without elevation (`hyperv.admin`).
+- The planned VM disk and curated mirror roots are local volumes with free space above the storage floor (`hyperv.storage`).
+- The native `ssh.exe` exec-channel client is present and reports a version, rather than a shim on PATH (`hyperv.ssh`).
+- The DCC license server is configured as host:port, which is also the source of the validation runtime's vNIC allowlist (`hyperv.license-server`).
+
+The five Hyper-V rows are read-only, fixed-literal PowerShell checks: they read feature, identity, volume, client, and configuration state, start no VM, and change nothing. They are registered as not required while ADR 0022 is Proposed, so a workstation without Hyper-V reports fix-needed rows without failing the Stage 0 gate.
 
