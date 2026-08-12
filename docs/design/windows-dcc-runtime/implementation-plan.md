@@ -150,9 +150,34 @@ Threat-model validation-runtime section; managed-policy keys (topology
 pin, warm cap, profile-exception gate) in `studio-security-policy.md`;
 maintenance runbook; flip ADR 0022 to Accepted with the spike numbers.
 
-## Next-session agenda (concrete)
+## Status (2026-08-13)
 
-1. `npm run prevalidate` — confirm baseline before changes.
-2. Build M0 (prevalidate gates) — pure TypeScript, no environment needs.
-3. If group membership is live: run M1a hardware smoke, record timings.
-4. If storage decided: start the M1 guest runbook; else begin M2 contracts.
+M0–M8 landed on ADR-22. M1a passed on real Hyper-V (spike-report.md); M1
+remains environment-blocked (no studio share/DCC/license on the build
+machine) and is the Accepted gate. Visual coverage V79–V84.
+
+## Post-M8 backlog (deliberate deferrals, none load-bearing for the gate)
+
+- **Recipe auto-trigger** — nothing enqueues validation from ADR 0007
+  subtask recipes yet; entry points are the palette command, chip re-run,
+  and `validation.run`. Needs a recipe-step profile declaration.
+- **Agent-session fixture byte-copy** — production snapshots stage host-side
+  and ship into validation jobs; copying into a *live agent sandbox* (exec
+  channel, bounded) is not wired. The card + ledger + staging are.
+- **greenAt at breach** — the probe service replaces `lastResult` before the
+  quarantine callback runs, so the banner says "no green probe on record"
+  rather than naming the last green time. Persisting probe history (or
+  passing the prior stamp into the callback) restores the full F5 sentence.
+- **vmName capture at adopt** — the VM name derives from displayName, so a
+  rename re-points at a differently-named VM (narrower than H5 promises;
+  runbook documents the caveat). Fix: stamp `vmName` into the config row at
+  adopt time.
+- **planWarmSet application** — the warm cap is enforced arithmetically and
+  reported, but nothing starts/stops VMs to converge on the plan.
+- **Agents-panel counters** — `hyperVControl.counters` exists; the fleet
+  view does not render hyperv runtimes yet.
+- **Durable restart-retry ledger** — E7's requeue-once is tracked in
+  memory; a job interrupted by two separate host restarts requeues twice.
+- **Fixture restart-durability** — staged fixture files survive on disk but
+  a restored job request is rebuilt without `fixtures`/manifest hash; a
+  re-run re-attaches them.

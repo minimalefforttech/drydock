@@ -1,6 +1,20 @@
 # 0022 - Windows DCC validation runtime on Hyper-V
 
-Status: Proposed - 2026-08-12
+Status: Proposed - 2026-08-12 · Implemented behind the Phase-1 gate - 2026-08-13
+
+> **Status note (2026-08-13).** M0-M8 are implemented and tested on branch
+> ADR-22 (prevalidate gates, contracts/registry/routing, hyperv adapter,
+> job service, mirror tooling, probe suite, full UX, policy keys). The M1a
+> hardware smoke ran clean non-elevated (6.2 s control-plane round trip;
+> extended ACLs survive checkpoint restore) - see
+> `docs/design/windows-dcc-runtime/spike-report.md`. The M1 kill-gate
+> numbers (warm-restore, exec latency, stream latency, round-trip ratio)
+> require a studio workstation with the X: share, DCC installs, and license
+> server; this ADR flips to Accepted only when that spike passes its
+> ceilings. One spike finding already shapes the code: Windows OpenSSH has
+> no ControlMaster, so exec is per-process behind a swappable transport
+> seam. Deferred items are listed in `implementation-plan.md` §Post-M8
+> backlog.
 
 Refs: `docs/design/windows-dcc-runtime/` (docset), `docs/design/threat-model.md`,
 ADR 0001 (isolation), ADR 0007 (verification requirements), ADR 0015 (bounded
