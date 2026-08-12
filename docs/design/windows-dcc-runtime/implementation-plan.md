@@ -152,9 +152,14 @@ maintenance runbook; flip ADR 0022 to Accepted with the spike numbers.
 
 ## Status (2026-08-13)
 
-M0–M8 landed on ADR-22. M1a passed on real Hyper-V (spike-report.md); M1
-remains environment-blocked (no studio share/DCC/license on the build
-machine) and is the Accepted gate. Visual coverage V79–V84.
+M0–M8 landed on ADR-22. M1a passed on real Hyper-V (spike-report.md). The
+job pipeline has been live-fired end to end against real DCCs (hython 20.5,
+Blender 5.2) via the exec seam's local transport — spike-report.md
+§M1-local, opt-in suite `localDccExec.test.ts` (`DRYDOCK_DCC_ITEST=1`) —
+which found and fixed the `-Command` tag-join wrapper bug and recorded the
+local round-trip baseline. M1's four VM-transport numbers remain
+studio-bound (guest image, package share, license server) and stay the
+Accepted gate. Visual coverage V79–V84.
 
 ## Post-M8 backlog (deliberate deferrals, none load-bearing for the gate)
 
@@ -181,3 +186,10 @@ machine) and is the Accepted gate. Visual coverage V79–V84.
 - **Fixture restart-durability** — staged fixture files survive on disk but
   a restored job request is rebuilt without `fixtures`/manifest hash; a
   re-run re-attaches them.
+- **Run-wrapper PID emission for orphan-proof sweeps** — live fire showed
+  that when the token-carrying wrapper dies before `sweepGuestJob` runs
+  (local abort does this deterministically; over ssh it depends on sshd's
+  channel-close behavior — measure at M1), the token-anchored parent walk
+  has no root and the hung DCC child orphans. Having the run wrapper print
+  its own `$PID` as a tagged first line would let the sweep root the walk
+  without a live wrapper.

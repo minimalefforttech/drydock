@@ -1,143 +1,137 @@
 # ADR-22 implementation handoff
 
-Session handoff, 2026-08-13. Branch `ADR-22`, working tree **clean**, everything committed.
-Full suite: **`npm test` → 743 tests, 0 fail, 4 skipped** (the 4 skips are pre-existing
-Windows symlink-privilege skips in the git/changeset suites, unrelated to this work).
+Session handoff, 2026-08-13 (second session). Branch `ADR-22`.
+Full suite: **`npm test` → 748 tests, 0 fail, 9 skipped** (4 pre-existing
+Windows symlink-privilege skips + 5 opt-in real-DCC tests that skip without
+`DRYDOCK_DCC_ITEST=1`).
 
 ## What this is
 
-ADR 0022 (`docs/adr/0022-windows-dcc-validation-runtime.md`): a second runtime class — a
-pooled Hyper-V Windows VM (adapter kind `hyperv`) that runs `mayapy`/`hython` auto-validation
-against the studio's Windows rez packages, with no host execution and no path to production.
+ADR 0022 (`docs/adr/0022-windows-dcc-validation-runtime.md`): a second runtime
+class — a pooled Hyper-V Windows VM (adapter kind `hyperv`) that runs
+`mayapy`/`hython` auto-validation against the studio's Windows rez packages,
+with no host execution and no path to production.
 Design docset: `docs/design/windows-dcc-runtime/` (read `README.md` first).
 
-## Status: M0–M8 all implemented, committed, and reviewed
+## Status: M0–M8 implemented and reviewed; exec path proven on real DCCs
 
 Commits on `ADR-22` (newest first), all green at each step:
 
-| Commit | Milestone |
+| Commit | What |
 |---|---|
-| `c9c19b2` | Code-review fixes (2 security, 8 correctness) — see below |
+| (this session) | Identifier scrub + real-DCC live fire + `-Command` tag-join fix + vsix 0.17.0 + docs |
+| `21df44a` | Session handoff document |
+| `c9c19b2` | Code-review fixes (2 security, 8 correctness) |
 | `16ba4d2` | M8: ADR status note + post-M8 backlog + vsix 0.16.0 |
-| `09f47af` | M7: validation UX end to end (Configure section, chips, fixture card, hub picker, rail dot, harness) |
+| `09f47af` | M7: validation UX end to end |
 | `34ddc5f` | M4: validation job service, changeset ref, Windows patch boundary |
 | `6050edb` | M6: standing must-fail probe suite + quarantine |
-| `61f8539` | M8a: threat-model deltas, managed validationRuntimes policy keys, runbook |
+| `61f8539` | M8a: threat-model deltas, managed policy keys, runbook |
 | `561567a` | M3: hyperv adapter, multi-adapter core services, bus kinds |
-| `2a328b0` | M5: pkgroot-mirror tooling + mirror status reader |
+| `2a328b0` | M5: package-mirror tooling + mirror status reader |
 | `299f4f8` | M0: prevalidate Hyper-V gates |
 | `9e3ee02` | M2: contracts, sqlite store, routing cascade |
 | `77b6e81` | M1a: Hyper-V hardware smoke scripts + spike report |
-| `f205f76` | ADR 0022 proposal + docset (pre-existing) |
+| `f205f76` | ADR 0022 proposal + docset (pre-existing; the one commit on origin) |
 
-**vsix**: version bumped to **0.16.0**; last packaged at `16ba4d2`. **The review fixes in
-`c9c19b2` changed host/core/contracts code, so the vsix should be repackaged** (`npm run
-package:vsix`) before handing a build to test — this was NOT yet re-done.
+**vsix**: **0.17.0**, packaged this session from the current tree and scanned
+clean of studio identifiers. The 0.16.0 artifact was deleted (it contained
+pre-scrub identifier strings — do not distribute any copy of it that exists
+elsewhere).
 
-## Environment (this machine — personal laptop THINKPAD, not the work machine)
+## This session's work
 
-- Hyper-V fully installed; user IS in `Hyper-V Administrators` (control plane runs non-elevated);
-  `ssh.exe` present; ~875 GB free on C:. **No studio package share, no Maya/Houdini, no license server.**
-- Consequence: **M1a hardware smoke ran for real and PASSED** (6.2 s control-plane round trip;
-  extended ACLs survive checkpoint restore — `docs/design/windows-dcc-runtime/spike-report.md`).
-  **The M1 full kill-gate spike is environment-blocked** (needs a studio workstation) and is the
-  gate for flipping the ADR to Accepted. Product code M2–M8 lands behind that gate per the plan.
-- One M1a finding shapes the code: **Windows OpenSSH has no ControlMaster multiplexing**, so the
-  adapter's exec is one `ssh.exe` per call behind a swappable transport seam.
+1. **Production-identifier scrub (55 files).** The real server/share
+   (`therock`/`Floats`), studio drive letter (`X:`), `xroot` naming family,
+   `FR_*`/`fr_*`/`FR-####` studio-initial identifiers, an internal system
+   name, a real domain login and a real username are gone from the tree —
+   replaced by `\\studio-fs\share`, `P:`, `pkgroot`, `STUDIO_*`, `pipe_*`,
+   `TSK-####`, `EXAMPLE\td.user`, `senior.td`. Renames: `tools/xroot-mirror`
+   → `tools/pkgroot-mirror` (package `@drydock/pkgroot-mirror`),
+   `xrootMirrorStatus.ts` → `pkgrootMirrorStatus.ts`,
+   `DRYDOCK_XROOT_MIRROR` → `DRYDOCK_PKGROOT_MIRROR`,
+   `xroot-manifest.json` → `pkgroot-manifest.json`. The reference scanner's
+   hardcoded `[Xx]:` regex became a configurable drive letter (default `P`,
+   CLI `--drive`, `diff` derives it from the manifest sourceRoot). The
+   LICENSE copyright line (real studio identity) is kept on purpose. ADR
+   0022's Context notes the docset names are anonymized examples.
+   **Gate:** repo-wide grep for all of the above returns zero.
+2. **Real-DCC live fire** (`packages/runtime-adapters/src/localDccExec.test.ts`,
+   opt-in `DRYDOCK_DCC_ITEST=1`): the real `ValidationJobService` pipeline
+   with the real guest PowerShell wrappers spawned locally (the exec seam),
+   against installed Blender 5.2 and Houdini 20.5 hython (Apprentice).
+   Pass / fail / license-wait / stall+sweep / cold+warm serialization: 5/5.
+   Numbers and findings in `spike-report.md` §M1-local.
+3. **Bug found+fixed by the live fire:** PowerShell `-Command` space-joins
+   trailing argv, so the job-id tag made every tagged run wrapper a parse
+   error — no tagged guest command had ever executed. Fix: tagged scripts
+   end on the constant `VALIDATION_TAG_COMMENT` line; regression pinned in
+   the fixed-literal test.
+4. **Finding, deferred:** orphan-on-abort sweep gap (token-anchored tree walk
+   has no root once the wrapper is dead). Backlog: run-wrapper PID emission;
+   M1 must measure sshd channel-close behavior.
+5. **Harness re-verify** of V79–V84 surfaces on all four pages
+   (configure/index/taskHub/rail) against the scrubbed fixtures — banner,
+   revert-reprobe, chips, production fixture card typed-confirm, hub picker,
+   rail dot heal all drive correctly.
+6. **Docs**: spike-report §M1-local, ADR status note (second code-shaping
+   finding), implementation-plan status + backlog entry.
+
+## Environment (reference laptop THINKPAD)
+
+- Hyper-V fully installed; user in `Hyper-V Administrators` (non-elevated
+  control plane); `ssh.exe` present; ~875 GB free.
+- **Houdini 20.5.445 installed** (hython works headless; Apprentice license;
+  set `PYTHONNOUSERSITE=1` — a stray user-site NumPy 2.x otherwise leaks in).
+  **Blender 4.4–5.2 installed** (5.2 used by the tests; license-free).
+- Still absent (M1 blockers): studio package share route, rez configs, a
+  Windows guest image, license-server reachability.
 
 ## Where the code lives (anchors)
 
-- Contracts: `packages/contracts/src/validationRuntime.ts` (registry/job/receipt/routing types),
-  `packages/contracts/src/webviewMessages.ts` (the `config.validation.*` / `validation.*` schema,
-  `parseValidationConnection`).
-- Core: `validationRoutingService.ts` (pure cascade), `validationJobService.ts` (per-runtime
-  serialized queue), `validationProbeService.ts` (must-fail probes), `validationChangesetRef.ts`,
-  `pkgrootMirrorStatus.ts`, `cloneSyncService.ts` (`assertPatchSafeForWindowsGuest`), `eventBus.ts`
-  (validation bus kinds). Multi-adapter registry in `runtimeLifecycleService`/`runtimeCleanupService`/`runtimeReconcileService`.
-- Runtime adapter: `packages/runtime-adapters/src/hyperVControl.ts` + `hyperVRuntimeAdapter.ts`
-  (adopt-only — **no `Remove-VM` path exists**, test-asserted) + `commandDiscovery.ts`.
-- Storage: `packages/storage-sqlite/src/validationRuntimeStore.ts` + migration block.
-- Extension: `apps/vscode-extension/src/services/validationAppService.ts` (registry CRUD + managed
-  policy + fixtures + availability + rail), `securityPolicy.ts` (`isProductionPath`,
-  `validationRuntimes` keys), `workspaceReviewAppService.ts` (production fixture approve path),
-  `compositionRoot.ts` (wiring; the `validateHostPath` production carve-out).
-- Webview: `webview-ui/src/configure.ts` (Validation runtimes section), `views/validationChips.ts`,
-  `views/accessCard.ts` (production fixture card), `taskHub.ts` (picker + banner), `views/railViews.ts`
-  (DCC dot), `validationTypes.ts` (re-exports contracts).
-- Tools: `tools/prevalidate/src/hyperv.ts` (M0 gates), `tools/pkgroot-mirror/` (M5), `tools/hyperv-spike/`
-  (M1a), `tools/webview-harness/` (configure.html + taskHub.html + rail.html pages, `harness.js`
-  validation fixtures, `visual-tests.md` V79–V84).
+- Contracts: `packages/contracts/src/validationRuntime.ts`,
+  `packages/contracts/src/webviewMessages.ts` (`parseValidationConnection`).
+- Core: `validationJobService.ts` (queue, guest scripts, `VALIDATION_TAG_COMMENT`,
+  `ValidationExecAdapter` seam), `validationRoutingService.ts`,
+  `validationProbeService.ts`, `validationChangesetRef.ts`,
+  `pkgrootMirrorStatus.ts`, `cloneSyncService.ts`
+  (`assertPatchSafeForWindowsGuest`), `eventBus.ts` (validation bus kinds).
+- Runtime adapter: `packages/runtime-adapters/src/hyperVControl.ts`,
+  `hyperVRuntimeAdapter.ts` (adopt-only; `SWEEP_GUEST_JOB_SCRIPT` exported),
+  `commandDiscovery.ts`, **`localDccExec.test.ts`** (real-DCC opt-in suite).
+- Storage: `packages/storage-sqlite/src/validationRuntimeStore.ts`.
+- Extension: `validationAppService.ts`, `securityPolicy.ts`,
+  `workspaceReviewAppService.ts`, `compositionRoot.ts` (adapter binding
+  ~:1019, `validateHostPath` carve-out).
+- Webview: `configure.ts`, `views/validationChips.ts`, `views/accessCard.ts`,
+  `taskHub.ts`, `views/railViews.ts`, `validationTypes.ts`.
+- Tools: `tools/prevalidate/src/hyperv.ts` (env: `DRYDOCK_HYPERV_ROOT`,
+  `DRYDOCK_PKGROOT_MIRROR`), `tools/pkgroot-mirror/` (manifest, sync, scan,
+  `--drive`), `tools/hyperv-spike/`, `tools/webview-harness/` (V79–V84).
 
-## Code review (high effort, 8 angles) — 10 findings, ALL FIXED in `c9c19b2`
+## Remaining work
 
-Two security + eight correctness, each with tests. Verify pass confirmed all 10.
+1. **Origin history contains the pre-scrub identifiers.** `origin/ADR-22`
+   points at `f205f76`, whose tree carries the real server/share names in the
+   ADR + upgrade-plan (`origin/main` is clean). The working tree is scrubbed,
+   but clearing GitHub needs a branch history rewrite + force-push (or a
+   squash-merge to main and branch deletion) — **Alex's call**, prepared
+   options in the session summary. Until then, do not push ADR-22 as-is on
+   top of the old base if the goal is a clean public history.
+2. **M1 studio spike** (unchanged gate): guest image + share + license
+   server; measure the four numbers; also measure sshd channel-close process
+   reaping (orphan sweep finding).
+3. **Deferred backlog** in `implementation-plan.md` §Post-M8 backlog
+   (now includes run-wrapper PID emission). Prior session's deferrals —
+   KV task-override dangle, vmName-from-displayName, kill-switch accounting,
+   recipe auto-trigger, `formatBytes` dedup — unchanged.
+4. The prior handoff's "re-call ReportFindings with outcomes" item was
+   **dropped**: the originating code-review session is gone and the tool is
+   only valid inside an active review; the findings and their fixes are
+   documented here and in the git history.
 
-1. **[SECURITY] Production carve-out exposed credentials.** `isProductionPath` was keyed on the
-   whole mount denylist, which includes credential defaults (`~/.ssh`, `~/.aws`, …), so those were
-   snapshottable through the fixture flow, bypassing `assertHostPathAllowed` / `assertMountAllowed` /
-   `assertSessionCanWiden`. **Fix:** production tier = STUDIO-managed data denials only
-   (`EffectiveSecurityPolicy.productionDataPaths` from `studioDenied`, excluding sensitive paths);
-   carve-out re-runs `assertPolicyCurrent()`; `grantProductionFixture` re-asserts at the copy.
-2. **[SECURITY] ssh argv injection → host RCE.** `parseValidationConnection` didn't charset-check
-   `host`/`user`, which reach `user@host` before `--` in `sshArgs()`. **Fix:** anchored regexes
-   forbidding a leading hyphen + shell metacharacters.
-3. **Guest sweep was a no-op.** Token lived only in env (invisible to `Win32_Process`). **Fix:**
-   run wrapper tagged with the job id on its command line (`validationGuestCommand(script, jobId)`)
-   + sweep tree-walks descendants (adapter half).
-4. **Stall watchdog armed before exec** → cold DCC start tripped 120 s. **Fix:** separate startup budget.
-5. **`drain()` had no trailing-edge re-run** → job stranded queued on an idle runtime. **Fix:** `drainAgain` loop.
-6. **`runPipeline`/`requeueParked` didn't re-check `archived`** → job ran on a decommissioned runtime. **Fix:** park.
-7. **`isVmAbsent`/`isAlreadyGone` too broad** → a still-running VM could be reaped. **Fix:** tightened to exact
-   "VM not found" wording (stderr/error only) + empty-name guard in `hyperVControl`.
-8. **Case-collision check false-flagged a real rename** (`parseDiffPaths` harvested both `---`/`+++`
-   spellings). **Fix:** key on destination-tree paths only.
-9. **Fixture staging basename collision** → second grant overwrote the first, receipt hash diverged.
-   **Fix:** namespace staged files by a source-path hash subdir.
-10. **Synchronous `statSync` on production paths** on the hub-refresh hot path → main-thread hang on a
-    disconnected share. **Fix:** size read only for PENDING cards, never bulk history.
+## Working preferences honored
 
-## Remaining work (what the next session should pick up)
-
-1. **Re-report finding outcomes** to the code-review UI: call `ReportFindings` again with the same 10
-   findings, each `outcome: "fixed"` (this was interrupted before it ran). The finding list/order is in
-   the transcript; all 10 are fixed.
-2. **Repackage the vsix** (`npm run package:vsix`) — 0.16.0 host code changed in `c9c19b2` after the
-   last package.
-3. **Harness re-verification of the UX** after the fixture-flow change: the four pages
-   (`configure.html`, `index.html`, `taskHub.html`, `rail.html`) were screenshot-verified at M7
-   (`09f47af`) and looked clean; the `c9c19b2` fixes were host/core-side (staged-path layout, size
-   gating) and shouldn't change rendering, but a quick re-drive of the production fixture card +
-   validation chips is worth doing to be safe. Server: `tools/webview-harness/server.mjs` (port 8971)
-   after `cd apps/vscode-extension && npm run bundle`.
-4. **Deferred backlog** (real but not fixed — logged in `implementation-plan.md` §Post-M8 backlog and
-   below; none block the M1 gate):
-   - **Review finding 6 (routing cascade dup)** — `resolvedRuntimeForTask` reimplements the cascade
-     without the park guards. **Decided: no change.** It already excludes archived via
-     `listRuntimes(false)`, `railStatus` surfaces the chosen runtime's quarantine cheaply, and routing
-     it through `resolveValidationRuntime` would add an availability probe per row (the perf issue
-     another finding warns about).
-   - **KV task-override dangle** — task overrides ride `validation_settings` as `override.task.<id>`
-     keys, so `deleteRuntime` can't reassign them; a deleted runtime leaves overrides pointing at it
-     (they fall through to default in the display path, but a job enqueue would park until the user
-     re-picks). Proper fix: a `validation_task_overrides` table (task_id PK, runtime_id) so delete
-     reassigns like associations.
-   - **vmName from mutable displayName** — the Hyper-V VM name is slugged from `displayName` in two
-     places (`compositionRoot` `validationVmName`, `validationAppService` `vmNameFor`), so a rename
-     re-points at a differently-named VM and jobs fail at adopt. Proper fix: capture `vmName` once at
-     create/adopt as a stored `NamedRuntimeConfig` field; `displayName` becomes display-only.
-   - **Networked-AI kill-switch accounting** — the deallocation loop in `compositionRoot` counts only
-     `status === "removed"`; the adapter-not-registered branch returns `quarantined` (row flipped, VM
-     not stopped) and is silently treated as handled. **Latent** (docker-only inventory today), but the
-     kill switch would report success without acting once a second kind reaches that inventory.
-   - Recipe auto-trigger (nothing enqueues validation from ADR 0007 subtask recipes yet), agent-session
-     fixture byte-copy (snapshot ships to jobs, not into a live agent sandbox), `greenAt` at breach for
-     the F5 banner, `planWarmSet` application (cap enforced arithmetically, nothing starts/stops VMs),
-     Agents-panel hyperv counters, durable restart-retry ledger, fixture restart-durability.
-   - Minor dedup: `formatBytes` exists in 3 spots (`validationAppService`, `workspaceReviewAppService`
-     `formatSizeLabel`, `configure.ts`); `validationGuestCommand`/`errorMessage` duplicated intra-core.
-
-## Working preferences honored this session
-
-Alex is usage-limit conscious — bulk work was fanned out to focused Opus subagents. vsix version is
-bumped for every test build (0.15.0 → 0.16.0). Docs/summaries terse. Memory file
-`drydock-adr22-implementation.md` is current.
+Bulk scrub fanned out to focused subagents; vsix bumped for the new build
+(0.16.0 → 0.17.0, code changes); docs terse; memory file
+`drydock-adr22-implementation.md` updated.

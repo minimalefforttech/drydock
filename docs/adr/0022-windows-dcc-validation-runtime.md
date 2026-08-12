@@ -6,15 +6,20 @@ Status: Proposed - 2026-08-12 · Implemented behind the Phase-1 gate - 2026-08-1
 > ADR-22 (prevalidate gates, contracts/registry/routing, hyperv adapter,
 > job service, mirror tooling, probe suite, full UX, policy keys). The M1a
 > hardware smoke ran clean non-elevated (6.2 s control-plane round trip;
-> extended ACLs survive checkpoint restore) - see
-> `docs/design/windows-dcc-runtime/spike-report.md`. The M1 kill-gate
-> numbers (warm-restore, exec latency, stream latency, round-trip ratio)
-> require a studio workstation with the P: share, DCC installs, and license
-> server; this ADR flips to Accepted only when that spike passes its
-> ceilings. One spike finding already shapes the code: Windows OpenSSH has
-> no ControlMaster, so exec is per-process behind a swappable transport
-> seam. Deferred items are listed in `implementation-plan.md` §Post-M8
-> backlog.
+> extended ACLs survive checkpoint restore), and the full job pipeline has
+> now been **live-fired against real DCCs** (hython 20.5, Blender 5.2) on
+> the reference laptop through the exec seam's local transport - pass /
+> fail / license-wait / stall+sweep all green, local round-trip baseline
+> recorded - see `docs/design/windows-dcc-runtime/spike-report.md`. The M1
+> kill-gate numbers (warm-restore, exec latency, stream latency, round-trip
+> ratio) still require a studio workstation with the package share, a guest
+> image, and license-server reachability; this ADR flips to Accepted only
+> when that spike passes its ceilings. Two spike findings already shape the
+> code: Windows OpenSSH has no ControlMaster, so exec is per-process behind
+> a swappable transport seam; and PowerShell `-Command` space-joins trailing
+> argv, so tagged guest scripts end on a constant comment line for the job
+> token to land on (`VALIDATION_TAG_COMMENT`). Deferred items are listed in
+> `implementation-plan.md` §Post-M8 backlog.
 
 Refs: `docs/design/windows-dcc-runtime/` (docset), `docs/design/threat-model.md`,
 ADR 0001 (isolation), ADR 0007 (verification requirements), ADR 0015 (bounded
