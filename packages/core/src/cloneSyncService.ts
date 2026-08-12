@@ -1265,6 +1265,72 @@ function stripDiffPrefix(raw: string): string {
   return raw;
 }
 
+/** Git's file mode for a symbolic link; the only mode Windows cannot reproduce. */
+const SYMLINK_FILE_MODE = "120000";
+
+/**
+ * The Windows-guest patch boundary (ADR 0022, edge cases D3/D4).
+ *
+ * A changeset produced in a Linux clone can contain two things a Windows guest
+ * silently gets wrong: symbolic links (which need developer mode or elevation,
+ * and become plain files when they do not) and paths that differ only by
+ * capitalization (which NTFS collapses into ONE file, so the later patch hunk
+ * quietly overwrites the earlier one and the test suite validates content that
+ * never existed).
+ *
+ * Both fail HERE, at the boundary, listing every offender at once - not five
+ * minutes into a run whose red is unexplainable. Callers use this before
+ * shipping a changeset into a validation runtime; the local/agent sync paths are
+ * unaffected, because on Linux both shapes are perfectly legal.
+ */
+export function assertPatchSafeForWindowsGuest(patch: string): void {
+  const symlinks = new Set<string>();
+  const byLowercase = new Map<string, Set<string>>();
+  let currentPath = "";
+
+  for (const rawLine of patch.split("\n")) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line.trim());
+    if (header?.[2] !== undefined) {
+      currentPath = stripDiffPrefix(header[2]);
+      continue;
+    }
+    // A symlink shows up as mode 120000 on a create/delete/mode-change line, or
+    // on the `index` line when only the link TARGET changed. All four are the
+    // same problem in the guest, so all four are caught.
+    const modeLine = /^(?:new file mode|deleted file mode|old mode|new mode) (\d{6})$/.exec(line);
+    const indexLine = /^index [0-9a-f]+\.\.[0-9a-f]+ (\d{6})$/.exec(line);
+    if ((modeLine?.[1] === SYMLINK_FILE_MODE || indexLine?.[1] === SYMLINK_FILE_MODE) && currentPath !== "") {
+      symlinks.add(currentPath);
+    }
+  }
+
+  for (const path of parseDiffPaths(patch)) {
+    const key = path.toLowerCase();
+    const bucket = byLowercase.get(key) ?? new Set<string>();
+    bucket.add(path);
+    byLowercase.set(key, bucket);
+  }
+
+  const offenders: string[] = [];
+  for (const path of [...symlinks].sort()) {
+    offenders.push(`"${path}" is a symbolic link - the Windows validation runtime cannot reproduce one`);
+  }
+  for (const bucket of [...byLowercase.values()]) {
+    if (bucket.size < 2) continue;
+    const variants = [...bucket].sort();
+    offenders.push(
+      `${variants.map((value) => `"${value}"`).join(" and ")} differ only by capitalization - Windows would collapse them into one file`
+    );
+  }
+  if (offenders.length === 0) return;
+
+  throw new Error(
+    `This changeset cannot be validated on a Windows runtime:\n${offenders.map((line) => `  - ${line}`).join("\n")}\n`
+    + "Rework the changeset so it applies on Windows, then run validation again."
+  );
+}
+
 /** True when a repo-relative path matches the sensitive preset or an exact prefix. */
 export function pathMatchesCloneOmission(candidate: string, omission?: ClonePathOmission): boolean {
   if (!hasCloneOmissions(omission)) return false;

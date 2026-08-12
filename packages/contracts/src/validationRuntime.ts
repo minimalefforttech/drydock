@@ -196,6 +196,59 @@ export type ValidationJobState =
   | "failed";
 
 /**
+ * What a validation job actually RUNS in the guest (ADR 0022 M4). A profile is
+ * the studio's validation suite expressed as an argv the guest wrapper executes
+ * verbatim - never a shell string, because the wrapper receives it as JSON and
+ * spawns it as a process (fixed-literal guest scripts, `snapshotProcessTree`
+ * rule).
+ *
+ * `requiredCapabilities` are matched against the resolved runtime's declared
+ * capabilities AT QUEUE TIME (edge case H8), so a C++ suite routed at a runtime
+ * without MSVC is caught in a second with `route to cpp-builds?` rather than
+ * five minutes into a failing build.
+ */
+export interface ValidationProfile {
+  /** Stable id of the suite; copied onto the job and rendered in evidence. */
+  readonly profileRef: string;
+  /** Executable + arguments, run as-is in the job workspace. */
+  readonly argv: readonly string[];
+  /** Extra guest environment; the job service adds its own job-scoped vars. */
+  readonly env?: Readonly<Record<string, string>>;
+  /** Runtime capabilities this suite needs (`msvc`, `maya`, ...) - H8 gate. */
+  readonly requiredCapabilities?: readonly string[];
+  /**
+   * Regex SOURCE strings (matched case-insensitively) marking a line as a
+   * license wait rather than a hang (edge case E4). A match pauses the
+   * inactivity watchdog and shows `license-wait` as state; the job's hard turn
+   * cap still applies. The job service adds a default pattern set, so profiles
+   * only declare their DCC's peculiar wording.
+   */
+  readonly licenseWaitPatterns?: readonly string[];
+}
+
+/**
+ * What a caller hands the job service to get work validated (ADR 0022 M4).
+ * Everything the cascade needs to route (`requestedRuntimeId`, `projectRootId`)
+ * plus everything evidence needs to attribute (session/chat/task/subtask/agent).
+ *
+ * `requestedRuntimeId` is the chat/task OVERRIDE tier - absent means "resolve
+ * normally", never "use the default". A subagent's request carries the parent's
+ * `taskId` with the child's `agentId` (edge case C1).
+ */
+export interface ValidationJobRequest {
+  readonly sessionId: SessionId;
+  readonly chatId: ChatId;
+  readonly taskId?: TaskId;
+  readonly subtaskId?: SubtaskId;
+  readonly agentId?: AgentId;
+  readonly projectRootId?: WorkspaceRootId;
+  readonly requestedRuntimeId?: ValidationRuntimeId;
+  readonly profile: ValidationProfile;
+  /** Hash of the per-job fixture set (A6); copied onto the receipt verbatim. */
+  readonly fixtureManifestHash?: string;
+}
+
+/**
  * One validation job (ADR 0022). `requestedRuntimeId` is what the caller asked
  * for; `resolvedRuntimeId` is what the cascade actually chose - both are kept
  * so evidence can attribute honestly. Subagent jobs run under the parent's task

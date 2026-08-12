@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SpawnCommandRunner } from "./commandRunner.js";
-import { CloneSyncService } from "./cloneSyncService.js";
+import { assertPatchSafeForWindowsGuest, CloneSyncService } from "./cloneSyncService.js";
 
 const runner = new SpawnCommandRunner();
 
@@ -1065,6 +1065,146 @@ test("a conflicting seed patch fails clone init loudly, naming its source", asyn
       }),
       /seed upstream changeset sub-up\/proj/
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Windows-guest patch boundary (ADR 0022, edge cases D3/D4)
+// ---------------------------------------------------------------------------
+
+test("a plain changeset passes the Windows-guest boundary untouched", () => {
+  const patch = [
+    "diff --git a/src/loader.py b/src/loader.py",
+    "index 1111111..2222222 100644",
+    "--- a/src/loader.py",
+    "+++ b/src/loader.py",
+    "@@ -1 +1 @@",
+    "-old",
+    "+new",
+    ""
+  ].join("\n");
+  assert.doesNotThrow(() => { assertPatchSafeForWindowsGuest(patch); });
+});
+
+test("a new symbolic link is rejected by name", () => {
+  const patch = [
+    "diff --git a/docs/latest b/docs/latest",
+    "new file mode 120000",
+    "index 0000000..3333333",
+    "--- /dev/null",
+    "+++ b/docs/latest",
+    "@@ -0,0 +1 @@",
+    "+docs/v2",
+    "\ No newline at end of file",
+    ""
+  ].join("\n");
+  assert.throws(() => { assertPatchSafeForWindowsGuest(patch); }, (error: Error) => {
+    assert.match(error.message, /"docs\/latest" is a symbolic link/);
+    assert.match(error.message, /cannot be validated on a Windows runtime/);
+    return true;
+  });
+});
+
+test("deleted, converted, and retargeted symlinks are all caught", () => {
+  const deleted = [
+    "diff --git a/docs/gone b/docs/gone",
+    "deleted file mode 120000",
+    ""
+  ].join("\n");
+  const converted = [
+    "diff --git a/docs/converted b/docs/converted",
+    "old mode 100644",
+    "new mode 120000",
+    ""
+  ].join("\n");
+  const retargeted = [
+    "diff --git a/docs/moved b/docs/moved",
+    "index 1111111..2222222 120000",
+    "--- a/docs/moved",
+    "+++ b/docs/moved",
+    ""
+  ].join("\n");
+  assert.throws(() => { assertPatchSafeForWindowsGuest(deleted); }, /"docs\/gone" is a symbolic link/);
+  assert.throws(() => { assertPatchSafeForWindowsGuest(converted); }, /"docs\/converted" is a symbolic link/);
+  assert.throws(() => { assertPatchSafeForWindowsGuest(retargeted); }, /"docs\/moved" is a symbolic link/);
+});
+
+test("paths that differ only by capitalization are rejected together", () => {
+  const patch = [
+    "diff --git a/src/Icons.py b/src/Icons.py",
+    "index 1111111..2222222 100644",
+    "--- a/src/Icons.py",
+    "+++ b/src/Icons.py",
+    "diff --git a/src/icons.py b/src/icons.py",
+    "index 3333333..4444444 100644",
+    "--- a/src/icons.py",
+    "+++ b/src/icons.py",
+    ""
+  ].join("\n");
+  assert.throws(() => { assertPatchSafeForWindowsGuest(patch); }, (error: Error) => {
+    assert.match(error.message, /"src\/Icons\.py" and "src\/icons\.py" differ only by capitalization/);
+    return true;
+  });
+});
+
+test("a rename that only changes capitalization is not a collision", () => {
+  // Git renames emit both spellings, but a/ and b/ naming the SAME file after a
+  // case-only rename is legitimate: it is one file, applied as one file.
+  const patch = [
+    "diff --git a/src/Icons.py b/src/Icons.py",
+    "similarity index 100%",
+    "rename from src/icons.py",
+    "rename to src/Icons.py",
+    ""
+  ].join("\n");
+  assert.doesNotThrow(() => { assertPatchSafeForWindowsGuest(patch); });
+});
+
+test("every offender is listed in one message, not just the first", () => {
+  const patch = [
+    "diff --git a/link b/link",
+    "new file mode 120000",
+    "diff --git a/other b/other",
+    "new file mode 120000",
+    "diff --git a/src/A.py b/src/A.py",
+    "index 1111111..2222222 100644",
+    "diff --git a/src/a.py b/src/a.py",
+    "index 3333333..4444444 100644",
+    ""
+  ].join("\n");
+  assert.throws(() => { assertPatchSafeForWindowsGuest(patch); }, (error: Error) => {
+    const lines = error.message.split("\n").filter((line) => line.startsWith("  - "));
+    assert.equal(lines.length, 3);
+    assert.match(error.message, /"link" is a symbolic link/);
+    assert.match(error.message, /"other" is a symbolic link/);
+    assert.match(error.message, /differ only by capitalization/);
+    // Studio vocabulary: the denial names the way forward (G3).
+    assert.match(error.message, /Rework the changeset so it applies on Windows/);
+    return true;
+  });
+});
+
+test("a real cross-platform changeset with a symlink fails the boundary it would fail in the guest", async (t) => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "keep.txt": "base\n" });
+  try {
+    const svc = service();
+    const clone = await svc.initClone({ localRepoPath, cloneParentDir: join(root, "repos"), name: "proj" });
+    await writeAll(join(clone.clonePath, "real.txt"), "content\n");
+    try {
+      await symlink(join(clone.clonePath, "real.txt"), join(clone.clonePath, "alias.txt"), "file");
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error
+        && ((error as { readonly code?: unknown }).code === "EPERM" || (error as { readonly code?: unknown }).code === "EACCES")) {
+        t.skip("This Windows account cannot create symbolic links.");
+        return;
+      }
+      throw error;
+    }
+    const captured = await svc.outboundChangesetPatch(clone.clonePath);
+    assert.ok(captured);
+    assert.throws(() => { assertPatchSafeForWindowsGuest(captured.patch); }, /is a symbolic link/);
   } finally {
     await cleanup();
   }
