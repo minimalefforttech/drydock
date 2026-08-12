@@ -4,6 +4,7 @@
  */
 
 export * from "./agentQuestionStore.js";
+export * from "./appStateStore.js";
 export * from "./boardColumnStore.js";
 export * from "./diffReviewStore.js";
 export * from "./eventStore.js";

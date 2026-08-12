@@ -64,6 +64,8 @@ export interface PlannerSessionsPort {
   reclaimChatSession(sessionId: string, model?: ChatModelSelection): Promise<unknown>;
   endChatSession(sessionId: string, reason: string): Promise<unknown>;
   sendChatTurn(sessionId: string, prompt: string): Promise<{ readonly status: TurnTerminalStatus }>;
+  /** Durable transcript record for a dispatch that failed before any turn existed. */
+  recordChatSendFailure(sessionId: string, error: unknown): Promise<void>;
   isChatSessionLive(sessionId: string): boolean;
   hasActiveChatTurn(sessionId: string): boolean;
 }
@@ -272,7 +274,7 @@ export class PlannerAppService {
     return sessionId;
   }
 
-  /** Sends a free-form turn from the sidebar Plan tab, reviving if needed. */
+  /** Sends a free-form turn from a plan surface, reviving if needed. */
   async sendPlanTurn(planId: string, prompt: string): Promise<void> {
     const id = asId<"PlanId">(planId);
     const plan = await this.requirePlan(id);
@@ -433,6 +435,8 @@ export class PlannerAppService {
         sessionId,
         error: error instanceof Error ? error.message : String(error)
       });
+      // Surface the failure in the plan session's chat instead of only the log.
+      void this.options.sessions.recordChatSendFailure(sessionId, error);
     });
   }
 

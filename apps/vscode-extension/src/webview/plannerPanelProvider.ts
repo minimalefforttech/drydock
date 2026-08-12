@@ -2,11 +2,11 @@
  * Planner editor panel host (ADR 0012).
  *
  * A SINGLE editor-area WebviewPanel for the selected plan's files, outline,
- * artifact viewer, and plan-wide notes queue. Plan creation, selection,
- * aspects, and planning chat remain in the Drydock Plan tab in the VS Code
- * sidebar. Same trust boundary as every panel - parsePanelRequest gates every
- * inbound message and the webview only sees display-safe projections from
- * PlannerAppService.
+ * artifact viewer, and plan-wide notes queue. Since the sidebar Plan tab
+ * retired (ADR 0020) this panel is the ONLY plan surface: creation, selection,
+ * aspects, and planning chat all live here. Same trust boundary as every panel
+ * - parsePanelRequest gates every inbound message and the webview only sees
+ * display-safe projections from PlannerAppService.
  *
  * Pushes: the coarse `planner.changed` (debounced; the webview refetches
  * planner.state), `planner.sessionReady` (terminal result of a detached
@@ -36,6 +36,7 @@ import type { Logger, ProductBusEvent } from "@drydock/core";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import { extractSubtaskCandidates } from "../services/planMaterialize.js";
 import { toChatSessionSummary } from "./controlPanelProvider.js";
+import { panelFollowsActiveTask } from "./panelFollow.js";
 
 export class PlannerPanelProvider {
   /** Single instance: at most one planner panel per window. */
@@ -52,8 +53,8 @@ export class PlannerPanelProvider {
   private pendingShowPlanId: string | null = null;
   /** A cross-panel guide handoff queued until planner.plans proves the webview is listening. */
   private pendingStartGuide = false;
-  /** Last plan selection sent to the Drydock Plan tab. */
-  private sidebarPlanId: string | null = null;
+  /** The plan this panel is currently showing; suppresses redundant re-pushes. */
+  private shownPlanId: string | null = null;
   /** planner.changed debounce: collection bursts collapse into one push per plan. */
   private readonly pendingChangedPlanIds = new Set<string>();
   private changedDebounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -61,8 +62,7 @@ export class PlannerPanelProvider {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly backend: Backend,
-    private readonly logger: Logger,
-    private readonly showPlanInSidebar: (planId: string | undefined, reveal: boolean) => void
+    private readonly logger: Logger
   ) {
     if (backend.available) {
       backend.bus.subscribe((event) => {
@@ -97,9 +97,42 @@ export class PlannerPanelProvider {
         if (!this.watchedSessions.has(event.session.sessionId)) return;
         this.push({ type: "session.updated", session: this.decorateSession(event.session.sessionId, event.session) });
         return;
+      case "active-task-changed":
+        // UX overhaul P3: an open, unpinned Planner follows the spine to the
+        // new task's most recent plan.
+        this.followActiveTask(event.taskId);
+        return;
       default:
         return;
     }
+  }
+
+  /**
+   * Retargets an open Planner onto the newly active task's most recent plan.
+   * Deliberately conservative: a pinned tab opts out, a task with no plans
+   * keeps the current one (following to nothing would be worse than staying),
+   * and any failure leaves the panel exactly as it was.
+   */
+  private followActiveTask(taskId: string | null): void {
+    if (this.panel === undefined || taskId === null) return;
+    if (!this.backend.available) return;
+    if (!panelFollowsActiveTask("drydock.planner")) return;
+    void this.backend.planner.listPlans()
+      .then((plans) => {
+        if (this.panel === undefined) return;
+        const candidate = plans
+          .filter((plan) => plan.taskId === taskId && plan.status !== "archived")
+          .sort((a, b) => (a.updatedAt === b.updatedAt ? a.planId.localeCompare(b.planId) : a.updatedAt < b.updatedAt ? 1 : -1))[0];
+        if (candidate === undefined || candidate.planId === this.shownPlanId) return;
+        this.shownPlanId = candidate.planId;
+        this.push({ type: "planner.showPlan", planId: candidate.planId });
+      })
+      .catch((error: unknown) => {
+        this.logger.warn("planner follow-retarget failed", {
+          taskId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
   }
 
   private scheduleChanged(planId: string): void {
@@ -116,8 +149,7 @@ export class PlannerPanelProvider {
   }
 
   async open(planId?: string, startGuide = false): Promise<void> {
-    this.showPlanInSidebar(planId, true);
-    if (planId !== undefined) this.sidebarPlanId = planId;
+    if (planId !== undefined) this.shownPlanId = planId;
     if (this.panel !== undefined) {
       this.panel.reveal(vscode.ViewColumn.Active);
       if (planId !== undefined) {
@@ -152,7 +184,7 @@ export class PlannerPanelProvider {
       this.pendingChangedPlanIds.clear();
       this.pendingShowPlanId = null;
       this.pendingStartGuide = false;
-      this.sidebarPlanId = null;
+      this.shownPlanId = null;
       if (this.changedDebounceTimer !== undefined) {
         clearTimeout(this.changedDebounceTimer);
         this.changedDebounceTimer = undefined;
@@ -219,10 +251,7 @@ export class PlannerPanelProvider {
       }
       case "planner.state": {
         const state = await backend.planner.getPlanState(payload.planId);
-        if (this.sidebarPlanId !== payload.planId) {
-          this.sidebarPlanId = payload.planId;
-          this.showPlanInSidebar(payload.planId, false);
-        }
+        this.shownPlanId = payload.planId;
         const session = await this.sessionSummaryFor(backend, state.plan.sessionId);
         if (state.plan.sessionId !== null) {
           this.watchedSessions.add(state.plan.sessionId);
@@ -334,7 +363,7 @@ export class PlannerPanelProvider {
         const state = await backend.planner.getPlanState(payload.planId);
         const taskId = state.plan.taskId;
         if (taskId === null) {
-          this.respondError(request.requestId, "This plan has no owning task - assign one from the Drydock Plan tab first.");
+          this.respondError(request.requestId, "This plan has no owning task - create the plan from a task, or set its task first.");
           return;
         }
         let createdCount = 0;

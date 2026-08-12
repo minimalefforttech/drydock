@@ -76,6 +76,8 @@ export interface TaskUpdateInput {
   readonly columnId?: string;
   /** ADR 0007: the per-task FAQ auto-answer toggle. */
   readonly autoAnswerFaq?: boolean;
+  /** UX overhaul P1: suppress (or restore) this task's workspace-mismatch toast. */
+  readonly dontAskWorkspace?: boolean;
 }
 
 export interface TaskClonePolicyInput {
@@ -127,6 +129,7 @@ export class TaskService {
     if (
       input.title === undefined && input.description === undefined && input.state === undefined
       && input.columnId === undefined && input.autoAnswerFaq === undefined
+      && input.dontAskWorkspace === undefined
     ) {
       throw new Error("Task update must change at least one field.");
     }
@@ -163,6 +166,7 @@ export class TaskService {
       // "" clears the description; the store maps null to a NULL column.
       ...(input.description === undefined ? {} : { description: input.description === "" ? null : input.description }),
       ...(input.autoAnswerFaq === undefined ? {} : { autoAnswerFaq: input.autoAnswerFaq }),
+      ...(input.dontAskWorkspace === undefined ? {} : { dontAskWorkspace: input.dontAskWorkspace }),
       ...columnUpdate
     });
     const updated = await this.options.store.getTask(id);
@@ -378,6 +382,7 @@ export class TaskService {
         ...(clonePolicy === undefined ? {} : { clonePolicy }),
         ...(faqCount > 0 ? { faqCount } : {}),
         ...(task.autoAnswerFaq === true ? { autoAnswerFaq: true } : {}),
+        ...(task.dontAskWorkspace === true ? { dontAskWorkspace: true } : {}),
         subtasks: []
       };
     });

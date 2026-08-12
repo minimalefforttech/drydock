@@ -20,6 +20,7 @@ export * from "./runtime.js";
 export * from "./sessions.js";
 export * from "./storage.js";
 export * from "./tasks.js";
+export * from "./taskStatus.js";
 export * from "./webviewMessages.js";
 export * from "./workspaces.js";
 

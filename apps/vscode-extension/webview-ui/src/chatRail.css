@@ -1,0 +1,94 @@
+/* Chat rail styles.
+
+   The rail mounts the shared chat DOM, so it imports that DOM's sheet
+   (`styles.css`, trimmed to exactly the chat's rules when the Control Panel
+   retired - ADR 0020). Only the rail-owned rows are styled below. */
+
+@import "./styles.css";
+
+/* Faint line above the chat naming the owning task. Quiet by construction: no
+   border, no chip, no icon - it must never compete with the chat header. */
+.chat-rail-attribution {
+  flex: 0 0 auto;
+  display: flex;
+  min-width: 0;
+  padding: 4px 2px 0;
+}
+
+.chat-rail-task {
+  border: none;
+  background: transparent;
+  padding: 0;
+  min-width: 0;
+  color: var(--vscode-foreground);
+  font-family: inherit;
+  font-size: 0.78em;
+  line-height: 1.2;
+  opacity: 0.55;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chat-rail-task:hover {
+  opacity: 0.9;
+  text-decoration: underline;
+}
+
+.chat-rail-task:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* "Track as subtask" (P4): a post-first-turn nudge, not a call to action. It
+   sits under the attribution line and disappears the moment it is used. */
+.chat-rail-track {
+  flex: 0 0 auto;
+  display: flex;
+  min-width: 0;
+  padding: 2px 2px 0;
+}
+
+.chat-rail-track.hidden {
+  display: none;
+}
+
+.chat-rail-track-action {
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-family: inherit;
+  font-size: 0.75em;
+  line-height: 1.2;
+  opacity: 0.6;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.chat-rail-track-action:hover:not(:disabled) {
+  opacity: 1;
+  color: var(--vscode-charts-orange, #cc6633);
+}
+
+.chat-rail-track-action:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.chat-rail-track-action:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* Backend-unavailable reason (the System tab's banner has no rail equivalent). */
+.chat-rail-notice {
+  flex: 0 0 auto;
+  margin: 4px 0 0;
+  padding: 4px 8px;
+  border-radius: 2px;
+  background: var(--vscode-inputValidation-warningBackground, rgba(128, 128, 0, 0.15));
+  border: 1px solid var(--vscode-inputValidation-warningBorder, rgba(128, 128, 0, 0.4));
+  font-size: 0.85em;
+}

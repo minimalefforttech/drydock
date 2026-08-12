@@ -33,6 +33,8 @@ import type { ChatWorkspaceContext } from "./isolatedRunService.js";
 export interface SubtaskRunSessionPort {
   startChat(prompt: string, model?: ChatModelSelection, workspace?: ChatWorkspaceContext, title?: string): Promise<{ session: ChatSessionRecord }>;
   sendChatTurn(sessionId: string, prompt: string): Promise<unknown>;
+  /** Durable transcript record for a dispatch that failed before any turn existed. */
+  recordChatSendFailure(sessionId: string, error: unknown): Promise<void>;
 }
 
 /** Task-clone workspace resolution; WorkspaceReviewAppService satisfies this. */
@@ -91,6 +93,9 @@ export function createSubtaskRunBridge(options: SubtaskRunBridgeOptions): StartS
         subtaskId,
         error: error instanceof Error ? error.message : String(error)
       });
+      // Make the failure visible in the subtask's chat; without a transcript
+      // event the session just sits idle with no explanation.
+      void options.sessions.recordChatSendFailure(sessionId, error);
     };
     return {
       sessionId,

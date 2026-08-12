@@ -14,16 +14,21 @@ isolation, and nothing launches until you release it.
 
 ## What it looks like
 
+> The screenshots below predate the calm-workbench shell (ADR 0020) and still
+> show the retired four-tab Control Panel. The surfaces and behaviour are the
+> same; only their homes moved. New captures are pending.
+
 Tasks are the unit of work: chats, subtasks, workspace links, and clone policy
-on one card. The inbox strip at the top collects everything waiting on you.
+on one card - in the left rail's Tasks view and the Task Hub. The inbox strip
+collects everything waiting on you.
 
-![Tasks tab: inbox strip, task card with linked chats, subtasks, workspace chips](docs/media/tasks-tab.png)
+![Tasks: inbox strip, task card with linked chats, subtasks, workspace chips](docs/media/tasks-tab.png)
 
-The Edit tab is a chat against a sandboxed agent: subagent rows, access-request
+The chat rail is a chat against a sandboxed agent: subagent rows, access-request
 cards with typed confirmation for writes, live preview servers, and an
 evidence-based changed-files list with accept/discard.
 
-![Edit tab: transcript with subagents, an access request card, preview pill, working set](docs/media/edit-tab.png)
+![Chat: transcript with subagents, an access request card, preview pill, working set](docs/media/edit-tab.png)
 
 Code Review aggregates every changed file across a task's projects - text
 hunks, image/binary deltas, large-diff collapsing, selection comments routed
@@ -38,13 +43,14 @@ persists without a human clicking Approve.
 
 ![Memory section: Remember quick-add with scope pill and tag chips, editable pending agent proposal](docs/media/memory.png)
 
-MCP servers are defined once (System tab) and toggled per workspace, task, or
-chat with inherit/on/off; sensitive servers need an explicit task/chat opt-in.
+MCP servers are defined once (Configure › MCP Servers) and toggled per
+workspace, task, or chat with inherit/on/off; sensitive servers need an
+explicit task/chat opt-in.
 The effective set is written into the sandbox and applies next turn.
 
 ![Task card MCP popover: per-server tri-state toggles with inheritance notes](docs/media/mcp-toggles.png)
 
-![System tab: MCP server registry with default toggles, sensitive and from-settings badges](docs/media/mcp-manager.png)
+![MCP server registry with default toggles, sensitive and from-settings badges](docs/media/mcp-manager.png)
 
 ## What it does
 

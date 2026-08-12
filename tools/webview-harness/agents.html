@@ -36,10 +36,10 @@
     }
     html, body { margin: 0; height: 100%; background: #1b1b1b; }
     body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
-    /* Editor-panel-shaped stage: the fleet is a vertical scan list, so the
-       stage is wide but scrolls vertically only. */
+    /* Editor-panel-shaped stage: the flat fleet list is a single column, so the
+       stage is editor-wide but scrolls vertically only. */
     #stage {
-      width: 1240px; height: calc(100vh - 32px); background: var(--vscode-editor-background);
+      width: 1040px; height: calc(100vh - 32px); background: var(--vscode-editor-background);
       border: 1px solid var(--vscode-panel-border); overflow: auto; box-sizing: border-box;
     }
     #stage-note { color: #7f7f7f; font-size: 12px; max-width: 260px; }
@@ -47,15 +47,15 @@
   </style>
   <link rel="stylesheet" href="/assets/agents.css" />
 </head>
-<body class="vscode-dark" data-card-detail="minimal">
+<body class="vscode-dark">
   <div id="stage">
     <div id="app"></div>
   </div>
   <div id="stage-note">
-    <p><strong>Agents harness (ADR 0013).</strong> Real bundled fleet panel, mock host. Cast: <code>t-1</code> group (s-live running with 2 subagents + a grafted role child, s-clone live-idle), the orphan drawer (s-waiting idle, s-ended, s-failed, s-elsewhere view-only), 2 pending questions + 2 pending access requests on <code>s-live</code>.</p>
-    <p>Density (ADR 0013): <code>data-card-detail</code> on <code>&lt;body&gt;</code> plays the config default (minimal); the toolbar Min/Std/Full seg overrides per panel. Hover a session row for its hover card.</p>
-    <p>Drive scenarios from the console: <code>__harness.scenario.agentsTick()</code> (activity fold), <code>__harness.scenario.agentsTurnCompleted("failed")</code> (turn end → ✗), <code>__harness.scenario.agentsChanged()</code> (coarse refetch), <code>__harness.scenario.fanOut("s-live")</code> then watch the ⑂ rows.</p>
-    <p>Inspect sends: <code>__harness.log</code> (agents.openSession / chat.cancelTurn / taskBoard.open / taskReview.open lines).</p>
+    <p><strong>Agents harness (UX overhaul P5).</strong> Real bundled fleet panel, mock host. FLAT list, recent-first: one 2-line row per session (dot · title · owning task · elapsed, then one mono activity line). Cast: <code>s-live</code> (running, 2 subagents, 2 questions + 2 access requests → pinned amber), its grafted role child <code>a11y reviewer</code>, <code>s-clone</code> (live-idle, landable), <code>s-resuming</code> (starting), <code>s-elsewhere</code> (view-only), <code>s-waiting</code> (idle), <code>s-ended</code> + <code>s-failed</code> (settled, landable).</p>
+    <p>Rows carry host-derived <code>sessionLines</code> (activity/result line + <code>landable</code>). Hover or focus a row for <em>Open chat ⇥ · Stop · ⋯</em>; the chevron expands in place (raw-stream tail, subagent children, meta line). Filters <em>All · Needs you · Active</em> and the <em>Group by task</em> toggle persist via getState.</p>
+    <p>Drive scenarios from the console: <code>__harness.scenario.agentsTick()</code> (activity line moves), <code>__harness.scenario.agentsTurnCompleted("failed")</code> (row turns red + Retry), <code>__harness.scenario.agentsChanged()</code> (coarse refetch), <code>__harness.scenario.fanOut("s-live")</code> (expand it first to watch the children), <code>__harness.scenario.askQuestion("s-clone")</code> (pin + <code>? …</code> line).</p>
+    <p>Inspect sends: <code>__harness.log</code> (agents.openSession / chat.cancelTurn / chat.endSession / chat.rawStream / runtime.openTerminal / agents.landSession lines).</p>
   </div>
   <script src="/harness.js"></script>
   <script src="/assets/agents.js"></script>

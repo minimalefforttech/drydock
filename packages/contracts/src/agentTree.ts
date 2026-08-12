@@ -336,6 +336,120 @@ export function usageTokens(usage: unknown): number | null {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Fleet row lines (UX overhaul P5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Agents panel's flat list carries ONE live line per row. The host derives
+ * it for the snapshot (it can see questions, changesets and stored status);
+ * the webview re-derives it when an activity push lands mid-turn. Both call
+ * the functions below, so a pushed row and a refetched row cannot disagree.
+ *
+ * `AgentsOverviewState.sessionLines` carries these on the `agents.state`
+ * snapshot.
+ */
+export interface AgentsSessionLine {
+  readonly sessionId: string;
+  /** ONE live line: pending question → posture → command → output → status. */
+  readonly activityLine?: string;
+  /** Terminal one-liner for done/failed rows (changed files, else last output). */
+  readonly resultLine?: string;
+  /** An unlanded changeset waits on this session: the row offers Land changes. */
+  readonly landable?: boolean;
+}
+
+/**
+ * The root-agent facts the line derivations read - a structural subset of
+ * `AgentActivityItem`, so callers pass `activity.root` straight through
+ * without this module depending on the webview message contracts.
+ */
+export interface FleetRootActivity {
+  readonly status?: string;
+  readonly lastCommand?: string;
+  readonly lastActivity?: string;
+}
+
+/** The session facts `fleetActivityLine` reads (subset of ChatSessionSummary + pendings). */
+export interface FleetActivityLineInput {
+  /** Durable ChatSessionStatus: starting | active | ended | failed. */
+  readonly status: string;
+  readonly live?: boolean;
+  readonly runningElsewhere?: boolean;
+  /** Verbatim text of the oldest pending question on this session. */
+  readonly pendingQuestion?: string;
+  /** A pending workspace-access request waits on the user. */
+  readonly pendingAccess?: boolean;
+  /** This session's root-agent fold for the current (or last) turn. */
+  readonly root?: FleetRootActivity;
+  /** User-authored session note - the last thing tried before a status phrase. */
+  readonly description?: string;
+}
+
+/** Output/command lines are clipped here so a row never ships a paragraph. */
+const FLEET_LINE_MAX = 80;
+
+function clipLine(text: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > FLEET_LINE_MAX ? `${collapsed.slice(0, FLEET_LINE_MAX)}…` : collapsed;
+}
+
+/**
+ * The row's one live line. Order is deliberate: a question the user must
+ * answer outranks everything; an honest posture (running elsewhere, still
+ * booting) outranks a local fold that is not authoritative (ADR 0008); then
+ * the current command, the latest output, and finally a stored phrase.
+ * Elapsed is NOT baked in - it ticks in the row's right column, where it
+ * cannot go stale between pushes.
+ */
+export function fleetActivityLine(input: FleetActivityLineInput): string | undefined {
+  const question = input.pendingQuestion?.replace(/\s+/g, " ").trim();
+  if (question !== undefined && question.length > 0) return `? ${question}`;
+  if (input.pendingAccess === true) return "? waiting on a workspace access decision";
+  if (input.runningElsewhere === true) return "running in another window - view only";
+  if (input.status === "starting") return "resuming - recreating the runtime and clones";
+  const root = input.root;
+  const command = root?.lastCommand?.trim();
+  if (command !== undefined && command.length > 0) return `$ ${clipLine(command)}`;
+  const activity = root?.lastActivity?.trim();
+  if (activity !== undefined && activity.length > 0) return clipLine(activity);
+  const description = input.description?.trim();
+  if (description !== undefined && description.length > 0) return clipLine(description);
+  if (input.status === "failed") return "the last turn failed";
+  if (input.status === "ended") return undefined;
+  return input.live === true ? "no activity this turn yet" : "not running - open the chat to resume";
+}
+
+/** The facts `fleetResultLine` reads for a settled row. */
+export interface FleetResultLineInput {
+  readonly status: string;
+  /** Files an unlanded changeset captured for this session. */
+  readonly changedFiles?: number;
+  /** Repos those files span (>1 is worth saying). */
+  readonly changedRepos?: number;
+  /** The root fold's last reported line, when no changeset exists. */
+  readonly lastActivity?: string;
+}
+
+/**
+ * The line a done/failed row collapses to. Changed-file counts win when a
+ * changeset waits - that is the thing the user acts on - otherwise the last
+ * reported output stands in. Live rows get nothing (their activity line is
+ * the truth).
+ */
+export function fleetResultLine(input: FleetResultLineInput): string | undefined {
+  if (input.status !== "ended" && input.status !== "failed") return undefined;
+  const files = input.changedFiles;
+  if (files !== undefined && files > 0) {
+    const repos = input.changedRepos ?? 1;
+    const spread = repos > 1 ? ` across ${String(repos)} repos` : "";
+    return `${String(files)} file${files === 1 ? "" : "s"} changed${spread} - not landed`;
+  }
+  const activity = input.lastActivity?.trim();
+  if (activity !== undefined && activity.length > 0) return clipLine(activity);
+  return input.status === "failed" ? "the last turn failed" : "ended with nothing reported";
+}
+
 function commandNameFromArgv(command: readonly string[]): string | undefined {
   const raw = commandFromShell(command) ?? command[0];
   const trimmed = raw?.trim();

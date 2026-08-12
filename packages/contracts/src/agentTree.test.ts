@@ -11,6 +11,8 @@ import type { AgentEvent } from "./events.js";
 import { summarizeAgentEvent } from "./events.js";
 import { asId } from "./ids.js";
 import {
+  fleetActivityLine,
+  fleetResultLine,
   reduceAgentTree,
   ROOT_AGENT_NODE_ID,
   subagentReportingForTransport,
@@ -196,4 +198,51 @@ test("summarizeAgentEvent carries lineage and structured statuses", () => {
   assert.deepEqual(child.agentPath, ["n1"]);
   assert.equal(child.toolStatus, "started");
   assert.equal(child.commandName, "ls");
+});
+
+// --- fleet row lines (UX overhaul P5) ---------------------------------------
+
+test("fleetActivityLine follows the question → posture → command → output order", () => {
+  const root = { status: "running", lastCommand: "pytest tests/test_publish.py", lastActivity: "edit exporters/alembic.py" };
+  // A question the user must answer outranks everything, verbatim after "? ".
+  assert.equal(
+    fleetActivityLine({ status: "active", live: true, root, pendingQuestion: "  Mock the\n ledger?  " }),
+    "? Mock the ledger?"
+  );
+  // Honest posture beats a local fold that is not authoritative (ADR 0008).
+  assert.equal(
+    fleetActivityLine({ status: "active", runningElsewhere: true, root }),
+    "running in another window - view only"
+  );
+  assert.equal(fleetActivityLine({ status: "starting", live: true, root }), "resuming - recreating the runtime and clones");
+  // Then the current command, then the latest output line.
+  assert.equal(fleetActivityLine({ status: "active", live: true, root }), "$ pytest tests/test_publish.py");
+  assert.equal(
+    fleetActivityLine({ status: "active", live: true, root: { lastActivity: "edit exporters/alembic.py" } }),
+    "edit exporters/alembic.py"
+  );
+  assert.equal(fleetActivityLine({ status: "active", live: true, pendingAccess: true }), "? waiting on a workspace access decision");
+});
+
+test("fleetActivityLine clips long output and falls back to stored phrases", () => {
+  const long = "x".repeat(200);
+  const clipped = fleetActivityLine({ status: "active", live: true, root: { lastActivity: long } });
+  assert.equal(clipped?.length, 81);
+  assert.ok(clipped?.endsWith("…"));
+  assert.equal(fleetActivityLine({ status: "active", live: true, description: "root cause in publish hooks" }), "root cause in publish hooks");
+  assert.equal(fleetActivityLine({ status: "active", live: true }), "no activity this turn yet");
+  assert.equal(fleetActivityLine({ status: "active" }), "not running - open the chat to resume");
+  assert.equal(fleetActivityLine({ status: "failed" }), "the last turn failed");
+  // An ended row says nothing here - its result line carries the story.
+  assert.equal(fleetActivityLine({ status: "ended" }), undefined);
+});
+
+test("fleetResultLine prefers changed files, and only speaks for settled rows", () => {
+  assert.equal(fleetResultLine({ status: "ended", changedFiles: 4 }), "4 files changed - not landed");
+  assert.equal(fleetResultLine({ status: "ended", changedFiles: 1, changedRepos: 1 }), "1 file changed - not landed");
+  assert.equal(fleetResultLine({ status: "ended", changedFiles: 9, changedRepos: 2 }), "9 files changed across 2 repos - not landed");
+  assert.equal(fleetResultLine({ status: "failed", lastActivity: "sandbox process failed" }), "sandbox process failed");
+  assert.equal(fleetResultLine({ status: "failed" }), "the last turn failed");
+  assert.equal(fleetResultLine({ status: "ended" }), "ended with nothing reported");
+  assert.equal(fleetResultLine({ status: "active", changedFiles: 4 }), undefined);
 });

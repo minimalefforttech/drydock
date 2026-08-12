@@ -159,6 +159,18 @@ export class LineJsonRpcClient {
     });
   }
 
+  /**
+   * Drops queued notifications nobody consumed. Called at turn boundaries so
+   * stragglers from a finished or cancelled turn are never replayed into the
+   * next turn's stream under the wrong run id. Returns how many were dropped
+   * so callers can log the discard instead of losing it silently.
+   */
+  clearNotificationQueue(): number {
+    const dropped = this.notificationQueue.length;
+    this.notificationQueue.length = 0;
+    return dropped;
+  }
+
   async stop(): Promise<void> {
     if (!this.child) return;
     this.child.stdin?.end();

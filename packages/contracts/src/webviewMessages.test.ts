@@ -4,7 +4,14 @@
 
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { MAX_MODEL_ID_LENGTH, parsePanelRequest, WEBVIEW_PROTOCOL_VERSION } from "./webviewMessages.js";
+import {
+  CONFIG_SETTING_SECTIONS,
+  MAX_MODEL_ID_LENGTH,
+  MAX_RECENTS_LIMIT,
+  PANEL_SURFACES,
+  parsePanelRequest,
+  WEBVIEW_PROTOCOL_VERSION
+} from "./webviewMessages.js";
 
 function wrap(payload: unknown): unknown {
   return { protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "request", requestId: "req-1", payload };
@@ -81,6 +88,24 @@ test("agents panel payloads validate their fields (ADR 0013)", () => {
 test("retired planDocs payloads are rejected at the boundary (ADR 0012)", () => {
   for (const type of ["planDocs.state", "planDocs.open", "planDocs.sendComments"]) {
     assert.equal(parsePanelRequest(wrap({ type, sessionId: "session-1" })), null);
+  }
+});
+
+test("retired Control Panel payloads are rejected at the boundary (ADR 0020)", () => {
+  // The Tasks tab's touch-history popover and the System tab's app-server probe
+  // + per-sandbox stats poll retired with the four-tab panel; nothing else ever
+  // sent them, so the parse gate must not know these literals any more.
+  for (const type of ["work.history", "isolatedRun.probeAppServer", "runtime.stats"]) {
+    assert.equal(parsePanelRequest(wrap({ type })), null);
+  }
+  // Their argument-bearing shapes are rejected too - a retired type is unknown
+  // whatever it carries.
+  for (const payload of [
+    { type: "work.history", workspaceSetId: "set-1" },
+    { type: "work.history", projectId: "project-1" },
+    { type: "runtime.stats", runtimeIds: ["runtime-1"] }
+  ]) {
+    assert.equal(parsePanelRequest(wrap(payload)), null);
   }
 });
 
@@ -545,6 +570,40 @@ test("task payloads validate titles, updates, link targets, and open-in-new-wind
     sessionId: "session-1"
   })), null);
 
+  // subtaskId narrows a SESSION link to one card (the chat rail's "Track as
+  // subtask"). It is bounded, link-only, and meaningless without a session.
+  const toCard = parsePanelRequest(wrap({
+    type: "task.link",
+    taskId: "task-1",
+    sessionId: "session-1",
+    subtaskId: "subtask-1"
+  }));
+  assert.ok(toCard);
+  assert.deepEqual(toCard.payload, {
+    type: "task.link",
+    taskId: "task-1",
+    sessionId: "session-1",
+    subtaskId: "subtask-1"
+  });
+  assert.equal(parsePanelRequest(wrap({
+    type: "task.link",
+    taskId: "task-1",
+    workspaceSetId: "set-1",
+    subtaskId: "subtask-1"
+  })), null);
+  assert.equal(parsePanelRequest(wrap({
+    type: "task.link",
+    taskId: "task-1",
+    sessionId: "session-1",
+    subtaskId: ""
+  })), null);
+  assert.equal(parsePanelRequest(wrap({
+    type: "task.unlink",
+    taskId: "task-1",
+    sessionId: "session-1",
+    subtaskId: "subtask-1"
+  })), null);
+
   // openInNewWindow needs a non-empty workspace set id.
   assert.ok(parsePanelRequest(wrap({ type: "workspace.openInNewWindow", workspaceSetId: "set-1" })));
   assert.equal(parsePanelRequest(wrap({ type: "workspace.openInNewWindow", workspaceSetId: "" })), null);
@@ -568,29 +627,6 @@ test("workspace.activate accepts exactly one of taskId / workspaceSetId", () => 
   assert.equal(parsePanelRequest(wrap({ type: "workspace.activate" })), null);
   assert.equal(parsePanelRequest(wrap({ type: "workspace.activate", taskId: "task-1", workspaceSetId: "set-1" })), null);
   assert.equal(parsePanelRequest(wrap({ type: "workspace.activate", taskId: "" })), null);
-});
-
-test("work.history requires exactly one scope", () => {
-  // Exactly one of workspaceSetId / projectId.
-  const bySet = parsePanelRequest(wrap({ type: "work.history", workspaceSetId: "set-1" }));
-  assert.ok(bySet);
-  assert.deepEqual(
-    bySet.payload.type === "work.history" ? bySet.payload.workspaceSetId : undefined,
-    "set-1"
-  );
-  const byProject = parsePanelRequest(wrap({ type: "work.history", projectId: "project-1" }));
-  assert.ok(byProject);
-  assert.deepEqual(
-    byProject.payload.type === "work.history" ? byProject.payload.projectId : undefined,
-    "project-1"
-  );
-
-  // Neither scope and both scopes both reject.
-  assert.equal(parsePanelRequest(wrap({ type: "work.history" })), null);
-  assert.equal(parsePanelRequest(wrap({ type: "work.history", workspaceSetId: "set-1", projectId: "project-1" })), null);
-  // A present-but-empty id is rejected on either branch.
-  assert.equal(parsePanelRequest(wrap({ type: "work.history", workspaceSetId: "" })), null);
-  assert.equal(parsePanelRequest(wrap({ type: "work.history", projectId: "" })), null);
 });
 
 test("taskReview payloads validate their task id", () => {
@@ -830,4 +866,190 @@ test("task.start validates a bounded taskId", () => {
   assert.ok(parsePanelRequest(wrap({ type: "task.start", taskId: "task-1" })));
   assert.equal(parsePanelRequest(wrap({ type: "task.start" })), null);
   assert.equal(parsePanelRequest(wrap({ type: "task.start", taskId: "" })), null);
+});
+
+test("active.get/active.set validate the spine payloads", () => {
+  assert.ok(parsePanelRequest(wrap({ type: "active.get" })));
+  const set = parsePanelRequest(wrap({ type: "active.set", taskId: "task-1" }));
+  assert.ok(set);
+  assert.deepEqual(set.payload, { type: "active.set", taskId: "task-1" });
+  // Null is the explicit "no active task" value, not a malformed payload.
+  const cleared = parsePanelRequest(wrap({ type: "active.set", taskId: null }));
+  assert.ok(cleared);
+  assert.deepEqual(cleared.payload, { type: "active.set", taskId: null });
+  assert.equal(parsePanelRequest(wrap({ type: "active.set" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "active.set", taskId: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "active.set", taskId: 7 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "active.set", taskId: "t".repeat(201) })), null);
+});
+
+test("session.recents validates its optional limit", () => {
+  const bare = parsePanelRequest(wrap({ type: "session.recents" }));
+  assert.ok(bare);
+  assert.deepEqual(bare.payload, { type: "session.recents" });
+  const limited = parsePanelRequest(wrap({ type: "session.recents", limit: 7 }));
+  assert.ok(limited);
+  assert.deepEqual(limited.payload, { type: "session.recents", limit: 7 });
+  assert.ok(parsePanelRequest(wrap({ type: "session.recents", limit: MAX_RECENTS_LIMIT })));
+  // Non-integers, zero/negatives, and anything past the cap are malformed.
+  assert.equal(parsePanelRequest(wrap({ type: "session.recents", limit: 0 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "session.recents", limit: -1 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "session.recents", limit: 2.5 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "session.recents", limit: MAX_RECENTS_LIMIT + 1 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "session.recents", limit: "7" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "session.recents", limit: null })), null);
+});
+
+test("hub.state validates a bounded taskId (UX overhaul P3)", () => {
+  const parsed = parsePanelRequest(wrap({ type: "hub.state", taskId: "task-1" }));
+  assert.ok(parsed);
+  assert.deepEqual(parsed.payload, { type: "hub.state", taskId: "task-1" });
+  assert.equal(parsePanelRequest(wrap({ type: "hub.state" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "hub.state", taskId: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "hub.state", taskId: null })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "hub.state", taskId: 7 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "hub.state", taskId: "t".repeat(201) })), null);
+});
+
+test("panel.openSurface accepts only the closed surface enum with bounded ids", () => {
+  for (const surface of PANEL_SURFACES) {
+    const parsed = parsePanelRequest(wrap({ type: "panel.openSurface", surface }));
+    assert.ok(parsed);
+    assert.deepEqual(parsed.payload, { type: "panel.openSurface", surface });
+  }
+  const scoped = parsePanelRequest(wrap({ type: "panel.openSurface", surface: "planner", taskId: "task-1", planId: "plan-1" }));
+  assert.ok(scoped);
+  assert.deepEqual(scoped.payload, { type: "panel.openSurface", surface: "planner", taskId: "task-1", planId: "plan-1" });
+  // The hub is a surface too: a rail row opens it with the task it selected.
+  const hub = parsePanelRequest(wrap({ type: "panel.openSurface", surface: "hub", taskId: "task-1" }));
+  assert.ok(hub);
+  assert.deepEqual(hub.payload, { type: "panel.openSurface", surface: "hub", taskId: "task-1" });
+  // A surface is never a command name, and ids stay bounded.
+  assert.equal(parsePanelRequest(wrap({ type: "panel.openSurface", surface: "workbench.action.reloadWindow" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "panel.openSurface" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "panel.openSurface", surface: "board", taskId: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "panel.openSurface", surface: "board", taskId: 7 })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "panel.openSurface", surface: "planner", planId: "p".repeat(201) })), null);
+});
+
+// --- Configure panel (UX overhaul P6) ---------------------------------------
+
+test("config.state accepts only the closed scope enum", () => {
+  const bare = parsePanelRequest(wrap({ type: "config.state" }));
+  assert.ok(bare);
+  assert.deepEqual(bare.payload, { type: "config.state" });
+  for (const scope of ["global", "project"] as const) {
+    const parsed = parsePanelRequest(wrap({ type: "config.state", scope }));
+    assert.ok(parsed);
+    assert.deepEqual(parsed.payload, { type: "config.state", scope });
+  }
+  assert.equal(parsePanelRequest(wrap({ type: "config.state", scope: "machine" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.state", scope: null })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.state", scope: 1 })), null);
+});
+
+test("config.setSetting bounds its section, key shape, and JSON-safe value", () => {
+  for (const section of CONFIG_SETTING_SECTIONS) {
+    assert.ok(parsePanelRequest(wrap({ type: "config.setSetting", section, key: "runtime.env", value: {} })));
+  }
+  // Sections are a closed enum, not a free namespace.
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "providers", key: "a", value: true })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: null, key: "a", value: true })), null);
+
+  // Key shape: dotted identifiers only - no traversal, no path separators.
+  assert.ok(parsePanelRequest(wrap({ type: "config.setSetting", section: "security", key: "security.cloneOnly", value: true })));
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "security", key: "", value: true })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "security", key: "..", value: true })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "security", key: "a b", value: true })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "security", key: "a/../b", value: true })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "security", key: 7, value: true })), null);
+
+  // Accepted value shapes: scalars, string lists, string maps, tag-rule rows.
+  const bool = parsePanelRequest(wrap({ type: "config.setSetting", section: "security", key: "security.cloneOnly", value: false }));
+  assert.ok(bool);
+  assert.deepEqual(bool.payload, { type: "config.setSetting", section: "security", key: "security.cloneOnly", value: false });
+  const number = parsePanelRequest(wrap({ type: "config.setSetting", section: "runtime", key: "orchestrator.maxConcurrentRuns", value: 4 }));
+  assert.ok(number);
+  assert.equal(number.payload.type === "config.setSetting" ? number.payload.value : null, 4);
+  const list = parsePanelRequest(wrap({ type: "config.setSetting", section: "runtime", key: "runtime.pathAdditions", value: ["C:\\tools"] }));
+  assert.ok(list);
+  assert.deepEqual(list.payload.type === "config.setSetting" ? list.payload.value : null, ["C:\\tools"]);
+  const map = parsePanelRequest(wrap({ type: "config.setSetting", section: "runtime", key: "runtime.env", value: { REZ_CONFIG: "1" } }));
+  assert.ok(map);
+  assert.deepEqual(map.payload.type === "config.setSetting" ? map.payload.value : null, { REZ_CONFIG: "1" });
+  const rules = parsePanelRequest(wrap({
+    type: "config.setSetting",
+    section: "memories",
+    key: "memory.tagRules",
+    value: [{ globs: ["*.usd", "*.usda"], tag: "usd" }]
+  }));
+  assert.ok(rules);
+  assert.deepEqual(
+    rules.payload.type === "config.setSetting" ? rules.payload.value : null,
+    [{ globs: ["*.usd", "*.usda"], tag: "usd" }]
+  );
+
+  // Rejected: null, nested objects, non-string map values, malformed rules, oversize lists.
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "runtime", key: "runtime.env", value: null })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "runtime", key: "runtime.env", value: { a: { b: 1 } } })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "runtime", key: "runtime.env", value: { a: 1 } })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "runtime", key: "x", value: Number.NaN })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "memories", key: "memory.tagRules", value: [{ globs: [], tag: "usd" }] })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "memories", key: "memory.tagRules", value: [{ globs: ["*.usd"] }] })), null);
+  assert.equal(
+    parsePanelRequest(wrap({ type: "config.setSetting", section: "runtime", key: "runtime.pathAdditions", value: new Array(65).fill("x") })),
+    null
+  );
+  assert.equal(parsePanelRequest(wrap({ type: "config.setSetting", section: "runtime", key: "runtime.env" })), null);
+});
+
+test("config MCP writes bound their ids, names, commands, and args", () => {
+  const toggled = parsePanelRequest(wrap({ type: "config.mcpToggle", serverId: "mcp-1", enabled: true }));
+  assert.ok(toggled);
+  assert.deepEqual(toggled.payload, { type: "config.mcpToggle", serverId: "mcp-1", enabled: true });
+  assert.equal(parsePanelRequest(wrap({ type: "config.mcpToggle", serverId: "mcp-1", enabled: "yes" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.mcpToggle", serverId: "", enabled: true })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.mcpToggle", enabled: true })), null);
+
+  const added = parsePanelRequest(wrap({ type: "config.mcpAdd", name: "docs", command: "npx", args: ["-y", "docs-mcp"] }));
+  assert.ok(added);
+  assert.deepEqual(added.payload, { type: "config.mcpAdd", name: "docs", command: "npx", args: ["-y", "docs-mcp"] });
+  assert.ok(parsePanelRequest(wrap({ type: "config.mcpAdd", name: "docs", command: "npx", args: [] })));
+  assert.equal(parsePanelRequest(wrap({ type: "config.mcpAdd", name: "docs", command: "npx" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.mcpAdd", name: "", command: "npx", args: [] })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.mcpAdd", name: "docs", command: "", args: [] })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.mcpAdd", name: "docs", command: "npx", args: ["", "x"] })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.mcpAdd", name: "docs", command: "npx", args: [7] })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.mcpAdd", name: "docs", command: "npx", args: new Array(33).fill("x") })), null);
+});
+
+test("config provider requests bound their provider and model ids", () => {
+  const signIn = parsePanelRequest(wrap({ type: "config.provider.signIn", providerId: "claude" }));
+  assert.ok(signIn);
+  assert.deepEqual(signIn.payload, { type: "config.provider.signIn", providerId: "claude" });
+  assert.equal(parsePanelRequest(wrap({ type: "config.provider.signIn", providerId: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.provider.signIn", providerId: "p".repeat(MAX_MODEL_ID_LENGTH + 1) })), null);
+
+  const set = parsePanelRequest(wrap({ type: "config.provider.setDefaultModel", providerId: "codex", model: "gpt-5" }));
+  assert.ok(set);
+  assert.deepEqual(set.payload, { type: "config.provider.setDefaultModel", providerId: "codex", model: "gpt-5" });
+  // The empty model clears the stored default back to the registry pick.
+  const cleared = parsePanelRequest(wrap({ type: "config.provider.setDefaultModel", providerId: "codex", model: "" }));
+  assert.ok(cleared);
+  assert.equal(cleared.payload.type === "config.provider.setDefaultModel" ? cleared.payload.model : null, "");
+  assert.equal(parsePanelRequest(wrap({ type: "config.provider.setDefaultModel", providerId: "codex" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.provider.setDefaultModel", providerId: "codex", model: 7 })), null);
+  assert.equal(
+    parsePanelRequest(wrap({ type: "config.provider.setDefaultModel", providerId: "codex", model: "m".repeat(MAX_MODEL_ID_LENGTH + 1) })),
+    null
+  );
+});
+
+test("config.openFile bounds its path (the host still re-checks its own allowlist)", () => {
+  const parsed = parsePanelRequest(wrap({ type: "config.openFile", path: "C:\\repo\\.drydock\\mcp.json" }));
+  assert.ok(parsed);
+  assert.deepEqual(parsed.payload, { type: "config.openFile", path: "C:\\repo\\.drydock\\mcp.json" });
+  assert.equal(parsePanelRequest(wrap({ type: "config.openFile", path: "" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.openFile" })), null);
+  assert.equal(parsePanelRequest(wrap({ type: "config.openFile", path: "p".repeat(1_025) })), null);
 });

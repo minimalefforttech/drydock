@@ -56,6 +56,7 @@ class FakeSessions implements PlannerSessionsPort {
   readonly prompts: string[] = [];
   readonly startedWorkspaces: (ChatWorkspaceContext | undefined)[] = [];
   readonly ended: { sessionId: string; reason: string }[] = [];
+  readonly recordedFailures: { sessionId: string; error: unknown }[] = [];
   reclaims = 0;
   nextEndError: Error | null = null;
   nextSendError: Error | null = null;
@@ -73,6 +74,10 @@ class FakeSessions implements PlannerSessionsPort {
     this.live.add(sessionId);
     this.startedWorkspaces.push(workspace);
     return { session: { sessionId } };
+  }
+
+  async recordChatSendFailure(sessionId: string, error: unknown): Promise<void> {
+    this.recordedFailures.push({ sessionId, error });
   }
 
   async reclaimChatSession(sessionId: string): Promise<unknown> {

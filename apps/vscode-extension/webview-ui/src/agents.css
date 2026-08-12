@@ -1,12 +1,13 @@
 @import "./help.css";
 
 /*
- * Agents panel (ADR 0013) - fleet view styles.
+ * Agents panel (UX overhaul P5) - the flat fleet list.
  *
- * VS Code theme variables only; status/depth/accent styling is by CLASS
- * (the panel's strict CSP has no 'unsafe-inline' for styles, so no style
- * attributes anywhere). The row grid keeps a fixed rhythm so fleet-size
- * lists stay scannable: dot → title → chips → activity → right meta.
+ * VS Code theme variables only; status styling is by CLASS (the panel's strict
+ * CSP has no 'unsafe-inline' for styles, so no style attributes anywhere). One
+ * row shape: a 2-line ~44px row whose second line is the single live activity
+ * line. Everything else - actions, subagents, raw stream - is revealed on
+ * demand, so a resting fleet reads as a quiet list.
  */
 
 :root {
@@ -26,15 +27,20 @@ html, body {
   font-size: var(--vscode-font-size, 13px);
 }
 
-.fleet {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 0 12px 48px;
+.mono {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-variant-numeric: tabular-nums;
 }
 
-/* --- toolbar ---------------------------------------------------------- */
+.fleet {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 14px 48px;
+}
 
-.toolbar {
+/* --- toolbar ------------------------------------------------------------ */
+
+.bar {
   position: sticky;
   top: 0;
   z-index: 2;
@@ -42,33 +48,35 @@ html, body {
   align-items: center;
   gap: 14px;
   flex-wrap: wrap;
-  padding: 10px 2px;
+  padding: 10px 2px 9px;
   background: var(--vscode-editor-background);
   border-bottom: 1px solid var(--fleet-line);
 }
 
-.rollup {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
+.bar-title {
   font-weight: 600;
-  white-space: nowrap;
+  font-size: 1.05em;
 }
 
-.rollup-running { color: var(--fleet-run); }
-.rollup-waiting.loud { color: var(--fleet-warn); }
-.rollup-idle, .rollup-sep, .rollup-waiting { color: var(--fleet-quiet); }
-.rollup-waiting.loud { font-weight: 700; }
-/* Fleet token total (ADR 0013) - quiet cost line. */
-.rollup-tokens { color: var(--fleet-quiet); font-weight: 500; font-variant-numeric: tabular-nums; }
-.gmeta-tokens { font-variant-numeric: tabular-nums; }
+.bar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bar-tokens {
+  color: var(--fleet-quiet);
+  opacity: 0.75;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
 
 .seg {
   display: flex;
   border: 1px solid var(--fleet-line);
   border-radius: 5px;
   overflow: hidden;
-  margin-left: auto;
 }
 
 .seg-item {
@@ -76,7 +84,7 @@ html, body {
   background: transparent;
   color: var(--fleet-quiet);
   font: inherit;
-  padding: 3px 10px;
+  padding: 2px 10px;
   cursor: pointer;
 }
 
@@ -85,59 +93,75 @@ html, body {
   color: var(--vscode-foreground);
 }
 
-/* The Detail seg (ADR 0013) sits beside the filter seg; only the first seg
-   pushes the cluster right. */
-.seg-detail {
-  margin-left: 0;
-}
-
-.filter-input {
-  background: var(--vscode-input-background);
-  color: var(--vscode-input-foreground);
-  border: 1px solid var(--vscode-input-border, var(--fleet-line));
-  border-radius: 5px;
-  padding: 3px 10px;
+.ghost {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fleet-quiet);
+  border-radius: 4px;
+  padding: 1px 7px;
   font: inherit;
-  min-width: 180px;
+  font-size: 0.88em;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
-.filter-input:focus-visible,
+.ghost:hover { color: var(--vscode-foreground); border-color: var(--fleet-line); }
+.ghost.on { color: var(--vscode-foreground); border-color: var(--fleet-line); background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2)); }
+.ghost.stop:hover, .ghost.stop.armed { color: var(--fleet-fail); border-color: var(--fleet-fail); }
+.ghost.stop.armed { font-weight: 600; }
+
 .seg-item:focus-visible,
-.action:focus-visible,
-.ghead-toggle:focus-visible,
-.session-open:focus-visible,
-.row-sub:focus-visible {
+.ghost:focus-visible,
+.twist:focus-visible,
+.row-open:focus-visible,
+.child:focus-visible,
+.pill:focus-visible,
+.menu-item:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: -1px;
 }
 
-/* --- groups ----------------------------------------------------------- */
+/* --- rows --------------------------------------------------------------- */
 
-.group {
-  border: 1px solid var(--fleet-line);
-  border-radius: 6px;
-  margin-top: 12px;
-  /* Visible overflow so per-row hover cards (ADR 0013) escape the box; the
-     header/last-row radii below keep the rounded corners intact instead. */
-  overflow: visible;
-}
+.rows { margin-top: 2px; }
 
-.ghead {
-  display: flex;
+.row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px;
-  flex-wrap: wrap;
-  padding: 7px 12px;
-  background: var(--vscode-sideBarSectionHeader-background, rgba(128, 128, 128, 0.08));
-  user-select: none;
-  border-radius: 5px 5px 0 0;
+  column-gap: 6px;
+  padding: 4px 8px 5px 6px;
+  border-bottom: 1px solid var(--fleet-line);
+  border-left: 2px solid transparent;
 }
 
-.ghead-toggle {
+.row:hover { background: var(--vscode-list-hoverBackground); }
+
+/* Waiting on a person - the one thing allowed to shout. Failed rows keep the
+   same pin so nothing that stalled can hide below the fold. */
+.row.pinned { border-left-color: var(--fleet-warn); }
+.row.pinned.pin-failed { border-left-color: var(--fleet-fail); }
+.row.settled .row-title { font-weight: 500; color: var(--fleet-quiet); }
+.row.settled .dot { opacity: 0.7; }
+
+.twist {
+  border: 0;
+  background: transparent;
+  color: var(--fleet-quiet);
+  font: inherit;
+  line-height: 1;
+  padding: 2px 0;
+  cursor: pointer;
+  align-self: center;
+}
+
+.twist:hover { color: var(--vscode-foreground); }
+
+.row-open {
+  display: grid;
+  grid-template-rows: auto auto;
+  row-gap: 1px;
   min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 9px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -147,287 +171,389 @@ html, body {
   cursor: pointer;
 }
 
-.group > .row:last-child {
-  border-bottom-left-radius: 5px;
-  border-bottom-right-radius: 5px;
-}
-
-.gtoggle { color: var(--fleet-quiet); width: 12px; }
-.gtitle { font-weight: 600; }
-.gtitle.quiet { font-weight: 500; color: var(--fleet-quiet); }
-
-.gmeta {
-  margin-left: auto;
+.row-line1 {
   display: flex;
-  gap: 10px;
-  align-items: baseline;
-  color: var(--fleet-quiet);
-  font-size: 0.92em;
-  white-space: nowrap;
-}
-
-.gmeta-part { color: var(--fleet-run); }
-
-/* --- rows ------------------------------------------------------------- */
-
-.row {
-  position: relative; /* anchors the per-row hover card (ADR 0013) */
-  display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  padding: 6px 12px;
-  border-top: 1px solid var(--fleet-line);
-  cursor: pointer;
   min-width: 0;
 }
 
-.row:hover { background: var(--vscode-list-hoverBackground); }
-.row.dimmed { opacity: 0.55; }
-.session-row { cursor: pointer; }
-
-.row-sub {
-  font-size: 0.94em;
-  cursor: pointer;
-}
-
-.row-note {
-  color: var(--fleet-quiet);
-  font-style: italic;
-  font-size: 0.9em;
-  cursor: default;
-}
-
-.task-verification {
-  color: var(--vscode-editorWarning-foreground, #cca700);
-  font-style: normal;
-}
-
-.task-verification-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.task-verification .action {
-  margin-left: auto;
-  white-space: nowrap;
-}
-
-/* Indent by class only (no inline styles under the strict CSP). */
-.depth-0 { padding-left: 12px; }
-.depth-1 { padding-left: 34px; }
-.depth-2 { padding-left: 56px; }
-.depth-3 { padding-left: 78px; }
-.depth-4 { padding-left: 100px; }
-.depth-5 { padding-left: 122px; }
-.depth-6 { padding-left: 144px; }
-
-.stitle {
+.row-title {
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 30%;
+  flex: 0 1 auto;
 }
 
-.session-open {
-  padding: 0;
+.row-task {
+  color: var(--fleet-quiet);
+  font-size: 0.86em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.row-line2 {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--fleet-quiet);
+  opacity: 0.85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-height: 1.35em;
+}
+
+.row-right {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.row-elapsed {
+  color: var(--fleet-quiet);
+  font-size: 0.85em;
+}
+
+/* Actions replace the elapsed on hover/focus, so the resting row stays quiet. */
+.row-actions { display: none; gap: 4px; }
+.row:hover .row-actions,
+.row:focus-within .row-actions,
+.row-right.menu-open .row-actions { display: flex; }
+.row:hover .row-elapsed,
+.row:focus-within .row-elapsed,
+.row-right.menu-open .row-elapsed { display: none; }
+
+/* Land/Retry are decisions, not chrome: always visible. */
+.pill {
+  border: 1px solid var(--fleet-line);
+  background: transparent;
+  color: var(--fleet-quiet);
+  border-radius: 4px;
+  padding: 1px 8px;
+  font: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pill:hover:enabled { color: var(--vscode-foreground); border-color: var(--vscode-foreground); }
+.pill:disabled { opacity: 0.5; cursor: default; }
+.pill.row-land { border-color: var(--vscode-charts-blue, #58a6ff); color: var(--vscode-charts-blue, #58a6ff); }
+.pill.row-land.armed { font-weight: 600; }
+.pill.row-retry { border-color: var(--fleet-fail); color: var(--fleet-fail); }
+
+.row-note {
+  grid-column: 2 / -1;
+  padding: 2px 0 4px;
+  font-size: 0.85em;
+  color: var(--fleet-quiet);
+}
+
+/* --- row menu ------------------------------------------------------------ */
+
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 6;
+  min-width: 170px;
+  display: flex;
+  flex-direction: column;
+  padding: 3px;
+  border: 1px solid var(--vscode-widget-border, var(--fleet-line));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.menu-item {
   border: 0;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font: inherit;
+  font-size: 0.9em;
+  text-align: left;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.menu-item:hover { background: var(--vscode-list-hoverBackground); }
+
+/* --- expansion ----------------------------------------------------------- */
+
+.row-expand {
+  grid-column: 2 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0 9px;
+}
+
+.raw {
+  margin: 0;
+  max-height: 190px;
+  overflow: auto;
+  padding: 7px 9px;
+  border: 1px solid var(--fleet-line);
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
+  color: var(--fleet-quiet);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 3px;
   background: transparent;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
+  min-width: 0;
 }
 
-.slabel {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 26%;
-}
+.child:hover { background: var(--vscode-list-hoverBackground); }
 
-.act {
-  color: var(--fleet-quiet);
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.88em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1 1 auto;
-  min-width: 60px;
-}
-
-.act.note { font-family: inherit; font-style: italic; }
-
-.rmeta {
-  margin-left: auto;
-  display: flex;
-  gap: 10px;
-  align-items: baseline;
-  white-space: nowrap;
-  color: var(--fleet-quiet);
+.child-label {
   font-size: 0.9em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  max-width: 40%;
 }
 
-.rmeta-part.num { font-variant-numeric: tabular-nums; }
-.rmeta-part.idle-label { color: var(--fleet-warn); }
-.rmeta-part.quiet { color: var(--fleet-quiet); }
+.child-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--fleet-quiet);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
-/* --- dots -------------------------------------------------------------- */
+.child-elapsed {
+  color: var(--fleet-quiet);
+  font-size: 0.82em;
+}
+
+.child-note {
+  color: var(--fleet-quiet);
+  font-style: italic;
+  font-size: 0.85em;
+  padding-left: 4px;
+}
+
+/* Indent by class only (no inline styles under the strict CSP). */
+.depth-0 { padding-left: 4px; }
+.depth-1 { padding-left: 22px; }
+.depth-2 { padding-left: 40px; }
+.depth-3 { padding-left: 58px; }
+.depth-4 { padding-left: 76px; }
+
+.meta {
+  font-size: 11.5px;
+  color: var(--fleet-quiet);
+  opacity: 0.8;
+  padding-left: 4px;
+}
+
+/* --- grouping + fold ------------------------------------------------------ */
+
+.task-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 4px 4px;
+  color: var(--fleet-quiet);
+}
+
+.task-head-title { font-weight: 600; color: var(--vscode-foreground); }
+.task-head-count { font-size: 0.85em; }
+
+/* The thin fold: settled rows sink under it once they are ten minutes cold. */
+.fold {
+  margin-top: 10px;
+  padding: 8px 4px 3px;
+  border-top: 1px solid var(--fleet-line);
+  color: var(--fleet-quiet);
+  font-size: 0.8em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* --- dots ---------------------------------------------------------------- */
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   flex: none;
   align-self: center;
 }
 
-.dot-run {
+.dot-running {
   background: var(--fleet-run);
-  animation: fleet-pulse 1.6s ease-in-out infinite;
+  animation: fleet-pulse 1.8s ease-in-out infinite;
 }
 
-.dot-idle { background: var(--fleet-run); opacity: 0.5; }
-.dot-done { background: var(--fleet-quiet); }
-.dot-hollow { background: transparent; border: 1.5px solid var(--fleet-quiet); }
-.dot-half {
-  background: linear-gradient(90deg, var(--fleet-run) 50%, transparent 50%);
-  border: 1px solid var(--fleet-run);
-}
-.dot-fail { background: var(--fleet-fail); }
-.dot-unknown { background: transparent; border: 1.5px dashed var(--fleet-quiet); }
-/* ADR 0013: resuming/booting - hollow but alive (pulsing outline). */
-.dot-boot {
+.dot-starting,
+.dot-queued {
   background: transparent;
   border: 1.5px solid var(--fleet-run);
-  animation: fleet-pulse 1.6s ease-in-out infinite;
 }
+
+.dot-starting { animation: fleet-pulse 1.8s ease-in-out infinite; }
+.dot-idle { background: var(--fleet-run); opacity: 0.5; }
+.dot-awaiting { background: var(--fleet-warn); }
+.dot-failed { background: var(--fleet-fail); }
+.dot-done { background: var(--fleet-quiet); opacity: 0.6; }
+.dot-offline { background: transparent; border: 1.5px solid var(--fleet-quiet); }
 
 @keyframes fleet-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.45); }
-  50% { box-shadow: 0 0 0 4px rgba(63, 185, 80, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.4); }
+  50% { box-shadow: 0 0 0 3px rgba(63, 185, 80, 0); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dot-run { animation: none; }
-  .dot-boot { animation: none; }
+  .dot-running,
+  .dot-starting { animation: none; }
 }
 
-/* --- chips -------------------------------------------------------------- */
-
-.chip {
-  font-size: 0.78em;
-  border-radius: 4px;
-  padding: 1px 6px;
-  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.2));
-  color: var(--vscode-badge-foreground, var(--fleet-quiet));
-  white-space: nowrap;
-  flex: none;
-}
-
-.chip-provider, .chip-mode { background: transparent; border: 1px solid var(--fleet-line); color: var(--fleet-quiet); }
-.chip-role { background: transparent; border: 1px solid var(--fleet-line); color: var(--vscode-charts-purple, #bc8cff); }
-.chip-fan { background: transparent; border: 1px solid var(--fleet-run); color: var(--fleet-run); }
-.chip-fan-failed { border-color: var(--fleet-fail); color: var(--fleet-fail); }
-.chip-q, .chip-a, .chip-attention { background: transparent; border: 1px solid var(--fleet-warn); color: var(--fleet-warn); font-weight: 600; }
-.chip-x { background: transparent; border: 1px solid var(--fleet-fail); color: var(--fleet-fail); font-weight: 600; }
-
-.colchip { background: transparent; border: 1px solid var(--fleet-line); color: var(--fleet-quiet); border-radius: 999px; }
-.colchip.cat-in-progress { border-color: var(--fleet-run); color: var(--fleet-run); }
-.colchip.cat-done { border-color: var(--vscode-charts-blue, #58a6ff); color: var(--vscode-charts-blue, #58a6ff); }
-.colchip.cat-pending, .colchip.cat-backlog, .colchip.cat-none { }
-
-/* --- actions ------------------------------------------------------------ */
-
-.action {
-  border: 1px solid var(--fleet-line);
-  background: transparent;
-  color: var(--fleet-quiet);
-  border-radius: 4px;
-  padding: 0 7px;
-  font: inherit;
-  font-size: 0.88em;
-  cursor: pointer;
-  flex: none;
-}
-
-.action:hover { color: var(--vscode-foreground); border-color: var(--vscode-foreground); }
-.action.link { border: 0; color: var(--vscode-textLink-foreground); padding: 0 2px; }
-.action.link:hover { text-decoration: underline; }
-.action.stop:hover, .action.stop.armed { color: var(--fleet-fail); border-color: var(--fleet-fail); }
-.action.stop.armed { font-weight: 600; }
-
-/* --- hover card (ADR 0013) ---------------------------------------------- */
-
-/* One consolidated popover per row for everything the detail level hides -
-   revealed by CSS with a tooltip-ish delay on the way in, gone instantly on
-   the way out; no pointer events, so row clicks are never intercepted. */
-.hovercard {
-  position: absolute;
-  top: calc(100% - 2px);
-  left: 26px;
-  z-index: 5;
-  min-width: 200px;
-  max-width: 300px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 6px 9px;
-  border: 1px solid var(--vscode-widget-border, var(--fleet-line));
-  border-radius: 4px;
-  background: var(--vscode-editorWidget-background, #252526);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
-  pointer-events: none;
-  visibility: hidden;
-  opacity: 0;
-}
-
-.row:hover .hovercard,
-.row:focus-within .hovercard {
-  visibility: visible;
-  opacity: 1;
-  transition: opacity 0.12s ease 0.5s, visibility 0s linear 0.5s;
-}
-
-.hrow {
-  display: flex;
-  gap: 8px;
-  font-size: 0.8em;
-  line-height: 1.35;
-}
-
-.hlabel {
-  flex: none;
-  min-width: 70px;
-  color: var(--fleet-quiet);
-}
-
-.hvalue {
-  word-break: break-word;
-  white-space: normal;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .row:hover .hovercard,
-  .row:focus-within .hovercard { transition: none; }
-}
-
-/* --- drawer + empty ------------------------------------------------------ */
-
-.drawer { border-style: dashed; }
-.drawer .ghead { background: transparent; }
-
-/* Landing drawer (ADR 0014): solid border - it holds real actions. */
-.drawer.landing { border-style: solid; }
-.landing-row { cursor: default; }
+/* --- empty --------------------------------------------------------------- */
 
 .empty {
-  margin-top: 28px;
+  margin-top: 32px;
   text-align: center;
   color: var(--fleet-quiet);
 }
 
 .empty.error { color: var(--fleet-fail); }
+
+/* --- runtimes fold ------------------------------------------------------- */
+/* The plumbing under the fleet (UX overhaul P7, ex-System tab): closed by
+   default, quiet when open. Rows only reveal Stop on hover or keyboard focus,
+   so the resting fold is three columns of text and nothing else. */
+
+.runtimes-fold {
+  margin-top: 24px;
+  border-top: 1px solid var(--fleet-line);
+}
+
+.runtimes-summary {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fleet-quiet);
+  border-radius: 4px;
+  padding: 8px 4px;
+  font: inherit;
+  font-size: 0.85em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.runtimes-summary:hover { color: var(--vscode-foreground); }
+
+.runtimes-summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.runtimes-body {
+  padding: 0 4px 8px;
+}
+
+.runtimes-note {
+  color: var(--fleet-quiet);
+  padding: 4px 0 8px;
+}
+
+.runtimes-note.error { color: var(--fleet-fail); }
+
+.runtimes-actions {
+  padding-top: 8px;
+}
+
+.runtime-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+  border-bottom: 1px solid transparent;
+}
+
+.runtime-row:hover { border-bottom-color: var(--fleet-line); }
+
+.runtime-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-state {
+  flex: none;
+  color: var(--fleet-quiet);
+  font-size: 0.85em;
+}
+
+.runtime-state.state-running { color: var(--fleet-run); }
+.runtime-state.state-quarantined,
+.runtime-state.state-lost { color: var(--fleet-warn); }
+.runtime-state.state-failed { color: var(--fleet-fail); }
+
+.runtime-uptime {
+  flex: none;
+  width: 66px;
+  text-align: right;
+  color: var(--fleet-quiet);
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+}
+
+.runtime-stop {
+  flex: none;
+  visibility: hidden;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fleet-quiet);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.runtime-row:hover .runtime-stop,
+.runtime-row:focus-within .runtime-stop,
+.runtime-stop.armed { visibility: visible; }
+
+.runtime-stop:hover,
+.runtime-stop.armed { color: var(--fleet-fail); border-color: var(--fleet-fail); }
+.runtime-stop.armed { font-weight: 600; }
+
+.runtime-stop:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}

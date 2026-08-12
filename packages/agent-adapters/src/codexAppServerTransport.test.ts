@@ -44,10 +44,15 @@ test("Codex model discovery preserves advertised reasoning effort capabilities",
 
 test("Codex Ultra turns use xhigh plus proactive delegation instructions", async () => {
   const requests: Array<{ method: string; params: unknown }> = [];
+  let clearedQueues = 0;
   const client = {
     request: async (method: string, params: unknown): Promise<JsonValue> => {
       requests.push({ method, params });
       return { turn: { id: "turn-1" } };
+    },
+    clearNotificationQueue: (): number => {
+      clearedQueues += 1;
+      return 0;
     }
   } as unknown as LineJsonRpcClient;
   const session = {
@@ -70,6 +75,8 @@ test("Codex Ultra turns use xhigh plus proactive delegation instructions", async
 
   assert.equal(requests.length, 1);
   assert.equal(requests[0]?.method, "turn/start");
+  // Turn boundary hygiene: stale notifications are dropped before the turn starts.
+  assert.equal(clearedQueues, 1);
   const params = requests[0]?.params as { effort?: string; model?: string; input?: Array<{ text?: string }> };
   assert.equal(params.model, "gpt-5.6-sol");
   assert.equal(params.effort, "xhigh");

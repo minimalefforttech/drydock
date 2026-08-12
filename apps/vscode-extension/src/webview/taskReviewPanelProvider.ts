@@ -34,6 +34,7 @@ import type { Backend } from "../compositionRoot.js";
 import type { TaskReviewAppService } from "../services/taskReviewAppService.js";
 import type { WorkspaceReviewAppService } from "../services/workspaceReviewAppService.js";
 import { openBaselineDiff } from "./baselineDiff.js";
+import { panelFollowsActiveTask } from "./panelFollow.js";
 import type { TaskReviewCommentFile, TaskReviewCommentsController } from "./taskReviewCommentsController.js";
 
 export class TaskReviewPanelProvider {
@@ -53,6 +54,13 @@ export class TaskReviewPanelProvider {
       // task-review projections, so fan the event out to every open panel whose
       // task links that session as the summaries-free taskReview.updated push.
       backend.bus.subscribe((event) => {
+        // UX overhaul P3: an open, unpinned review panel follows the spine to
+        // the newly active task (the panel is per-task, so following means
+        // opening the new task's panel and closing the one it replaces).
+        if (event.kind === "active-task-changed") {
+          this.followActiveTask(event.taskId);
+          return;
+        }
         if (event.kind !== "turn-started" && event.kind !== "turn-completed" && event.kind !== "session-deleted") {
           return;
         }
@@ -62,6 +70,46 @@ export class TaskReviewPanelProvider {
         this.fanOutSessionUpdate(event.sessionId);
       });
     }
+  }
+
+  /**
+   * Moves an open review panel onto the newly active task. Only unpinned
+   * panels follow, a panel already on that task is left alone, and the
+   * replacement is opened BEFORE the old one is disposed so the editor group
+   * never blinks empty. Any failure leaves the existing panels untouched.
+   */
+  private followActiveTask(taskId: string | null): void {
+    if (taskId === null || this.panels.size === 0 || this.panels.has(taskId)) return;
+    if (!this.backend.available) return;
+    // Per-task panels share one viewType, so the pin check is narrowed by the
+    // tab label this provider itself composes.
+    const stale = [...this.panels.keys()].filter((openTaskId) => {
+      const label = this.panels.get(openTaskId)?.title;
+      return panelFollowsActiveTask("drydock.taskReview", label);
+    });
+    if (stale.length === 0) return;
+    // Land the replacement in the column the panel it replaces already
+    // occupies, and without focus: following the spine must never yank the
+    // keyboard out of whatever the user is reading.
+    const firstStale = stale[0];
+    const column = firstStale === undefined ? undefined : this.panels.get(firstStale)?.viewColumn;
+    void this.backend.tasks.getTask(taskId)
+      .then(async (record) => {
+        if (record === null) return;
+        await this.open(taskId, record.title);
+        if (column !== undefined) {
+          this.panels.get(taskId)?.reveal(column, true);
+        }
+        for (const openTaskId of stale) {
+          this.panels.get(openTaskId)?.dispose();
+        }
+      })
+      .catch((error: unknown) => {
+        this.logger.warn("task review follow-retarget failed", {
+          taskId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
   }
 
   /**

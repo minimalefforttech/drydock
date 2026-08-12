@@ -1,6 +1,7 @@
 /**
- * Unit tests for the Claude adapter's exec transport: argument shape, resume
- * continuity, context restoration, and cancellation.
+ * Unit tests for the Claude adapter's streaming exec transport: argument
+ * shape, live line-fed events, resume continuity, context restoration,
+ * cancellation, stall handling, and in-runtime model discovery.
  */
 
 import { strict as assert } from "node:assert";
@@ -35,6 +36,48 @@ test("turns run claude -p stream-json with resume continuity and model override"
   assert.deepEqual(executor.calls[1]?.args.slice(-2), ["--resume", "claude-abc"]);
 });
 
+test("events survive buffered-stdout truncation because they stream per line", async () => {
+  // The buffered CommandResult stdout is truncated to nothing (the historical
+  // 120KB-cap failure); the turn must still deliver every event, including the
+  // terminal done, purely from the live line stream.
+  const lines = [
+    JSON.stringify({ type: "system", subtype: "init", session_id: "claude-big" }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "big reply" }] } }),
+    JSON.stringify({ type: "result", is_error: false, result: "big reply", session_id: "claude-big" })
+  ];
+  const executor = new FakeExecutor([
+    { result: { ...execResult(""), stdout: "[truncated 999999 chars]\n" }, lines }
+  ]);
+  const adapter = makeAdapter(executor);
+  const connection = await adapter.startProtocol(protocolRequest());
+
+  const runId = await adapter.sendPrompt(connection, { text: "huge turn" });
+  const events = await collect(adapter.streamEvents(connection, runId));
+
+  assert.deepEqual(events.map((event) => event.type), ["agent.text", "agent.done"]);
+
+  // Continuity survived too: the next turn resumes the captured session id.
+  const nextRun = await adapter.sendPrompt(connection, { text: "follow-up" });
+  await collect(adapter.streamEvents(connection, nextRun));
+  assert.deepEqual(executor.calls[1]?.args.slice(-2), ["--resume", "claude-big"]);
+});
+
+test("a clean exit without a result line is an explicit error, never silence", async () => {
+  const executor = new FakeExecutor([
+    execResult(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "partial" }] } }))
+  ]);
+  const adapter = makeAdapter(executor);
+  const connection = await adapter.startProtocol(protocolRequest());
+
+  const runId = await adapter.sendPrompt(connection, { text: "hello" });
+  const events = await collect(adapter.streamEvents(connection, runId));
+
+  assert.deepEqual(events.map((event) => event.type), ["agent.text", "agent.error"]);
+  const error = events[1];
+  assert.equal(error?.type === "agent.error" ? error.retryable : false, true);
+  assert.match(error?.type === "agent.error" ? error.message : "", /never emitted a terminal result line/);
+});
+
 test("ridden providers wrap the exec in sh -c with wire env and the token file, never the token itself", async () => {
   const executor = new FakeExecutor([execResult(JSON.stringify({ type: "result", is_error: false, result: "ok", session_id: "s1" }))]);
   const adapter = new ClaudeAdapter({
@@ -46,14 +89,13 @@ test("ridden providers wrap the exec in sh -c with wire env and the token file, 
     wire: {
       baseUrl: "https://api.deepseek.com/anthropic",
       tokenFile: "/tmp/.drydock-provider-token",
-      smallFastModel: "deepseek-chat",
-      defaultModel: "deepseek-chat"
+      smallFastModel: "deepseek-chat"
     }
   });
   const connection = await adapter.startProtocol(protocolRequest());
   assert.equal(String(connection.providerId), "deepseek");
 
-  const runId = await adapter.sendPrompt(connection, { text: "hello" });
+  const runId = await adapter.sendPrompt(connection, { text: "hello", metadata: { model: "deepseek-chat" } });
   await collect(adapter.streamEvents(connection, runId));
 
   const args = executor.calls[0]?.args ?? [];
@@ -63,14 +105,29 @@ test("ridden providers wrap the exec in sh -c with wire env and the token file, 
   assert.match(command, /ANTHROPIC_AUTH_TOKEN="\$\(cat '\/tmp\/\.drydock-provider-token' 2>\/dev\/null\)"/);
   assert.match(command, /ANTHROPIC_BASE_URL=https:\/\/api\.deepseek\.com\/anthropic/);
   assert.match(command, /ANTHROPIC_SMALL_FAST_MODEL=deepseek-chat/);
-  // A rider turn without an explicit model pins the rider default.
   assert.match(command, /'--model' 'deepseek-chat'/);
   // The prompt still rides stdin, through the shell into claude.
   assert.equal(executor.calls[0]?.input, "hello");
 });
 
+test("a rider turn without an explicit model is rejected with an actionable error", async () => {
+  const executor = new FakeExecutor([]);
+  const adapter = new ClaudeAdapter({
+    ids: new FixedIds(),
+    clock: new FixedClock(),
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    runtimeExecutor: executor,
+    providerId: "deepseek",
+    wire: { baseUrl: "https://api.deepseek.com/anthropic", tokenFile: "/tmp/.drydock-provider-token" }
+  });
+  const connection = await adapter.startProtocol(protocolRequest());
+  await assert.rejects(adapter.sendPrompt(connection, { text: "hello" }), /needs an explicit model/);
+  assert.equal(executor.calls.length, 0);
+});
+
 test("restored context is delivered as a preamble on the next prompt only", async () => {
-  const executor = new FakeExecutor([execResult(""), execResult("")]);
+  const done = JSON.stringify({ type: "result", is_error: false, result: "ok", session_id: "s2" });
+  const executor = new FakeExecutor([execResult(done), execResult(done)]);
   const adapter = makeAdapter(executor);
   const connection = await adapter.startProtocol(protocolRequest());
   await adapter.restoreContext(connection, [
@@ -100,6 +157,55 @@ test("cancel aborts the in-flight exec and maps to TURN_CANCELLED", async () => 
   assert.equal(executor.calls[0]?.signal?.aborted, true);
   assert.equal(events.length, 1);
   assert.equal(events[0]?.type === "agent.error" ? events[0].code : "", "TURN_CANCELLED");
+});
+
+test("a turn with no output past the inactivity window is stopped as CLAUDE_TURN_STALLED", async () => {
+  const executor = new HangingExecutor();
+  const adapter = new ClaudeAdapter({
+    ids: new FixedIds(),
+    clock: new FixedClock(),
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    runtimeExecutor: executor,
+    inactivityTimeoutMs: 20
+  });
+  const connection = await adapter.startProtocol(protocolRequest());
+
+  const runId = await adapter.sendPrompt(connection, { text: "stalls forever" });
+  const events = await collect(adapter.streamEvents(connection, runId));
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.type === "agent.error" ? events[0].code : "", "CLAUDE_TURN_STALLED");
+  assert.equal(events[0]?.type === "agent.error" ? events[0].retryable : false, true);
+});
+
+test("listModels probes api.anthropic.com inside the runtime and maps the reply", async () => {
+  const executor = new FakeExecutor([
+    execResult(JSON.stringify({
+      ok: true,
+      models: [
+        { id: "claude-fable-5", display_name: "Claude Fable 5" },
+        { id: "claude-sonnet-5", display_name: "Claude Sonnet 5" }
+      ]
+    }))
+  ]);
+  const adapter = makeAdapter(executor);
+  const connection = await adapter.startProtocol(protocolRequest());
+
+  const catalog = await adapter.listModels(connection);
+  assert.equal(catalog.source, "provider");
+  assert.deepEqual(catalog.models.map((model) => model.id), ["claude-fable-5", "claude-sonnet-5"]);
+  assert.equal(executor.calls[0]?.args[0], "node");
+});
+
+test("listModels failure is an unavailable catalog carrying the reason, not an invented list", async () => {
+  const executor = new FakeExecutor([execResult(JSON.stringify({ ok: false, error: "401 invalid bearer token" }))]);
+  const adapter = makeAdapter(executor);
+  const connection = await adapter.startProtocol(protocolRequest());
+
+  const catalog = await adapter.listModels(connection);
+  assert.equal(catalog.source, "unavailable");
+  assert.equal(catalog.models.length, 0);
+  assert.match(catalog.diagnostics.join(" "), /401 invalid bearer token/);
 });
 
 async function collect(stream: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
@@ -163,24 +269,74 @@ interface ExecCall {
   readonly signal?: AbortSignal;
 }
 
+/** A canned exec outcome: the buffered result plus (optionally) what the live line feed emits. */
+type CannedExec = CommandResult | { readonly result: CommandResult; readonly lines: readonly string[] };
+
+/**
+ * Canned executor that mirrors the real streaming exec: lines are fed through
+ * onStdoutLine before the buffered result settles. The buffered stdout may
+ * deliberately differ from the line feed (truncation tests) - exactly how the
+ * real runner behaves when its capture cap trims stdout.
+ */
 class FakeExecutor {
   readonly calls: ExecCall[] = [];
 
-  constructor(private readonly results: CommandResult[]) {}
+  constructor(private readonly results: CannedExec[]) {}
 
-  async exec(_handle: RuntimeHandle, args: readonly string[], _timeoutMs: number, input?: string, signal?: AbortSignal): Promise<CommandResult> {
+  async exec(
+    _handle: RuntimeHandle,
+    args: readonly string[],
+    _timeoutMs: number,
+    input?: string,
+    signal?: AbortSignal,
+    onStdoutLine?: (line: string) => void
+  ): Promise<CommandResult> {
     this.calls.push({ args, ...(input === undefined ? {} : { input }), ...(signal === undefined ? {} : { signal }) });
-    const result = this.results.shift();
-    if (result === undefined) {
+    const canned = this.results.shift();
+    if (canned === undefined) {
       throw new Error("FakeExecutor ran out of canned results.");
     }
-    // Let the caller register the run before the result settles, mirroring the
-    // real non-blocking exec.
+    const result = "result" in canned ? canned.result : canned;
+    const lines = "result" in canned ? canned.lines : canned.stdout.split("\n");
+    // Let the caller register the run before lines flow, mirroring the real
+    // non-blocking exec.
     await new Promise((resolve) => setTimeout(resolve, 1));
+    if (!signal?.aborted && onStdoutLine !== undefined) {
+      for (const line of lines) {
+        if (line.length > 0) onStdoutLine(line);
+      }
+    }
     if (signal?.aborted && result.exitCode === 0) {
       return { ...result, exitCode: 1 };
     }
     return result;
+  }
+}
+
+/** Never produces output or settles until the abort signal kills it. */
+class HangingExecutor {
+  async exec(
+    _handle: RuntimeHandle,
+    _args: readonly string[],
+    _timeoutMs: number,
+    _input?: string,
+    signal?: AbortSignal
+  ): Promise<CommandResult> {
+    await new Promise<void>((resolve) => {
+      if (signal?.aborted) { resolve(); return; }
+      signal?.addEventListener("abort", () => { resolve(); }, { once: true });
+    });
+    return { ...{
+      command: "sbx",
+      args: [],
+      cwd: "C:\\tmp",
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      durationMs: 25
+    }, error: "Aborted" };
   }
 }
 

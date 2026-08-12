@@ -86,6 +86,10 @@ export class SqliteWorkTaskStore implements WorkTaskStore {
       assignments.push("auto_answer_faq = ?");
       values.push(update.autoAnswerFaq ? 1 : 0);
     }
+    if (update.dontAskWorkspace !== undefined) {
+      assignments.push("dont_ask_workspace = ?");
+      values.push(update.dontAskWorkspace ? 1 : 0);
+    }
     this.connection.database.prepare(`
       UPDATE work_tasks
       SET ${assignments.join(", ")}
@@ -231,6 +235,7 @@ interface WorkTaskRow {
   readonly clone_project_ids_json: string | null;
   readonly clone_dirty_handling: string | null;
   readonly auto_answer_faq: number;
+  readonly dont_ask_workspace: number;
 }
 
 interface WorkTaskLinkRow {
@@ -253,7 +258,8 @@ function mapTask(row: WorkTaskRow): WorkTaskRecord {
     updatedAt: row.updated_at,
     ...(row.done_at === null ? {} : { doneAt: row.done_at }),
     ...(clonePolicy === undefined ? {} : { clonePolicy }),
-    ...(row.auto_answer_faq ? { autoAnswerFaq: true } : {})
+    ...(row.auto_answer_faq ? { autoAnswerFaq: true } : {}),
+    ...(row.dont_ask_workspace ? { dontAskWorkspace: true } : {})
   };
 }
 

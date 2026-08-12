@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Webview harness - Configure panel</title>
+  <style>
+    /* Dark-theme values for the --vscode-* variables the real panel CSS uses.
+       A missing variable degrades to the fallback in var(), so this subset only
+       needs the load-bearing ones. */
+    :root {
+      --vscode-font-family: "Segoe UI", system-ui, sans-serif;
+      --vscode-font-size: 13px;
+      --vscode-foreground: #cccccc;
+      --vscode-descriptionForeground: #9d9d9d;
+      --vscode-errorForeground: #f48771;
+      --vscode-focusBorder: #007fd4;
+      --vscode-editor-background: #1e1e1e;
+      --vscode-editor-foreground: #d4d4d4;
+      --vscode-editor-font-family: Consolas, "Courier New", monospace;
+      --vscode-input-background: #3c3c3c;
+      --vscode-input-foreground: #cccccc;
+      --vscode-dropdown-background: #3c3c3c;
+      --vscode-dropdown-foreground: #cccccc;
+      --vscode-badge-background: #4d4d4d;
+      --vscode-badge-foreground: #ffffff;
+      --vscode-list-hoverBackground: #2a2d2e;
+      --vscode-panel-border: #3c3c3c;
+      --vscode-textLink-foreground: #3794ff;
+      --vscode-charts-orange: #cc6633;
+      --vscode-charts-green: #89d185;
+      --vscode-editorWarning-foreground: #d29922;
+    }
+    html, body { margin: 0; height: 100%; background: #1b1b1b; }
+    body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
+    /* Editor-panel-shaped stage: nav + one ~720px column, vertical scroll only. */
+    #stage {
+      width: 1060px; height: calc(100vh - 32px); background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border); overflow: auto; box-sizing: border-box;
+    }
+    #stage-note { color: #7f7f7f; font-size: 12px; max-width: 260px; }
+    #stage-note code { color: #d7ba7d; }
+  </style>
+  <link rel="stylesheet" href="/assets/configure.css" />
+</head>
+<body class="vscode-dark">
+  <div id="stage">
+    <div id="app"></div>
+  </div>
+  <div id="stage-note">
+    <p><strong>Configure harness (UX overhaul P6 + Memories re-home).</strong> Real bundled Configure panel, mock host. Sections: Providers (codex authenticated, claude needs-login → amber nav dot), MCP Servers (2 local + 1 settings row), Agents &amp; Models, Preprompts, Skills &amp; Recipes, Memories, Runtime, Security.</p>
+    <p><strong>Memories cast:</strong> <code>m-1</code> pending (workspace-scoped, python tag → amber card + nav count), <code>m-2</code> approved global (agent), <code>m-3</code> approved workspace (added by you). Detected tags <code>python / pip / maya</code> render as toggleable <code>for:</code> chips on quick-add and pending cards.</p>
+    <p>Drive from the console: <code>__harness.scenario.memoryCandidate({ memoryCandidateId: "m-9", sessionId: "s-live", content: "Farm submits need the retry guard.", status: "pending", createdAt: new Date().toISOString(), scope: "workspace", scopeLabel: "asset_api", tags: ["python"], origin: "agent" })</code> streams a proposal into the approval list live.</p>
+    <p>Inspect sends: <code>__harness.log</code> (memory.add / memory.resolve edits / memory.delete / memory.open / config.setSetting / config.mcpToggle / config.provider.* lines).</p>
+  </div>
+  <script src="/harness.js"></script>
+  <script src="/assets/configure.js"></script>
+</body>
+</html>

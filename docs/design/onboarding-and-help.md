@@ -7,7 +7,16 @@ marketing.
 
 ## Control-panel handoff
 
-The sidebar tour introduces Tasks, Plan, Edit, and System before ending at an
+**Retired with the Control Panel (ADR 0020).** The sidebar tour that introduced
+Tasks, Plan, Edit and System went with the four-tab webview, and neither the
+chat rail nor the left rail has a tour of its own: the editor-area panels
+(Task Board, Agents, Planner, Task Review) each keep their complete local tour
+and their `Next workflow` chooser, so guided onboarding now starts in a panel
+rather than in the sidebar. Demo mode is likewise panel-only - the chat rail
+never enables it. The paragraph below describes the retired sidebar leg and is
+kept for the handoff mechanics, which are unchanged.
+
+The sidebar tour introduced Tasks, Plan, Edit, and System before ending at an
 editor-panel guide chooser. Selecting Task Board, Agents, Planner, or Task
 Review opens or reveals that panel and starts its complete local tour.
 

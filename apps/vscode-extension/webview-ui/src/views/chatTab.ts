@@ -1,13 +1,15 @@
 /**
- * Chat tab: the default surface, styled as a DEV LOG (GitHub-Copilot-chat-like),
- * not an online chat bot.
+ * The chat view, styled as a DEV LOG (GitHub-Copilot-chat-like), not an online
+ * chat bot. Mounted by `chatRail.ts`; it was the Control Panel's Edit tab until
+ * that retired (ADR 0020), which is why the module is still `views/chatTab.ts`.
  *
  * Full-height flex column: scrollable chat body (header, context strip,
  * transcript, open questions, access cards, Changes working set with Task
- * Notes) → pinned composer (with the plan-docs pill). Assistant turns render
- * full-width as structural markdown blocks (shared splitter); user turns as a
- * compact tinted card. Files dragged from the VS Code explorer or the OS drop
- * their (mount-relative) paths into the composer.
+ * Notes) → pinned composer. Assistant turns render full-width as structural
+ * markdown blocks (shared splitter); user turns as a compact tinted card. Files
+ * dragged from the VS Code explorer or the OS drop their (mount-relative) paths
+ * into the composer. It reaches its host through two callbacks only
+ * (`focusOwningTask` / `hostChanged`), so a second host stays cheap.
  *
  * SECURITY: all dynamic strings (agent output, titles, mounts, model names, file
  * paths) are assigned via textContent - never innerHTML - so nothing
@@ -58,8 +60,8 @@ import { buildMcpTogglePanel, enabledMcpCount } from "../mcpControls.js";
 import { splitBlocks, type DocBlock } from "../markdownBlocks.js";
 import { onPush, request } from "../messaging.js";
 import {
+  applyProviderCatalogs,
   currentSession,
-  fallbackCatalog,
   isSessionLiveish,
   normalizeProviderId,
   upsertAccessRequest,
@@ -149,8 +151,8 @@ const LEGACY_CODEX_EFFORT_OPTIONS: readonly { id: string; label: string; descrip
   { id: "high", label: "High" }
 ];
 
-const SOL_EXTRA_EFFORT_OPTIONS: readonly { id: string; label: string; description: string }[] = [
-  { id: "xhigh", label: "Extra High", description: "Deep reasoning for difficult, multi-step work." },
+/** App-level Ultra mode, offered whenever the model advertises xhigh support. */
+const ULTRA_EFFORT_OPTIONS: readonly { id: string; label: string; description: string }[] = [
   { id: "ultra", label: "Ultra", description: "Maximum supported reasoning plus proactive delegation to subagents." }
 ];
 
@@ -194,7 +196,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   let reconnectLabel = "Reconnecting…";
   // The last prompt actually submitted, for the Retry button on error notices.
   let lastSentPrompt: string | null = null;
-  // Set by a caller (e.g. workTab's "Create and start chat") right after it
+  // Set by a caller (e.g. the hub composer starting a chat) right after it
   // switches to this tab, BEFORE chat.startSession has resolved - there is no
   // session yet to select. Drives a transcript placeholder distinct from
   // `starting` (the lazy first-send spin-up on an already-selected new chat).
@@ -274,7 +276,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // --- header -----------------------------------------------------------------
   const header = el("div", "chat-header");
   const backButton = iconButton("‹", "Back to sessions", "chat-back");
-  backButton.addEventListener("click", () => ctx.bridge.switchTab("work"));
+  backButton.addEventListener("click", () => ctx.bridge.focusOwningTask());
   const titleWrap = el("div", "chat-title-wrap");
   // CH·hierarchy: an optional small muted line above the title naming the
   // parent task, shown only when the selected session belongs to a subtask
@@ -464,7 +466,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       }
       if (response.payload.type === "chat.reclaim") {
         upsertSession(state, response.payload.session);
-        state.providerCatalogs = [...response.payload.providerCatalogs];
+        applyProviderCatalogs(state, response.payload.providerCatalogs);
         state.selectedSessionId = response.payload.session.sessionId;
         setTurnActive(false);
         appendSystemMessage("Took this chat over in this window. History and project mounts were restored from the saved session.");
@@ -504,7 +506,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     void request({ type: "provider.list", force: true }).then((response) => {
       recheckAuthButton.disabled = false;
       if (response.ok && response.payload.type === "provider.list") {
-        state.providerCatalogs = [...response.payload.providerCatalogs];
+        applyProviderCatalogs(state, response.payload.providerCatalogs);
         renderProviderControls();
         ctx.persist();
       }
@@ -612,7 +614,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         upsertSession(state, response.payload.session);
         logChat(`spawned ${role} session "${response.payload.session.title}" - its mounts are a subset of this session's`);
         ctx.persist();
-        ctx.bridge.work.render();
+        ctx.bridge.hostChanged();
         renderAgentsLens();
       }
     });
@@ -677,7 +679,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       void request({ type: "provider.list" }).then((response) => {
         modelRefreshInFlight = false;
         if (!response.ok || response.payload.type !== "provider.list") return;
-        state.providerCatalogs = [...response.payload.providerCatalogs];
+        applyProviderCatalogs(state, response.payload.providerCatalogs);
         renderProviderControls();
         ctx.persist();
         if (!content.classList.contains("hidden")) {
@@ -827,7 +829,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
               ...response.payload.previews
             ];
             renderPreviews();
-            ctx.bridge.work.render();
+            ctx.bridge.hostChanged();
           }
         });
       });
@@ -842,7 +844,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     ];
     logChat(`preview up: ${payload.preview.title} → ${payload.preview.url}`);
     renderPreviews();
-    ctx.bridge.work.render();
+    ctx.bridge.hostChanged();
   });
 
   sendButton.addEventListener("click", () => void onSend());
@@ -999,7 +1001,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderFacts();
   });
   onPush("provider.models", (payload) => {
-    state.providerCatalogs = [...payload.providerCatalogs];
+    applyProviderCatalogs(state, payload.providerCatalogs);
     renderProviderControls();
     ctx.persist();
   });
@@ -1024,11 +1026,22 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       applyTranscriptLine(payload.line);
     }
   });
+  // Reattach catch-up: pushes emitted while this webview was hidden or being
+  // recreated are gone from the live channel, and the turn-completed push that
+  // normally triggers the tail sync may itself have been missed. Becoming
+  // visible re-pulls everything past lastSequence from durable storage.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    const sessionId = state.selectedSessionId;
+    if (sessionId !== null && sessionId !== "") {
+      void loadTimelineIncremental(sessionId);
+    }
+  });
   onPush("chat.turnStarted", (payload) => {
     // Track running turns for EVERY session (not just the selected one) so
     // Tasks-tab rows can show running-a-turn vs idle-live.
     state.turnActiveSessionIds.add(payload.sessionId);
-    ctx.bridge.work.render();
+    ctx.bridge.hostChanged();
     if (payload.sessionId === state.selectedSessionId) {
       folder.clearActiveAssistant();
       folder.resetTurn();
@@ -1039,7 +1052,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   });
   onPush("chat.turnCompleted", (payload) => {
     state.turnActiveSessionIds.delete(payload.sessionId);
-    ctx.bridge.work.render();
+    ctx.bridge.hostChanged();
     if (payload.sessionId === state.selectedSessionId) {
       folder.clearActiveAssistant();
       logChat(`turn ${payload.status}`);
@@ -1071,6 +1084,17 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   });
   onPush("run.failed", (payload) => {
     logChat(`failed - ${payload.message}`);
+    if (payload.sessionId !== undefined) {
+      state.turnActiveSessionIds.delete(payload.sessionId);
+      ctx.bridge.hostChanged();
+      if (payload.sessionId !== state.selectedSessionId) {
+        return;
+      }
+      // The durable pre-turn error event usually renders via chat.event too;
+      // this system line covers the cases where no event could be written and
+      // offers a one-click retry of the swallowed message.
+      appendSystemMessage(`This message was not sent: ${payload.message}`, "error", true);
+    }
     setTurnActive(false);
     starting = false;
     refreshControls();
@@ -1087,19 +1111,19 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   onPush("question.asked", (payload) => {
     upsertQuestion(state, payload.question);
     ctx.persist();
-    ctx.bridge.work.renderAttention();
+    ctx.bridge.hostChanged();
     if (payload.question.sessionId === state.selectedSessionId) renderAccessCards();
   });
   onPush("question.resolved", (payload) => {
     upsertQuestion(state, payload.question);
     ctx.persist();
-    ctx.bridge.work.renderAttention();
+    ctx.bridge.hostChanged();
     if (payload.question.sessionId === state.selectedSessionId) renderAccessCards();
   });
   onPush("policy.accessRequested", (payload) => {
     upsertAccessRequest(state, payload.accessRequest);
     ctx.persist();
-    ctx.bridge.work.renderAttention();
+    ctx.bridge.hostChanged();
     if (payload.accessRequest.sessionId === state.selectedSessionId) {
       renderAccessCards();
     }
@@ -1109,10 +1133,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderAttachments();
   });
   onPush("panel.showSession", (payload) => {
-    // Another surface (the Agents panel, ADR 0013) navigated here. Selection
-    // is the sidebar's own flow; a nodeId lands on the Agents lens so the
-    // clicked delegated agent is in view.
-    ctx.bridge.switchTab("chat");
+    // Another surface (the Agents panel, ADR 0013) navigated here. The host
+    // reveals itself; a nodeId lands on the Agents lens so the clicked
+    // delegated agent is in view.
     selectSession(payload.sessionId);
     setTranscriptView(payload.nodeId === undefined ? "log" : "agents");
   });
@@ -1253,7 +1276,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
             logChat(`link to task failed: ${linkResponse.error.message}`);
           } else {
             logChat("chat linked to the current task");
-            ctx.bridge.work.refresh();
+            ctx.bridge.hostChanged();
           }
         });
       }
@@ -1354,7 +1377,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
     if (reviveResponse.payload.type === "chat.resumeSession" || reviveResponse.payload.type === "chat.reclaim") {
       upsertSession(state, reviveResponse.payload.session);
-      state.providerCatalogs = [...reviveResponse.payload.providerCatalogs];
+      applyProviderCatalogs(state, reviveResponse.payload.providerCatalogs);
       renderHeader();
       renderProviderControls();
       renderFacts();
@@ -1410,7 +1433,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
     if (response.payload.type === "chat.restartBackend") {
       upsertSession(state, response.payload.session);
-      state.providerCatalogs = [...response.payload.providerCatalogs];
+      applyProviderCatalogs(state, response.payload.providerCatalogs);
       renderHeader();
       renderProviderControls();
       renderFacts();
@@ -1702,7 +1725,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       logChat(`restart failed: ${response.error.message}`);
     } else if (response.payload.type === "chat.restartBackend") {
       upsertSession(state, response.payload.session);
-      state.providerCatalogs = [...response.payload.providerCatalogs];
+      applyProviderCatalogs(state, response.payload.providerCatalogs);
       renderHeader();
       renderProviderControls();
       renderFacts();
@@ -1734,7 +1757,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       logChat(`resume failed: ${response.error.message}`);
     } else if (response.payload.type === "chat.resumeSession") {
       upsertSession(state, response.payload.session);
-      state.providerCatalogs = [...response.payload.providerCatalogs];
+      applyProviderCatalogs(state, response.payload.providerCatalogs);
       logChat("session resumed on a fresh backend - context replayed");
       renderHeader();
       renderProviderControls();
@@ -1769,7 +1792,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       logChat(`delete failed: ${response.error.message}`);
       return;
     }
-    // The host also pushes session.deleted; workTab drops it from the list.
+    // The host also pushes session.deleted; the rail drops it from the list.
     state.sessions = state.sessions.filter((s) => s.sessionId !== sessionId);
     resetToNewChat();
     ctx.persist();
@@ -2317,10 +2340,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   /** Rebuilds the effort picker from the currently selected model's catalog capabilities. */
   function renderThinkingEfforts(catalogOverride?: AgentModelCatalog): void {
-    const catalogs = state.providerCatalogs.length === 0 ? [fallbackCatalog()] : state.providerCatalogs;
     const providerId = normalizeProviderId(providerSelect.value);
     const catalog = catalogOverride
-      ?? catalogs.find((candidate) => normalizeProviderId(candidate.providerId) === providerId);
+      ?? state.providerCatalogs.find((candidate) => normalizeProviderId(candidate.providerId) === providerId);
     const model = catalog?.models.find((candidate) => candidate.id === modelSelect.value);
     const advertised = model?.supportedReasoningEfforts;
     const baseEfforts = advertised === undefined && providerId === "codex"
@@ -2330,11 +2352,13 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
           label: thinkingEffortLabel(candidate.reasoningEffort),
           description: candidate.description
         }));
-    // Ultra is an app mode rather than a raw app-server reasoning value. Sol's
-    // picker exposes it alongside efforts; the transport maps it to xhigh and
-    // supplies the proactive-delegation instruction that defines Ultra.
-    const efforts = providerId === "codex" && model?.id.toLowerCase() === "gpt-5.6-sol"
-      ? [...baseEfforts, ...SOL_EXTRA_EFFORT_OPTIONS.filter((extra) => !baseEfforts.some((candidate) => candidate.id === extra.id))]
+    // Ultra is an app mode rather than a raw app-server reasoning value: the
+    // transport maps it to xhigh plus the proactive-delegation instruction.
+    // It is offered wherever the model itself advertises xhigh support -
+    // capability-driven, never keyed to a hardcoded model id.
+    const supportsXhigh = baseEfforts.some((candidate) => candidate.id === "xhigh");
+    const efforts = providerId !== "claude" && supportsXhigh
+      ? [...baseEfforts, ...ULTRA_EFFORT_OPTIONS.filter((extra) => !baseEfforts.some((candidate) => candidate.id === extra.id))]
       : baseEfforts;
 
     thinkingSelect.replaceChildren();
@@ -2368,7 +2392,22 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     const selectedSessionProvider = selectedSession === undefined ? "" : normalizeProviderId(selectedSession.providerId);
     const desiredProvider = normalizeProviderId(preserveSelection ? selectedSessionProvider || previousProvider : previousProvider);
     providerSelect.replaceChildren();
-    const catalogs = state.providerCatalogs.length === 0 ? [fallbackCatalog()] : state.providerCatalogs;
+    const catalogs = state.providerCatalogs;
+    if (catalogs.length === 0) {
+      // Nothing from the host yet (panel.init still in flight or failed):
+      // say so honestly instead of inventing a provider list.
+      providerSelect.append(option("", "Loading providers…"));
+      providerSelect.disabled = true;
+      modelSelect.replaceChildren();
+      modelSelect.append(option("", "Waiting for the backend…"));
+      modelSelect.disabled = true;
+      renderThinkingEfforts(undefined);
+      renderModelButton();
+      renderAuthBanner();
+      refreshControls();
+      return;
+    }
+    providerSelect.disabled = false;
     for (const catalog of catalogs) {
       providerSelect.append(option(catalog.providerId, catalog.displayName));
     }
@@ -2379,12 +2418,23 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
     const catalog = catalogs.find((candidate) => normalizeProviderId(candidate.providerId) === normalizeProviderId(providerSelect.value)) ?? catalogs[0];
     modelSelect.replaceChildren();
-    if (catalog === undefined || catalog.models.length === 0) {
-      modelSelect.append(option("", "Start backend to load models"));
+    const visibleModels = (catalog?.models ?? []).filter((model) => !model.hidden);
+    if (catalog === undefined || visibleModels.length === 0) {
+      modelSelect.append(option("", catalog?.source === "unavailable" ? "No models discovered - Refresh models" : "No models"));
       modelSelect.disabled = true;
+      // A session's saved model (or a manually typed one) must stay usable
+      // even before discovery succeeds; it rides as the sole real option.
+      const manualModel = manualModelSessionId === state.selectedSessionId ? state.selectedModel || previousModel : "";
+      const knownModel = manualModel || (selectedSessionProvider === normalizeProviderId(providerSelect.value) ? selectedSession?.model ?? "" : "");
+      if (knownModel !== "") {
+        modelSelect.append(option(knownModel, knownModel));
+        modelSelect.value = knownModel;
+        modelSelect.disabled = false;
+        state.selectedModel = knownModel;
+      }
     } else {
       modelSelect.disabled = false;
-      for (const model of catalog.models) {
+      for (const model of visibleModels) {
         const node = option(model.id, model.displayName);
         if (model.description) node.title = model.description;
         modelSelect.append(node);
@@ -2396,10 +2446,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       // A saved/live session is authoritative even if an aged or partial
       // catalog has not rediscovered its model yet. Keep that selection visible
       // rather than silently snapping the UI (and next turn) to the default.
-      if (selectedModel !== "" && !catalog.models.some((model) => model.id === selectedModel)) {
+      if (selectedModel !== "" && !visibleModels.some((model) => model.id === selectedModel)) {
         modelSelect.append(option(selectedModel, selectedModel));
       }
-      const defaultModel = catalog.models.find((model) => model.isDefault)?.id ?? catalog.models[0]?.id ?? "";
+      const defaultModel = visibleModels.find((model) => model.isDefault)?.id ?? visibleModels[0]?.id ?? "";
       modelSelect.value = selectedModel || defaultModel;
       state.selectedModel = modelSelect.value;
     }
@@ -2412,9 +2462,8 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   /** Syncs the composer's model button label to the (hidden) select values. */
   function renderModelButton(): void {
-    const catalogs = state.providerCatalogs.length === 0 ? [fallbackCatalog()] : state.providerCatalogs;
     const providerId = normalizeProviderId(providerSelect.value);
-    const catalog = catalogs.find((candidate) => normalizeProviderId(candidate.providerId) === providerId);
+    const catalog = state.providerCatalogs.find((candidate) => normalizeProviderId(candidate.providerId) === providerId);
     const providerName = catalog?.displayName ?? providerLabel(providerId);
     const model = catalog?.models.find((candidate) => candidate.id === modelSelect.value);
     const modelName = model?.displayName ?? (modelSelect.value || "default");
@@ -2455,8 +2504,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
   /** The catalog's own casing for a normalized provider id (for the select value). */
   function catalogProviderValue(normalizedProviderId: string): string {
-    const catalogs = state.providerCatalogs.length === 0 ? [fallbackCatalog()] : state.providerCatalogs;
-    return catalogs.find((candidate) => normalizeProviderId(candidate.providerId) === normalizedProviderId)?.providerId
+    return state.providerCatalogs.find((candidate) => normalizeProviderId(candidate.providerId) === normalizedProviderId)?.providerId
       ?? normalizedProviderId;
   }
 
@@ -2466,9 +2514,14 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
    * surfaced as small hints; picking a model routes through selectModelFromTree.
    */
   function buildModelTree(content: HTMLElement, close: () => void): void {
-    const catalogs = state.providerCatalogs.length === 0 ? [fallbackCatalog()] : state.providerCatalogs;
+    const catalogs = state.providerCatalogs;
     const activeProvider = normalizeProviderId(providerSelect.value);
     const activeModel = modelSelect.value;
+    if (catalogs.length === 0) {
+      const empty = el("div", "model-tree-empty");
+      empty.textContent = "Waiting for the backend to answer with providers…";
+      content.append(empty);
+    }
     for (const catalog of catalogs) {
       const providerId = normalizeProviderId(catalog.providerId);
       const group = el("div", "model-tree-group");
@@ -2481,11 +2534,23 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
         hint.textContent = "needs login";
         groupHead.append(hint);
       }
+      // Provenance chip: live lists stay quiet; a cached list shows its age so
+      // the user knows they are choosing from a snapshot.
+      if (catalog.source === "cache") {
+        const hint = el("span", "model-tree-source");
+        hint.textContent = `cached ${relativeTime(catalog.refreshedAt)}`;
+        hint.title = catalog.diagnostics.join("\n");
+        groupHead.append(hint);
+      }
       group.append(groupHead);
       const models = catalog.models.filter((model) => !model.hidden);
       if (models.length === 0) {
         const empty = el("div", "model-tree-empty");
-        empty.textContent = catalog.source === "fallback" ? "start a chat to load models" : "no models";
+        // Unavailable is a real state with a real reason - show it.
+        empty.textContent = catalog.source === "unavailable"
+          ? (catalog.diagnostics[0] ?? "No models discovered yet.")
+          : "no models";
+        empty.title = catalog.diagnostics.join("\n");
         group.append(empty);
       }
       for (const model of models) {
@@ -2506,6 +2571,45 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       }
       content.append(group);
     }
+
+    // Explicit requery: forces the host past its TTL and re-runs every
+    // provider's live discovery, then rebuilds this open popover in place.
+    const refreshRow = document.createElement("button");
+    refreshRow.className = "model-tree-refresh";
+    refreshRow.textContent = modelRefreshInFlight ? "Refreshing models…" : "↻ Refresh models";
+    refreshRow.disabled = modelRefreshInFlight;
+    refreshRow.addEventListener("click", () => {
+      if (ctx.isDemo() || modelRefreshInFlight) return;
+      modelRefreshInFlight = true;
+      refreshRow.textContent = "Refreshing models…";
+      refreshRow.disabled = true;
+      void request({ type: "provider.list", force: true }).then((response) => {
+        modelRefreshInFlight = false;
+        if (response.ok && response.payload.type === "provider.list") {
+          applyProviderCatalogs(state, response.payload.providerCatalogs);
+          renderProviderControls();
+          ctx.persist();
+        }
+        if (content.isConnected) {
+          content.replaceChildren();
+          buildModelTree(content, close);
+          sizeModelPopover(content);
+        }
+      });
+    });
+    content.append(refreshRow);
+  }
+
+  /** Compact "3m ago" / "2d ago" for catalog provenance chips. */
+  function relativeTime(iso: string): string {
+    const then = Date.parse(iso);
+    if (Number.isNaN(then)) return "";
+    const minutes = Math.max(0, Math.round((Date.now() - then) / 60_000));
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return `${String(minutes)}m ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 48) return `${String(hours)}h ago`;
+    return `${String(Math.round(hours / 24))}d ago`;
   }
 
   /**
@@ -2779,11 +2883,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   async function pollSandboxStats(): Promise<void> {
     if (sandboxStatsInFlight) return;
     const sessionId = state.selectedSessionId;
-    // Only gate on being on the Chat tab with a session selected; the backend
-    // returns null when there's no running sandbox, which hides the bar. (Do NOT
-    // gate on isSessionLiveish - a running runtime can exist even when the
-    // window's `live` flag is momentarily stale, which was hiding the bar.)
-    if (state.activeTab !== "chat" || !sessionId) {
+    // Only gate on having a session selected; the backend returns null when
+    // there's no running sandbox, which hides the bar. (Do NOT gate on
+    // isSessionLiveish - a running runtime can exist even when the window's
+    // `live` flag is momentarily stale, which was hiding the bar.)
+    if (!sessionId) {
       renderSandboxStats(null);
       return;
     }
@@ -3473,7 +3577,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderAttentionStack(accessCardsWrap, accessItems, accessAttentionCursor, {
       onResolved: () => {
         renderAccessCards();
-        ctx.bridge.work.renderAttention();
+        ctx.bridge.hostChanged();
         ctx.persist();
       },
       onError: (message) => {
@@ -3498,7 +3602,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     renderAttentionStack(questionCardsWrap, questionItems, questionAttentionCursor, {
       onResolved: () => {
         renderAccessCards();
-        ctx.bridge.work.renderAttention();
+        ctx.bridge.hostChanged();
         ctx.persist();
       },
       onError: (message) => {
@@ -3542,18 +3646,16 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       state.workspacePolicy = response.payload.state;
       ctx.persist();
       renderAccessCards();
-      ctx.bridge.work.renderAttention();
+      ctx.bridge.hostChanged();
     }
   }
 
   function renderDiagnostics(): void {
-    ctx.bridge.system.render();
-  }
+    }
 
   /** Facts grid from the SELECTED session record (actual provider/model), not the picker. */
   function renderFacts(): void {
-    ctx.bridge.system.render();
-  }
+    }
 
   /**
    * Renders the Copilot-style working set. The details summary tracks the count;
@@ -4498,7 +4600,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   // ---------------------------------------------------------------------------
   /**
    * FIX 1: shows/clears the "Starting the chat backend…" placeholder for a
-   * caller (e.g. workTab's "Create and start chat") that switches to this tab
+   * caller (e.g. the hub composer starting a chat) that reveals this chat
    * before chat.startSession has resolved. `selectSession` (called once the
    * real session lands) clears it as a side effect too, so callers only need
    * this for the failure path or an explicit early clear.
@@ -4521,7 +4623,7 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       const owner = state.tasks.find((task) => task.linkedSessionIds.includes(sessionId));
       if (owner !== undefined && state.activeTaskId !== owner.taskId) {
         state.activeTaskId = owner.taskId;
-        ctx.bridge.work.render();
+        ctx.bridge.hostChanged();
       }
     }
     // Selection uses selective renderers (not the full render()), so refresh

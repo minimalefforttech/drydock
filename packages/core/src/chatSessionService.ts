@@ -63,6 +63,14 @@ export interface StartChatSessionRequest {
   readonly template: RuntimeTemplate;
   readonly workspacePath: string;
   readonly workspaceOwnerToken?: string;
+  /**
+   * Pre-allocated session id (UX overhaul P4). The boot timeline reports
+   * stages that happen BEFORE this row exists - disposable workspace, mounts,
+   * clone seeding - so the caller allocates the id first and hands it in here
+   * rather than letting a late id split one boot across two identities.
+   * Absent (every legacy caller) means "allocate one now", unchanged.
+   */
+  readonly sessionId?: SessionId;
   readonly title: string;
   readonly model: ChatModelSelection;
   readonly transport: AgentTransport;
@@ -219,9 +227,19 @@ export class ChatSessionService {
     this.heartbeatStaleMs = options.heartbeatStaleMs ?? DEFAULT_HEARTBEAT_STALE_MS;
   }
 
+  /**
+   * The product bus this service publishes on. Exposed so a host-side caller
+   * that already holds the chat service (the isolated-run facade, which
+   * sequences the workspace half of a boot) can report boot stages on the SAME
+   * bus instead of needing a second wiring point in the composition root.
+   */
+  get bus(): ProductEventBus {
+    return this.options.bus;
+  }
+
   async startSession(request: StartChatSessionRequest): Promise<ChatSessionRecord> {
     const adapter = this.requiredAdapter(request.model.providerId);
-    const sessionId = this.options.ids.sessionId();
+    const sessionId = request.sessionId ?? this.options.ids.sessionId();
     const chatId = this.options.ids.chatId();
     const createdAt = this.options.clock.isoNow();
     const runtimeId = this.options.ids.runtimeId();
@@ -528,16 +546,49 @@ export class ChatSessionService {
       delete live.activeTurn;
     }
 
-    live.model = turnModel;
-    const updated = await this.updateSession(live.session, {
-      status: "active",
-      ...(live.session.title === "New chat" ? { title: titleFromPrompt(prompt) } : {}),
-      providerId: turnModel.providerId,
-      model: turnModel.model ?? null
-    });
-    live.session = updated;
+    // endSession can run while the stream above is still draining; once this
+    // live record is no longer the registered one, the session's terminal
+    // status (ended/failed) is authoritative and must not be resurrected to
+    // "active" by this turn's bookkeeping.
+    if (this.liveSessions.get(sessionId) === live) {
+      live.model = turnModel;
+      const updated = await this.updateSession(live.session, {
+        status: "active",
+        ...(live.session.title === "New chat" ? { title: titleFromPrompt(prompt) } : {}),
+        providerId: turnModel.providerId,
+        model: turnModel.model ?? null
+      });
+      live.session = updated;
+    }
     this.options.bus.publish({ kind: "turn-completed", sessionId, runId, status: terminalStatus });
     return { runId, status: terminalStatus, eventCount };
+  }
+
+  /**
+   * Records a send that failed BEFORE a turn existed (policy gate, busy
+   * session, briefing failure, dispatch race) as a durable transcript event.
+   * Without this, such failures have no event trail at all - the message
+   * simply vanishes from the user's point of view. Works for live and
+   * non-live sessions alike; unknown sessions throw.
+   */
+  async recordSendFailure(sessionId: SessionId, error: unknown, code = "SEND_FAILED"): Promise<void> {
+    const stored = await this.options.sessionStore.getSession(sessionId);
+    if (stored === null) {
+      throw new Error(`Session ${sessionId} was not found.`);
+    }
+    const failure: AgentErrorEvent = {
+      id: this.options.ids.eventId(),
+      type: "agent.error",
+      sessionId,
+      runId: this.options.ids.runId(),
+      agentRole: "worker",
+      createdAt: this.options.clock.isoNow(),
+      code,
+      message: error instanceof Error ? error.message : String(error),
+      retryable: true,
+      raw: { synthetic: true, phase: "pre-turn" }
+    };
+    await this.appendAndPublish(failure);
   }
 
   async cancelTurn(sessionId: SessionId): Promise<void> {
@@ -845,9 +896,18 @@ export class ChatSessionService {
     return this.liveSessions.get(sessionId)?.runtime ?? null;
   }
 
-  /** Sessions currently live in THIS host (e.g. bulk MCP config refresh). */
-  liveSessionIds(): SessionId[] {
-    return [...this.liveSessions.keys()];
+  /**
+   * Sessions currently live in THIS host (e.g. bulk MCP config refresh).
+   * With `providerId`, narrows to that provider's ACTIVE sessions - used for
+   * on-demand model discovery through a live runtime (native Claude).
+   */
+  liveSessionIds(providerId?: string): SessionId[] {
+    if (providerId === undefined) {
+      return [...this.liveSessions.keys()];
+    }
+    return [...this.liveSessions.entries()]
+      .filter(([, live]) => live.session.status === "active" && String(live.model.providerId) === providerId)
+      .map(([sessionId]) => sessionId);
   }
 
   async endSession(sessionId: SessionId, reason: string): Promise<ChatSessionRecord> {

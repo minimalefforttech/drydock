@@ -18,20 +18,15 @@ import type {
   AgentActivitySummary,
   AgentModelCatalog,
   AgentQuestionSummary,
-  BoardColumnSummary,
   ChatSessionSummary,
-  ColumnCategory,
   IsolationSummary,
   McpOverrideSummary,
   McpServerSummary,
-  MemoryCandidateSummary,
   PanelInitState,
   PreviewSummary,
-  RuntimeSummary,
   WorkspacePolicyState,
   WorkTaskSummary
 } from "@drydock/contracts";
-import { COLUMN_CATEGORIES } from "@drydock/contracts";
 
 interface VsCodeApi {
   postMessage(message: unknown): void;
@@ -42,14 +37,6 @@ interface VsCodeApi {
 declare function acquireVsCodeApi(): VsCodeApi;
 
 export const vscode: VsCodeApi = acquireVsCodeApi();
-
-export type TabId = "work" | "plan" | "chat" | "system";
-
-/** Tasks-tab density: full task cards (default) or the compact recents+tree read. */
-export type TasksViewMode = "expanded" | "compact";
-
-/** Compact-tree grouping order: task branches first, or workspace branches first. */
-export type CompactGroupOrder = "task" | "workspace";
 
 // The transcript message/group model moved to the shared chat module (ADR
 // 0012, P3) so the Planner rail folds lines through the same reducer as the
@@ -82,20 +69,24 @@ export function normalizeProviderId(providerId: string): string {
   return providerId === LEGACY_CODEX_PROVIDER_ID ? CODEX_PROVIDER_ID : providerId;
 }
 
-export function fallbackCatalog(): AgentModelCatalog {
-  return {
-    providerId: CODEX_PROVIDER_ID,
-    displayName: "Codex / OpenAI",
-    models: [
-      { id: "gpt-5.5", displayName: "GPT-5.5", isDefault: true, hidden: false },
-      { id: "gpt-5.4", displayName: "GPT-5.4", isDefault: false, hidden: false },
-      { id: "gpt-5.4-mini", displayName: "GPT-5.4-Mini", isDefault: false, hidden: false },
-      { id: "gpt-5.3-codex-spark", displayName: "GPT-5.3-Codex-Spark", isDefault: false, hidden: false }
-    ],
-    refreshedAt: new Date().toISOString(),
-    source: "fallback",
-    diagnostics: ["Static Codex catalog; the backend replaces it via host app-server discovery."]
-  };
+/**
+ * Folds host-sent catalogs into state through one choke point. Every host
+ * message carries the same canonical per-provider map, so a per-provider
+ * `refreshedAt` comparison is enough to stop a slow, older response from
+ * clobbering a fresher one (the historical last-write-wins race). There is no
+ * webview-side fallback catalog: until the host answers, the state is empty
+ * and the UI says so.
+ */
+export function applyProviderCatalogs(state: AppState, incoming: readonly AgentModelCatalog[]): void {
+  const byId = new Map(state.providerCatalogs.map((catalog) => [normalizeProviderId(catalog.providerId), catalog]));
+  for (const catalog of incoming) {
+    const key = normalizeProviderId(catalog.providerId);
+    const existing = byId.get(key);
+    if (existing === undefined || Date.parse(catalog.refreshedAt) >= Date.parse(existing.refreshedAt) || Number.isNaN(Date.parse(existing.refreshedAt))) {
+      byId.set(key, catalog);
+    }
+  }
+  state.providerCatalogs = [...byId.values()];
 }
 
 /**
@@ -103,7 +94,6 @@ export function fallbackCatalog(): AgentModelCatalog {
  * are new for the redesign; the rest carries the pre-redesign session/chat data.
  */
 export interface AppState {
-  activeTab: TabId;
   sessions: ChatSessionSummary[];
   selectedSessionId: string | null;
   chatMessages: ChatMessage[];
@@ -118,10 +108,7 @@ export interface AppState {
   codeBlockWordWrap: boolean;
   /** Agent questions (all statuses); pending ones stack in the attention UI. */
   questions: AgentQuestionSummary[];
-  /** Non-session (probe/run/runtime) lines shown on the System tab. */
-  systemLog: DiagnosticEntry[];
   lastSequence: number;
-  runtimes: readonly RuntimeSummary[];
   providerCatalogs: AgentModelCatalog[];
   promptDraft: string;
   providerId: string;
@@ -132,16 +119,12 @@ export interface AppState {
   lastIsolation: IsolationSummary | null;
   workspacePolicy: WorkspacePolicyState | null;
   selectedWorkspaceSetId: string;
-  /** The plan whose session the Plan tab's rail follows; null = most recent. */
-  planTabPlanId: string | null;
   openFolderNames: readonly string[];
   /** The window's active editor (host-reported), offered as a composer
    * attachment; null when none. Transient - not persisted. */
   activeEditor: ActiveEditorRef | null;
   /** Internal work tasks, newest-first by updatedAt. */
   tasks: WorkTaskSummary[];
-  /** Board columns (task board and subtasks); ordered by sortOrder at render time. */
-  boardColumns: BoardColumnSummary[];
   /**
    * Per-session waiting-on-user signal (Phase 3 attention routing). Maps a
    * sessionId to its active attention reasons ("turn-completed" | "turn-failed"
@@ -151,16 +134,6 @@ export interface AppState {
    * push (see `applySessionAttention`).
    */
   attention: Record<string, readonly string[]>;
-  /**
-   * Agent-proposed memory candidates. All statuses are kept so
-   * the Memory section can render pending cards plus a dim "Memories (N)"
-   * sub-list; newest-first is imposed at render time. Persisted so the section
-   * survives a reload until `memory.list` re-hydrates it; a legacy blob without
-   * it migrates to [].
-   */
-  memoryCandidates: MemoryCandidateSummary[];
-  /** Tags detected in the open folders (quick-add suggestion chips). Transient. */
-  detectedTags: string[];
   /** MCP registry rows + tri-state overrides. Transient; mcp.list hydrates. */
   mcpServers: McpServerSummary[];
   mcpOverrides: McpOverrideSummary[];
@@ -181,15 +154,10 @@ export interface AppState {
    * Persisted; null = no explicit choice (surfaces fall back to derivation).
    */
   activeTaskId: string | null;
-  /** Tasks-tab view density (expanded cards vs the compact tree). */
-  tasksViewMode: TasksViewMode;
-  /** Compact-tree grouping order (task-first vs workspace-first). */
-  compactGroupOrder: CompactGroupOrder;
 }
 
 function freshState(): AppState {
   return {
-    activeTab: "work",
     sessions: [],
     selectedSessionId: null,
     chatMessages: [],
@@ -199,10 +167,8 @@ function freshState(): AppState {
     agentIdleThresholdMs: 5 * 60_000,
     codeBlockWordWrap: true,
     questions: [],
-    systemLog: [],
     lastSequence: 0,
-    runtimes: [],
-    providerCatalogs: [fallbackCatalog()],
+    providerCatalogs: [],
     promptDraft: "",
     providerId: CODEX_PROVIDER_ID,
     selectedModel: "",
@@ -211,27 +177,17 @@ function freshState(): AppState {
     lastIsolation: null,
     workspacePolicy: null,
     selectedWorkspaceSetId: "",
-    planTabPlanId: null,
     openFolderNames: [],
     activeEditor: null,
     tasks: [],
-    boardColumns: [],
     attention: {},
-    memoryCandidates: [],
-    detectedTags: [],
     mcpServers: [],
     mcpOverrides: [],
     taskNotes: [],
     turnActiveSessionIds: new Set<string>(),
     previews: [],
-    activeTaskId: null,
-    tasksViewMode: "expanded",
-    compactGroupOrder: "task"
+    activeTaskId: null
   };
-}
-
-function isTabId(value: unknown): value is TabId {
-  return value === "work" || value === "plan" || value === "chat" || value === "system";
 }
 
 function isTaskNote(value: unknown): value is TaskNote {
@@ -242,19 +198,6 @@ function isTaskNote(value: unknown): value is TaskNote {
     && (note["subtaskId"] === undefined || typeof note["subtaskId"] === "string")
     && typeof note["createdAt"] === "string"
     && typeof note["text"] === "string";
-}
-
-function isColumnCategory(value: unknown): value is ColumnCategory {
-  return typeof value === "string" && (COLUMN_CATEGORIES as readonly string[]).includes(value);
-}
-
-function isBoardColumnSummary(value: unknown): value is BoardColumnSummary {
-  if (typeof value !== "object" || value === null) return false;
-  const column = value as Record<string, unknown>;
-  return typeof column["columnId"] === "string"
-    && typeof column["name"] === "string"
-    && isColumnCategory(column["category"])
-    && typeof column["sortOrder"] === "number";
 }
 
 /**
@@ -270,7 +213,6 @@ export function restore(): AppState {
   }
   const raw = saved as Record<string, unknown>;
 
-  if (isTabId(raw["activeTab"])) state.activeTab = raw["activeTab"];
   if (Array.isArray(raw["sessions"])) state.sessions = [...(raw["sessions"] as ChatSessionSummary[])];
   if (typeof raw["selectedSessionId"] === "string") state.selectedSessionId = raw["selectedSessionId"];
   if (Array.isArray(raw["chatMessages"])) state.chatMessages = [...(raw["chatMessages"] as ChatMessage[])];
@@ -281,7 +223,6 @@ export function restore(): AppState {
   } else if (Array.isArray(raw["transcript"])) {
     state.diagnostics = [...(raw["transcript"] as DiagnosticEntry[])];
   }
-  if (Array.isArray(raw["systemLog"])) state.systemLog = [...(raw["systemLog"] as DiagnosticEntry[])];
   // Subagent groups + chip counters; legacy blobs default to empty.
   if (typeof raw["agentGroups"] === "object" && raw["agentGroups"] !== null) {
     state.agentGroups = { ...(raw["agentGroups"] as Record<string, AgentGroup>) };
@@ -297,10 +238,10 @@ export function restore(): AppState {
   }
   if (Array.isArray(raw["questions"])) state.questions = [...(raw["questions"] as AgentQuestionSummary[])];
   if (typeof raw["lastSequence"] === "number") state.lastSequence = raw["lastSequence"];
-  if (Array.isArray(raw["runtimes"])) state.runtimes = raw["runtimes"] as readonly RuntimeSummary[];
-  state.providerCatalogs = Array.isArray(raw["providerCatalogs"]) && raw["providerCatalogs"].length > 0
-    ? [...(raw["providerCatalogs"] as AgentModelCatalog[])]
-    : [fallbackCatalog()];
+  // providerCatalogs are deliberately NOT restored: a persisted blob from an
+  // older extension is exactly the staleness the host-side cache replaces.
+  // The host answers panel.init with its durable cache within the first round
+  // trip; until then the picker renders its honest loading state.
   if (typeof raw["promptDraft"] === "string") state.promptDraft = raw["promptDraft"];
   if (typeof raw["providerId"] === "string") state.providerId = normalizeProviderId(raw["providerId"]);
   // `selectedModel` (current) or `modelDraft` (older) both name the model.
@@ -327,7 +268,6 @@ export function restore(): AppState {
     state.workspacePolicy = policyWithoutSecurity;
   }
   if (typeof raw["selectedWorkspaceSetId"] === "string") state.selectedWorkspaceSetId = raw["selectedWorkspaceSetId"];
-  if (typeof raw["planTabPlanId"] === "string") state.planTabPlanId = raw["planTabPlanId"];
   // Legacy `plans`/`selectedPlanId` keys (retired Stage-5 plan gating) are
   // ignored: old persisted blobs simply drop them.
   if (Array.isArray(raw["openFolderNames"])) {
@@ -335,11 +275,6 @@ export function restore(): AppState {
   }
   // `tasks` is new for Phase 2; a legacy blob without it defaults to [].
   if (Array.isArray(raw["tasks"])) state.tasks = [...(raw["tasks"] as WorkTaskSummary[])];
-  // `boardColumns` is newer than some persisted blobs; validate array-of-objects
-  // shape defensively, else drop to [] (board.state re-hydrates it regardless).
-  if (Array.isArray(raw["boardColumns"]) && raw["boardColumns"].every(isBoardColumnSummary)) {
-    state.boardColumns = [...(raw["boardColumns"] as BoardColumnSummary[])];
-  }
   // `attention` is new for Phase 3; keep only string→string[] entries, drop the
   // rest (a legacy blob without it defaults to {}).
   const attention = raw["attention"];
@@ -350,29 +285,16 @@ export function restore(): AppState {
       }
     }
   }
-  // `memoryCandidates` is a later addition; a legacy blob without it
-  // defaults to []. memory.list re-hydrates it on boot regardless.
-  if (Array.isArray(raw["memoryCandidates"])) {
-    state.memoryCandidates = [...(raw["memoryCandidates"] as MemoryCandidateSummary[])];
-  }
   if (Array.isArray(raw["taskNotes"])) {
     state.taskNotes = raw["taskNotes"].filter(isTaskNote);
   }
-  // Tasks-tab view prefs are later additions; legacy blobs keep the defaults.
   if (typeof raw["activeTaskId"] === "string") state.activeTaskId = raw["activeTaskId"];
-  if (raw["tasksViewMode"] === "expanded" || raw["tasksViewMode"] === "compact") {
-    state.tasksViewMode = raw["tasksViewMode"];
-  }
-  if (raw["compactGroupOrder"] === "task" || raw["compactGroupOrder"] === "workspace") {
-    state.compactGroupOrder = raw["compactGroupOrder"];
-  }
   return state;
 }
 
 /** Persists the current state. Maps serialize as entry arrays. */
 export function persist(state: AppState): void {
   vscode.setState({
-    activeTab: state.activeTab,
     sessions: state.sessions,
     selectedSessionId: state.selectedSessionId,
     chatMessages: state.chatMessages,
@@ -382,10 +304,7 @@ export function persist(state: AppState): void {
     agentIdleThresholdMs: state.agentIdleThresholdMs,
     codeBlockWordWrap: state.codeBlockWordWrap,
     questions: state.questions,
-    systemLog: state.systemLog,
     lastSequence: state.lastSequence,
-    runtimes: state.runtimes,
-    providerCatalogs: state.providerCatalogs,
     promptDraft: state.promptDraft,
     providerId: state.providerId,
     selectedModel: state.selectedModel,
@@ -394,23 +313,17 @@ export function persist(state: AppState): void {
     lastIsolation: state.lastIsolation,
     workspacePolicy: state.workspacePolicy,
     selectedWorkspaceSetId: state.selectedWorkspaceSetId,
-    planTabPlanId: state.planTabPlanId,
     openFolderNames: state.openFolderNames,
     tasks: state.tasks,
-    boardColumns: state.boardColumns,
     attention: state.attention,
-    memoryCandidates: state.memoryCandidates,
     taskNotes: state.taskNotes,
-    activeTaskId: state.activeTaskId,
-    tasksViewMode: state.tasksViewMode,
-    compactGroupOrder: state.compactGroupOrder
+    activeTaskId: state.activeTaskId
   });
 }
 
 /** Applies the host `panel.init` payload to state (openFolderNames, catalogs). */
 export function applyInitState(state: AppState, init: PanelInitState): void {
-  state.runtimes = init.runtimes;
-  state.providerCatalogs = [...init.providerCatalogs];
+  applyProviderCatalogs(state, init.providerCatalogs);
   state.openFolderNames = [...init.openFolderNames];
   state.activeEditor = init.activeEditor ?? null;
   state.agentIdleThresholdMs = init.agentIdleThresholdMs;
@@ -438,25 +351,6 @@ export function upsertTask(state: AppState, task: WorkTaskSummary): void {
   state.tasks.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 }
 
-/** Upserts every task in `tasks` (e.g. a `board.moveCard`/`board.state` response). */
-export function upsertTasks(state: AppState, tasks: readonly WorkTaskSummary[]): void {
-  for (const task of tasks) upsertTask(state, task);
-}
-
-/**
- * Upserts one memory candidate by id (replace-in-place, else prepend). Ordering
- * for display is imposed at render time (newest-first by createdAt), so this
- * only keeps the list de-duplicated.
- */
-export function upsertMemoryCandidate(state: AppState, candidate: MemoryCandidateSummary): void {
-  const index = state.memoryCandidates.findIndex((c) => c.memoryCandidateId === candidate.memoryCandidateId);
-  if (index === -1) {
-    state.memoryCandidates.unshift(candidate);
-  } else {
-    state.memoryCandidates[index] = candidate;
-  }
-}
-
 /**
  * Applies a host `session.attention` push. Empty reasons clears the session's
  * waiting signal (delete the key); a non-empty list replaces it. Returns whether
@@ -476,19 +370,6 @@ export function applySessionAttention(state: AppState, sessionId: string, reason
   return true;
 }
 
-/**
- * Highest-priority attention reason for a session (failed > approval > done),
- * or null when nothing is waiting. Drives the single Tasks-row marker chip.
- */
-export function topAttentionReason(state: AppState, sessionId: string): string | null {
-  const reasons = state.attention[sessionId];
-  if (reasons === undefined || reasons.length === 0) return null;
-  if (reasons.includes("turn-failed")) return "turn-failed";
-  if (reasons.includes("access-request")) return "access-request";
-  if (reasons.includes("turn-completed")) return "turn-completed";
-  return reasons[0] ?? null;
-}
-
 /** Upserts one agent question by id (replace-in-place, else append - asked order). */
 export function upsertQuestion(state: AppState, question: AgentQuestionSummary): void {
   const index = state.questions.findIndex((candidate) => candidate.questionId === question.questionId);
@@ -503,6 +384,37 @@ export function currentSession(state: AppState): ChatSessionSummary | undefined 
   return state.selectedSessionId === null
     ? undefined
     : state.sessions.find((session) => session.sessionId === state.selectedSessionId);
+}
+
+/**
+ * The task that owns a session, by the rules every chat surface already uses:
+ * a direct `linkedSessionIds` match wins; then a subtask link (a subtask
+ * session belongs to its parent task); then the session's `parentSessionId`
+ * chain (a spawned child may not be linked itself). Cycle-guarded, since
+ * session records are host-provided. Returns undefined for an orphan chat.
+ *
+ * Pure derivation over state - added for the chat rail's task-attribution line
+ * (UX overhaul P2); the Edit tab keeps its own narrower note-scoping rule.
+ */
+export function owningTaskForSession(state: AppState, sessionId: string | null): WorkTaskSummary | undefined {
+  if (sessionId === null) return undefined;
+  const direct = state.tasks.find((task) => task.linkedSessionIds.includes(sessionId));
+  if (direct !== undefined) return direct;
+  for (const task of state.tasks) {
+    for (const subtask of task.subtasks) {
+      if (subtask.linkedSessionIds.includes(sessionId)) return task;
+    }
+  }
+  const visited = new Set<string>([sessionId]);
+  let current = state.sessions.find((session) => session.sessionId === sessionId)?.parentSessionId;
+  while (current !== undefined && !visited.has(current)) {
+    visited.add(current);
+    const ancestorId = current;
+    const viaAncestor = state.tasks.find((task) => task.linkedSessionIds.includes(ancestorId));
+    if (viaAncestor !== undefined) return viaAncestor;
+    current = state.sessions.find((session) => session.sessionId === ancestorId)?.parentSessionId;
+  }
+  return undefined;
 }
 
 export function isSessionLiveish(state: AppState, sessionId: string): boolean {

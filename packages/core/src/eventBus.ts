@@ -42,7 +42,23 @@ export type ProductBusEvent =
   /** Planner (ADR 0012): a plan, its artifacts, or its annotations changed. */
   | { readonly kind: "planner-changed"; readonly planId: PlanId }
   /** A plan's session booted (new or revived): surfaces auto-open the panel. */
-  | { readonly kind: "planner-session-started"; readonly planId: PlanId; readonly sessionId: SessionId };
+  | { readonly kind: "planner-session-started"; readonly planId: PlanId; readonly sessionId: SessionId }
+  /** Active-task spine: the one task every surface follows moved (null = none). */
+  | { readonly kind: "active-task-changed"; readonly taskId: TaskId | null }
+  /**
+   * One stage of a session boot reached (UX overhaul P4). Emitted from the host
+   * services that sequence the boot, never from a transport, so the composer's
+   * timeline and the rail's reconnect spinner render the same stages whatever
+   * the agent CLI does with its stdout.
+   */
+  | { readonly kind: "boot-progress"; readonly sessionId: SessionId; readonly stage: BootStage };
+
+/**
+ * Boot timeline stages. `mount` and `clone` are the two shapes of the same
+ * middle step (live roots mounted vs repositories cloned into the disposable
+ * workspace), so exactly one of them is emitted per boot.
+ */
+export type BootStage = "create" | "mount" | "clone" | "start";
 
 export type ProductBusHandler = (event: ProductBusEvent) => void;
 
@@ -63,6 +79,33 @@ export class ProductEventBus {
       } catch {
         // Subscribers are isolated; a throwing handler must not affect others.
       }
+    }
+  }
+}
+
+/**
+ * Emits one session's boot stages, at most once each (UX overhaul P4).
+ *
+ * Progress reporting is decoration: a boot that fails simply stops emitting,
+ * and a missing bus (partial test compositions) reports nothing rather than
+ * throwing into the boot path. Repeats are swallowed so a shared seam - the
+ * same prepareWorkspace serving start and resume - can report defensively.
+ */
+export class BootStageReporter {
+  private readonly seen = new Set<BootStage>();
+
+  constructor(
+    private readonly bus: ProductEventBus | undefined,
+    private readonly sessionId: SessionId
+  ) {}
+
+  stage(stage: BootStage): void {
+    if (this.bus === undefined || this.seen.has(stage)) return;
+    this.seen.add(stage);
+    try {
+      this.bus.publish({ kind: "boot-progress", sessionId: this.sessionId, stage });
+    } catch {
+      // Best-effort: a broken bus must never fail the boot it is describing.
     }
   }
 }

@@ -17,7 +17,15 @@ import { createBackend } from "./compositionRoot.js";
 import { OutputChannelLogger } from "./outputChannelLogger.js";
 import { AgentsPanelProvider } from "./webview/agentsPanelProvider.js";
 import { BASELINE_SCHEME, BaselineContentProvider } from "./webview/baselineContentProvider.js";
+import { ChatRailViewProvider } from "./webview/chatRailViewProvider.js";
 import { ControlPanelProvider } from "./webview/controlPanelProvider.js";
+import { RailViewProvider, RAIL_VIEW_TYPES, type RailViewKind } from "./webview/railViewProvider.js";
+import { TaskHubPanelProvider } from "./webview/taskHubPanelProvider.js";
+import { ConfigurePanelProvider } from "./webview/configurePanelProvider.js";
+import { createMcpProjectOverlayReader } from "./services/mcpProjectOverlay.js";
+import { registerRailCommands } from "./webview/railCommands.js";
+import { registerQuickChat } from "./services/quickChat.js";
+import { registerWorkspaceMismatchForBackend } from "./services/workspaceMismatchHost.js";
 import { MEMORY_SCHEME, MemoryContentProvider } from "./webview/memoryContentProvider.js";
 import { PlannerPanelProvider } from "./webview/plannerPanelProvider.js";
 import { createAspectOverlayReader } from "./services/plannerAspectOverlay.js";
@@ -97,6 +105,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // into the recipe registry the same way.
   const recipeOverlays = createRecipeOverlayReader(
     policyWorkspaceRoots(".drydock/recipes.json"),
+    logger,
+    () => vscode.workspace.isTrusted,
+    policyOverlayFile
+  );
+  // Project MCP servers: `.drydock/mcp.json` merges read-only into the
+  // Configure panel with `project` provenance, mirroring the recipe packs.
+  const mcpProjectOverlays = createMcpProjectOverlayReader(
+    policyWorkspaceRoots(".drydock/mcp.json"),
     logger,
     () => vscode.workspace.isTrusted,
     policyOverlayFile
@@ -207,8 +223,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   }));
 
-  const panel = new ControlPanelProvider(context.extensionUri, backend, logger);
-  context.subscriptions.push(vscode.window.registerWebviewViewProvider(ControlPanelProvider.viewType, panel));
+  const panel = new ControlPanelProvider(backend, logger);
+  const chatRail = new ChatRailViewProvider(context.extensionUri, panel, backend, logger);
+  context.subscriptions.push(vscode.window.registerWebviewViewProvider(ChatRailViewProvider.viewType, chatRail));
+  context.subscriptions.push(chatRail);
+  for (const kind of ["tasks", "recents", "workspaces"] as const satisfies readonly RailViewKind[]) {
+    const rail = new RailViewProvider(context.extensionUri, panel, kind, backend, logger);
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(RAIL_VIEW_TYPES[kind], rail), rail);
+  }
+  context.subscriptions.push(...registerRailCommands(backend, logger));
+  context.subscriptions.push(...registerQuickChat(backend, logger));
+  context.subscriptions.push(registerWorkspaceMismatchForBackend(backend, logger));
+  const taskHubPanel = new TaskHubPanelProvider(context.extensionUri, panel, backend, logger);
+  context.subscriptions.push(taskHubPanel);
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.taskHub.open", async (taskId?: unknown) => {
+    if (!backend.available) {
+      void vscode.window.showErrorMessage(backend.reason);
+      return;
+    }
+    await taskHubPanel.open(typeof taskId === "string" ? taskId : undefined);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.taskHub.back", () => taskHubPanel.back()));
+  const configurePanel = new ConfigurePanelProvider(context.extensionUri, backend, logger, mcpProjectOverlays, plannerAspectOverlays);
+  context.subscriptions.push(configurePanel);
+  context.subscriptions.push(vscode.commands.registerCommand("drydock.configure.open", async () => {
+    await configurePanel.open();
+  }));
   if (backend.available) {
     // Serves the diff editor's read-only baseline (left) pane from the blob store.
     context.subscriptions.push(
@@ -442,14 +482,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await agentsPanel.open(startGuide);
   }));
   // Planner (ADR 0012): the editor panel owns intake, outputs, and artifact
-  // review; the Drydock Plan tab remains its planning-chat sidebar. Selection
-  // is synchronized in both directions without moving focus during panel use.
-  const plannerPanel = new PlannerPanelProvider(
-    context.extensionUri,
-    backend,
-    logger,
-    (planId, reveal) => panel.showPlan(planId, reveal)
-  );
+  // review. It is the only plan surface since the Control Panel's Plan tab
+  // retired, so selection lives entirely inside the panel.
+  const plannerPanel = new PlannerPanelProvider(context.extensionUri, backend, logger);
   context.subscriptions.push(vscode.commands.registerCommand("drydock.planner.open", async (planId?: unknown, options?: unknown) => {
     const startGuide = typeof options === "object" && options !== null
       && (options as { readonly startGuide?: unknown }).startGuide === true;

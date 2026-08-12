@@ -1,8 +1,8 @@
 /**
  * Shared chat transcript model (ADR 0012, P3 extraction).
  *
- * The line→message reducer both sidebar chat surfaces fold transcript lines
- * through: the Edit tab (via views/chatTab.ts) and the Plan tab. One code
+ * The line→message reducer every chat surface folds transcript lines
+ * through: the chat rail (via views/chatTab.ts) and the Planner's rail. One code
  * path means a routing rule fixed once is fixed everywhere. The folder owns
  * the live-turn bookkeeping (streaming assistant row, running-command
  * coalescing, subagent group tree) and mutates a caller-owned store - the

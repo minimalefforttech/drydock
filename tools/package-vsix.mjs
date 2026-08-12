@@ -34,8 +34,6 @@ await run(process.execPath, [path.join(root, "tools", "bundle-extension.mjs")], 
 
 const stagedFiles = [
   "dist/extension.js",
-  "dist/webview/main.js",
-  "dist/webview/main.css",
   "dist/webview/planDocsMermaid.js",
   "dist/webview/taskReview.js",
   "dist/webview/taskReview.css",
@@ -47,6 +45,14 @@ const stagedFiles = [
   "dist/webview/planner.css",
   "dist/webview/agents.js",
   "dist/webview/agents.css",
+  "dist/webview/chatRail.js",
+  "dist/webview/chatRail.css",
+  "dist/webview/rail.js",
+  "dist/webview/rail.css",
+  "dist/webview/taskHub.js",
+  "dist/webview/taskHub.css",
+  "dist/webview/configure.js",
+  "dist/webview/configure.css",
   "media/icon.svg"
 ];
 for (const relativePath of stagedFiles) {
@@ -71,8 +77,6 @@ const stagedManifest = {
     "README.md",
     "LICENSE.txt",
     "dist/extension.js",
-    "dist/webview/main.js",
-    "dist/webview/main.css",
     "dist/webview/planDocsMermaid.js",
     "dist/webview/taskReview.js",
     "dist/webview/taskReview.css",
@@ -84,6 +88,14 @@ const stagedManifest = {
     "dist/webview/planner.css",
     "dist/webview/agents.js",
     "dist/webview/agents.css",
+    "dist/webview/chatRail.js",
+    "dist/webview/chatRail.css",
+    "dist/webview/rail.js",
+    "dist/webview/rail.css",
+    "dist/webview/taskHub.js",
+    "dist/webview/taskHub.css",
+    "dist/webview/configure.js",
+    "dist/webview/configure.css",
     "media/icon.svg"
   ]
 };
@@ -147,8 +159,6 @@ function assertPackagedFiles(stdout) {
     "extension/readme.md",
     "extension/LICENSE.txt",
     "extension/dist/extension.js",
-    "extension/dist/webview/main.js",
-    "extension/dist/webview/main.css",
     "extension/dist/webview/planDocsMermaid.js",
     "extension/dist/webview/taskReview.js",
     "extension/dist/webview/taskReview.css",
@@ -160,6 +170,14 @@ function assertPackagedFiles(stdout) {
     "extension/dist/webview/planner.css",
     "extension/dist/webview/agents.js",
     "extension/dist/webview/agents.css",
+    "extension/dist/webview/chatRail.js",
+    "extension/dist/webview/chatRail.css",
+    "extension/dist/webview/rail.js",
+    "extension/dist/webview/rail.css",
+    "extension/dist/webview/taskHub.js",
+    "extension/dist/webview/taskHub.css",
+    "extension/dist/webview/configure.js",
+    "extension/dist/webview/configure.css",
     "extension/media/icon.svg"
   ]);
   for (const entry of required) {

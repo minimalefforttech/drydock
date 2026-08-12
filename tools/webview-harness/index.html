@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Webview harness - Drydock panel</title>
+  <title>Webview harness - Drydock chat rail</title>
   <style>
     /* Dark-theme values for the --vscode-* variables the real panel CSS uses.
        A missing variable degrades to the fallback in var(), so this subset only
@@ -49,9 +49,9 @@
     }
     html, body { margin: 0; height: 100%; background: #1b1b1b; }
     body { display: flex; gap: 16px; padding: 16px; box-sizing: border-box; font-family: var(--vscode-font-family); }
-    /* Sidebar-shaped stage: the real panel renders inside at ~VS Code width.
-       Padding mirrors the real webview body (styles.css: 0 10px 12px) so the
-       tab bar's full-bleed negative margins land exactly like in VS Code. */
+    /* Sidebar-shaped stage: the real chat rail renders inside at ~VS Code
+       width. Padding mirrors the real webview body so full-bleed rows land
+       exactly like in VS Code. */
     #stage {
       width: 340px; height: calc(100vh - 32px); background: var(--vscode-sideBar-background);
       border: 1px solid var(--vscode-panel-border); display: flex; flex-direction: column; overflow: hidden;
@@ -60,19 +60,19 @@
     #stage-note { color: #7f7f7f; font-size: 12px; max-width: 260px; }
     #stage-note code { color: #d7ba7d; }
   </style>
-  <link rel="stylesheet" href="/assets/main.css" />
+  <link rel="stylesheet" href="/assets/chatRail.css" />
 </head>
 <body class="vscode-dark">
   <div id="stage">
     <div id="app" data-nonce="" data-mermaid-src="/assets/planDocsMermaid.js"></div>
   </div>
   <div id="stage-note">
-    <p><strong>Webview visual-test harness.</strong> Real bundled panel, mock host, dummy fixtures.</p>
+    <p><strong>Webview visual-test harness.</strong> Real bundled chat rail, mock host, dummy fixtures.</p>
     <p>Drive scenarios from the console: <code>__harness.scenario.streamTurn("s-live")</code>,
     <code>__harness.scenario.attention("s-waiting", ["turn-completed"])</code>,
     <code>__harness.scenario.accessRequest({...})</code>.</p>
   </div>
   <script src="/harness.js"></script>
-  <script src="/assets/main.js"></script>
+  <script src="/assets/chatRail.js"></script>
 </body>
 </html>

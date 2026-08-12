@@ -24,19 +24,6 @@ await bundle(
   { platform: "node", format: "esm", target: "node22", external: ["vscode"] }
 );
 
-// Webview script: browser IIFE, contracts bundled in.
-await bundle(
-  path.join(extensionRoot, "webview-ui", "src", "main.ts"),
-  path.join(distRoot, "webview", "main.js"),
-  browserOptions
-);
-
-// Webview styles.
-await bundle(
-  path.join(extensionRoot, "webview-ui", "src", "styles.css"),
-  path.join(distRoot, "webview", "main.css")
-);
-
 // Task-review panel: browser IIFE + styles - a standalone editor-panel
 // entry, contracts bundled in.
 await bundle(
@@ -95,6 +82,53 @@ await bundle(
 await bundle(
   path.join(extensionRoot, "webview-ui", "src", "agents.css"),
   path.join(distRoot, "webview", "agents.css")
+);
+
+// Configure panel: browser IIFE + styles, own config.* dispatch.
+await bundle(
+  path.join(extensionRoot, "webview-ui", "src", "configure.ts"),
+  path.join(distRoot, "webview", "configure.js"),
+  browserOptions
+);
+await bundle(
+  path.join(extensionRoot, "webview-ui", "src", "configure.css"),
+  path.join(distRoot, "webview", "configure.css")
+);
+
+// Task hub (singleton editor panel for the active task): browser IIFE +
+// styles, same shape as the other editor-panel pairs.
+await bundle(
+  path.join(extensionRoot, "webview-ui", "src", "taskHub.ts"),
+  path.join(distRoot, "webview", "taskHub.js"),
+  browserOptions
+);
+await bundle(
+  path.join(extensionRoot, "webview-ui", "src", "taskHub.css"),
+  path.join(distRoot, "webview", "taskHub.css")
+);
+
+// Left rail (tasks/recents/workspaces sidebar views): one shared bundle,
+// mounted per-view via body[data-view].
+await bundle(
+  path.join(extensionRoot, "webview-ui", "src", "rail.ts"),
+  path.join(distRoot, "webview", "rail.js"),
+  browserOptions
+);
+await bundle(
+  path.join(extensionRoot, "webview-ui", "src", "rail.css"),
+  path.join(distRoot, "webview", "rail.css")
+);
+
+// Chat rail (sidebar chat view): browser IIFE + styles - the standalone host
+// for the shared chat components, attached to the control-panel dispatch.
+await bundle(
+  path.join(extensionRoot, "webview-ui", "src", "chatRail.ts"),
+  path.join(distRoot, "webview", "chatRail.js"),
+  browserOptions
+);
+await bundle(
+  path.join(extensionRoot, "webview-ui", "src", "chatRail.css"),
+  path.join(distRoot, "webview", "chatRail.css")
 );
 
 // Mermaid renderer: a separate, minified bundle the plan-docs webview injects

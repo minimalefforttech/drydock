@@ -51,6 +51,22 @@ export interface AppServerNormalizerContext {
 export class CodexAppServerEventNormalizer {
   constructor(private readonly ids: IdGenerator, private readonly clock: Clock) {}
 
+  /**
+   * Transport-synthesized failure (stall watchdog, protocol drift): a single
+   * retryable agent.error attributed to the root agent. The caller ends the
+   * stream after yielding it; the orchestrator's terminal fallback closes the
+   * turn.
+   */
+  syntheticError(context: AppServerNormalizerContext, code: string, message: string): AgentEvent {
+    return {
+      ...this.base("agent.error", context, { synthesized: true }),
+      type: "agent.error",
+      code,
+      message,
+      retryable: true
+    };
+  }
+
   normalize(message: JsonRpcMessage, context: AppServerNormalizerContext): AgentEvent[] {
     const method = message.method ?? "";
     const params = objectValue(message.params);

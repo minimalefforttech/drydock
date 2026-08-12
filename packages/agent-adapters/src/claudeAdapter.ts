@@ -3,9 +3,13 @@
  *
  * Runs Claude Code non-interactively inside an already-created isolated
  * runtime (`claude -p --output-format stream-json`), with the prompt on stdin
- * so it never appears in host argv. Multi-turn continuity uses the provider
- * session id with `--resume`. Host operations stay inert; prompts only ever
- * execute through the runtime executor.
+ * so it never appears in host argv. The stream-json lines are parsed LIVE via
+ * the executor's per-line hook, so events reach the UI while the turn runs and
+ * the turn's outcome never depends on a buffered (and truncatable) stdout
+ * capture. Multi-turn continuity uses the provider session id with `--resume`;
+ * the id is captured from the first line that carries it, so even a cancelled
+ * or failed turn keeps the conversation resumable. Host operations stay inert;
+ * prompts only ever execute through the runtime executor.
  */
 
 import type {
@@ -17,9 +21,11 @@ import type {
   AgentContextMessage,
   AgentEvent,
   AgentModelCatalog,
+  AgentModelSummary,
   AgentPrompt,
   AuthValidationResult,
   CommandResult,
+  JsonObject,
   ProviderId,
   RunId,
   RuntimeHandle,
@@ -29,9 +35,16 @@ import { asId } from "@drydock/contracts";
 import type { Clock, IdGenerator, Logger, RawStreamSink } from "@drydock/core";
 import { ClaudeEventNormalizer } from "./claudeEventNormalizer.js";
 
-/** Runtime exec port with cancellation; DockerSandboxRuntimeAdapter satisfies it. */
+/** Runtime exec port with cancellation and live stdout lines; DockerSandboxRuntimeAdapter satisfies it. */
 export interface CancellableRuntimeExecutor {
-  exec(handle: RuntimeHandle, args: readonly string[], timeoutMs: number, input?: string, signal?: AbortSignal): Promise<CommandResult>;
+  exec(
+    handle: RuntimeHandle,
+    args: readonly string[],
+    timeoutMs: number,
+    input?: string,
+    signal?: AbortSignal,
+    onStdoutLine?: (line: string) => void
+  ): Promise<CommandResult>;
 }
 
 /**
@@ -45,8 +58,6 @@ export interface ClaudeWireConfig {
   readonly tokenFile: string;
   /** Background/fast-model slot override so the rider endpoint never sees Anthropic model ids. */
   readonly smallFastModel?: string;
-  /** Model used when a turn does not select one (rider endpoints reject Claude defaults). */
-  readonly defaultModel?: string;
 }
 
 export interface ClaudeAdapterOptions {
@@ -54,23 +65,26 @@ export interface ClaudeAdapterOptions {
   readonly clock: Clock;
   readonly logger: Logger;
   readonly runtimeExecutor: CancellableRuntimeExecutor;
-  readonly timeoutMs?: number;
+  /** Hard cap on a single turn's wall clock (default 60 min). */
+  readonly turnTimeoutMs?: number;
+  /**
+   * Stall watchdog: end the turn as a recoverable failure after this much
+   * stdout silence (default 10 min - past Claude Code's own tool timeouts,
+   * so a healthy long tool run does not trip it). 0 disables it.
+   */
+  readonly inactivityTimeoutMs?: number;
   /** Optional debug tee of the raw exec stream for the chat tab's raw view. */
   readonly rawSink?: RawStreamSink;
   /** Rider identity; defaults to the native "claude" provider. */
   readonly providerId?: string;
   /** Present only for ridden providers; absent means native Anthropic auth via the sandbox proxy. */
   readonly wire?: ClaudeWireConfig;
-  /** Static catalog override for ridden providers (listModels returns it verbatim). */
-  readonly catalog?: AgentModelCatalog;
+  /**
+   * Live catalog source for ridden providers (host-side registry discovery).
+   * Native Claude discovers models inside the session runtime instead.
+   */
+  readonly catalogSource?: () => Promise<AgentModelCatalog>;
 }
-
-export const CLAUDE_MODEL_CATALOG_MODELS = [
-  { id: "claude-opus-4-8", displayName: "Claude Opus 4.8", isDefault: true, hidden: false },
-  { id: "claude-fable-5", displayName: "Claude Fable 5", isDefault: false, hidden: false },
-  { id: "claude-sonnet-5", displayName: "Claude Sonnet 5", isDefault: false, hidden: false },
-  { id: "claude-haiku-4-5", displayName: "Claude Haiku 4.5", isDefault: false, hidden: false }
-] as const;
 
 interface ClaudeConnectionState {
   claudeSessionId?: string;
@@ -78,22 +92,33 @@ interface ClaudeConnectionState {
 }
 
 interface ActiveRun {
-  readonly result: Promise<CommandResult>;
+  readonly stream: AgentEventQueue;
   readonly controller: AbortController;
   readonly connectionId: string;
+  /** Resolves with the exec result or the thrown launch error once settled; assigned right after launch. */
+  settled: Promise<{ readonly result?: CommandResult; readonly error?: unknown }>;
+  quietTimedOut: boolean;
+  sawTerminal: boolean;
+  droppedLines: number;
 }
+
+const DEFAULT_TURN_TIMEOUT_MS = 3_600_000;
+const DEFAULT_INACTIVITY_TIMEOUT_MS = 600_000;
+const MODEL_LIST_TIMEOUT_MS = 30_000;
 
 export class ClaudeAdapter implements AgentAdapter {
   readonly providerId: ProviderId;
   private readonly normalizer: ClaudeEventNormalizer;
-  private readonly timeoutMs: number;
+  private readonly turnTimeoutMs: number;
+  private readonly inactivityTimeoutMs: number;
   private readonly connections = new Map<string, ClaudeConnectionState>();
   private readonly runs = new Map<string, ActiveRun>();
 
   constructor(private readonly options: ClaudeAdapterOptions) {
     this.providerId = asId<"ProviderId">(options.providerId ?? "claude");
     this.normalizer = new ClaudeEventNormalizer(options.ids, options.clock);
-    this.timeoutMs = options.timeoutMs ?? 360_000;
+    this.turnTimeoutMs = options.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
+    this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
   }
 
   async detect(): Promise<AdapterDetectionResult> {
@@ -135,8 +160,26 @@ export class ClaudeAdapter implements AgentAdapter {
     return connection;
   }
 
-  async listModels(_connection: AgentConnection): Promise<AgentModelCatalog> {
-    return this.options.catalog ?? claudeModelCatalog(this.options.clock.isoNow());
+  /**
+   * Live model discovery. Native Claude asks api.anthropic.com/v1/models from
+   * INSIDE the session runtime (the sandbox proxy injects the credential; the
+   * host never sees it). Riders return their host-side registry discovery.
+   * Failures return an "unavailable" catalog carrying the reason - never an
+   * invented list.
+   */
+  async listModels(connection: AgentConnection): Promise<AgentModelCatalog> {
+    if (this.options.catalogSource !== undefined) {
+      return this.options.catalogSource();
+    }
+    if (this.options.wire !== undefined) {
+      return this.unavailableCatalog("This provider has no live model discovery wired; type a model id from its docs.");
+    }
+    const result = await this.options.runtimeExecutor.exec(
+      connection.runtime,
+      ["node", "-e", ANTHROPIC_MODELS_SCRIPT],
+      MODEL_LIST_TIMEOUT_MS
+    );
+    return this.parseModelProbe(result);
   }
 
   /** Replayed history is delivered as a context preamble on the next prompt. */
@@ -149,35 +192,99 @@ export class ClaudeAdapter implements AgentAdapter {
 
   /**
    * Starts the turn without awaiting it so the orchestrator can register the
-   * run id and cancel mid-execution; streamEvents awaits the buffered result.
+   * run id and cancel mid-execution; streamEvents consumes the live event
+   * queue the exec's stdout lines feed.
    */
   async sendPrompt(connection: AgentConnection, prompt: AgentPrompt): Promise<RunId> {
     const state = this.requiredState(connection);
     const runId = this.options.ids.runId();
     const requested = typeof prompt.metadata?.["model"] === "string" ? prompt.metadata["model"] : undefined;
-    // Ridden endpoints reject Claude's own default model ids, so a rider turn
-    // always pins a model (the turn's choice, else the rider default).
-    const model = requested !== undefined && requested.length > 0
-      ? requested
-      : this.options.wire?.defaultModel;
+    const model = requested !== undefined && requested.length > 0 ? requested : undefined;
+    // Ridden endpoints reject Claude's own default model ids, and there is no
+    // compiled-in default to fall back to - the turn must pick a model.
+    if (model === undefined && this.options.wire !== undefined) {
+      throw new Error(
+        `${String(this.providerId)} needs an explicit model for this turn. Pick one from the model menu (Refresh models if the list is empty), or type a model id.`
+      );
+    }
     const claudeArgs = [
       "claude",
       "-p",
       "--output-format", "stream-json",
       "--verbose",
       "--dangerously-skip-permissions",
-      ...(model === undefined || model.length === 0 ? [] : ["--model", model]),
+      ...(model === undefined ? [] : ["--model", model]),
       ...(state.claudeSessionId === undefined ? [] : ["--resume", state.claudeSessionId])
     ];
     const args = this.options.wire === undefined ? claudeArgs : wrapWithWire(claudeArgs, this.options.wire);
     const controller = new AbortController();
     const input = this.promptWithContext(state, prompt.text);
+    const stream = new AgentEventQueue();
+    const context = {
+      sessionId: connection.sessionId,
+      runId,
+      agentRole: connection.agentRole,
+      runtimeId: connection.runtime.runtimeId
+    };
+
+    // Debug tee: reset the session's raw buffer at launch and append each
+    // stream-json line as it arrives, so the raw view is live for Claude too.
+    this.options.rawSink?.beginTurn(connection.sessionId);
+
+    const run: ActiveRun = {
+      stream,
+      controller,
+      connectionId: connection.connectionId,
+      settled: Promise.resolve({}),
+      quietTimedOut: false,
+      sawTerminal: false,
+      droppedLines: 0
+    };
+
+    let quietTimer: NodeJS.Timeout | undefined;
+    const armQuietTimer = (): void => {
+      if (this.inactivityTimeoutMs <= 0) return;
+      if (quietTimer !== undefined) clearTimeout(quietTimer);
+      quietTimer = setTimeout(() => {
+        run.quietTimedOut = true;
+        this.options.logger.warn("claude exec went quiet; aborting turn", {
+          runId,
+          quietMs: this.inactivityTimeoutMs
+        });
+        controller.abort();
+      }, this.inactivityTimeoutMs);
+    };
+
+    const onLine = (line: string): void => {
+      armQuietTimer();
+      this.options.rawSink?.write(connection.sessionId, `${line}\n`);
+      const parsed = this.normalizer.parseLine(line, context);
+      if (parsed.dropped === true) {
+        run.droppedLines += 1;
+        return;
+      }
+      if (parsed.claudeSessionId !== undefined) {
+        state.claudeSessionId = parsed.claudeSessionId;
+      }
+      for (const event of parsed.events) {
+        if (event.type === "agent.error" || event.type === "agent.done") {
+          run.sawTerminal = true;
+        }
+        stream.push(event);
+      }
+    };
+
     this.options.logger.info("claude exec prompt starting", { runId, runtimeId: connection.runtime.runtimeId });
-    const result = this.options.runtimeExecutor.exec(connection.runtime, args, this.timeoutMs, input, controller.signal);
-    // Failures surface through streamEvents; an unhandled rejection here would
-    // crash the host before the stream consumer attaches.
-    result.catch(() => undefined);
-    this.runs.set(runId, { result, controller, connectionId: connection.connectionId });
+    armQuietTimer();
+    run.settled = this.options.runtimeExecutor
+      .exec(connection.runtime, args, this.turnTimeoutMs, input, controller.signal, onLine)
+      .then((result) => ({ result }), (error: unknown) => ({ error }))
+      .then((outcome) => {
+        if (quietTimer !== undefined) clearTimeout(quietTimer);
+        stream.end();
+        return outcome;
+      });
+    this.runs.set(runId, run);
     return runId;
   }
 
@@ -185,61 +292,83 @@ export class ClaudeAdapter implements AgentAdapter {
     const run = this.runs.get(runId);
     this.runs.delete(runId);
     if (!run) {
-      yield this.errorEvent(connection, runId, "RUN_NOT_FOUND", `No buffered Claude exec result was found for ${runId}.`, false);
+      yield this.errorEvent(connection, runId, "RUN_NOT_FOUND", `No live Claude exec stream was found for ${runId}.`, false);
       return;
     }
 
-    let result: CommandResult;
-    try {
-      result = await run.result;
-    } catch (error) {
-      yield this.errorEvent(connection, runId, "CLAUDE_EXEC_FAILED", error instanceof Error ? error.message : String(error), true);
-      return;
-    }
-
-    // Debug tee: Claude's exec is buffered, so the whole raw stream-json of this
-    // turn arrives at once. Reset the session's buffer and publish it verbatim,
-    // then append stderr so a failure that only writes there is still readable.
-    this.options.rawSink?.beginTurn(connection.sessionId);
-    this.options.rawSink?.write(connection.sessionId, result.stdout);
-    if (result.stderr.length > 0) {
-      this.options.rawSink?.write(connection.sessionId, `\n[stderr]\n${result.stderr}\n`);
-    }
-
-    const state = this.connections.get(connection.connectionId);
-    const parsed = this.normalizer.parseJsonLines(result.stdout, {
-      sessionId: connection.sessionId,
-      runId,
-      agentRole: connection.agentRole,
-      runtimeId: connection.runtime.runtimeId
-    });
-    if (state !== undefined && parsed.claudeSessionId !== undefined) {
-      state.claudeSessionId = parsed.claudeSessionId;
-    }
-    let sawTerminal = false;
-    for (const event of parsed.events) {
-      if (event.type === "agent.error" || event.type === "agent.done") sawTerminal = true;
+    for await (const event of run.stream) {
       yield event;
     }
 
-    // Only synthesize a generic failure when Claude produced NO terminal event of
-    // its own. When it did - a stream-json `result` with is_error (auth failures
-    // like "Not logged in · Please run /login", rate limits, etc.) - that event
-    // already carries the real, actionable message; stacking "claude exec failed"
-    // on top only buries it. The generic path remains for true launch failures
-    // (sbx couldn't start claude, empty stdout) where stderr/error hold the cause.
-    if (result.exitCode !== 0 && !sawTerminal) {
-      const detail = result.stderr || result.error
-        || (result.stdout.trim().length > 0 ? `claude exited ${String(result.exitCode)} without a result line` : "claude exec failed");
+    const outcome = await run.settled;
+    if (run.droppedLines > 0) {
+      this.options.logger.warn("claude stream contained unparseable lines", {
+        runId,
+        droppedLines: run.droppedLines
+      });
+    }
+    if (outcome.error !== undefined) {
       yield this.errorEvent(
         connection,
         runId,
         run.controller.signal.aborted ? "TURN_CANCELLED" : "CLAUDE_EXEC_FAILED",
-        detail,
-        !run.controller.signal.aborted,
+        outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
+        !run.controller.signal.aborted
+      );
+      return;
+    }
+    const result = outcome.result;
+    if (result === undefined) {
+      return;
+    }
+    if (result.stderr.length > 0) {
+      this.options.rawSink?.write(connection.sessionId, `\n[stderr]\n${result.stderr}\n`);
+    }
+
+    // Honest terminal accounting: when Claude produced its own terminal event
+    // (a stream-json `result` line), that event already carries the real
+    // message and nothing is stacked on top. Every other ending - launch
+    // failure, timeout, quiet-watchdog abort, cancellation, and (new) a clean
+    // exit that never emitted a result line - yields an explicit error.
+    if (run.sawTerminal) {
+      return;
+    }
+    if (run.quietTimedOut) {
+      yield this.errorEvent(
+        connection,
+        runId,
+        "CLAUDE_TURN_STALLED",
+        `Claude produced no output for ${String(Math.round(this.inactivityTimeoutMs / 60_000))} minutes, so the turn was stopped. The conversation is still resumable - send the message again to continue.`,
+        true,
         { exitCode: result.exitCode, timedOut: result.timedOut }
       );
+      return;
     }
+    if (run.controller.signal.aborted) {
+      yield this.errorEvent(connection, runId, "TURN_CANCELLED", result.error ?? "The turn was cancelled.", false, {
+        exitCode: result.exitCode,
+        timedOut: result.timedOut
+      });
+      return;
+    }
+    if (result.timedOut) {
+      yield this.errorEvent(
+        connection,
+        runId,
+        "CLAUDE_TURN_TIMEOUT",
+        `The turn exceeded the ${String(Math.round(this.turnTimeoutMs / 60_000))}-minute limit and was stopped. Work already done inside the sandbox is kept; send a follow-up to continue.`,
+        true,
+        { exitCode: result.exitCode, timedOut: true }
+      );
+      return;
+    }
+    const detail = result.exitCode !== 0
+      ? (result.stderr || result.error || `claude exited ${String(result.exitCode)} without a result line`)
+      : `claude exited cleanly but never emitted a terminal result line (${String(run.droppedLines)} unparseable stream line(s)); the reply may be incomplete. Send the message again to retry.`;
+    yield this.errorEvent(connection, runId, "CLAUDE_EXEC_FAILED", detail, true, {
+      exitCode: result.exitCode,
+      timedOut: result.timedOut
+    });
   }
 
   async cancel(_connection: AgentConnection, runId: RunId): Promise<void> {
@@ -287,6 +416,65 @@ export class ClaudeAdapter implements AgentAdapter {
     return state;
   }
 
+  private parseModelProbe(result: CommandResult): AgentModelCatalog {
+    if (result.exitCode !== 0) {
+      return this.unavailableCatalog(
+        `Model discovery inside the runtime failed (exit ${String(result.exitCode)}): ${oneLine(result.stderr || result.error || result.stdout) || "no output"}`
+      );
+    }
+    let probe: JsonObject;
+    try {
+      const parsed = JSON.parse(result.stdout.trim()) as unknown;
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("probe output was not an object");
+      }
+      probe = parsed as JsonObject;
+    } catch {
+      return this.unavailableCatalog(`Model discovery returned unparseable output: ${oneLine(result.stdout)}`);
+    }
+    if (probe["ok"] !== true) {
+      return this.unavailableCatalog(
+        `api.anthropic.com/v1/models rejected the request: ${typeof probe["error"] === "string" ? probe["error"] : "unknown error"}`
+      );
+    }
+    const rawModels = Array.isArray(probe["models"]) ? probe["models"] : [];
+    const models: AgentModelSummary[] = [];
+    for (const entry of rawModels) {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const record = entry as JsonObject;
+      const id = typeof record["id"] === "string" ? record["id"] : null;
+      if (id === null || id.length === 0) continue;
+      models.push({
+        id,
+        displayName: typeof record["display_name"] === "string" && record["display_name"].length > 0 ? record["display_name"] : id,
+        isDefault: false,
+        hidden: false
+      });
+    }
+    if (models.length === 0) {
+      return this.unavailableCatalog("api.anthropic.com/v1/models answered without any models.");
+    }
+    return {
+      providerId: String(this.providerId),
+      displayName: "Claude / Anthropic",
+      models,
+      refreshedAt: this.options.clock.isoNow(),
+      source: "provider",
+      diagnostics: ["Live model list from api.anthropic.com/v1/models, fetched inside the session runtime (proxy-injected credential)."]
+    };
+  }
+
+  private unavailableCatalog(reason: string): AgentModelCatalog {
+    return {
+      providerId: String(this.providerId),
+      displayName: this.options.wire === undefined ? "Claude / Anthropic" : String(this.providerId),
+      models: [],
+      refreshedAt: this.options.clock.isoNow(),
+      source: "unavailable",
+      diagnostics: [reason]
+    };
+  }
+
   private errorEvent(
     connection: AgentConnection,
     runId: RunId,
@@ -308,6 +496,55 @@ export class ClaudeAdapter implements AgentAdapter {
       message,
       retryable,
       ...(raw === undefined ? {} : { raw })
+    };
+  }
+}
+
+/**
+ * Unbounded single-consumer queue bridging the exec's line callback to the
+ * streamEvents async iterator. push() after end() is dropped (late lines from
+ * a killed process); iteration completes once end() is called and the buffer
+ * drains.
+ */
+class AgentEventQueue implements AsyncIterable<AgentEvent> {
+  private readonly buffered: AgentEvent[] = [];
+  private waiter: ((result: IteratorResult<AgentEvent>) => void) | null = null;
+  private ended = false;
+
+  push(event: AgentEvent): void {
+    if (this.ended) return;
+    if (this.waiter !== null) {
+      const resolve = this.waiter;
+      this.waiter = null;
+      resolve({ value: event, done: false });
+      return;
+    }
+    this.buffered.push(event);
+  }
+
+  end(): void {
+    this.ended = true;
+    if (this.waiter !== null && this.buffered.length === 0) {
+      const resolve = this.waiter;
+      this.waiter = null;
+      resolve({ value: undefined, done: true });
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
+    return {
+      next: (): Promise<IteratorResult<AgentEvent>> => {
+        const queued = this.buffered.shift();
+        if (queued !== undefined) {
+          return Promise.resolve({ value: queued, done: false });
+        }
+        if (this.ended) {
+          return Promise.resolve({ value: undefined, done: true });
+        }
+        return new Promise((resolve) => {
+          this.waiter = resolve;
+        });
+      }
     };
   }
 }
@@ -345,13 +582,58 @@ function wrapWithWire(claudeArgs: readonly string[], wire: ClaudeWireConfig): re
   return ["sh", "-c", command];
 }
 
-export function claudeModelCatalog(refreshedAt: string): AgentModelCatalog {
-  return {
-    providerId: "claude",
-    displayName: "Claude / Anthropic",
-    models: [...CLAUDE_MODEL_CATALOG_MODELS],
-    refreshedAt,
-    source: "provider",
-    diagnostics: ["Static Claude Code model catalog; the sandbox agent accepts these ids via --model."]
-  };
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, 400);
 }
+
+/**
+ * Inert in-runtime probe of api.anthropic.com/v1/models. Runs under the
+ * sandbox's node with the sandbox proxy on-path: the proxy injects the real
+ * Anthropic credential at the HTTPS layer, so the script only ever sends the
+ * `proxy-managed` sentinel. Tries the bearer and x-api-key header forms (and
+ * a bare request) because subscription tokens and API keys ride different
+ * headers; the first accepted form wins. Prints a single JSON object:
+ * `{ok:true, models:[...]}` or `{ok:false, error}`.
+ */
+const ANTHROPIC_MODELS_SCRIPT = `
+(async () => {
+  const attempts = [
+    { authorization: "Bearer proxy-managed" },
+    { "x-api-key": "proxy-managed" },
+    {}
+  ];
+  const errors = [];
+  for (const auth of attempts) {
+    try {
+      const models = [];
+      let afterId = undefined;
+      for (let page = 0; page < 20; page += 1) {
+        const url = new URL("https://api.anthropic.com/v1/models");
+        url.searchParams.set("limit", "100");
+        if (afterId) url.searchParams.set("after_id", afterId);
+        const res = await fetch(url, { headers: { "anthropic-version": "2023-06-01", ...auth } });
+        const body = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(res.status + " " + ((body && body.error && body.error.message) || res.statusText));
+        }
+        const data = Array.isArray(body && body.data) ? body.data : [];
+        for (const entry of data) {
+          if (entry && typeof entry.id === "string") {
+            models.push({ id: entry.id, display_name: typeof entry.display_name === "string" ? entry.display_name : entry.id });
+          }
+        }
+        if (!(body && body.has_more) || data.length === 0) break;
+        afterId = body.last_id;
+      }
+      if (models.length > 0) {
+        process.stdout.write(JSON.stringify({ ok: true, models }));
+        return;
+      }
+      errors.push("empty model list");
+    } catch (error) {
+      errors.push(String(error && error.message ? error.message : error));
+    }
+  }
+  process.stdout.write(JSON.stringify({ ok: false, error: errors.join(" | ") }));
+})();
+`.trim();

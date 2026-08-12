@@ -21,7 +21,9 @@ const NAVIGATION_REQUESTS = new Set<PanelRequestPayload["type"]>([
   "planner.open",
   "taskReview.open",
   "codeReview.open",
-  "agents.openSession"
+  "agents.openSession",
+  // UX overhaul P3: opening a surface is navigation, never demo data.
+  "panel.openSurface"
 ]);
 
 type Refresh = () => void | Promise<void>;
@@ -54,7 +56,6 @@ interface DemoFixtures {
   comments: DemoRecord[];
   landing: DemoRecord[];
   timelines: Record<string, DemoRecord[]>;
-  history: DemoRecord[];
   diff: DemoRecord[];
   cloneRepos: DemoRecord[];
   runtimes: DemoRecord[];
@@ -263,8 +264,12 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
       return ok(requestId, { type: "task.delete", taskId: payload.taskId });
     case "task.link":
     case "task.unlink": {
-      const task = fixtures.tasks.find((item) => item.taskId === payload.taskId);
-      return task === undefined ? error(requestId, "Demo task not found.") : ok(requestId, { type: payload.type, task });
+      // A subtask-narrowed session link (the rail's "Track as subtask") moves
+      // the chat onto that card, so the demo shows the same shape as Live.
+      const linked = payload.type === "task.link" && payload.subtaskId !== undefined && payload.sessionId !== undefined
+        ? linkSessionToSubtask(payload.taskId, payload.subtaskId, payload.sessionId)
+        : fixtures.tasks.find((item) => item.taskId === payload.taskId);
+      return linked === undefined ? error(requestId, "Demo task not found.") : ok(requestId, { type: payload.type, task: linked });
     }
     case "board.state":
       return ok(requestId, { type: "board.state", board: boardState() });
@@ -326,8 +331,6 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
       accessRequest.status = payload.approve ? "approved" : "denied";
       return ok(requestId, { type: "policy.resolveAccess", accessRequest });
     }
-    case "work.history":
-      return ok(requestId, { type: "work.history", entries: fixtures.history });
     case "memory.list":
       return ok(requestId, { type: "memory.list", candidates: [], detectedTags: ["typescript", "node"] });
     case "mcp.list":
@@ -459,8 +462,6 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
       return ok(requestId, { type: "ui.confirm", confirmed: true });
     case "clipboard.writeText":
       return ok(requestId, { type: "clipboard.writeText", accepted: true });
-    case "runtime.stats":
-      return ok(requestId, { type: "runtime.stats", stats: fixtures.runtimeStats });
     case "isolatedRun.listRuntimes":
       return ok(requestId, { type: "isolatedRun.listRuntimes", runtimes: fixtures.runtimes });
     case "chat.rawStream":
@@ -492,7 +493,6 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     case "runtime.sbxLogin":
     case "runtime.openTerminal":
     case "runtime.reconcile":
-    case "isolatedRun.probeAppServer":
     case "isolatedRun.stopRuntime":
     case "chat.start":
     case "chat.startSession":
@@ -516,6 +516,26 @@ export function demoResponse(payload: PanelRequestPayload, requestId: string): P
     case "clone.pull":
     case "clone.push":
     case "clone.discard":
+    // The active-task spine is host state; demo mode has no fixture for it yet.
+    case "active.get":
+    case "active.set":
+    // Left-rail recents (UX overhaul P1): placeholder so the exhaustive switch
+    // compiles; the rail's own demo fixture replaces this.
+    case "session.recents":
+    // Task Hub (UX overhaul P3): the hub's composite read has no fixture yet;
+    // panel.openSurface never reaches here (it is navigation, listed above).
+    case "hub.state":
+    case "panel.openSurface":
+    // Configure (UX overhaul P6): every row is real machine configuration -
+    // providers, MCP definitions, settings write-through. Demo mode has no
+    // fixture on purpose; a guide must never appear to change a real setting.
+    case "config.state":
+    case "config.setSetting":
+    case "config.mcpToggle":
+    case "config.mcpAdd":
+    case "config.provider.signIn":
+    case "config.provider.setDefaultModel":
+    case "config.openFile":
       return error(requestId);
     case "taskBoard.open":
     case "agents.open":
@@ -629,6 +649,24 @@ function addSubtask(taskId: string, title: string, description?: string, prompt?
       ...(autoStart === undefined ? {} : { autoStart })
     });
     result = { ...task, subtasks: [...task.subtasks, subtask], updatedAt: new Date().toISOString() };
+    return result;
+  });
+  return result;
+}
+
+/** Moves a session link onto one card (idempotent, like the real store's INSERT OR IGNORE). */
+function linkSessionToSubtask(taskId: string, subtaskId: string, sessionId: string) {
+  let result: (typeof fixtures.tasks)[number] | undefined;
+  fixtures.tasks = fixtures.tasks.map((task) => {
+    if (task.taskId !== taskId) return task;
+    result = {
+      ...task,
+      updatedAt: new Date().toISOString(),
+      subtasks: task.subtasks.map((subtask: DemoRecord) => subtask.subtaskId !== subtaskId
+        || (subtask["linkedSessionIds"] as string[]).includes(sessionId)
+        ? subtask
+        : { ...subtask, linkedSessionIds: [...(subtask["linkedSessionIds"] as string[]), sessionId] })
+    };
     return result;
   });
   return result;
@@ -873,8 +911,8 @@ function createFixtures(): DemoFixtures {
     security: { managed: false, label: "Demo policy · no host access", cloneOnly: true, networkedAiAllowed: false, omissionsEnabled: true }
   };
   const catalogs = [
-    { providerId: "codex", displayName: "Codex / OpenAI", models: [{ id: "gpt-5.5", displayName: "GPT-5.5", isDefault: true, hidden: false }, { id: "gpt-5.4-mini", displayName: "GPT-5.4 mini", isDefault: false, hidden: false }], refreshedAt: now, source: "provider", diagnostics: [] },
-    { providerId: "claude", displayName: "Claude", models: [{ id: "sonnet-4", displayName: "Sonnet 4", isDefault: true, hidden: false }], refreshedAt: now, source: "fallback", diagnostics: [] }
+    { providerId: "codex", displayName: "Codex / OpenAI", models: [{ id: "gpt-5.6-sol", displayName: "GPT-5.6-Sol", isDefault: true, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Balanced" }, { reasoningEffort: "xhigh", description: "Extra High" }] }, { id: "gpt-5.6-luna", displayName: "GPT-5.6-Luna", isDefault: false, hidden: false }], refreshedAt: now, source: "provider", diagnostics: ["Demo fixture catalog."] },
+    { providerId: "claude", displayName: "Claude / Anthropic", models: [{ id: "claude-fable-5", displayName: "Claude Fable 5", isDefault: true, hidden: false }, { id: "claude-sonnet-5", displayName: "Claude Sonnet 5", isDefault: false, hidden: false }], refreshedAt: now, source: "cache", diagnostics: ["Demo fixture catalog (cached example)."] }
   ];
   const plans = [
     { planId: "demo-plan-onboarding", title: "Guided onboarding implementation", brief: "Add instructions that developers can follow across every Drydock surface.", aspectIds: ["ux", "accessibility", "testing"], contextRoots: ["apps/vscode-extension/webview-ui"], notes: "Use the existing VS Code visual language and keep demo effects local.", status: "active", sessionId: "demo-session-build", taskId: "demo-task-onboarding", taskTitle: "Add guided onboarding to Drydock", artifactCount: 4, openAnnotationCount: 2, updatedAt: now },
@@ -962,10 +1000,6 @@ function createFixtures(): DemoFixtures {
         { sequence: 4, eventType: "agent.text", createdAt: now, summary: "Static checks pass, but I cannot reach the editor UI from this container, so one check needs your hands.\n\n1. Open the Task Board panel\n2. Press `?` and choose **Start guided tour**\n3. Tab through every control in the first step\n\nAnswer the open question with the result and I will either fix the focus order or stamp the subtask verified.", final: true }
       ]
     },
-    history: [
-      { taskId: "demo-task-onboarding", taskTitle: "Add guided onboarding to Drydock", sessionId: "demo-session-build", sessionTitle: "Onboarding implementation", lastActivityAt: now, turnCount: 6 },
-      { taskId: "demo-task-auth", taskTitle: "Replace the token refresh path", sessionId: "demo-session-auth", sessionTitle: "Token refresh implementation", lastActivityAt: now, turnCount: 4 }
-    ],
     diff: [
       { baselineId: "demo-base-build", rootName: "drydock-demo", path: "apps/vscode-extension/webview-ui/src/help.ts", changeKind: "modify", addedLines: 146, removedLines: 18, revertSupported: false, reason: "Demo data" },
       { baselineId: "demo-base-build", rootName: "drydock-demo", path: "apps/vscode-extension/webview-ui/src/demoMode.ts", changeKind: "add", addedLines: 420, removedLines: 0, revertSupported: false, reason: "Demo data" }

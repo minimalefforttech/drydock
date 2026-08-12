@@ -14,11 +14,12 @@ import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ClaudeAdapter, CodexAdapter, CodexAppServerTransport } from "@drydock/agent-adapters";
-import { asId, PROVIDER_REGISTRY, PROVIDER_TOKEN_FILE, providerDefaultModel, type AgentAdapter, type AgentModelCatalog, type ProviderDescriptor } from "@drydock/contracts";
+import { asId, PROVIDER_REGISTRY, PROVIDER_TOKEN_FILE, type AgentAdapter, type AgentModelCatalog, type ProviderDescriptor } from "@drydock/contracts";
 import { ContentAddressedBlobStore, TempWorkspaceStore } from "@drydock/artifacts";
 import type { ChatSessionStore, EventStore, RuntimeInventoryStore, SecurityEventInput, SecurityEventStore } from "@drydock/contracts";
 import {
   AccessRequestService,
+  ActiveTaskService,
   AgentQuestionService,
   ChatSessionService,
   CloneSyncService,
@@ -50,6 +51,7 @@ import {
   applyMigrations,
   SqliteAccessRequestStore,
   SqliteAgentQuestionStore,
+  SqliteAppStateStore,
   SqliteBoardColumnStore,
   SqliteChatSessionStore,
   SqliteConnection,
@@ -77,13 +79,16 @@ import {
 import { BoardService, ChangesetService, importServersFromConfigJson, McpRegistryService, MemoryService, ProjectCatalogService, RecipeService, SubtaskOrchestrator, SubtaskService, TaskService, WorkspaceSetService } from "@drydock/work-management";
 import { PlannerAppService } from "./services/plannerAppService.js";
 import { IsolatedRunService, type ProviderSecretRefStore } from "./services/isolatedRunService.js";
+import { fetchProviderModelsFromHost } from "./services/modelDiscovery.js";
 import { createProviderRuntimePreparer } from "./services/providerWire.js";
 import { createSubtaskRunBridge } from "./services/subtaskRunBridge.js";
 import type { EffectiveSecurityPolicy } from "./services/securityPolicy.js";
 import { TaskReviewAppService } from "./services/taskReviewAppService.js";
 import { TaskFaqAutoAnswerCoordinator } from "./services/taskFaqAutoAnswer.js";
-import { WorkInsightsAppService } from "./services/workInsightsAppService.js";
 import { WorkspaceReviewAppService } from "./services/workspaceReviewAppService.js";
+
+/** app_state key holding the last successful live model discoveries. */
+const CATALOG_CACHE_KEY = "providerCatalogCache.v1";
 
 export interface BackendReady {
   readonly available: true;
@@ -92,6 +97,14 @@ export interface BackendReady {
   readonly planner: PlannerAppService;
   readonly taskReview: TaskReviewAppService;
   readonly tasks: TaskService;
+  /** Active-task spine: the one task every surface follows in this window. */
+  readonly activeTasks: ActiveTaskService;
+  /**
+   * Durable key/value UI state (the `app_state` table). Providers persist small
+   * one-time flags here - e.g. "the chat rail already tried its placement move"
+   * - so nothing user-visible depends on globalState/workspaceState.
+   */
+  readonly appState: SqliteAppStateStore;
   readonly board: BoardService;
   readonly subtasks: SubtaskService;
   readonly orchestrator: SubtaskOrchestrator;
@@ -105,7 +118,6 @@ export interface BackendReady {
   readonly mcp: McpRegistryService;
   /** Merged glob->tag rule table (defaults + drydock.memory.tagRules). */
   readonly tagRules: readonly import("@drydock/core").TagRule[];
-  readonly workInsights: WorkInsightsAppService;
   readonly bus: ProductEventBus;
   /** Content-free, append-only security evidence with JSONL export. */
   readonly securityEvents: SecurityEventStore;
@@ -505,15 +517,14 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   // adapters, parameterized from the registry: codex rides get their key env
   // sentinel prefixed into the app-server spawn (the sandbox proxy injects the
   // real value); claude rides get the Anthropic-compatible wire config with a
-  // runtime-scoped token file.
-  const riderCatalog = (descriptor: ProviderDescriptor): AgentModelCatalog => ({
-    providerId: descriptor.providerId,
-    displayName: descriptor.displayName,
-    models: [...descriptor.models],
-    refreshedAt: clock.isoNow(),
-    source: "fallback",
-    diagnostics: [descriptor.catalogDiagnostic ?? "Static registry catalog."]
-  });
+  // runtime-scoped token file. Model catalogs are LIVE: each rider's
+  // listModels queries the registry-described models endpoint on the host.
+  const riderCatalogSource = (descriptor: ProviderDescriptor) => () =>
+    fetchProviderModelsFromHost(descriptor, {
+      ...(options.providerSecrets === undefined ? {} : { providerSecrets: options.providerSecrets }),
+      logger,
+      isoNow: () => clock.isoNow()
+    });
   const riderAdapters: AgentAdapter[] = PROVIDER_REGISTRY
     .filter((descriptor) => descriptor.wire !== undefined)
     .map((descriptor) => {
@@ -522,7 +533,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
         return new CodexAdapter({
           ...adapterOptions,
           providerId: descriptor.providerId,
-          staticCatalog: riderCatalog(descriptor),
+          catalogSource: riderCatalogSource(descriptor),
           appServer: {
             ...adapterOptions.appServer,
             argsForRuntime: (handle: { readonly externalName: string }) =>
@@ -537,14 +548,11 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
         runtimeExecutor: runtimeAdapter,
         rawSink: rawStreamStore,
         providerId: descriptor.providerId,
-        catalog: riderCatalog(descriptor),
+        catalogSource: riderCatalogSource(descriptor),
         wire: {
           baseUrl: descriptor.wire?.baseUrl ?? "",
           tokenFile: PROVIDER_TOKEN_FILE,
-          ...(descriptor.wire?.smallFastModel === undefined ? {} : { smallFastModel: descriptor.wire.smallFastModel }),
-          ...(providerDefaultModel(descriptor.providerId) === undefined
-            ? {}
-            : { defaultModel: providerDefaultModel(descriptor.providerId) as string })
+          ...(descriptor.wire?.smallFastModel === undefined ? {} : { smallFastModel: descriptor.wire.smallFastModel })
         }
       });
     });
@@ -624,6 +632,28 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       ? {}
       : { authorizePrompt: () => options.securityPolicy?.assertNetworkedAiAllowed() })
   });
+  // Durable key/value UI state; also backs the discovered-model catalog cache
+  // (constructed here because the app service loads the cache at build time).
+  const appState = new SqliteAppStateStore(connection);
+  const catalogCache = {
+    load: (): readonly AgentModelCatalog[] | undefined => {
+      const rawCache = appState.getAppState(CATALOG_CACHE_KEY);
+      if (rawCache === null) return undefined;
+      try {
+        const parsed = JSON.parse(rawCache) as unknown;
+        if (!Array.isArray(parsed)) return undefined;
+        return parsed.filter((entry): entry is AgentModelCatalog =>
+          entry !== null && typeof entry === "object"
+          && typeof (entry as AgentModelCatalog).providerId === "string"
+          && Array.isArray((entry as AgentModelCatalog).models));
+      } catch {
+        return undefined;
+      }
+    },
+    save: (catalogs: readonly AgentModelCatalog[]): void => {
+      appState.setAppState(CATALOG_CACHE_KEY, JSON.stringify(catalogs));
+    }
+  };
   const appService = new IsolatedRunService({
     ids,
     clock,
@@ -636,6 +666,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     prober,
     chatService,
     runtimeExecutor: runtimeAdapter,
+    catalogCache,
     ...(options.prototypeThemes === undefined ? {} : { userPrototypeThemes: options.prototypeThemes }),
     ...(options.mcpConfigJson === undefined ? {} : { mcpConfigJson: options.mcpConfigJson }),
     ...(options.teamInstructions === undefined ? {} : { teamInstructions: options.teamInstructions }),
@@ -726,7 +757,10 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     bus,
     faqs: taskFaqStore
   });
-  const workInsights = new WorkInsightsAppService({ workSessions: workSessionStore, tasks, chatService, workspaceSets });
+  // Active-task spine: restored before any surface can read it, so a reloaded
+  // window resumes on the task it was working on.
+  const activeTasks = new ActiveTaskService({ appState, bus });
+  activeTasks.restore();
   const diff = new SessionDiffService({
     ids,
     clock,
@@ -1103,6 +1137,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     planner,
     taskReview,
     tasks,
+    activeTasks,
+    appState,
     board,
     subtasks,
     orchestrator,
@@ -1111,7 +1147,6 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     memory,
     mcp,
     tagRules,
-    workInsights,
     bus,
     securityEvents,
     rawStreamStore,

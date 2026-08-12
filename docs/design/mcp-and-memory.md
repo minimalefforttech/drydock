@@ -10,6 +10,10 @@ sketch below: workspace-scoped memory anchors to the session's mounted ROOT
 PATHS rather than a workspaceSetId (sessions don't persist set ids; roots
 survive set edits and travel with the folder). MCP workspace overrides still
 key on workspace sets, resolved by roots-intersection at session time.
+Surfaces moved once since: ADR 0020's calm-workbench shell retired the
+Tasks/System tabs, and the memory quick-add + browser + approval gate
+re-homed to Configure › Memories (0.14.0, shared host projections in
+`memoryShared.ts`).
 
 ## Goals
 
@@ -132,7 +136,8 @@ a memory did or didn't load.
 
 ### UX — quick add as you go
 
-- **Memory section (Tasks tab)**: a one-line `＋ Remember…` input with a
+- **Memory section (Configure › Memories; sketched for the Tasks tab and
+  re-homed when ADR 0020 retired it)**: a one-line `＋ Remember…` input with a
   scope pill defaulting to the CURRENT context (`task: <active task>` — one
   click cycles task → workspace → global) and an optional `for:` chip row
   (`python`, `rez`, `maya` — the active workspace's detected tags, one click

@@ -133,9 +133,15 @@ export function sanitizeOutput(value: string): string {
   return value.replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g, "sk-REDACTED");
 }
 
+/**
+ * Caps captured output at MAX_CAPTURED_OUTPUT, keeping the TAIL: for control
+ * commands the failure detail is at the end, and buffered agent streams keep
+ * their terminal line. Live consumers that need every line use
+ * `onStdoutLine`, which is never truncated.
+ */
 export function truncate(value: string): string {
   if (value.length <= MAX_CAPTURED_OUTPUT) return value;
-  return `${value.slice(0, MAX_CAPTURED_OUTPUT)}\n[truncated ${String(value.length - MAX_CAPTURED_OUTPUT)} chars]`;
+  return `[truncated ${String(value.length - MAX_CAPTURED_OUTPUT)} chars]\n${value.slice(value.length - MAX_CAPTURED_OUTPUT)}`;
 }
 
 export function errorMessage(error: unknown): string {

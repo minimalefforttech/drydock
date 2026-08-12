@@ -12,7 +12,7 @@
  * var NAMES.
  */
 
-import type { AgentModelSummary, AgentTransport } from "./agent.js";
+import type { AgentTransport } from "./agent.js";
 
 /** Sandbox agent image kinds Docker Sandbox can create (`sbx create <kind>`). */
 export type SandboxAgentKind = "codex" | "claude";
@@ -42,6 +42,20 @@ export interface ProviderWireConfig {
    * Anthropic model ids.
    */
   readonly smallFastModel?: string;
+}
+
+/**
+ * Host-side live model discovery for a ridden provider: a GET to an
+ * OpenAI-models-shaped endpoint (`{ data: [{ id, ... }] }`). `auth` names how
+ * the request is authorized: "none" for public listings, "vscode-secret" for a
+ * bearer key read from VS Code SecretStorage (`vscode-secret:<provider>`).
+ * Native providers (codex, claude) have dedicated discovery paths and omit
+ * this. There are intentionally no compiled-in model lists anywhere.
+ */
+export interface ProviderModelDiscoverySpec {
+  readonly kind: "openai-models-endpoint";
+  readonly url: string;
+  readonly auth: "none" | "vscode-secret";
 }
 
 /** How a provider is signed in and how its auth status is probed. */
@@ -88,10 +102,8 @@ export interface ProviderDescriptor {
   readonly wire?: ProviderWireConfig;
   /** Scoped egress entries (`host:port`) for `sbx policy allow network`. */
   readonly egress: readonly string[];
-  /** Static seed catalog for providers without live model discovery. */
-  readonly models: readonly AgentModelSummary[];
-  /** Diagnostic shown with the static catalog. */
-  readonly catalogDiagnostic?: string;
+  /** Live model discovery for ridden providers; native providers use their own paths. */
+  readonly discovery?: ProviderModelDiscoverySpec;
 }
 
 export const CODEX_EGRESS = ["chatgpt.com:443", "ab.chatgpt.com:443", "files.openai.com:443", "api.openai.com:443"] as const;
@@ -113,8 +125,7 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = [
       apiKey: { sbxService: "openai", keyUrl: "https://platform.openai.com/api-keys" },
       sbxService: "openai"
     },
-    egress: CODEX_EGRESS,
-    models: []
+    egress: CODEX_EGRESS
   },
   {
     providerId: "claude",
@@ -125,8 +136,7 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = [
       apiKey: { sbxService: "anthropic", keyUrl: "https://console.anthropic.com/settings/keys" },
       sbxService: "anthropic"
     },
-    egress: CLAUDE_EGRESS,
-    models: []
+    egress: CLAUDE_EGRESS
   },
   {
     providerId: "openrouter",
@@ -142,15 +152,11 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = [
       envKey: "OPENROUTER_API_KEY"
     },
     egress: ["openrouter.ai:443"],
-    models: [
-      { id: "openrouter/auto", displayName: "Auto (best available)", isDefault: true, hidden: false },
-      { id: "anthropic/claude-sonnet-4.5", displayName: "Claude Sonnet 4.5", isDefault: false, hidden: false },
-      { id: "deepseek/deepseek-v4", displayName: "DeepSeek V4", isDefault: false, hidden: false },
-      { id: "qwen/qwen3-coder", displayName: "Qwen3 Coder", isDefault: false, hidden: false },
-      { id: "moonshotai/kimi-k2.7", displayName: "Kimi K2.7", isDefault: false, hidden: false },
-      { id: "z-ai/glm-5.2", displayName: "GLM 5.2", isDefault: false, hidden: false }
-    ],
-    catalogDiagnostic: "Static OpenRouter seed catalog; any openrouter.ai model id can be typed manually."
+    discovery: {
+      kind: "openai-models-endpoint",
+      url: "https://openrouter.ai/api/v1/models",
+      auth: "none"
+    }
   },
   {
     providerId: "deepseek",
@@ -165,11 +171,11 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = [
       smallFastModel: "deepseek-chat"
     },
     egress: ["api.deepseek.com:443"],
-    models: [
-      { id: "deepseek-chat", displayName: "DeepSeek Chat (V4)", isDefault: true, hidden: false },
-      { id: "deepseek-reasoner", displayName: "DeepSeek Reasoner", isDefault: false, hidden: false }
-    ],
-    catalogDiagnostic: "Static DeepSeek catalog (Anthropic-compatible endpoint; see api-docs.deepseek.com)."
+    discovery: {
+      kind: "openai-models-endpoint",
+      url: "https://api.deepseek.com/models",
+      auth: "vscode-secret"
+    }
   },
   {
     providerId: "kimi",
@@ -184,11 +190,11 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = [
       smallFastModel: "kimi-k2.7-code"
     },
     egress: ["api.moonshot.ai:443"],
-    models: [
-      { id: "kimi-k2.7-code", displayName: "Kimi K2.7 Code", isDefault: true, hidden: false },
-      { id: "kimi-k3", displayName: "Kimi K3", isDefault: false, hidden: false }
-    ],
-    catalogDiagnostic: "Static Kimi catalog (Anthropic-compatible endpoint; see platform.moonshot.ai)."
+    discovery: {
+      kind: "openai-models-endpoint",
+      url: "https://api.moonshot.ai/v1/models",
+      auth: "vscode-secret"
+    }
   }
 ];
 
@@ -214,10 +220,4 @@ export function providerTransport(providerId: string): AgentTransport {
 export function providerEgressResources(providerId: string): string | undefined {
   const descriptor = providerDescriptor(providerId);
   return descriptor === undefined || descriptor.egress.length === 0 ? undefined : descriptor.egress.join(",");
-}
-
-/** The default model id of a descriptor's static catalog, if any. */
-export function providerDefaultModel(providerId: string): string | undefined {
-  const models = providerDescriptor(providerId)?.models ?? [];
-  return (models.find((model) => model.isDefault) ?? models[0])?.id;
 }

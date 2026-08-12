@@ -44,17 +44,19 @@ export interface ProviderWireDeps {
 
 const WIRE_EXEC_TIMEOUT_MS = 30_000;
 
-/** Codex `config.toml` for an OpenAI-compatible rider. Contains no secrets. */
+/**
+ * Codex `config.toml` for an OpenAI-compatible rider. Contains no secrets and
+ * pins no model: there is no compiled-in default, so every rider turn carries
+ * an explicit model override (enforced at send time by the adapter).
+ */
 export function codexRiderConfigToml(descriptor: ProviderDescriptor): string {
   const wire = descriptor.wire;
   if (wire === undefined || wire.kind !== "openai-compat" || wire.envKey === undefined) {
     throw new Error(`${descriptor.providerId} is not an openai-compat rider.`);
   }
-  const defaultModel = (descriptor.models.find((model) => model.isDefault) ?? descriptor.models[0])?.id;
   return [
     `# Written by Drydock: routes this sandbox's Codex CLI to ${descriptor.displayName}.`,
     `model_provider = "${descriptor.providerId}"`,
-    ...(defaultModel === undefined ? [] : [`model = "${defaultModel}"`]),
     "",
     `[model_providers.${descriptor.providerId}]`,
     `name = "${descriptor.displayName}"`,

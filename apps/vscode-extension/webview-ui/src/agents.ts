@@ -1,31 +1,39 @@
 /**
- * Agents editor panel webview (ADR 0013) - the fleet view.
+ * Agents editor panel webview (UX overhaul P5) - the fleet as a flat list.
  *
- * One scrollable scan list over every session across every task: task groups
- * (board-column chip, rollups, board/review jumps), session rows nesting role
- * children by parentSessionId, and native subagent rows from the same
- * AgentActivityItem set the sidebar ⑂ chips read. Rows key liveness off
- * `live` (authoritative), render the ADR 0008 running-elsewhere posture with
- * no controls, and keep capability tiers honest ("lifecycle only", "no
- * subagent signal") instead of showing an all-quiet tree.
+ * ONE row per session, recent-first, in the background-tasks shape: line 1 is
+ * dot · title · owning task · elapsed, line 2 is a single live mono activity
+ * line. Rows that need a person pin to the top with a coloured left edge.
+ * Expanding a row in place adds the raw-stream tail, its subagent children and
+ * a meta line - nothing else competes for attention. The grouped grid, hover
+ * cards and chip clusters of ADR 0013 are gone; group-by-task is an opt-in
+ * toggle that renders the SAME rows under task headers.
  *
  * Data plane: one agents.state snapshot, then hot pushes fold in place
  * (session.agentActivity / chat.turnStarted / chat.turnCompleted /
  * session.updated / session.deleted) while the coarse agents.changed push
- * schedules a debounced refetch - self-healing, never polling. Durations and
- * idle labels tick locally from timestamps.
+ * schedules a debounced refetch - self-healing, never polling. Re-renders are
+ * damped to at most one per second (a fleet mid-fan-out pushes far faster than
+ * anyone can read) and nothing ever scrolls the list for you.
  *
- * SECURITY: every dynamic string (task/session titles, agent labels, activity
- * previews, error messages) renders via textContent - NEVER innerHTML, no
- * DOM-from-string of any kind. The panel's strict CSP has no 'unsafe-inline'
- * for styles, so depth/status/accent styling is by CLASS only, never style
- * attributes. This entry is self-contained (it does not import the
- * control-panel bundle); the small DOM helpers live in-module.
+ * The activity line is derived by `fleetActivityLine` in contracts - the same
+ * function the host calls for the snapshot - so a pushed row and a refetched
+ * row cannot disagree.
+ *
+ * A collapsed Runtimes fold sits at the bottom (UX overhaul P7): the container
+ * inventory the retired System tab used to own - name, state, uptime, Stop,
+ * "Clean up stale", and a sign-in escape hatch when the sandbox tooling refuses
+ * to answer. It loads on open and after its own actions; it never polls.
+ *
+ * SECURITY: every dynamic string (titles, activity lines, raw-stream tails,
+ * error messages) renders via textContent - NEVER innerHTML, no DOM-from-string
+ * of any kind. The panel's strict CSP has no 'unsafe-inline' for styles, so all
+ * styling is by CLASS, never style attributes.
  */
 
 import {
-  CARD_DETAIL_LEVELS,
-  cardDetailLevel,
+  fleetActivityLine,
+  sessionRollupStatus,
   subagentReportingForTransport,
   WEBVIEW_PROTOCOL_VERSION,
   type AccessRequestSummary,
@@ -33,14 +41,15 @@ import {
   type AgentActivitySummary,
   type AgentQuestionSummary,
   type AgentsOverviewState,
+  type AgentsSessionLine,
   type AgentsTaskGroup,
-  type CardDetailLevel,
   type ChatSessionSummary,
-  type LandingItem,
   type HostToWebviewMessage,
   type PanelPushPayload,
   type PanelRequestPayload,
-  type PanelResponse
+  type PanelResponse,
+  type RuntimeSummary,
+  type TaskRollupStatus
 } from "@drydock/contracts";
 import { createHelpExperience, setHelpTooltip } from "./help.js";
 import { createDemoModeController, demoResponse, isDemoMode } from "./demoMode.js";
@@ -54,20 +63,29 @@ interface VsCodeApi {
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
-/** Only the toolbar filters persist across webview reloads; the fleet is re-fetched on boot. */
+/** Only the toolbar picks persist across reloads; the fleet is re-fetched on boot. */
 interface PersistedState {
   readonly filter: FilterMode;
-  /** Explicit toolbar Detail choice (ADR 0013); absent = follow the config default. */
-  readonly cardDetail?: CardDetailLevel;
+  readonly groupByTask?: boolean;
 }
 
-type FilterMode = "active" | "attention" | "all";
-const FILTER_MODES: readonly FilterMode[] = ["active", "attention", "all"];
+type FilterMode = "all" | "attention" | "active";
+const FILTER_MODES: readonly FilterMode[] = ["all", "attention", "active"];
 const FILTER_LABEL: Record<FilterMode, string> = {
-  active: "Active",
-  attention: "Needs attention",
-  all: "All"
+  all: "All",
+  attention: "Needs you",
+  active: "Active"
 };
+
+const REQUEST_TIMEOUT_MS = 60_000;
+const REFETCH_DEBOUNCE_MS = 300;
+/** Update damping: a fan-out pushes faster than anyone reads. */
+const RENDER_THROTTLE_MS = 1000;
+/** Settled rows stay in the main list this long, then sink below the fold. */
+const SINK_AFTER_MS = 10 * 60_000;
+/** Raw-stream tail shown when a row is expanded. */
+const RAW_TAIL_LINES = 12;
+const MAX_CHILD_DEPTH = 4;
 
 const vscodeApi = acquireVsCodeApi();
 const app = document.getElementById("app");
@@ -78,56 +96,57 @@ const demoMode = createDemoModeController(loadOverview);
 const help = createHelpExperience({
   id: "agents",
   title: "Agents guide",
-  intro: "Inspect agent sessions across tasks, open sessions that need attention, and review clone changes before landing them.",
+  intro: "One row per agent, most recent first. Rows that need an answer pin to the top; everything else stays quiet until you open it.",
   showWelcome: true,
   dataMode: demoMode.helpMode,
   pages: [
     {
       id: "reading",
-      label: "Session status",
-      title: "Interpret session status",
-      intro: "The list places sessions that are waiting or running before inactive history. Filters change only the current view.",
+      label: "Reading a row",
+      title: "Read one agent row",
+      intro: "Each row is one chat session: a status dot, its title, the task that owns it, and how long it has been at this.",
       sections: [
-        { title: "Running", body: "A green dot and duration indicate that a turn is in progress. The activity field shows the latest reported command or tool event." },
-        { title: "Waiting", body: "Questions, access requests, failed turns, and subtasks awaiting human verification add attention indicators. Open the session for agent-specific items or the Task Board for verification." },
-        { title: "Idle", body: "Idle indicates that a live session has reported no activity for longer than the configured threshold. Open the session to determine whether it is blocked." },
-        { title: "Token totals", body: "Token totals are calculated from activity reported during the current window. They are not a billing record." }
+        { title: "Status dot", body: "The same dot language every Drydock surface uses: awaiting an answer, failed, running, starting, idle, done, offline." },
+        { title: "Activity line", body: "The single line below the title reports what the agent is doing now - a pending question, the current command, or the latest output line." },
+        { title: "Pinned rows", body: "A coloured left edge marks a row that is waiting on you. Those rows sort above everything else regardless of filter." },
+        { title: "Elapsed", body: "The right-hand time is the current turn's duration while a turn runs, and the age of the last activity otherwise." }
       ]
     },
     {
-      id: "groups",
-      label: "Tasks & agents",
-      title: "Open tasks and sessions",
-      intro: "Sessions are grouped under their owning task. Nested rows show delegated sessions or provider-reported subagent activity.",
+      id: "acting",
+      label: "Acting on a row",
+      title: "Open, stop, and land",
+      intro: "Row actions appear on hover or keyboard focus so the resting list stays quiet.",
       sections: [
-        { title: "Use the task header", body: "The header shows the task, board stage, attention count, running count, and links to its board and review views." },
-        { title: "Open a session", body: "Select a session row to open that session in the sidebar. Hover the row to inspect provider, model, capability, activity, timing, and token data." },
-        { title: "Inspect nested sessions", body: "Indented rows preserve delegated parent-child relationships. Provider subagent rows show the lifecycle and activity available from that transport." },
-        { title: "Find unowned sessions", body: "Sessions without a linked task appear in the Orphan sessions drawer." }
+        { title: "Open chat", body: "Select a row (or press Enter) to open that session's chat. The chevron expands the row in place instead." },
+        { title: "Expand", body: "An expanded row shows the tail of the raw agent stream, its delegated subagents, and a meta line. The tail is fetched once per expand - it never polls." },
+        { title: "Stop and end", body: "Stop cancels the current turn (two clicks). The overflow menu ends the session, opens a terminal into its container, or re-reads the raw stream." },
+        { title: "Land changes", body: "A finished row offers Land changes only while a captured changeset is still unlanded. Landing pulls that work into your working copy." }
       ]
     },
     {
-      id: "landing",
-      label: "Landing work",
-      title: "Review and land clone changes",
-      intro: "Clone changes remain separate from the working copy until you confirm a pull.",
+      id: "sorting",
+      label: "Filters & grouping",
+      title: "Narrow the fleet",
+      intro: "Filters and grouping change only what you see - never what an agent is doing.",
       sections: [
-        { title: "Check ordering", body: "Candidates without known path overlap appear first. This ordering does not guarantee that a pull will be conflict-free." },
-        { title: "Inspect overlap", body: "An overlap indicator identifies concurrent changes to related paths. Open the other work before pulling." },
-        { title: "Confirm the pull", body: "Pull requires confirmation and uses the same clone integration path as the session Changes tray." },
-        { title: "Request revisions first", body: "Open Task Review when changes require agent feedback before they are pulled into the working copy." }
+        { title: "Filters", body: "All shows every session. Needs you shows only rows waiting on a person. Active hides finished history." },
+        { title: "The fold", body: "Finished and failed rows drop below a thin divider once they are ten minutes old, so the live fleet stays at the top." },
+        { title: "Group by task", body: "The opt-in toggle renders the same rows under task headers when you are tracking several tasks at once." },
+        { title: "Token total", body: "The toolbar total is folded from activity reported in this window. It is not a billing record." }
       ]
     }
   ],
   tour: [
-    { title: "Read the status summary", body: "The toolbar reports running and idle sessions plus every item waiting on you, including Task Board verification.", target: ".toolbar" },
-    { title: "Filter the session list", body: "Filter by activity or attention state, choose the row detail level, or search by task and session title. These controls change only the current view.", target: () => app.querySelector<HTMLElement>(".seg") ?? app },
-    { title: "Read the task rollup", body: "Each task header shows its board stage, waiting count, active sessions, and token rollup. Expand or collapse the group without changing session state.", target: () => app.querySelector<HTMLElement>(".group:not(.drawer) .ghead") ?? app },
-    { title: "Handle verification and attention", body: "Verification rows link to the Task Board. Questions and access requests appear on the responsible session; open that session before responding.", target: () => app.querySelector<HTMLElement>(".task-verification") ?? app.querySelector<HTMLElement>(".group:not(.drawer)") ?? app },
-    { title: "Open the responsible session", body: "Select a session row to open its chat in the sidebar. Hover the row for provider, model, capability, activity, questions, access requests, timing, and tokens.", target: () => app.querySelector<HTMLElement>(".session-row") ?? app },
-    { title: "Inspect delegated work", body: "Indented session and agent rows preserve parent-child relationships. A transport note explains when per-agent activity is unavailable.", target: () => app.querySelector<HTMLElement>(".row-sub, .session-row.depth-1, .row-note.depth-1") ?? app.querySelector<HTMLElement>(".session-row") ?? app },
-    { title: "Open the task board or review", body: "Use Board to manage stages and verification. Use Review to inspect changed files and send revision comments for this task.", target: () => app.querySelector<HTMLElement>(".group:not(.drawer) .gmeta") ?? app.querySelector<HTMLElement>(".group:not(.drawer)") ?? app },
-    { title: "Inspect and pull landing work", body: "The Landing drawer orders unlanded clone changes by known overlap. Inspect related work first, then confirm Pull when the changes should enter the working copy.", target: () => app.querySelector<HTMLElement>(".landing-row") ?? app.querySelector<HTMLElement>(".landing") ?? app, prepare: () => { if (!landingOpen) { landingOpen = true; render(); } } },
+    { title: "Scan the fleet", body: "One row per agent, most recent first, with the running total of reported tokens on the right.", target: ".bar" },
+    { title: "Filter the list", body: "All, Needs you, or Active. The pick persists for this panel only.", target: () => app.querySelector<HTMLElement>(".seg") ?? app },
+    { title: "Read one row", body: "Status dot, title, owning task, elapsed - and one live line reporting the current command, output, or pending question.", target: () => app.querySelector<HTMLElement>(".row") ?? app },
+    { title: "Expand in place", body: "The chevron opens the raw-stream tail, the delegated subagents, and the row's meta line without leaving the list.", target: () => app.querySelector<HTMLElement>(".twist") ?? app },
+    // The action cluster only exists on hover, so the tour points at the row's
+    // right column - the place those actions appear.
+    { title: "Act on a row", body: "Hover or focus a row and this column becomes Open chat, Stop, and an overflow menu (end session, container terminal, raw stream).", target: () => app.querySelector<HTMLElement>(".row-right") ?? app.querySelector<HTMLElement>(".row") ?? app },
+    { title: "Land finished work", body: "A finished row offers Land changes while its captured changeset is unlanded. Landing pulls that clone work into your working copy.", target: () => app.querySelector<HTMLElement>(".row-land") ?? app.querySelector<HTMLElement>(".fold") ?? app },
+    { title: "Group by task", body: "Optional: the same rows under task headers, for when several tasks run at once.", target: () => app.querySelector<HTMLElement>(".group-toggle") ?? app },
     nextWorkflowStep({
       current: "agents",
       request,
@@ -136,12 +155,8 @@ const help = createHelpExperience({
   ]
 });
 
-const REQUEST_TIMEOUT_MS = 60_000;
-const REFETCH_DEBOUNCE_MS = 300;
-const MAX_NEST_DEPTH = 6;
-
 // ---------------------------------------------------------------------------
-// Messaging (correlation pattern copied from taskBoard.ts: 60s timeout, pending map)
+// Messaging (correlation pattern shared with the other panels: 60s, pending map)
 // ---------------------------------------------------------------------------
 
 const pending = new Map<string, { resolve: (value: PanelResponse) => void; timer: number }>();
@@ -181,9 +196,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     }
     return;
   }
-  if (message.kind === "push") {
-    applyPush(message.payload);
-  }
+  if (message.kind === "push") applyPush(message.payload);
 });
 
 // ---------------------------------------------------------------------------
@@ -195,45 +208,46 @@ let loadError: string | null = null;
 let pendingGuideStart = document.body.dataset["startGuide"] === "true";
 /** Live per-session activity overlay: fresher than the snapshot's copies. */
 const activityBySession = new Map<string, AgentActivitySummary>();
+/** Host-derived one-liners from the last snapshot, keyed by session. */
+const linesBySession = new Map<string, AgentsSessionLine>();
 /** Sessions with a live turn right now (boot: root status; then turn pushes). */
 const turnRunning = new Set<string>();
 /** Sessions whose LAST turn failed (cleared by the next turn start). */
 const failedTurn = new Set<string>();
-let filter: FilterMode = vscodeApi.getState()?.filter ?? "active";
-/**
- * Row density (ADR 0013). The explicit toolbar pick persists per panel; null
- * falls through to the config default the provider injected as
- * `<body data-card-detail="…">`. minimal = one state chip per row (waiting →
- * failed → nothing; the dot already carries "running"), the rest in the
- * hover card.
- */
-let cardDetailChoice: CardDetailLevel | null = ((): CardDetailLevel | null => {
-  const saved = vscodeApi.getState()?.cardDetail;
-  return saved === undefined ? null : cardDetailLevel(saved);
-})();
-
-function detailLevel(): CardDetailLevel {
-  return cardDetailChoice ?? cardDetailLevel(document.body.dataset["cardDetail"]);
-}
-let textFilter = "";
-/** Collapsed task groups (session-local; groups default expanded). */
-const collapsedGroups = new Set<string>();
-let orphansOpen = false;
-/** Landing drawer (ADR 0014): open state + armed Pull confirm + last outcome line. */
-let landingOpen = false;
-let armedLandId: string | null = null;
-let landingNotice: string | null = null;
-/** Session id whose Stop confirm is armed (two-click, like board deletes). */
+/** Rows expanded in place (session-local; nothing expands by default). */
+const expanded = new Set<string>();
+/** Raw-stream tails, fetched once per expand - never polled. */
+const rawTails = new Map<string, { readonly status: "loading" | "ready" | "error"; readonly text: string }>();
+/** Two-click arming, matching the board's destructive-action convention. */
 let armedStopId: string | null = null;
-/** One DOM rebuild per animation frame, even when several sessions push together. */
-let renderFrame = 0;
+let armedLandId: string | null = null;
+/** Per-row outcome notes (landing results, action errors). */
+const rowNotes = new Map<string, string>();
+/** The one open row overflow menu, if any. */
+let openMenuId: string | null = null;
+
+// --- Runtimes fold (UX overhaul P7) -----------------------------------------
+// The System tab's runtime list, demoted to a fold at the bottom of the fleet:
+// what containers exist, stop one, clean up the strays. Collapsed by default and
+// never polled - it loads when opened and after its own actions, so a closed
+// fold costs nothing.
+let runtimesOpen = false;
+let runtimes: readonly RuntimeSummary[] = [];
+let runtimesError: string | null = null;
+let runtimesLoaded = false;
+/** Runtime id armed for Stop (two clicks, matching the row convention). */
+let armedRuntimeId: string | null = null;
+
+const saved = vscodeApi.getState();
+let filter: FilterMode = saved?.filter ?? "active";
+let groupByTask = saved?.groupByTask === true;
+
+function persist(): void {
+  vscodeApi.setState({ filter, ...(groupByTask ? { groupByTask: true } : {}) });
+}
 
 /** Time-labeled nodes refreshed by the 1s ticker without a full re-render. */
 let tickers: Array<{ readonly node: Text; readonly compute: () => string }> = [];
-
-function persist(): void {
-  vscodeApi.setState({ filter, ...(cardDetailChoice === null ? {} : { cardDetail: cardDetailChoice }) });
-}
 
 // ---------------------------------------------------------------------------
 // Data access helpers
@@ -253,21 +267,71 @@ function pendingQuestionsFor(sessionId: string): AgentQuestionSummary[] {
 }
 
 function pendingAccessFor(sessionId: string): AccessRequestSummary[] {
-  return (overview?.accessRequests ?? []).filter((request_) => request_.sessionId === sessionId && request_.status === "pending");
+  return (overview?.accessRequests ?? []).filter((entry) => entry.sessionId === sessionId && entry.status === "pending");
 }
 
-function needsAttention(session: ChatSessionSummary): boolean {
-  return pendingQuestionsFor(session.sessionId).length > 0
-    || pendingAccessFor(session.sessionId).length > 0
-    || failedTurn.has(session.sessionId)
-    || session.status === "failed";
+/** Waiting on a PERSON: a question or an access decision. Failure is its own status. */
+function needsAnswer(session: ChatSessionSummary): boolean {
+  return pendingQuestionsFor(session.sessionId).length > 0 || pendingAccessFor(session.sessionId).length > 0;
 }
 
-function isIdle(session: ChatSessionSummary): boolean {
-  if (!(session.live === true) || turnRunning.has(session.sessionId)) return false;
-  const thresholdMs = overview?.agentIdleThresholdMs ?? 300_000;
-  const last = activityFor(session)?.root?.lastActivityAt ?? session.updatedAt;
-  return Date.now() - Date.parse(last) >= thresholdMs;
+function hasFailed(session: ChatSessionSummary): boolean {
+  return session.status === "failed" || failedTurn.has(session.sessionId);
+}
+
+function turnActive(session: ChatSessionSummary): boolean {
+  return turnRunning.has(session.sessionId) || activityFor(session)?.root?.status === "running";
+}
+
+/** The shared dot vocabulary (contracts roll-up), so no surface can fork it. */
+function rowStatus(session: ChatSessionSummary): TaskRollupStatus {
+  return sessionRollupStatus({
+    status: hasFailed(session) ? "failed" : session.status,
+    ...(session.live === undefined ? {} : { live: session.live }),
+    ...(session.runningElsewhere === undefined ? {} : { runningElsewhere: session.runningElsewhere }),
+    needsAttention: needsAnswer(session),
+    turnActive: turnActive(session)
+  });
+}
+
+/**
+ * The row's live line. The host derives it for the snapshot; here it is
+ * re-derived whenever an activity push lands, through the SAME function.
+ */
+function activityLineFor(session: ChatSessionSummary): string | undefined {
+  const stored = linesBySession.get(session.sessionId);
+  // The snapshot's line stands until this webview knows something fresher: a
+  // folded activity push, or a turn that failed since the fetch.
+  const fresher = activityBySession.has(session.sessionId) || failedTurn.has(session.sessionId);
+  if (!fresher && stored?.activityLine !== undefined) return stored.activityLine;
+  const question = pendingQuestionsFor(session.sessionId)[0]?.question;
+  const root = activityFor(session)?.root;
+  return fleetActivityLine({
+    status: hasFailed(session) ? "failed" : session.status,
+    ...(session.live === undefined ? {} : { live: session.live }),
+    ...(session.runningElsewhere === undefined ? {} : { runningElsewhere: session.runningElsewhere }),
+    ...(question === undefined ? {} : { pendingQuestion: question }),
+    ...(pendingAccessFor(session.sessionId).length > 0 ? { pendingAccess: true } : {}),
+    ...(root === undefined ? {} : { root }),
+    ...(session.description === undefined ? {} : { description: session.description })
+  });
+}
+
+/** When the user became the blocker on this row (oldest pending item). */
+function waitingSinceFor(sessionId: string): number | undefined {
+  const stamps = [
+    ...pendingQuestionsFor(sessionId).map((question) => Date.parse(question.createdAt)),
+    ...pendingAccessFor(sessionId).map((entry) => Date.parse(entry.requestedAt))
+  ].filter((value) => Number.isFinite(value));
+  return stamps.length === 0 ? undefined : Math.min(...stamps);
+}
+
+/** Last time anything happened on this row - the ordering key. */
+function lastActivityAt(session: ChatSessionSummary): number {
+  const root = activityFor(session)?.root;
+  const stamp = root?.lastActivityAt ?? root?.startedAt ?? session.updatedAt;
+  const parsed = Date.parse(stamp);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 /** Snapshot boot: derive live turn/failed state from each root's fold status. */
@@ -281,6 +345,12 @@ function seedTurnStateFromSnapshot(): void {
     if (root.status === "running" && session.live === true) turnRunning.add(session.sessionId);
     if (root.status === "failed") failedTurn.add(session.sessionId);
   }
+}
+
+/** Snapshot boot: adopt the host-derived one-liner for every row that has one. */
+function seedLinesFromSnapshot(state: AgentsOverviewState): void {
+  linesBySession.clear();
+  for (const line of state.sessionLines ?? []) linesBySession.set(line.sessionId, line);
 }
 
 // ---------------------------------------------------------------------------
@@ -324,21 +394,20 @@ function applyPush(payload: PanelPushPayload): void {
       if (payload.status === "failed") failedTurn.add(payload.sessionId);
       scheduleRender();
       return;
-    case "session.updated": {
-      if (!replaceSession(payload.session)) {
-        // A session we don't know (new chat, changed task membership): the
-        // snapshot's grouping is stale - coarse heal.
-        scheduleRefetch();
-        return;
-      }
-      scheduleRender();
+    case "session.updated":
+      // A session we don't know (new chat, changed task membership): the
+      // snapshot's grouping is stale - coarse heal.
+      if (!replaceSession(payload.session)) scheduleRefetch();
+      else scheduleRender();
       return;
-    }
     case "session.deleted":
       if (removeSession(payload.sessionId)) scheduleRender();
       activityBySession.delete(payload.sessionId);
+      linesBySession.delete(payload.sessionId);
       turnRunning.delete(payload.sessionId);
       failedTurn.delete(payload.sessionId);
+      expanded.delete(payload.sessionId);
+      rawTails.delete(payload.sessionId);
       return;
     default:
       return;
@@ -389,14 +458,10 @@ function el(tag: string, className?: string, text?: string): HTMLElement {
   return node;
 }
 
-function chip(text: string, className = ""): HTMLElement {
-  return el("span", `chip ${className}`.trim(), text);
-}
-
-function actionButton(label: string, title: string, onClick: () => void, className = ""): HTMLButtonElement {
+function button(label: string, title: string, className: string, onClick: () => void): HTMLButtonElement {
   const node = document.createElement("button");
   node.type = "button";
-  node.className = `action ${className}`.trim();
+  node.className = className;
   node.textContent = label;
   node.title = title;
   setHelpTooltip(node, title);
@@ -423,17 +488,15 @@ function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   if (totalSeconds < 60) return `${String(totalSeconds)}s`;
   const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes < 60) return `${String(minutes)}m ${String(seconds).padStart(2, "0")}s`;
+  if (minutes < 60) return `${String(minutes)}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
   const hours = Math.floor(minutes / 60);
   return `${String(hours)}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-function formatAgo(iso: string): string {
-  const ms = Date.now() - Date.parse(iso);
-  if (!Number.isFinite(ms) || ms < 0) return "just now";
-  if (ms < 60_000) return "just now";
-  const minutes = Math.floor(ms / 60_000);
+function formatAgo(ms: number): string {
+  const delta = Date.now() - ms;
+  if (!Number.isFinite(delta) || delta < 60_000) return "just now";
+  const minutes = Math.floor(delta / 60_000);
   if (minutes < 60) return `${String(minutes)}m ago`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${String(hours)}h ago`;
@@ -447,713 +510,592 @@ function formatTokens(tokens: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Ordering + filtering (presentation policy lives here, not in the host)
+// Row model + ordering (presentation policy lives here, not in the host)
 // ---------------------------------------------------------------------------
 
-function sessionVisible(session: ChatSessionSummary): boolean {
-  if (filter === "attention" && !needsAttention(session)) return false;
+interface FleetRow {
+  readonly session: ChatSessionSummary;
+  readonly taskId: string | null;
+  readonly taskTitle: string;
+  readonly status: TaskRollupStatus;
+  /** Waiting on a person, or failed: pinned above everything, edge-marked. */
+  readonly pinned: boolean;
+  readonly at: number;
+}
+
+function buildRows(): FleetRow[] {
+  if (overview === null) return [];
+  const rows: FleetRow[] = [];
+  const add = (session: ChatSessionSummary, taskId: string | null, taskTitle: string): void => {
+    const status = rowStatus(session);
+    rows.push({
+      session,
+      taskId,
+      taskTitle,
+      status,
+      pinned: status === "awaiting" || status === "failed",
+      at: lastActivityAt(session)
+    });
+  };
+  for (const group of overview.groups) {
+    for (const session of group.sessions) add(session, group.task.taskId, group.task.title);
+  }
+  for (const session of overview.orphanSessions) add(session, null, "no task");
+  rows.sort((a, b) => {
+    // Awaiting outranks failed outranks everything (the shared roll-up
+    // precedence); within a class the most recent activity leads.
+    const pin = Number(b.pinned) - Number(a.pinned);
+    if (pin !== 0) return pin;
+    if (a.pinned && b.pinned) {
+      const awaiting = Number(b.status === "awaiting") - Number(a.status === "awaiting");
+      if (awaiting !== 0) return awaiting;
+    }
+    return b.at - a.at;
+  });
+  return rows;
+}
+
+function rowVisible(row: FleetRow): boolean {
+  if (filter === "attention") return row.pinned;
   if (filter === "active") {
-    const active = session.live === true || session.runningElsewhere === true
-      || turnRunning.has(session.sessionId) || needsAttention(session)
-      // ADR 0013: a booting resume/reclaim is active - hiding it would make
-      // the session vanish exactly while the user waits on it.
-      || session.status === "starting";
-    if (!active) return false;
+    return row.pinned
+      || row.session.live === true
+      || row.session.runningElsewhere === true
+      || row.status === "running"
+      // A booting resume/reclaim is active - hiding it would make the session
+      // vanish exactly while the user waits on it.
+      || row.status === "starting";
   }
   return true;
 }
 
-function matchesText(session: ChatSessionSummary, group?: AgentsTaskGroup): boolean {
-  if (textFilter === "") return true;
-  const needle = textFilter.toLowerCase();
-  return session.title.toLowerCase().includes(needle)
-    || (group?.task.title.toLowerCase().includes(needle) ?? false);
-}
-
-interface SessionNode {
-  readonly session: ChatSessionSummary;
-  readonly children: SessionNode[];
-}
-
-/** Builds the role-lineage forest for one group's flat session list. */
-function sessionForest(sessions: readonly ChatSessionSummary[]): SessionNode[] {
-  const byId = new Map(sessions.map((session) => [session.sessionId, session]));
-  const nodes = new Map<string, SessionNode>();
-  const forSession = (session: ChatSessionSummary): SessionNode => {
-    const existing = nodes.get(session.sessionId);
-    if (existing) return existing;
-    const created: SessionNode = { session, children: [] };
-    nodes.set(session.sessionId, created);
-    return created;
-  };
-  const roots: SessionNode[] = [];
-  for (const session of sessions) {
-    const node = forSession(session);
-    const parent = session.parentSessionId === undefined ? undefined : byId.get(session.parentSessionId);
-    if (parent === undefined || parent.sessionId === session.sessionId) {
-      roots.push(node);
-    } else {
-      forSession(parent).children.push(node);
-    }
-  }
-  const byCreatedAt = (a: SessionNode, b: SessionNode): number => a.session.createdAt.localeCompare(b.session.createdAt);
-  for (const node of nodes.values()) node.children.sort(byCreatedAt);
-  roots.sort((a, b) => {
-    const attention = Number(needsAttention(b.session)) - Number(needsAttention(a.session));
-    if (attention !== 0) return attention;
-    const running = Number(turnRunning.has(b.session.sessionId)) - Number(turnRunning.has(a.session.sessionId));
-    if (running !== 0) return running;
-    const live = Number(b.session.live === true) - Number(a.session.live === true);
-    if (live !== 0) return live;
-    return b.session.updatedAt.localeCompare(a.session.updatedAt);
-  });
-  return roots;
-}
-
-function groupRunningCount(group: AgentsTaskGroup): number {
-  return group.sessions.filter((session) => turnRunning.has(session.sessionId)).length;
-}
-
-function groupVerificationCount(group: AgentsTaskGroup): number {
-  return group.task.subtasks.filter((subtask) => subtask.verifyUnmet === true).length;
-}
-
-function groupAttentionCount(group: AgentsTaskGroup): number {
-  return group.sessions.filter((session) => needsAttention(session)).length + groupVerificationCount(group);
-}
-
-function orderedGroups(): AgentsTaskGroup[] {
-  if (overview === null) return [];
-  return [...overview.groups].sort((a, b) => {
-    const attention = groupAttentionCount(b) - groupAttentionCount(a);
-    if (attention !== 0) return attention;
-    const running = groupRunningCount(b) - groupRunningCount(a);
-    if (running !== 0) return running;
-    return (b.task.lastWorkedAt ?? b.task.updatedAt).localeCompare(a.task.lastWorkedAt ?? a.task.updatedAt);
-  });
+/** Settled rows sink below the fold once they are ten minutes cold. */
+function isSunk(row: FleetRow): boolean {
+  if (row.pinned) return false;
+  if (row.status !== "done" && row.status !== "offline") return false;
+  return Date.now() - row.at >= SINK_AFTER_MS;
 }
 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
+let renderTimer = 0;
+let lastRenderAt = 0;
+
+/** Coalesces pushes into at most one rebuild per second. */
 function scheduleRender(): void {
-  if (renderFrame !== 0) return;
-  renderFrame = window.requestAnimationFrame(() => {
-    renderFrame = 0;
+  if (renderTimer !== 0) return;
+  const wait = Math.max(0, RENDER_THROTTLE_MS - (Date.now() - lastRenderAt));
+  renderTimer = window.setTimeout(() => {
+    renderTimer = 0;
     render();
-  });
+  }, wait);
 }
 
 function render(): void {
   if (!app) return;
-  if (renderFrame !== 0) {
-    window.cancelAnimationFrame(renderFrame);
-    renderFrame = 0;
+  if (renderTimer !== 0) {
+    window.clearTimeout(renderTimer);
+    renderTimer = 0;
   }
+  lastRenderAt = Date.now();
   tickers = [];
-  const level = detailLevel();
-  document.body.classList.toggle("detail-minimal", level === "minimal");
-  document.body.classList.toggle("detail-standard", level === "standard");
-  document.body.classList.toggle("detail-full", level === "full");
   const surface = el("div", "fleet");
   surface.append(renderToolbar());
+
+  /** Every exit path ends with the runtimes fold pinned to the bottom. */
+  const finish = (): void => {
+    surface.append(renderRuntimesFold());
+    app.replaceChildren(surface);
+  };
+
   if (loadError !== null) {
     surface.append(el("div", "empty error", loadError));
-    app.replaceChildren(surface);
+    finish();
     return;
   }
   if (overview === null) {
     surface.append(el("div", "empty", "Loading the fleet…"));
-    app.replaceChildren(surface);
+    finish();
     return;
   }
 
-  let renderedGroups = 0;
-  for (const group of orderedGroups()) {
-    const taskVerificationVisible = groupVerificationCount(group) > 0 && (filter === "active" || filter === "attention");
-    const visible = group.sessions.filter((session) => (taskVerificationVisible || sessionVisible(session)) && matchesText(session, group));
-    if (visible.length === 0) continue;
-    renderedGroups += 1;
-    surface.append(renderGroup(group, visible));
-  }
-
-  if (overview.landing !== undefined && overview.landing.length > 0) {
-    surface.append(renderLandingDrawer(overview.landing));
-  }
-
-  const visibleOrphans = overview.orphanSessions.filter((session) => sessionVisible(session) && matchesText(session));
-  if (visibleOrphans.length > 0) {
-    surface.append(renderOrphanDrawer(visibleOrphans));
-  }
-
-  if (renderedGroups === 0 && visibleOrphans.length === 0) {
+  const rows = buildRows().filter(rowVisible);
+  if (rows.length === 0) {
     surface.append(renderEmptyState());
+    finish();
+    return;
   }
-  app.replaceChildren(surface);
+
+  const list = el("div", "rows");
+  if (groupByTask) {
+    // The SAME rows, under task headers - grouping never reorders within a task.
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const key = row.taskId ?? "";
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const members = rows.filter((candidate) => (candidate.taskId ?? "") === key);
+      const head = el("div", "task-head");
+      head.append(el("span", "task-head-title", row.taskTitle));
+      head.append(el("span", "task-head-count", `${String(members.length)} agent${members.length === 1 ? "" : "s"}`));
+      list.append(head);
+      for (const member of members) list.append(renderRow(member));
+    }
+  } else {
+    const live = rows.filter((row) => !isSunk(row));
+    const sunk = rows.filter(isSunk);
+    for (const row of live) list.append(renderRow(row));
+    if (sunk.length > 0) {
+      list.append(el("div", "fold", `Earlier · ${String(sunk.length)}`));
+      for (const row of sunk) list.append(renderRow(row));
+    }
+  }
+  surface.append(list);
+  // Nothing scrolls the list for you: the scroller keeps its offset across a
+  // rebuild, and no row is ever scrolled into view.
+  finish();
 }
 
 function renderToolbar(): HTMLElement {
-  const bar = el("div", "toolbar");
-  const rollup = el("div", "rollup");
-  rollup.setAttribute("role", "status");
-  rollup.setAttribute("aria-live", "polite");
-  rollup.setAttribute("aria-atomic", "true");
-  const sessions = allSessions();
-  const runningCount = sessions.filter((session) => turnRunning.has(session.sessionId)).length;
-  const waitingCount = sessions.filter((session) => needsAttention(session)).length
-    + (overview?.groups.reduce((sum, group) => sum + groupVerificationCount(group), 0) ?? 0);
-  const idleCount = sessions.filter((session) => isIdle(session)).length;
-  const runningPart = el("span", "rollup-running", `● ${String(runningCount)} running`);
-  const waitingPart = el("span", waitingCount > 0 ? "rollup-waiting loud" : "rollup-waiting", `${String(waitingCount)} waiting on you`);
-  const idlePart = el("span", "rollup-idle", `${String(idleCount)} idle`);
-  rollup.append(runningPart, el("span", "rollup-sep", "·"), waitingPart, el("span", "rollup-sep", "·"), idlePart);
-  // Fleet cost line (ADR 0013): live token total across every session's fold.
-  // Honest scope: this window's live data - no durable ledger exists yet.
-  const fleetTokens = sessions.reduce((sum, session) => sum + (activityFor(session)?.root?.tokens ?? 0), 0);
-  if (fleetTokens > 0) {
-    rollup.append(el("span", "rollup-sep", "·"), el("span", "rollup-tokens", `Σ ${formatTokens(fleetTokens)}`));
-  }
+  const bar = el("div", "bar");
+  bar.append(el("span", "bar-title", "Agents"));
 
   const seg = el("div", "seg");
   seg.setAttribute("role", "group");
   seg.setAttribute("aria-label", "Agent filter");
   for (const mode of FILTER_MODES) {
-    const segButton = document.createElement("button");
-    segButton.type = "button";
-    segButton.className = filter === mode ? "seg-item on" : "seg-item";
-    segButton.textContent = FILTER_LABEL[mode];
-    segButton.setAttribute("aria-pressed", String(filter === mode));
-    segButton.addEventListener("click", () => {
+    const item = button(FILTER_LABEL[mode], `Show ${FILTER_LABEL[mode].toLowerCase()}`, filter === mode ? "seg-item on" : "seg-item", () => {
       filter = mode;
       persist();
       render();
     });
-    seg.append(segButton);
+    item.setAttribute("aria-pressed", String(filter === mode));
+    seg.append(item);
   }
+  bar.append(seg);
 
-  // Detail seg (ADR 0013): per-panel density override over the config default.
-  const detailSeg = el("div", "seg seg-detail");
-  detailSeg.setAttribute("role", "group");
-  detailSeg.setAttribute("aria-label", "Row detail");
-  const DETAIL_SHORT: Record<CardDetailLevel, string> = { minimal: "Min", standard: "Std", full: "Full" };
-  for (const level of CARD_DETAIL_LEVELS) {
-    const segButton = document.createElement("button");
-    segButton.type = "button";
-    segButton.className = detailLevel() === level ? "seg-item on" : "seg-item";
-    segButton.textContent = DETAIL_SHORT[level];
-    segButton.setAttribute("aria-pressed", String(detailLevel() === level));
-    segButton.title = `Detail: ${level}${level === "minimal" ? " - one state chip per row; hover a row for the rest" : ""}`;
-    segButton.addEventListener("click", () => {
-      cardDetailChoice = level;
-      persist();
-      render();
-    });
-    detailSeg.append(segButton);
-  }
-
-  const search = document.createElement("input");
-  search.type = "text";
-  search.className = "filter-input";
-  search.placeholder = "Filter tasks & sessions…";
-  search.setAttribute("aria-label", "Filter tasks and sessions");
-  search.value = textFilter;
-  search.addEventListener("input", () => {
-    textFilter = search.value.trim();
-    // Re-render everything below the toolbar, but keep this input's focus:
-    // render() rebuilds the DOM, so restore focus and caret afterwards.
-    const caret = search.selectionStart;
+  const right = el("div", "bar-right");
+  const toggle = button("Group by task", "Render the same rows under task headers", groupByTask ? "ghost group-toggle on" : "ghost group-toggle", () => {
+    groupByTask = !groupByTask;
+    persist();
     render();
-    const fresh = app?.querySelector<HTMLInputElement>(".filter-input");
-    if (fresh) {
-      fresh.focus();
-      if (caret !== null) fresh.setSelectionRange(caret, caret);
-    }
   });
+  toggle.setAttribute("aria-pressed", String(groupByTask));
+  right.append(toggle);
 
-  setHelpTooltip(search, "Filter the current list by task or session title. This changes only the displayed rows.");
-  bar.append(rollup, seg, detailSeg, search, help.launcher("fleet-help-launcher"));
+  // Fleet cost line: live token total across every session's fold. Honest
+  // scope - this window's live data, not a billing ledger.
+  const tokens = allSessions().reduce((sum, session) => sum + (activityFor(session)?.root?.tokens ?? 0), 0);
+  if (tokens > 0) {
+    const total = el("span", "bar-tokens mono", `Σ ${formatTokens(tokens)}`);
+    setHelpTooltip(total, "Tokens reported by agent activity in this window. Not a billing record.");
+    right.append(total);
+  }
+  right.append(help.launcher("fleet-help-launcher"));
+  bar.append(right);
   return bar;
 }
 
-function renderGroup(group: AgentsTaskGroup, visible: readonly ChatSessionSummary[]): HTMLElement {
-  const section = el("section", "group");
-  const head = el("div", "ghead");
-  const collapsed = collapsedGroups.has(group.task.taskId);
-  const toggleButton = document.createElement("button");
-  toggleButton.type = "button";
-  toggleButton.className = "ghead-toggle";
-  toggleButton.setAttribute("aria-expanded", String(!collapsed));
-  toggleButton.title = collapsed ? "Expand task agents" : "Collapse task agents";
+function renderRow(row: FleetRow): HTMLElement {
+  const session = row.session;
+  const sessionId = session.sessionId;
+  const isExpanded = expanded.has(sessionId);
+  const classes = ["row", `status-${row.status}`];
+  if (row.pinned) classes.push(row.status === "failed" ? "pinned pin-failed" : "pinned");
+  if (row.status === "done" || row.status === "offline") classes.push("settled");
+  if (isExpanded) classes.push("open");
+  const node = el("div", classes.join(" "));
 
-  const toggle = el("span", "gtoggle", collapsed ? "▸" : "▾");
-  const title = el("span", "gtitle", group.task.title);
-  toggleButton.append(toggle, title);
-  if (group.columnName !== undefined) {
-    toggleButton.append(chip(group.columnName, `colchip cat-${group.columnCategory ?? "none"}`));
-  }
-  const attention = groupAttentionCount(group);
-  if (attention > 0) toggleButton.append(chip(`${String(attention)} waiting`, "chip-attention"));
-  head.append(toggleButton);
-
-  const meta = el("span", "gmeta");
-  const running = groupRunningCount(group);
-  if (running > 0) meta.append(el("span", "gmeta-part", `${String(running)} running`));
-  // Per-task token rollup (ADR 0013): header metadata, folded from the same
-  // live activity the rows use. Hidden at minimal detail (passive metadata).
-  if (detailLevel() !== "minimal") {
-    const groupTokens = group.sessions.reduce((sum, session) => sum + (activityFor(session)?.root?.tokens ?? 0), 0);
-    if (groupTokens > 0) meta.append(el("span", "gmeta-tokens", formatTokens(groupTokens)));
-  }
-  meta.append(
-    actionButton("board", "Open the Task Board panel", () => {
-      void request({ type: "taskBoard.open" });
-    }, "link"),
-    actionButton("review", "Open Task Review for this task", () => {
-      void request({ type: "taskReview.open", taskId: group.task.taskId });
-    }, "link")
-  );
-  head.append(meta);
-  toggleButton.addEventListener("click", () => {
-    if (collapsedGroups.has(group.task.taskId)) {
-      collapsedGroups.delete(group.task.taskId);
-    } else {
-      collapsedGroups.add(group.task.taskId);
+  const twist = button(isExpanded ? "⌄" : "›", isExpanded ? "Collapse this agent" : "Expand this agent in place", "twist", () => {
+    if (expanded.has(sessionId)) expanded.delete(sessionId);
+    else {
+      expanded.add(sessionId);
+      void loadRawTail(sessionId);
     }
     render();
   });
-  section.append(head);
+  twist.setAttribute("aria-expanded", String(isExpanded));
+  node.append(twist);
 
-  if (!collapsed) {
-    const verificationCount = groupVerificationCount(group);
-    if (verificationCount > 0) {
-      const verification = el("div", "row row-note task-verification");
-      verification.append(
-        chip("verify", "chip-attention"),
-        el("span", "task-verification-label", `${String(verificationCount)} subtask${verificationCount === 1 ? "" : "s"} awaiting human verification`),
-        actionButton("open board", "Open the Task Board to inspect and record verification", () => {
-          void request({ type: "taskBoard.open" });
-        }, "link")
-      );
-      section.append(verification);
-    }
-    const visibleIds = new Set(visible.map((session) => session.sessionId));
-    for (const root of sessionForest(group.sessions)) {
-      appendSessionNode(section, root, 0, visibleIds);
-    }
-  }
-  return section;
-}
-
-function appendSessionNode(target: HTMLElement, node: SessionNode, depth: number, visibleIds: ReadonlySet<string>): void {
-  // A hidden parent still renders (dimmed) when a visible child needs its
-  // anchor; a fully-hidden subtree is skipped.
-  const subtreeVisible = (candidate: SessionNode): boolean =>
-    visibleIds.has(candidate.session.sessionId) || candidate.children.some(subtreeVisible);
-  if (!subtreeVisible(node)) return;
-  target.append(renderSessionRow(node.session, depth, !visibleIds.has(node.session.sessionId)));
-  const activity = activityFor(node.session);
-  appendSubagentRows(target, node.session, activity, depth + 1);
-  const cappedDepth = Math.min(depth + 1, MAX_NEST_DEPTH);
-  for (const child of node.children) {
-    appendSessionNode(target, child, cappedDepth, visibleIds);
-  }
-}
-
-function sessionDotClass(session: ChatSessionSummary): string {
-  if (session.status === "failed" || failedTurn.has(session.sessionId)) return "dot dot-fail";
-  if (session.runningElsewhere === true) return "dot dot-half";
-  // ADR 0013: a reclaimed/resumed session is BOOTING - not idle, not ended.
-  if (session.status === "starting") return "dot dot-boot";
-  if (turnRunning.has(session.sessionId)) return "dot dot-run";
-  if (session.live === true) return "dot dot-idle";
-  return "dot dot-hollow";
-}
-
-function renderSessionRow(session: ChatSessionSummary, depth: number, dimmed: boolean): HTMLElement {
-  const row = el("div", `row session-row depth-${String(Math.min(depth, MAX_NEST_DEPTH))}${dimmed ? " dimmed" : ""}`);
-  row.title = "Open this session's chat in the sidebar";
-  const open = (): void => {
-    void request({ type: "agents.openSession", sessionId: session.sessionId });
-  };
-
-  row.append(el("span", sessionDotClass(session)));
-  const title = document.createElement("button");
-  title.type = "button";
-  title.className = "session-open stitle";
-  title.textContent = session.title;
-  title.title = "Open this session's chat in the sidebar";
-  title.addEventListener("click", (event) => {
-    event.stopPropagation();
-    open();
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "row-open";
+  open.title = "Open this session's chat";
+  const line1 = el("span", "row-line1");
+  line1.append(el("span", `dot dot-${row.status}`));
+  line1.append(el("span", "row-title", session.title));
+  if (row.taskTitle !== "") line1.append(el("span", "row-task", row.taskTitle));
+  open.append(line1);
+  const activity = row.status === "done" || row.status === "offline" || row.status === "failed"
+    ? linesBySession.get(sessionId)?.resultLine ?? activityLineFor(session)
+    : activityLineFor(session);
+  open.append(el("span", "row-line2 mono", activity ?? ""));
+  open.addEventListener("click", () => {
+    openChat(sessionId);
   });
-  row.append(title);
+  node.append(open);
 
-  const level = detailLevel();
-  const activity = activityFor(session);
-  const questions = pendingQuestionsFor(session.sessionId);
-  const access = pendingAccessFor(session.sessionId);
-  const turnFailed = failedTurn.has(session.sessionId) || session.status === "failed";
-  const fanFailed = activity !== undefined && activity.failed > 0;
+  node.append(renderRowRight(row));
 
-  if (level === "minimal") {
-    // One-chip rule (ADR 0013): waiting-on-you beats failed beats everything;
-    // "running" needs no chip - the dot and the live duration already say it.
-    if (questions.length > 0) row.append(chip(questions.length === 1 ? "? question" : `? ${String(questions.length)} questions`, "chip-q"));
-    else if (access.length > 0) row.append(chip(access.length === 1 ? "⚠ access" : `⚠ ${String(access.length)} access`, "chip-a"));
-    else if (turnFailed) row.append(chip("✗ failed", "chip-x"));
-    else if (fanFailed) row.append(chip("⑂ failed", "chip-fan chip-fan-failed"));
-  } else {
-    const model = session.model === undefined ? "" : ` · ${session.model}`;
-    row.append(chip(`${session.providerId}${model}`, "chip-provider"));
-    if (session.mode !== undefined && session.mode !== "implementation") row.append(chip(session.mode, "chip-mode"));
-    if (session.spawnedRole !== undefined) row.append(chip(`role · ${session.spawnedRole}`, "chip-role"));
-    if (activity !== undefined && activity.running > 0) {
-      row.append(chip(`⑂ ${String(activity.running)}`, fanFailed ? "chip-fan chip-fan-failed" : "chip-fan"));
-    } else if (fanFailed) {
-      row.append(chip("⑂ failed", "chip-fan chip-fan-failed"));
-    }
-    if (questions.length > 0) row.append(chip(questions.length === 1 ? "? question" : `? ${String(questions.length)} questions`, "chip-q"));
-    if (access.length > 0) row.append(chip(access.length === 1 ? "⚠ access" : `⚠ ${String(access.length)} access`, "chip-a"));
-    if (turnFailed) row.append(chip("✗ failed", "chip-x"));
+  const note = rowNotes.get(sessionId);
+  if (note !== undefined) {
+    const noteNode = el("div", "row-note", note);
+    noteNode.setAttribute("role", "status");
+    node.append(noteNode);
   }
-
-  row.append(renderSessionActivityLine(session, activity, questions));
-  row.append(renderSessionMeta(session, activity));
-  if (level !== "full") row.append(buildSessionHoverCard(session, activity, questions.length, access.length));
-
-  row.addEventListener("click", () => {
-    open();
-  });
-  return row;
+  if (isExpanded) node.append(renderExpansion(row));
+  return node;
 }
 
-function renderSessionActivityLine(
-  session: ChatSessionSummary,
-  activity: AgentActivitySummary | undefined,
-  questions: readonly AgentQuestionSummary[]
-): HTMLElement {
-  const line = el("span", "act");
-  if (session.runningElsewhere === true) {
-    line.classList.add("note");
-    line.textContent = "running in another window - view only";
-    return line;
-  }
-  if (session.status === "starting") {
-    // ADR 0013: honest boot state while a resume/reclaim recreates the
-    // runtime and clones - neither idle nor running a turn yet.
-    line.classList.add("note");
-    line.textContent = "resuming - recreating the runtime and clones";
-    return line;
-  }
-  const firstQuestion = questions[0];
-  if (firstQuestion !== undefined) {
-    line.textContent = `waiting: “${firstQuestion.question}”`;
-    return line;
-  }
-  const root = activity?.root;
-  if (root !== undefined && (root.lastActivity !== undefined || root.lastCommand !== undefined)) {
-    const command = root.lastCommand === undefined ? "" : `$ ${root.lastCommand} - `;
-    line.textContent = `${command}${root.lastActivity ?? ""}`;
-    return line;
-  }
-  if (session.description !== undefined && session.description !== "") {
-    line.textContent = session.description;
-    return line;
-  }
-  line.textContent = session.live === true ? "no activity this turn yet" : "";
-  return line;
-}
+function renderRowRight(row: FleetRow): HTMLElement {
+  const session = row.session;
+  const sessionId = session.sessionId;
+  // An open menu keeps the hover-revealed actions visible after the rebuild.
+  const right = el("div", openMenuId === sessionId ? "row-right menu-open" : "row-right");
 
-function renderSessionMeta(session: ChatSessionSummary, activity: AgentActivitySummary | undefined): HTMLElement {
-  const meta = el("span", "rmeta");
-  const root = activity?.root;
-  const running = turnRunning.has(session.sessionId);
-
-  if (session.runningElsewhere === true) {
-    meta.append(el("span", "rmeta-part", "-"));
-    return meta;
-  }
-  if (running && root?.startedAt !== undefined) {
-    const startedAt = root.startedAt;
-    const duration = el("span", "rmeta-part num");
-    duration.append(tickerText(() => formatDuration(Date.now() - Date.parse(startedAt))));
-    meta.append(duration);
-  } else if (isIdle(session)) {
-    const last = root?.lastActivityAt ?? session.updatedAt;
-    const idleNode = el("span", "rmeta-part idle-label");
-    idleNode.append(tickerText(() => `idle ${formatAgo(last).replace(" ago", "")}`));
-    meta.append(idleNode);
-  } else {
-    const updated = el("span", "rmeta-part quiet");
-    updated.append(tickerText(() => formatAgo(session.updatedAt)));
-    meta.append(updated);
-  }
-  const level = detailLevel();
-  if (level !== "minimal" && root?.tokens !== undefined) meta.append(el("span", "rmeta-part num", formatTokens(root.tokens)));
-  if (level === "full" && root !== undefined && root.toolUses > 0) {
-    meta.append(el("span", "rmeta-part quiet", `${String(root.toolUses)} calls`));
-  }
-
-  if (running && session.live === true) {
-    const armed = armedStopId === session.sessionId;
-    meta.append(actionButton(armed ? "Confirm" : "Stop", "Cancel this session's current turn", () => {
-      if (armedStopId !== session.sessionId) {
-        armedStopId = session.sessionId;
-        render();
-        return;
-      }
-      armedStopId = null;
-      void request({ type: "chat.cancelTurn", sessionId: session.sessionId }).then((response) => {
-        // A refused cancel (ended meanwhile, running elsewhere) heals on refetch.
-        if (!response.ok) scheduleRefetch();
-      });
-      render();
-    }, armed ? "stop armed" : "stop"));
-  }
-  return meta;
-}
-
-function appendSubagentRows(
-  target: HTMLElement,
-  session: ChatSessionSummary,
-  activity: AgentActivitySummary | undefined,
-  depth: number
-): void {
-  const tier = subagentReportingForTransport(session.transport ?? "");
-  const agents = activity?.agents ?? [];
-  if (agents.length === 0) {
-    // Honest tiers: a silent tree must say WHY it is silent - but only while
-    // work is live (ended rows carry their history in the transcript).
-    if (tier === "none" && turnRunning.has(session.sessionId)) {
-      target.append(el("div", `row row-note depth-${String(Math.min(depth, MAX_NEST_DEPTH))}`, "no subagent signal for this transport"));
-    }
-    return;
-  }
-  const byParent = new Map<string, AgentActivityItem[]>();
-  for (const agent of agents) {
-    const key = agent.parentNodeId ?? "root";
-    const bucket = byParent.get(key);
-    if (bucket === undefined) {
-      byParent.set(key, [agent]);
-    } else {
-      bucket.push(agent);
-    }
-  }
-  const appendLevel = (parentKey: string, level: number): void => {
-    for (const agent of byParent.get(parentKey) ?? []) {
-      target.append(renderSubagentRow(session, agent, level));
-      appendLevel(agent.nodeId, Math.min(level + 1, MAX_NEST_DEPTH));
-    }
-  };
-  appendLevel("root", depth);
-  if (tier === "lifecycle") {
-    target.append(el("div", `row row-note depth-${String(Math.min(depth, MAX_NEST_DEPTH))}`, "this transport reports lifecycle only - no per-agent feed"));
-  }
-}
-
-function subagentDotClass(status: AgentActivityItem["status"]): string {
-  switch (status) {
-    case "running": return "dot dot-run";
-    case "failed": return "dot dot-fail";
-    case "cancelled": return "dot dot-hollow";
-    case "unknown": return "dot dot-unknown";
-    case "completed": return "dot dot-done";
-  }
-}
-
-function renderSubagentRow(session: ChatSessionSummary, agent: AgentActivityItem, depth: number): HTMLElement {
-  const row = el("div", `row row-sub depth-${String(Math.min(depth, MAX_NEST_DEPTH))}`);
-  row.tabIndex = 0;
-  row.setAttribute("role", "button");
-  row.title = "Open this agent in the sidebar's Agents lens";
-  row.append(el("span", subagentDotClass(agent.status)));
-  row.append(el("span", "slabel", agent.label));
-  if (agent.status === "failed") row.append(chip("failed", "chip-x"));
-  if (agent.status === "unknown") row.append(chip("unknown", "chip-mode"));
-
-  const line = el("span", "act");
-  const command = agent.lastCommand === undefined ? "" : `${agent.lastCommand} - `;
-  line.textContent = `${command}${agent.lastActivity ?? ""}`;
-  row.append(line);
-
-  const meta = el("span", "rmeta");
-  if (agent.status === "running" && agent.startedAt !== undefined) {
-    const startedAt = agent.startedAt;
-    const duration = el("span", "rmeta-part num");
-    duration.append(tickerText(() => formatDuration(Date.now() - Date.parse(startedAt))));
-    meta.append(duration);
-  } else if (agent.startedAt !== undefined && agent.endedAt !== undefined) {
-    meta.append(el("span", "rmeta-part num", formatDuration(Date.parse(agent.endedAt) - Date.parse(agent.startedAt))));
-  }
-  if (detailLevel() !== "minimal") {
-    if (agent.toolUses > 0) meta.append(el("span", "rmeta-part quiet", `${String(agent.toolUses)} calls`));
-    if (agent.tokens !== undefined) meta.append(el("span", "rmeta-part num", formatTokens(agent.tokens)));
-  }
-  row.append(meta);
-
-  const open = (): void => {
-    void request({ type: "agents.openSession", sessionId: session.sessionId, nodeId: agent.nodeId });
-  };
-  row.addEventListener("click", (event) => {
-    event.stopPropagation();
-    open();
-  });
-  row.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      open();
-    }
-  });
-  return row;
-}
-
-/**
- * The consolidated hover card (ADR 0013): ONE popover per row carrying
- * everything the current detail level hides - never per-chip tooltips.
- * Pure CSS reveal on row :hover/:focus-within; pointer-events stay off so
- * it never intercepts row clicks.
- */
-function buildSessionHoverCard(
-  session: ChatSessionSummary,
-  activity: AgentActivitySummary | undefined,
-  questionCount: number,
-  accessCount: number
-): HTMLElement {
-  const hover = el("div", "hovercard");
-  const row = (label: string, value: string): void => {
-    const line = el("div", "hrow");
-    line.append(el("span", "hlabel", label), el("span", "hvalue", value));
-    hover.append(line);
-  };
-  row("provider", session.model === undefined ? session.providerId : `${session.providerId} · ${session.model}`);
-  if (session.mode !== undefined) row("mode", session.mode);
-  if (session.spawnedRole !== undefined) row("role", session.spawnedRole);
-  if (session.transport !== undefined) row("transport", session.transport);
-  if (activity !== undefined && (activity.running > 0 || activity.failed > 0)) {
-    const parts = [];
-    if (activity.running > 0) parts.push(`${String(activity.running)} running`);
-    if (activity.failed > 0) parts.push(`${String(activity.failed)} failed`);
-    row("subagents", parts.join(" · "));
-  }
-  const root = activity?.root;
-  if (root?.tokens !== undefined) row("tokens", formatTokens(root.tokens));
-  if (root !== undefined && root.toolUses > 0) row("tool calls", String(root.toolUses));
-  if (questionCount > 0) row("questions", String(questionCount));
-  if (accessCount > 0) row("access", String(accessCount));
-  row("updated", formatAgo(session.updatedAt));
-  return hover;
-}
-
-/**
- * Landing drawer (ADR 0014): subtasks with unlanded changesets, disjoint
- * first. Pull = the same full clone pull as the Changes tray (two-click),
- * after which the landed rows leave the drawer on the refetch. Overlap chips
- * never hide - they are exactly the thing to look at before pulling.
- */
-function renderLandingDrawer(items: readonly LandingItem[]): HTMLElement {
-  const section = el("section", "group drawer landing");
-  const head = el("div", "ghead");
-  const toggleButton = document.createElement("button");
-  toggleButton.type = "button";
-  toggleButton.className = "ghead-toggle";
-  toggleButton.setAttribute("aria-expanded", String(landingOpen));
-  toggleButton.title = landingOpen ? "Collapse Landing" : "Expand Landing";
-  toggleButton.append(
-    el("span", "gtoggle", landingOpen ? "▾" : "▸"),
-    el("span", "gtitle", `Landing (${String(items.length)})`)
-  );
-  head.append(toggleButton, el("span", "gmeta", "unlanded changesets · disjoint first"));
-  toggleButton.addEventListener("click", () => {
-    landingOpen = !landingOpen;
-    render();
-  });
-  section.append(head);
-  if (!landingOpen) return section;
-
-  if (landingNotice !== null) {
-    const notice = el("div", "row row-note", landingNotice);
-    notice.setAttribute("role", "status");
-    notice.setAttribute("aria-live", "polite");
-    section.append(notice);
-  }
-  for (const item of items) {
-    const row = el("div", "row depth-0 landing-row");
-    row.append(el("span", item.overlapsWith.length > 0 ? "dot dot-unknown" : "dot dot-done"));
-    row.append(el("span", "stitle", `${item.taskTitle} · ${item.subtaskTitle}`));
-    if (item.overlapsWith.length > 0) {
-      row.append(chip(`⚠ overlaps ${String(item.overlapsWith.length)}`, "chip-a"));
-    } else if (item.overlapUnknown === true) {
-      row.append(chip("overlap unknown", "chip-mode"));
-    }
-    const line = el("span", "act");
-    line.textContent = item.repos.map((repo) => `${repo.repoName} (${String(repo.fileCount)} file${repo.fileCount === 1 ? "" : "s"})`).join(" · ");
-    row.append(line);
-
-    const meta = el("span", "rmeta");
-    meta.append(el("span", "rmeta-part quiet", formatAgo(item.capturedAt)));
-    const armed = armedLandId === item.subtaskId;
-    const pull = actionButton(armed ? "Confirm pull" : "Pull", "Pull this run's clone work into your working copy and mark it landed", () => {
-      if (armedLandId !== item.subtaskId) {
-        armedLandId = item.subtaskId;
+  // Landing (ADR 0014, per-row since P5): only while a captured changeset
+  // waits, and never mid-turn (the host refuses a pull under a live turn).
+  if (linesBySession.get(sessionId)?.landable === true && row.status !== "running" && row.status !== "starting") {
+    const armed = armedLandId === sessionId;
+    const land = button(armed ? "Confirm land" : "Land changes", "Pull this run's clone work into your working copy and mark it landed", armed ? "pill row-land armed" : "pill row-land", () => {
+      if (armedLandId !== sessionId) {
+        armedLandId = sessionId;
         render();
         return;
       }
       armedLandId = null;
-      landingNotice = `Pulling ${item.subtaskTitle}…`;
+      rowNotes.set(sessionId, "Landing…");
       render();
-      void request({ type: "agents.landSession", sessionId: item.sessionId }).then((response) => {
-        landingNotice = response.ok && response.payload.type === "agents.landSession"
+      void request({ type: "agents.landSession", sessionId }).then((response) => {
+        rowNotes.set(sessionId, response.ok && response.payload.type === "agents.landSession"
           ? response.payload.message
-          : `pull failed: ${response.ok ? "unexpected response" : response.error.message}`;
+          : `landing failed: ${response.ok ? "unexpected response" : response.error.message}`);
         scheduleRefetch();
         render();
       });
-    }, armed ? "stop armed" : "");
-    pull.disabled = isDemoMode();
-    if (isDemoMode()) pull.title = "Demo data does not write to your working copy. Switch to Live data to pull this work.";
-    meta.append(pull);
-    row.append(meta);
-    section.append(row);
+    });
+    land.disabled = isDemoMode();
+    if (isDemoMode()) land.title = "Demo data does not write to your working copy. Switch to Live data to land this work.";
+    right.append(land);
   }
-  return section;
+  if (row.status === "failed") {
+    // No session-level retry request reaches this panel's dispatch yet, so
+    // Retry opens the chat, where the composer's retry lives.
+    right.append(button("Retry ↗", "Open this chat to re-run the failed turn", "pill row-retry", () => {
+      openChat(sessionId);
+    }));
+  }
+
+  const elapsed = el("span", "row-elapsed mono");
+  const root = activityFor(session)?.root;
+  const waitingSince = row.status === "awaiting" ? waitingSinceFor(sessionId) : undefined;
+  if (session.runningElsewhere === true) {
+    elapsed.append(document.createTextNode("-"));
+  } else if (waitingSince !== undefined) {
+    // A pinned row's useful number is how long the PERSON has been the
+    // blocker, not when the agent last spoke.
+    elapsed.append(tickerText(() => `waiting ${formatDuration(Date.now() - waitingSince).replace(/ \d\ds$/, "")}`));
+  } else if (row.status === "running" && root?.startedAt !== undefined) {
+    const startedAt = Date.parse(root.startedAt);
+    elapsed.append(tickerText(() => formatDuration(Date.now() - startedAt)));
+  } else {
+    elapsed.append(tickerText(() => formatAgo(row.at)));
+  }
+  right.append(elapsed);
+
+  const actions = el("div", "row-actions");
+  actions.append(button("Open chat ⇥", "Open this session's chat", "ghost", () => {
+    openChat(sessionId);
+  }));
+  // Stop follows the TURN, not the dot: a row pinned for a question can still
+  // have a turn in flight, and that is exactly when stopping matters.
+  if (turnActive(session) && session.live === true) {
+    const armed = armedStopId === sessionId;
+    actions.append(button(armed ? "Confirm" : "Stop", "Cancel this session's current turn", armed ? "ghost stop armed" : "ghost stop", () => {
+      if (armedStopId !== sessionId) {
+        armedStopId = sessionId;
+        render();
+        return;
+      }
+      armedStopId = null;
+      void request({ type: "chat.cancelTurn", sessionId }).then((response) => {
+        // A refused cancel (ended meanwhile, running elsewhere) heals on refetch.
+        if (!response.ok) {
+          rowNotes.set(sessionId, response.error.message);
+          scheduleRefetch();
+        }
+        render();
+      });
+      render();
+    }));
+  }
+  if (session.runningElsewhere !== true) {
+    const more = button("⋯", "More actions", openMenuId === sessionId ? "ghost more on" : "ghost more", () => {
+      openMenuId = openMenuId === sessionId ? null : sessionId;
+      render();
+    });
+    more.setAttribute("aria-haspopup", "menu");
+    more.setAttribute("aria-expanded", String(openMenuId === sessionId));
+    actions.append(more);
+    if (openMenuId === sessionId) actions.append(renderRowMenu(sessionId));
+  }
+  right.append(actions);
+  return right;
 }
 
-function renderOrphanDrawer(orphans: readonly ChatSessionSummary[]): HTMLElement {
-  const section = el("section", "group drawer");
-  const head = el("div", "ghead");
-  const toggleButton = document.createElement("button");
-  toggleButton.type = "button";
-  toggleButton.className = "ghead-toggle";
-  toggleButton.setAttribute("aria-expanded", String(orphansOpen));
-  toggleButton.title = orphansOpen ? "Collapse sessions without a task" : "Expand sessions without a task";
-  toggleButton.append(
-    el("span", "gtoggle", orphansOpen ? "▾" : "▸"),
-    el("span", "gtitle quiet", `Sessions without a task (${String(orphans.length)})`)
-  );
-  head.append(toggleButton);
-  toggleButton.addEventListener("click", () => {
-    orphansOpen = !orphansOpen;
+function renderRowMenu(sessionId: string): HTMLElement {
+  const menu = el("div", "menu");
+  menu.setAttribute("role", "menu");
+  const item = (label: string, title: string, run: () => void): void => {
+    const node = button(label, title, "menu-item", () => {
+      openMenuId = null;
+      run();
+    });
+    node.setAttribute("role", "menuitem");
+    menu.append(node);
+  };
+  item("End session", "End this chat session and release its runtime", () => {
+    void request({ type: "chat.endSession", sessionId }).then((response) => {
+      if (!response.ok) rowNotes.set(sessionId, response.error.message);
+      scheduleRefetch();
+      render();
+    });
     render();
   });
-  section.append(head);
-  if (orphansOpen) {
-    const visibleIds = new Set(orphans.map((session) => session.sessionId));
-    for (const root of sessionForest(orphans)) {
-      appendSessionNode(section, root, 0, visibleIds);
+  item("Container terminal", "Open a terminal inside this chat's container", () => {
+    void request({ type: "runtime.openTerminal", sessionId }).then((response) => {
+      if (!response.ok) rowNotes.set(sessionId, response.error.message);
+      render();
+    });
+  });
+  item("Raw stream", "Expand this row and re-read the raw agent stream", () => {
+    expanded.add(sessionId);
+    rawTails.delete(sessionId);
+    void loadRawTail(sessionId);
+    render();
+  });
+  return menu;
+}
+
+/**
+ * Expand-in-place: the raw-stream tail, the delegated subagents, and one meta
+ * line. Nothing here polls - the tail is fetched once per expand.
+ */
+function renderExpansion(row: FleetRow): HTMLElement {
+  const session = row.session;
+  const wrap = el("div", "row-expand");
+  const tail = rawTails.get(session.sessionId);
+  const well = el("pre", "raw mono");
+  if (tail === undefined || tail.status === "loading") well.textContent = "reading the raw stream…";
+  else if (tail.status === "error") well.textContent = tail.text;
+  else well.textContent = tail.text === "" ? "no raw stream captured in this window yet" : tail.text;
+  wrap.append(well);
+
+  const activity = activityFor(session);
+  const agents = activity?.agents ?? [];
+  if (agents.length > 0) {
+    const byParent = new Map<string, AgentActivityItem[]>();
+    for (const agent of agents) {
+      const key = agent.parentNodeId ?? "root";
+      const bucket = byParent.get(key);
+      if (bucket === undefined) byParent.set(key, [agent]);
+      else bucket.push(agent);
     }
+    const appendLevel = (parentKey: string, depth: number): void => {
+      for (const agent of byParent.get(parentKey) ?? []) {
+        wrap.append(renderChildRow(session, agent, depth));
+        appendLevel(agent.nodeId, Math.min(depth + 1, MAX_CHILD_DEPTH));
+      }
+    };
+    appendLevel("root", 0);
   }
-  return section;
+  const tier = subagentReportingForTransport(session.transport ?? "");
+  if (tier !== "full" && turnRunning.has(session.sessionId)) {
+    // Honest tiers: a silent tree must say WHY it is silent.
+    wrap.append(el("div", "child-note", tier === "lifecycle"
+      ? "this transport reports subagent lifecycle only - no per-agent feed"
+      : "no subagent signal for this transport"));
+  }
+
+  const parts: string[] = [session.providerId];
+  if (session.model !== undefined) parts.push(session.model);
+  if (session.mode !== undefined) parts.push(session.mode);
+  if (session.spawnedRole !== undefined) parts.push(`role · ${session.spawnedRole}`);
+  if (session.transport !== undefined) parts.push(session.transport);
+  const root = activity?.root;
+  if (root?.tokens !== undefined) parts.push(formatTokens(root.tokens));
+  if (root !== undefined && root.toolUses > 0) parts.push(`${String(root.toolUses)} calls`);
+  wrap.append(el("div", "meta mono", parts.join(" · ")));
+  return wrap;
+}
+
+function renderChildRow(session: ChatSessionSummary, agent: AgentActivityItem, depth: number): HTMLElement {
+  const status: TaskRollupStatus = agent.status === "running"
+    ? "running"
+    : agent.status === "failed"
+      ? "failed"
+      : agent.status === "unknown" ? "offline" : "done";
+  const node = document.createElement("button");
+  node.type = "button";
+  node.className = `child depth-${String(Math.min(depth, MAX_CHILD_DEPTH))}`;
+  node.title = "Open this agent in the chat's Agents lens";
+  node.append(el("span", `dot dot-${status}`));
+  node.append(el("span", "child-label", agent.label));
+  const line = agent.lastCommand === undefined ? agent.lastActivity ?? "" : `$ ${agent.lastCommand}`;
+  node.append(el("span", "child-line mono", line));
+  const right = el("span", "child-elapsed mono");
+  if (agent.status === "running" && agent.startedAt !== undefined) {
+    const startedAt = Date.parse(agent.startedAt);
+    right.append(tickerText(() => formatDuration(Date.now() - startedAt)));
+  } else if (agent.startedAt !== undefined && agent.endedAt !== undefined) {
+    right.textContent = formatDuration(Date.parse(agent.endedAt) - Date.parse(agent.startedAt));
+  }
+  node.append(right);
+  node.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void request({ type: "agents.openSession", sessionId: session.sessionId, nodeId: agent.nodeId });
+  });
+  return node;
 }
 
 function renderEmptyState(): HTMLElement {
-  if (filter === "attention") {
-    return el("div", "empty", "Nothing is waiting on you.");
-  }
+  if (filter === "attention") return el("div", "empty", "Nothing is waiting on you.");
   if (filter === "active" && allSessions().length > 0) {
-    return el("div", "empty", "No agents are active right now. Switch to All to see finished sessions.");
+    return el("div", "empty", "No agents are working right now. Switch to All to see finished chats.");
   }
-  return el("div", "empty", "No sessions yet - start a chat from a task, and the fleet shows up here.");
+  return el("div", "empty", "No agents yet - start a chat from a task and it shows up here.");
+}
+
+/**
+ * Runtimes fold: the containers behind the fleet, one quiet line each. It is a
+ * fold rather than a dashboard on purpose - the rows above are the work, this is
+ * the plumbing you open when something looks stuck.
+ */
+function renderRuntimesFold(): HTMLElement {
+  const section = el("div", runtimesOpen ? "runtimes-fold open" : "runtimes-fold");
+
+  const live = runtimes.filter((runtime) => runtime.status !== "removed");
+  const summary = button(
+    `${runtimesOpen ? "▾" : "▸"} Runtimes${runtimesLoaded && live.length > 0 ? ` · ${String(live.length)}` : ""}`,
+    "Containers behind these agents: state, uptime, and cleanup",
+    "runtimes-summary",
+    () => {
+      runtimesOpen = !runtimesOpen;
+      armedRuntimeId = null;
+      render();
+      if (runtimesOpen && !runtimesLoaded) void loadRuntimes();
+    }
+  );
+  summary.setAttribute("aria-expanded", String(runtimesOpen));
+  section.append(summary);
+  if (!runtimesOpen) return section;
+
+  const body = el("div", "runtimes-body");
+
+  if (runtimesError !== null) {
+    body.append(el("div", "runtimes-note error", runtimesError));
+    // The only interactive recovery Drydock can offer from here: the sandbox
+    // tooling refuses to answer until it has a signed-in session.
+    body.append(button("Sign in to Docker Sandbox", "Open a terminal running `sbx login`", "ghost", () => {
+      void request({ type: "runtime.sbxLogin" }).then((response) => {
+        runtimesError = response.ok
+          ? "Opened a terminal running `sbx login`. Finish the sign-in, then reopen this fold."
+          : response.error.message;
+        render();
+      });
+    }));
+    section.append(body);
+    return section;
+  }
+
+  if (!runtimesLoaded) {
+    body.append(el("div", "runtimes-note", "Reading the runtime inventory…"));
+    section.append(body);
+    return section;
+  }
+  if (live.length === 0) {
+    body.append(el("div", "runtimes-note", "No runtimes are recorded right now."));
+  }
+  for (const runtime of live) body.append(renderRuntimeRow(runtime));
+
+  const actions = el("div", "runtimes-actions");
+  actions.append(button("Clean up stale", "Reap quarantined or lost runtimes whose sandbox is already gone, then purge old removed rows", "ghost", () => {
+    void request({ type: "runtime.reconcile" }).then((response) => {
+      if (!response.ok) {
+        runtimesError = response.error.message;
+        render();
+        return;
+      }
+      void loadRuntimes();
+    });
+  }));
+  body.append(actions);
+  section.append(body);
+  return section;
+}
+
+function renderRuntimeRow(runtime: RuntimeSummary): HTMLElement {
+  const row = el("div", "runtime-row");
+  row.append(el("span", "runtime-name mono", runtime.externalName));
+  row.append(el("span", `runtime-state state-${runtime.status}`, runtime.status));
+  const uptime = el("span", "runtime-uptime");
+  const startedAt = Date.parse(runtime.startedAt);
+  uptime.append(tickerText(() =>
+    Number.isFinite(startedAt) ? formatDuration(Date.now() - startedAt) : "-"));
+  row.append(uptime);
+
+  const armed = armedRuntimeId === runtime.runtimeId;
+  row.append(button(armed ? "Confirm stop" : "Stop", "Stop and remove this container", armed ? "runtime-stop armed" : "runtime-stop", () => {
+    if (!armed) {
+      armedRuntimeId = runtime.runtimeId;
+      render();
+      return;
+    }
+    armedRuntimeId = null;
+    void request({ type: "isolatedRun.stopRuntime", runtimeId: runtime.runtimeId }).then((response) => {
+      if (!response.ok) runtimesError = response.error.message;
+      void loadRuntimes();
+    });
+  }));
+  return row;
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+/** Loads the runtime inventory on demand: opening the fold, or after an action. */
+async function loadRuntimes(): Promise<void> {
+  const response = await request({ type: "isolatedRun.listRuntimes" });
+  runtimesLoaded = true;
+  if (!response.ok) {
+    runtimesError = response.error.message;
+  } else if (response.payload.type === "isolatedRun.listRuntimes") {
+    runtimes = response.payload.runtimes;
+    runtimesError = null;
+  }
+  render();
+}
+
+/** Navigation seam: the host reveals the chat and pushes panel.showSession. */
+function openChat(sessionId: string): void {
+  void request({ type: "agents.openSession", sessionId });
+}
+
+async function loadRawTail(sessionId: string): Promise<void> {
+  if (rawTails.has(sessionId)) return;
+  rawTails.set(sessionId, { status: "loading", text: "" });
+  const response = await request({ type: "chat.rawStream", sessionId });
+  if (!response.ok) {
+    rawTails.set(sessionId, { status: "error", text: response.error.message });
+  } else if (response.payload.type === "chat.rawStream") {
+    const lines = response.payload.text.split(/\r?\n/);
+    while (lines.length > 0 && (lines[lines.length - 1] ?? "").trim() === "") lines.pop();
+    rawTails.set(sessionId, { status: "ready", text: lines.slice(-RAW_TAIL_LINES).join("\n") });
+  }
+  render();
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,6 +1113,7 @@ async function loadOverview(): Promise<void> {
   overview = response.payload.state;
   loadError = null;
   seedTurnStateFromSnapshot();
+  seedLinesFromSnapshot(overview);
   render();
   if (pendingGuideStart) {
     pendingGuideStart = false;
@@ -1178,10 +1121,24 @@ async function loadOverview(): Promise<void> {
   }
 }
 
+// An outside click closes the row menu; the ⋯ button stops propagation itself.
+document.addEventListener("click", () => {
+  if (openMenuId === null) return;
+  openMenuId = null;
+  render();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (openMenuId === null && armedStopId === null && armedLandId === null && armedRuntimeId === null) return;
+  openMenuId = null;
+  armedStopId = null;
+  armedLandId = null;
+  armedRuntimeId = null;
+  render();
+});
+
 window.setInterval(() => {
-  for (const ticker of tickers) {
-    ticker.node.textContent = ticker.compute();
-  }
+  for (const ticker of tickers) ticker.node.textContent = ticker.compute();
 }, 1000);
 
 render();

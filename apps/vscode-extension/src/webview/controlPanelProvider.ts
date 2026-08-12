@@ -1,15 +1,20 @@
 /**
- * Control panel webview host.
+ * Shared webview dispatch bridge (formerly the Control Panel host).
  *
- * This is the trust boundary between the webview (untrusted renderer) and the
- * backend services: every inbound message passes through parsePanelRequest,
- * every outbound message is a typed envelope, and the webview only ever
- * receives display-safe projections - never runtime handles, secrets, or
- * process APIs. The panel renders a degraded state instead of disappearing
- * when the isolated runtime tooling is missing.
+ * The four-tab Control Panel retired with UX overhaul P7; what it was really
+ * carrying - one parsed, audited request dispatch over every backend service,
+ * plus one push fan-out - stayed. Hosts register with `attachWebview` and share
+ * it: the left rail views, the chat rail, and the Task Hub today, any future
+ * surface tomorrow. This class owns no view of its own; it never renders HTML.
+ *
+ * This is still the trust boundary between webviews (untrusted renderers) and
+ * the backend services: every inbound message passes through parsePanelRequest,
+ * every outbound message is a typed envelope, responses go only to the host
+ * that asked, and webviews only ever receive display-safe projections - never
+ * runtime handles, secrets, or process APIs. Requests answer with a degraded
+ * state instead of failing hard when the isolated runtime tooling is missing.
  */
 
-import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as vscode from "vscode";
@@ -34,17 +39,16 @@ import {
   type ChatSessionSummary,
   type ChatWorkspaceSelection,
   type HostToWebviewMessage,
+  type HubState,
   type McpServerRecord,
   type McpServerSummary,
-  type MemoryCandidateEdits,
-  type MemoryCandidateRecord,
-  type MemoryCandidateSummary,
-  type MemoryEditsInput,
-  type MemoryScope,
   type PanelInitState,
   type PanelPushPayload,
   type PanelRequest,
   type PanelResponsePayload,
+  type PanelSurface,
+  type PlanSummary,
+  type RuntimeStatsSummary,
   type SessionAttentionReason,
   type WorkspaceActivateResult,
   type WorkTaskRecord,
@@ -55,6 +59,8 @@ import type { BoardService, McpRegistryService, MemoryService, SubtaskService, T
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import type { PlannerAppService } from "../services/plannerAppService.js";
 import { buildBoardState, decorateTaskSummary, joinOpenCommentCounts, reconcileColumns } from "./boardShared.js";
+import { buildHubState, hubTaskSessionIds, type HubMountInput, type HubRuntimeInput } from "./hubShared.js";
+import { buildRecentChats, tasksBlockingWorkspaceSet, workspaceInUseMessage } from "./railShared.js";
 import { promptAndSaveSubtaskSeedMode } from "./subtaskSeedPrompt.js";
 import { promptAndSaveTaskClonePolicy } from "./taskClonePolicyPrompt.js";
 import {
@@ -63,10 +69,10 @@ import {
   type IsolatedRunService
 } from "../services/isolatedRunService.js";
 import { ProviderConnectService } from "../services/providerConnectService.js";
-import type { WorkHistoryFilter, WorkInsightsAppService } from "../services/workInsightsAppService.js";
 import { toAccessRequestSummary, type WorkspaceReviewAppService } from "../services/workspaceReviewAppService.js";
 import { openBaselineDiff } from "./baselineDiff.js";
 import { memoryUri } from "./memoryContentProvider.js";
+import { memoryAnchorPorts, memoryTaskTitles, resolveMemoryEdits, toMemoryCandidateSummary } from "./memoryShared.js";
 
 export function toChatSessionSummary(record: ChatSessionRecord, runningElsewhere = false): ChatSessionSummary {
   return {
@@ -121,33 +127,6 @@ function toFreshWorkTaskSummary(record: WorkTaskRecord): WorkTaskSummary {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     subtasks: []
-  };
-}
-
-/**
- * Display-safe projection of a memory; resolvedAt and workspace root PATHS are
- * host-only (the label carries folder basenames, not locations).
- */
-function toMemoryCandidateSummary(record: MemoryCandidateRecord, taskTitles?: ReadonlyMap<string, string>): MemoryCandidateSummary {
-  const scope = record.scope ?? "global";
-  let scopeLabel: string | undefined;
-  if (scope === "task" && record.scopeTaskId !== undefined) {
-    scopeLabel = taskTitles?.get(record.scopeTaskId) ?? record.scopeTaskId;
-  } else if (scope === "workspace" && record.scopeRoots !== undefined && record.scopeRoots.length > 0) {
-    scopeLabel = record.scopeRoots
-      .map((root) => root.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? root)
-      .join(", ");
-  }
-  return {
-    memoryCandidateId: record.memoryCandidateId,
-    sessionId: record.sessionId,
-    content: record.content,
-    status: record.status,
-    createdAt: record.createdAt,
-    scope,
-    ...(scopeLabel === undefined ? {} : { scopeLabel }),
-    tags: record.tags ?? [],
-    origin: record.origin ?? "agent"
   };
 }
 
@@ -213,12 +192,18 @@ function runtimePathToHostPath(runtimePath: string): string {
  * exactly one of workspaceSetId/sessionId is present, so workspaceSetId is
  * preferred and sessionId is the else branch.
  */
-function taskLinkTarget(payload: { readonly workspaceSetId?: string; readonly sessionId?: string }):
+function taskLinkTarget(payload: {
+  readonly workspaceSetId?: string;
+  readonly sessionId?: string;
+  readonly subtaskId?: string;
+}):
   | { readonly workspaceSetId: string }
-  | { readonly sessionId: string } {
+  | { readonly sessionId: string; readonly subtaskId?: string } {
   return payload.workspaceSetId !== undefined
     ? { workspaceSetId: payload.workspaceSetId }
-    : { sessionId: payload.sessionId as string };
+    // A session link narrowed by subtaskId belongs to that card rather than the
+    // task itself; TaskService.link already stores the narrower target.
+    : { sessionId: payload.sessionId as string, ...(payload.subtaskId === undefined ? {} : { subtaskId: payload.subtaskId }) };
 }
 
 /**
@@ -236,23 +221,34 @@ export function isSessionRunningElsewhere(appService: IsolatedRunService, record
     && record.hostInstanceId !== appService.hostInstanceId;
 }
 
-export class ControlPanelProvider implements vscode.WebviewViewProvider {
-  static readonly viewType = "drydock.controlPanel";
+/**
+ * `panel.openSurface` → the command that already opens that surface. The
+ * webview names a surface from a closed enum; only this table turns one into a
+ * command string, so a webview can never reach an arbitrary command.
+ */
+const SURFACE_COMMANDS: Readonly<Record<PanelSurface, string>> = {
+  hub: "drydock.taskHub.open",
+  board: "drydock.taskBoard.open",
+  agents: "drydock.agents.open",
+  planner: "drydock.planner.open",
+  review: "drydock.taskReview.open"
+};
 
-  private view: vscode.WebviewView | undefined;
+export class ControlPanelProvider {
   /** Previews whose untrusted-content notice has already been shown. */
   private readonly previewNoticeShown = new Set<string>();
   private sequence = 0;
   /**
-   * Per-session "waiting on you" reasons. Drives the activity-bar badge, the
-   * `session.attention` push, and the hidden-panel toast. A session with an
-   * empty set is dropped entirely so the badge counts only sessions that still
-   * need the user.
+   * Per-session "waiting on you" reasons. Drives the `session.attention` push
+   * and the hidden-host toast. A session with an empty set is dropped entirely
+   * so downstream counts only include sessions that still need the user. (The
+   * native activity-bar badge is the Tasks rail's, folded from the same bus
+   * events in `railViewProvider.ts`.)
    */
   private readonly attention = new Map<string, Set<SessionAttentionReason>>();
   /** Seeded once so a reloaded webview re-derives startup pending-request attention. */
   private attentionSeeded = false;
-  /** Seeded independently when the Work tab first requests pending questions. */
+  /** Seeded independently when a host first requests pending questions. */
   private questionAttentionSeeded = false;
   /**
    * Live subagent summaries per session, folded from the bus agent-events this
@@ -261,32 +257,38 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
    */
   private readonly agentActivity = new Map<string, { sources: AgentTreeSource[] }>();
   /**
-   * A session another surface (the Agents panel) asked us to show before the
-   * webview booted. The webview always fetches session.list on boot; the
-   * pending navigation flushes as a panel.showSession push right after that
-   * response, so it can never race a not-yet-listening document (the
-   * planner's pendingShowPlanId pattern).
+   * A session another surface (the Agents panel) asked us to show before any
+   * host booted. Hosts always fetch session.list on boot; the pending
+   * navigation flushes as a panel.showSession push right after that response,
+   * so it can never race a not-yet-listening document (the planner's
+   * pendingShowPlanId pattern).
    */
   private pendingShowSession: { readonly sessionId: string; readonly nodeId?: string } | null = null;
-  /** Planner navigation queued until the sidebar webview has requested its plan list. */
-  private pendingShowPlan: { readonly planId?: string } | null = null;
+  /**
+   * The webviews hosting this protocol (one handler, many hosts): they share
+   * the request dispatch and receive every push, but their responses go back to
+   * whichever host asked. The value reports whether that host is on screen -
+   * only view-backed hosts can answer, so the default is "not visible".
+   */
+  private readonly attachedWebviews = new Map<vscode.Webview, () => boolean>();
+  /** In-flight request -> the host that sent it. */
+  private readonly responseTargets = new Map<string, vscode.Webview>();
   /** Guided host-side provider sign-in flows (built lazily; needs vscode.env). */
   private connectService: ProviderConnectService | null = null;
   /** Auto-detection for terminal login flows: poll + close listener per provider. */
   private readonly loginWatchers = new Map<string, () => void>();
 
   constructor(
-    private readonly extensionUri: vscode.Uri,
     private readonly backend: Backend,
     private readonly logger: Logger
   ) {
     if (backend.available) {
       // The subscription lives for the extension lifetime; push() is a no-op
-      // while the view is hidden/disposed.
+      // while nothing is attached.
       backend.bus.subscribe((event) => this.onBusEvent(event));
     }
     // Surface the active editor so the composer can offer it as a one-click
-    // attachment. push() no-ops while the view is hidden, so this is cheap.
+    // attachment. push() no-ops while nothing is attached, so this is cheap.
     vscode.window.onDidChangeActiveTextEditor(() => {
       this.push({ type: "editor.active", editor: this.activeEditorRef() ?? null });
     });
@@ -299,36 +301,20 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
 
   /**
    * Navigation entry point for other surfaces (the Agents panel): reveal the
-   * sidebar and land the Chat tab on this session (nodeId → Agents lens).
-   * With no live webview yet, the navigation parks until the fresh view's
-   * boot session.list proves it is listening.
+   * chat rail and land it on this session (nodeId → Agents lens). With no live
+   * host yet, the navigation parks until a fresh one's boot session.list proves
+   * it is listening.
    */
   showSession(sessionId: string, nodeId?: string): void {
     const target = { sessionId, ...(nodeId === undefined ? {} : { nodeId }) };
-    // Focus is best-effort: the push is what carries the navigation.
-    void vscode.commands.executeCommand("drydock.controlPanel.focus").then(undefined, () => undefined);
-    if (this.view === undefined) {
+    // Focus is best-effort: the push is what carries the navigation. The chat
+    // rail is the only chat host now that the Control Panel has retired.
+    void vscode.commands.executeCommand("drydock.chatRail.focus").then(undefined, () => undefined);
+    if (this.attachedWebviews.size === 0) {
       this.pendingShowSession = target;
       return;
     }
     this.push({ type: "panel.showSession", ...target });
-  }
-
-  /**
-   * Shows the sidebar Plan tab and optionally selects a plan. `reveal=false`
-   * updates an already-open sidebar without moving keyboard focus out of the
-   * editor-area Planner.
-   */
-  showPlan(planId?: string, reveal = true): void {
-    const target = { ...(planId === undefined ? {} : { planId }) };
-    if (reveal) {
-      void vscode.commands.executeCommand("drydock.controlPanel.focus").then(undefined, () => undefined);
-    }
-    if (this.view === undefined) {
-      this.pendingShowPlan = target;
-      return;
-    }
-    this.push({ type: "panel.showPlan", ...target });
   }
 
   /** The active file-scheme editor as a display-safe ref, or undefined. */
@@ -385,11 +371,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.dropAttention(event.sessionId);
         return;
       case "planner-changed":
-        // Coarse planner invalidation: the Plan tab refetches planner.plans.
+        // Coarse planner invalidation: plan surfaces refetch planner.plans.
         this.push({ type: "planner.changed", planId: event.planId });
         return;
       case "planner-session-started":
-        // A plan session booted (any surface): the Plan tab picks up its rail.
+        // A plan session booted (any surface): plan surfaces pick up its rail.
         this.push({ type: "planner.sessionReady", planId: event.planId, sessionId: event.sessionId, ok: true });
         return;
       case "access-requested":
@@ -425,6 +411,16 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         // board panel edits): the Work tab refetches board.state off this push.
         this.push({ type: "board.changed" });
         return;
+      case "active-task-changed":
+        // The spine moved (any surface): every host retargets off this push.
+        this.push({ type: "activeTask", activeTaskId: event.taskId });
+        return;
+      case "boot-progress":
+        // One stage of a session boot (UX overhaul P4). Straight relay: the
+        // hub composer's timeline and the rail's reconnect spinner decide what
+        // to light; a stage nobody is watching costs a discarded message.
+        this.push({ type: "chat.bootProgress", sessionId: event.sessionId, stage: event.stage });
+        return;
       case "inventory-changed":
         if (this.backend.available) {
           void this.pushInventory(this.backend.appService);
@@ -433,31 +429,44 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view;
-    view.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "dist", "webview")]
+  /**
+   * Registers a webview on this protocol. Its messages run through the same
+   * parse + dispatch path (its responses come back to it, never to a sibling
+   * host) and it receives every push. Disposing detaches it.
+   *
+   * `isVisible` lets a view-backed host report whether it is on screen, which
+   * is what suppresses the redundant attention toast for a surface the user is
+   * already looking at. Hosts that cannot answer are treated as hidden.
+   */
+  attachWebview(webview: vscode.Webview, isVisible: () => boolean = () => false): { dispose(): void } {
+    this.attachedWebviews.set(webview, isVisible);
+    const subscription = webview.onDidReceiveMessage((raw: unknown) => {
+      void this.onMessage(raw, webview);
+    });
+    return {
+      dispose: () => {
+        subscription.dispose();
+        this.attachedWebviews.delete(webview);
+      }
     };
-    view.webview.html = this.renderHtml(view.webview);
-    view.webview.onDidReceiveMessage((raw: unknown) => {
-      void this.onMessage(raw);
-    });
-    view.onDidDispose(() => {
-      if (this.view === view) this.view = undefined;
-    });
   }
 
-  private async onMessage(raw: unknown): Promise<void> {
+  /** `origin` is the host that sent this message. */
+  private async onMessage(raw: unknown, origin?: vscode.Webview): Promise<void> {
     const request = parsePanelRequest(raw);
     if (!request) {
       this.logger.warn("control panel dropped a malformed webview message");
       return;
     }
+    if (origin !== undefined) {
+      this.responseTargets.set(request.requestId, origin);
+    }
     try {
       await this.handleRequest(request);
     } catch (error) {
       this.respondError(request.requestId, error instanceof Error ? error.message : String(error));
+    } finally {
+      this.responseTargets.delete(request.requestId);
     }
   }
 
@@ -500,12 +509,6 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.respond(request.requestId, { type: "isolatedRun.listRuntimes", runtimes });
         return;
       }
-      case "runtime.stats": {
-        const appService = this.requireBackend();
-        const stats = await appService.sampleRuntimeStats(payload.runtimeIds);
-        this.respond(request.requestId, { type: "runtime.stats", stats });
-        return;
-      }
       case "runtime.reconcile": {
         const appService = this.requireBackend();
         if (!this.backend.available) {
@@ -528,15 +531,6 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
           diagnostics: result.diagnostics
         });
         await this.pushInventory(appService);
-        return;
-      }
-      case "isolatedRun.probeAppServer": {
-        const appService = this.requireBackend();
-        if (appService.isRunInFlight()) {
-          throw new Error("A run is already in progress.");
-        }
-        this.respond(request.requestId, { type: "isolatedRun.probeAppServer", accepted: true });
-        void this.executeProbe(appService);
         return;
       }
       case "chat.start": {
@@ -752,10 +746,10 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       }
       case "provider.list": {
         const appService = this.requireBackend();
-        // An explicit Recheck (force) always re-probes auth status; only the
-        // model-catalog fetch stays behind the service's TTL.
+        // An explicit Recheck / "Refresh models" (force) re-probes auth AND
+        // requeries every provider's live model list, bypassing the TTL.
         const providerCatalogs = await appService.refreshHostProviderCatalogs(
-          payload.force === true ? { forceAuthProbe: true } : undefined
+          payload.force === true ? { force: true } : undefined
         );
         this.respond(request.requestId, { type: "provider.list", providerCatalogs });
         return;
@@ -909,6 +903,35 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
           });
         return;
       }
+      case "session.recents": {
+        // The rail's Recents list: one row per task, host-deduped so the
+        // webview never has to join sessions to tasks itself.
+        const appService = this.requireBackend();
+        const [sessions, tasks] = await Promise.all([
+          appService.listChatSessions(),
+          this.requireTasks().listTaskSummaries()
+        ]);
+        const recents = buildRecentChats(
+          await this.decorateTasks(tasks),
+          sessions.map((session) => {
+            const summary = this.decorateSessionSummary(session);
+            return {
+              sessionId: summary.sessionId,
+              title: summary.title,
+              status: summary.status,
+              ...(summary.live === undefined ? {} : { live: summary.live }),
+              ...(summary.runningElsewhere === undefined ? {} : { runningElsewhere: summary.runningElsewhere }),
+              updatedAt: summary.updatedAt
+            };
+          }),
+          {
+            ...(payload.limit === undefined ? {} : { limit: payload.limit }),
+            attentionSessionIds: await this.attentionSessionIds()
+          }
+        );
+        this.respond(request.requestId, { type: "session.recents", recents });
+        return;
+      }
       case "task.list": {
         const backend = this.requireBackendReady();
         const tasks = await joinOpenCommentCounts(backend, this.logger, await this.requireTasks().listTaskSummaries());
@@ -980,6 +1003,17 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         this.push({ type: "task.updated", task: summary });
         return;
       }
+      case "active.get": {
+        this.respond(request.requestId, { type: "active.get", activeTaskId: this.requireBackendReady().activeTasks.get() });
+        return;
+      }
+      case "active.set": {
+        // The service publishes active-task-changed, which becomes the push.
+        const activeTasks = this.requireBackendReady().activeTasks;
+        activeTasks.set(payload.taskId === null ? null : asId<"TaskId">(payload.taskId));
+        this.respond(request.requestId, { type: "active.set", activeTaskId: activeTasks.get() });
+        return;
+      }
       case "question.list": {
         const questions = await this.requireQuestions().listQuestions("pending");
         this.respond(request.requestId, { type: "question.list", questions: questions.map(toAgentQuestionSummary) });
@@ -1027,15 +1061,6 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         await this.handleWorkspaceActivate(request.requestId, payload);
         return;
       }
-      case "work.history": {
-        // Contracts guarantee exactly one scope; workspaceSetId wins the union.
-        const filter: WorkHistoryFilter = payload.workspaceSetId !== undefined
-          ? { workspaceSetId: payload.workspaceSetId }
-          : { projectId: payload.projectId as string };
-        const entries = await this.requireWorkInsights().history(filter);
-        this.respond(request.requestId, { type: "work.history", entries });
-        return;
-      }
       case "memory.list": {
         const titles = await this.taskTitleMap();
         const candidates = (await this.requireMemory().listCandidates()).map((record) => toMemoryCandidateSummary(record, titles));
@@ -1045,7 +1070,12 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "memory.resolve": {
-        const edits = await this.resolveMemoryEdits(payload.memoryCandidateId, payload.edits);
+        const edits = await resolveMemoryEdits(
+          memoryAnchorPorts(this.requireBackendReady()),
+          payload.memoryCandidateId,
+          payload.edits,
+          this.openFolderRoots()
+        );
         const record = await this.requireMemory().resolve(payload.memoryCandidateId, payload.approve, edits);
         this.respond(request.requestId, { type: "memory.resolve", candidate: toMemoryCandidateSummary(record, await this.taskTitleMap()) });
         return;
@@ -1144,13 +1174,27 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "workspace.deleteSet": {
-        const state = await this.requireWorkspaceReview().deleteWorkspaceSet(payload.workspaceSetId);
-        this.respond(request.requestId, { type: "workspace.deleteSet", state });
+        const review = this.requireWorkspaceReview();
+        const state = await review.getPolicyState();
+        const set = state.workspaceSets.find((candidate) => candidate.workspaceSetId === payload.workspaceSetId);
+        await this.assertWorkspaceSetsFree(
+          [payload.workspaceSetId],
+          `Workspace set "${set?.name ?? payload.workspaceSetId}"`
+        );
+        this.respond(request.requestId, { type: "workspace.deleteSet", state: await review.deleteWorkspaceSet(payload.workspaceSetId) });
         return;
       }
       case "workspace.removeProject": {
-        const state = await this.requireWorkspaceReview().removeProject(payload.projectId);
-        this.respond(request.requestId, { type: "workspace.removeProject", state });
+        // Removing a root removes it from every set that carries it, so the
+        // same live-mount guard applies to all of those sets.
+        const review = this.requireWorkspaceReview();
+        const state = await review.getPolicyState();
+        const project = state.projects.find((candidate) => candidate.projectId === payload.projectId);
+        const setIds = state.workspaceSets
+          .filter((set) => set.members.some((member) => member.projectId === payload.projectId))
+          .map((set) => set.workspaceSetId);
+        await this.assertWorkspaceSetsFree(setIds, `Folder "${project?.name ?? payload.projectId}"`);
+        this.respond(request.requestId, { type: "workspace.removeProject", state: await review.removeProject(payload.projectId) });
         return;
       }
       case "workspace.updateProjectPath": {
@@ -1505,7 +1549,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "planner.create": {
-        // The Plan tab owns the complete intake. The boot runs detached;
+        // The Planner owns the complete intake. The boot runs detached;
         // Planner opens the resulting files while the conversation remains in
         // the sidebar, and failures surface as the sessionReady error push.
         const planner = this.requirePlanner();
@@ -1531,13 +1575,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         return;
       }
       case "planner.plans": {
-        // The Plan tab's switcher + rail source (summaries carry sessionId).
+        // The plan switcher + rail source (summaries carry sessionId).
         const plans = await this.requirePlanner().listPlans();
         this.respond(request.requestId, { type: "planner.plans", plans });
-        if (this.pendingShowPlan !== null) {
-          this.push({ type: "panel.showPlan", ...this.pendingShowPlan });
-          this.pendingShowPlan = null;
-        }
         return;
       }
       case "planner.archive": {
@@ -1616,6 +1656,176 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
+      case "agents.openSession": {
+        // Attached hosts (the rail) navigate chat through the same seam the
+        // Agents panel uses: one panel.showSession push, whichever chat
+        // surface is listening (the chat rail).
+        this.showSession(payload.sessionId, payload.nodeId);
+        this.respond(request.requestId, { type: "agents.openSession", accepted: true });
+        return;
+      }
+      case "hub.state": {
+        // The Task Hub's ONE composite read (UX overhaul P3). Every field is
+        // folded from a service that already owns it - the hub adds no state,
+        // it only assembles. The fold itself lives in hubShared so it stays
+        // unit-testable without vscode or a backend.
+        const state = await this.buildHubState(payload.taskId);
+        this.respond(request.requestId, { type: "hub.state", state });
+        return;
+      }
+      case "panel.openSurface": {
+        // The webview names a surface from a closed enum; the host owns the
+        // command. Board/Agents are window singletons, Planner takes an
+        // optional planId, Review is per-task (falling back to the spine).
+        this.requireBackend();
+        const surface = payload.surface;
+        const command = SURFACE_COMMANDS[surface];
+        let args: readonly unknown[];
+        if (surface === "planner") {
+          args = [payload.planId];
+        } else if (surface === "review" || surface === "hub") {
+          // Both are task-scoped; an omitted id means "the task the spine is on".
+          const taskId = payload.taskId ?? this.requireBackendReady().activeTasks.get();
+          if (taskId === null) {
+            throw new Error(`${surface === "hub" ? "The Task Hub" : "Task Review"} needs a task; pick one first.`);
+          }
+          args = [taskId];
+        } else {
+          args = [{}];
+        }
+        try {
+          await vscode.commands.executeCommand(command, ...args);
+          this.respond(request.requestId, { type: "panel.openSurface", accepted: true });
+        } catch {
+          // Defensive: the commands register during activation; surface a
+          // readable error if a relay ever beats registration.
+          this.respondError(request.requestId, `That panel is not available yet (${surface}).`);
+        }
+        return;
+      }
+    }
+  }
+
+  /**
+   * Assembles one task's hub overview from the services that own each part.
+   * Optional services (planner, questions) degrade to empty rather than
+   * failing the whole read - a composition without them still has a hub.
+   */
+  private async buildHubState(taskId: string): Promise<HubState> {
+    const backend = this.requireBackendReady();
+    const appService = this.requireBackend();
+    const task = await this.requireTaskSummary(this.requireTasks(), taskId);
+    const linked = hubTaskSessionIds(task);
+    const [records, policy, plans, questions] = await Promise.all([
+      appService.listChatSessions(),
+      this.requireWorkspaceReview().getPolicyState(),
+      backend.planner.listPlans().catch(() => [] as PlanSummary[]),
+      this.requireQuestions().listQuestions("pending").then(
+        (pending) => pending.map(toAgentQuestionSummary),
+        () => [] as AgentQuestionSummary[]
+      )
+    ]);
+    const sessions = records
+      .filter((record) => linked.has(record.sessionId))
+      .map((record) => this.decorateSessionSummary(record));
+    // Mount lines + the header's workspace chip come from the task's linked
+    // sets, in link order; a set that no longer exists contributes nothing.
+    const setsById = new Map(policy.workspaceSets.map((set) => [set.workspaceSetId, set]));
+    const mounts: HubMountInput[] = [];
+    let workspaceName: string | undefined;
+    for (const setId of task.linkedWorkspaceSetIds) {
+      const set = setsById.get(setId);
+      if (set === undefined) continue;
+      workspaceName ??= set.name;
+      for (const member of set.members) {
+        mounts.push({ displayPath: member.displayPath, readOnly: member.readOnly });
+      }
+    }
+    // Runtimes this task owns, plus ONE stats sample covering all of them (the
+    // sampler takes a whole snapshot per call; per-session calls would repeat it).
+    const inventory = (await appService.listPanelRuntimes()).filter((record) => linked.has(String(record.sessionId)));
+    const runningIds = inventory.filter((record) => record.status === "running").map((record) => String(record.runtimeId));
+    const samples = runningIds.length === 0
+      ? []
+      : await appService.sampleRuntimeStats(runningIds).catch(() => [] as RuntimeStatsSummary[]);
+    const samplesById = new Map(samples.map((sample) => [sample.runtimeId, sample]));
+    const runtimes: HubRuntimeInput[] = inventory.map((record) => {
+      const workspacePath = record.metadata["workspacePath"];
+      const sample = samplesById.get(String(record.runtimeId));
+      return {
+        runtime: toRuntimeSummary(record),
+        sessionId: String(record.sessionId),
+        ...(sample === undefined ? {} : { stats: sample }),
+        ...(typeof workspacePath === "string" && workspacePath.length > 0
+          ? { workspaceDisplayPath: workspacePath }
+          : {})
+      };
+    });
+    return buildHubState({
+      task,
+      sessions,
+      plans,
+      questions,
+      accessRequests: policy.accessRequests,
+      runtimes,
+      mounts,
+      ...(workspaceName === undefined ? {} : { workspaceName }),
+      generatedAt: new Date().toISOString()
+    });
+  }
+
+  /**
+   * The same decorated task list `task.list` returns (links + subtasks +
+   * column state), without the review-comment join the rail does not read.
+   */
+  private async decorateTasks(summaries: readonly WorkTaskSummary[]): Promise<WorkTaskSummary[]> {
+    const backend = this.requireBackendReady();
+    const columnsById = new Map((await this.requireBoard().listColumns()).map((column) => [column.columnId, column]));
+    return Promise.all(summaries.map((summary) => decorateTaskSummary(backend, summary, columnsById)));
+  }
+
+  /**
+   * Sessions waiting on the user: this panel's attention bookkeeping plus any
+   * pending question (which survives a panel reload the attention map does not).
+   */
+  private async attentionSessionIds(): Promise<ReadonlySet<string>> {
+    const ids = new Set<string>(this.attention.keys());
+    try {
+      for (const question of await this.requireQuestions().listQuestions("pending")) {
+        ids.add(question.sessionId);
+      }
+    } catch {
+      // No question service in this composition: the attention map still stands.
+    }
+    return ids;
+  }
+
+  /** Sessions with a live backend here, or a fresh heartbeat in another window. */
+  private async liveSessionIds(): Promise<ReadonlySet<string>> {
+    const appService = this.requireBackend();
+    const ids = new Set<string>();
+    for (const record of await appService.listChatSessions()) {
+      if (appService.isChatSessionLive(record.sessionId) || this.isRunningElsewhere(record)) {
+        ids.add(record.sessionId);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Refuses a workspace mutation while a live chat mounts the set: pulling the
+   * roots out from under a running agent breaks its resume. The error names
+   * the task standing in the way rather than failing anonymously.
+   */
+  private async assertWorkspaceSetsFree(workspaceSetIds: readonly string[], subject: string): Promise<void> {
+    if (workspaceSetIds.length === 0) return;
+    const [tasks, live] = await Promise.all([
+      this.requireTasks().listTaskSummaries().then((summaries) => this.decorateTasks(summaries)),
+      this.liveSessionIds()
+    ]);
+    const blocking = tasksBlockingWorkspaceSet(workspaceSetIds, tasks, live);
+    if (blocking.length > 0) {
+      throw new Error(workspaceInUseMessage(subject, blocking));
     }
   }
 
@@ -1964,10 +2174,14 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         });
       }
       await appService.sendChatTurn(sessionId, prompt, model);
-    })().catch((error: unknown) => {
+    })().catch(async (error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error("chat turn failed to run", { sessionId, error: message });
-      this.push({ type: "run.failed", message });
+      // A failure this early has no turn events, so the message would vanish
+      // without a trace: record it durably in the session's transcript AND
+      // push the session-scoped failure for immediate spinner/composer state.
+      await appService.recordChatSendFailure(sessionId, error);
+      this.push({ type: "run.failed", sessionId, message });
     });
   }
 
@@ -2019,21 +2233,6 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     this.runTurnDetached(appService, accessRequest.sessionId, message);
   }
 
-  private async executeProbe(appService: IsolatedRunService): Promise<void> {
-    try {
-      const outcome = await appService.runAppServerProbe();
-      this.push({
-        type: "probe.completed",
-        status: outcome.probe.status,
-        diagnostics: [...outcome.probe.diagnostics, ...outcome.cleanupDiagnostics]
-      });
-    } catch (error) {
-      this.push({ type: "run.failed", message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      await this.pushInventory(appService);
-    }
-  }
-
   // MARK: Attention routing (Phase 3)
 
   /**
@@ -2053,11 +2252,18 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     if (!wasWaiting || !alreadyHadReason) {
       this.pushAttention(sessionId);
     }
-    this.refreshAttentionBadge();
-    // Toast only when the panel is hidden and this is a fresh attention episode.
-    if (!wasWaiting && !this.view?.visible) {
+    // Toast only when no host is on screen and this is a fresh attention episode.
+    if (!wasWaiting && !this.anyHostVisible()) {
       await this.showAttentionToast(sessionId, verb);
     }
+  }
+
+  /** True when at least one attached host reports itself on screen. */
+  private anyHostVisible(): boolean {
+    for (const isVisible of this.attachedWebviews.values()) {
+      if (isVisible()) return true;
+    }
+    return false;
   }
 
   /**
@@ -2083,7 +2289,6 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       this.attention.delete(sessionId);
     }
     this.pushAttention(sessionId);
-    this.refreshAttentionBadge();
   }
 
   /** Drops a session's attention entirely (deleted/ended) and re-announces empty. */
@@ -2092,21 +2297,19 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.pushAttention(sessionId);
-    this.refreshAttentionBadge();
   }
 
   /**
    * Seeds access-request attention for sessions with pending requests, once per
-   * panel session. This lets a reloaded webview re-derive the badge for
-   * requests that were already pending before this panel existed. Turn-attention
-   * is ephemeral and intentionally not seeded.
+   * host session. This lets a reloaded webview re-derive attention for requests
+   * that were already pending before this host existed. Turn-attention is
+   * ephemeral and intentionally not seeded.
    */
   private seedPendingAttention(accessRequests: readonly AccessRequestSummary[]): void {
     if (this.attentionSeeded) {
       return;
     }
     this.attentionSeeded = true;
-    let changed = false;
     for (const accessRequest of accessRequests) {
       if (accessRequest.status !== "pending") {
         continue;
@@ -2116,21 +2319,16 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         reasons.add("access-request");
         this.attention.set(accessRequest.sessionId, reasons);
         this.pushAttention(accessRequest.sessionId);
-        changed = true;
       }
-    }
-    if (changed) {
-      this.refreshAttentionBadge();
     }
   }
 
-  /** Re-derives durable question attention after a panel/window reload. */
+  /** Re-derives durable question attention after a host/window reload. */
   private seedPendingQuestionAttention(
     questions: readonly { readonly sessionId: string; readonly status: string }[]
   ): void {
     if (this.questionAttentionSeeded) return;
     this.questionAttentionSeeded = true;
-    let changed = false;
     for (const question of questions) {
       if (question.status !== "pending") continue;
       const reasons = this.attention.get(question.sessionId) ?? new Set<SessionAttentionReason>();
@@ -2138,9 +2336,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
       reasons.add("question");
       this.attention.set(question.sessionId, reasons);
       this.pushAttention(question.sessionId);
-      changed = true;
     }
-    if (changed) this.refreshAttentionBadge();
   }
 
   /** Pushes a session's current attention reasons (empty when it was dropped). */
@@ -2150,29 +2346,15 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * The activity-bar badge = the number of sessions with ≥1 attention reason;
-   * it clears (undefined) at zero so a settled queue leaves no stale "0".
-   */
-  private refreshAttentionBadge(): void {
-    if (this.view === undefined) {
-      return;
-    }
-    const waiting = this.attention.size;
-    this.view.badge = waiting === 0
-      ? undefined
-      : { value: waiting, tooltip: `${waiting} session(s) waiting on you` };
-  }
-
-  /**
-   * A hidden-panel toast for a freshly-flagged session. "Open" focuses the
-   * control panel. The title comes from the session lookup, falling back to the
-   * id prefix when the record can't be read.
+   * A hidden-host toast for a freshly-flagged session. "Open" focuses the chat
+   * rail. The title comes from the session lookup, falling back to the id
+   * prefix when the record can't be read.
    */
   private async showAttentionToast(sessionId: string, verb: string): Promise<void> {
     const title = await this.sessionTitle(sessionId);
     const choice = await vscode.window.showInformationMessage(`"${title}" ${verb}`, "Open");
     if (choice === "Open") {
-      void vscode.commands.executeCommand("drydock.controlPanel.focus");
+      void vscode.commands.executeCommand("drydock.chatRail.focus");
     }
   }
 
@@ -2226,7 +2408,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
         await vscode.env.openExternal(vscode.Uri.parse(url));
       },
       refreshAuthStatus: async (providerId) => {
-        const providerCatalogs = await appService.refreshHostProviderCatalogs({ forceAuthProbe: true });
+        // A completed guided connect means fresh credentials: requery models
+        // too, so the picker fills in the moment the provider turns green.
+        const providerCatalogs = await appService.refreshHostProviderCatalogs({ force: true });
         this.push({ type: "provider.models", providerCatalogs });
         return appService.providerAuthStatus(providerId);
       },
@@ -2251,10 +2435,16 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     this.loginWatchers.get(providerId)?.();
     const appService = this.requireBackend();
     const refresh = async (): Promise<boolean> => {
+      // Cheap auth-only probe while polling; on the flip to connected, one
+      // full forced discovery fills the model list for the fresh credentials.
       const providerCatalogs = await appService.refreshHostProviderCatalogs({ forceAuthProbe: true });
       this.push({ type: "provider.models", providerCatalogs });
       const connected = appService.providerAuthStatus(providerId) === "authenticated";
-      if (connected) this.push({ type: "provider.authProgress", providerId, phase: "connected" });
+      if (connected) {
+        this.push({ type: "provider.authProgress", providerId, phase: "connected" });
+        const refreshed = await appService.refreshHostProviderCatalogs({ force: true });
+        this.push({ type: "provider.models", providerCatalogs: refreshed });
+      }
       return connected;
     };
     const interval = setInterval(() => {
@@ -2328,62 +2518,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   }
 
   /** taskId → title, for memory scope labels. Best-effort: empty map on failure. */
-  private async taskTitleMap(): Promise<ReadonlyMap<string, string>> {
-    try {
-      const tasks = await this.requireTasks().listTasks();
-      return new Map(tasks.map((task) => [task.taskId as string, task.title]));
-    } catch {
-      return new Map();
-    }
-  }
-
-  /**
-   * Resolves webview-side approval edits (scope kind + tags + content) into
-   * store-level edits with real anchors: task scope anchors to the source
-   * session's linked task, workspace scope to the source session's mounted
-   * roots (falling back to this window's open folders).
-   */
-  private async resolveMemoryEdits(
-    memoryCandidateId: string,
-    edits: MemoryEditsInput | undefined
-  ): Promise<MemoryCandidateEdits | undefined> {
-    if (edits === undefined) return undefined;
-    const resolved: {
-      content?: string;
-      scope?: MemoryScope;
-      scopeTaskId?: string;
-      scopeRoots?: readonly string[];
-      tags?: readonly string[];
-    } = {
-      ...(edits.content === undefined ? {} : { content: edits.content }),
-      ...(edits.tags === undefined ? {} : { tags: edits.tags })
-    };
-    if (edits.scope !== undefined) {
-      resolved.scope = edits.scope;
-      const existing = await this.requireMemory().getCandidate(memoryCandidateId);
-      const sourceSessionId = existing?.sessionId;
-      if (edits.scope === "task" && sourceSessionId !== undefined) {
-        const tasks = await this.requireTasks().listTaskSummaries();
-        const owner = tasks.find((task) => task.linkedSessionIds.includes(sourceSessionId));
-        if (owner !== undefined) resolved.scopeTaskId = owner.taskId;
-      } else if (edits.scope === "workspace") {
-        const stored = sourceSessionId === undefined || sourceSessionId === "user"
-          ? null
-          : await this.requireBackend().getChatSession(sourceSessionId).catch(() => null);
-        const roots = stored?.workspaceRoots !== undefined && stored.workspaceRoots.length > 0
-          ? stored.workspaceRoots
-          : this.openFolderRoots();
-        if (roots.length > 0) resolved.scopeRoots = roots;
-      }
-    }
-    return resolved;
-  }
-
-  private requireWorkInsights(): WorkInsightsAppService {
-    if (!this.backend.available) {
-      throw new Error(this.backend.reason);
-    }
-    return this.backend.workInsights;
+  private taskTitleMap(): Promise<ReadonlyMap<string, string>> {
+    return memoryTaskTitles(() => this.requireTasks().listTasks());
   }
 
   private requirePlanner(): PlannerAppService {
@@ -2409,11 +2545,16 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
   }
 
   private respond(requestId: string, payload: PanelResponsePayload): void {
-    this.post({ protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "response", requestId, ok: true, payload });
+    this.postResponse(requestId, { protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "response", requestId, ok: true, payload });
   }
 
   private respondError(requestId: string, message: string): void {
-    this.post({ protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "response", requestId, ok: false, error: { message } });
+    this.postResponse(requestId, { protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "response", requestId, ok: false, error: { message } });
+  }
+
+  /** A response answers exactly one request, so it goes only to its asker. */
+  private postResponse(requestId: string, message: HostToWebviewMessage): void {
+    void this.responseTargets.get(requestId)?.postMessage(message);
   }
 
   private push(payload: PanelPushPayload): void {
@@ -2421,32 +2562,10 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider {
     this.post({ protocolVersion: WEBVIEW_PROTOCOL_VERSION, kind: "push", sequence: this.sequence, payload });
   }
 
+  /** Pushes broadcast to every attached host. */
   private post(message: HostToWebviewMessage): void {
-    void this.view?.webview.postMessage(message);
-  }
-
-  private renderHtml(webview: vscode.Webview): string {
-    const nonce = randomBytes(16).toString("hex");
-    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "main.js"));
-    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "main.css"));
-    const mermaidUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "planDocsMermaid.js"));
-    // CSP deviation, THIS PANEL ONLY: mermaid's renderer injects scoped inline
-    // SVG styles. Scripts still require the nonce and the bundle is loaded
-    // lazily only when a chat transcript contains a mermaid fence. Model output
-    // is rendered via textContent except adopted, sanitized SVG diagrams.
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource};">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="${styleUri.toString()}">
-  <title>Drydock</title>
-</head>
-<body>
-  <div id="app" data-nonce="${nonce}" data-mermaid-src="${mermaidUri.toString()}"></div>
-  <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
-</body>
-</html>`;
+    for (const webview of this.attachedWebviews.keys()) {
+      void webview.postMessage(message);
+    }
   }
 }

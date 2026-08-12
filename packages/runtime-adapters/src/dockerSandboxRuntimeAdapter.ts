@@ -117,7 +117,14 @@ export class DockerSandboxRuntimeAdapter implements RuntimeAdapter {
     });
   }
 
-  async exec(handle: RuntimeHandle, args: readonly string[], timeoutMs: number, input?: string, signal?: AbortSignal): Promise<CommandResult> {
+  async exec(
+    handle: RuntimeHandle,
+    args: readonly string[],
+    timeoutMs: number,
+    input?: string,
+    signal?: AbortSignal,
+    onStdoutLine?: (line: string) => void
+  ): Promise<CommandResult> {
     return this.options.commandRunner.run(
       this.options.sbxPath,
       ["exec", handle.externalName, ...args],
@@ -125,7 +132,8 @@ export class DockerSandboxRuntimeAdapter implements RuntimeAdapter {
         cwd: this.options.cwd,
         timeoutMs,
         ...(input === undefined ? {} : { input }),
-        ...(signal === undefined ? {} : { signal })
+        ...(signal === undefined ? {} : { signal }),
+        ...(onStdoutLine === undefined ? {} : { onStdoutLine })
       }
     );
   }

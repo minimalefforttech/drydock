@@ -10,7 +10,7 @@
 
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { claudeModelCatalog, fetchCodexHostModelCatalog } from "@drydock/agent-adapters";
+import { fetchCodexHostModelCatalog } from "@drydock/agent-adapters";
 import { TempWorkspaceStore, type TempWorkspace } from "@drydock/artifacts";
 import {
   asId,
@@ -31,6 +31,7 @@ import {
   type CommandResult,
   type CommandRunner,
   type ProviderAuthStatus,
+  type ProviderDescriptor,
   type ChatSessionRecord,
   type CleanupMode,
   type CleanupResult,
@@ -49,6 +50,7 @@ import {
 import {
   assertChildMountsWithinParent,
   assertMountAllowed,
+  BootStageReporter,
   buildChatLog,
   buildSessionBriefing,
   stripHostBriefing,
@@ -70,6 +72,7 @@ import {
 } from "@drydock/core";
 import type { McpEffectiveServer, McpEffectiveQuery, MemoryService } from "@drydock/work-management";
 import { detectWorkspaceTags, type TagRule } from "@drydock/core";
+import { fetchProviderModelsFromHost } from "./modelDiscovery.js";
 import { blocksGlobalMemoryBriefing, type EffectiveSecurityPolicy } from "./securityPolicy.js";
 
 export const ISOLATED_RUN_DEFAULT_PROMPT = "Create smoke-result.txt containing exactly DRYDOCK_SMOKE_OK, then say smoke-ok.";
@@ -135,6 +138,24 @@ export interface IsolatedRunServiceOptions {
   readonly hostCodexPath?: string;
   /** Platform secret store backing `vscode-secret:<provider>` auth refs. */
   readonly providerSecrets?: ProviderSecretRefStore;
+  /**
+   * Persisted copy of the last successful live model discoveries, so the
+   * picker is usable before any provider connects. Entries load as
+   * source:"cache" and are replaced by live results; nothing model-shaped is
+   * compiled into the extension.
+   */
+  readonly catalogCache?: ProviderCatalogCache;
+  /**
+   * Rider model discovery, injectable so tests never touch the network.
+   * Defaults to the registry-described host fetch (modelDiscovery.ts).
+   */
+  readonly discoverProviderModels?: (descriptor: ProviderDescriptor) => Promise<AgentModelCatalog>;
+}
+
+/** Durable store for discovered provider catalogs (host-side, e.g. globalState). */
+export interface ProviderCatalogCache {
+  load(): readonly AgentModelCatalog[] | undefined;
+  save(catalogs: readonly AgentModelCatalog[]): void;
 }
 
 /** Resolved workspace mounting for a chat session. */
@@ -239,31 +260,31 @@ export interface SessionCloneRepo {
 const HOST_CATALOG_TTL_MS = 5 * 60_000;
 
 /**
- * Merges two real provider catalogs without letting a narrower sandbox result
- * erase host-advertised models. Existing provider order stays stable; incoming
- * metadata refreshes matching rows and genuinely new models append. A real
- * provider result replaces the static fallback wholesale on first discovery.
+ * Honest catalog merge. A live "provider" result is the truth and replaces
+ * the entry wholesale (removed upstream models really disappear); "cache"
+ * only ever fills absence; "unavailable" never erases a usable list - it
+ * keeps the existing models and attaches its failure reason so the picker can
+ * show "cached from <date>; last refresh failed: <why>".
  */
 export function mergeAgentModelCatalog(existing: AgentModelCatalog | undefined, incoming: AgentModelCatalog): AgentModelCatalog {
-  if (existing === undefined || existing.providerId !== incoming.providerId || (existing.source === "fallback" && incoming.source === "provider")) {
+  if (existing === undefined || existing.providerId !== incoming.providerId) {
     return incoming;
   }
-  if (incoming.source === "fallback" && existing.source === "provider") {
+  if (incoming.source === "provider") {
+    return incoming;
+  }
+  if (incoming.source === "cache") {
     return existing;
   }
-  const incomingById = new Map(incoming.models.map((model) => [model.id, model]));
-  const existingIds = new Set(existing.models.map((model) => model.id));
-  const models = [
-    ...existing.models.map((model) => ({ ...model, ...(incomingById.get(model.id) ?? {}) })),
-    ...incoming.models.filter((model) => !existingIds.has(model.id))
-  ];
-  return {
-    ...existing,
-    ...incoming,
-    models,
-    source: existing.source === "provider" || incoming.source === "provider" ? "provider" : "fallback",
-    diagnostics: [...new Set([...existing.diagnostics, ...incoming.diagnostics])]
-  };
+  // incoming.source === "unavailable"
+  if (existing.models.length === 0) {
+    return { ...incoming, diagnostics: dedupe([...existing.diagnostics, ...incoming.diagnostics]) };
+  }
+  return { ...existing, diagnostics: dedupe([...existing.diagnostics, ...incoming.diagnostics]) };
+}
+
+function dedupe(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 /** Detected workspace tags are re-scanned at most this often per root. */
 const TAG_CACHE_TTL_MS = 5 * 60_000;
@@ -290,17 +311,46 @@ export class IsolatedRunService {
   private readonly mcpConfiguredSessions = new Set<string>();
   /** Per-root detected workspace tags (bounded scan, TTL-cached). */
   private readonly tagCache = new Map<string, { tags: string[]; at: number }>();
-  private readonly providerCatalogs = new Map<string, AgentModelCatalog>([
-    [CODEX_PROVIDER_ID, fallbackCodexCatalog()],
-    [CLAUDE_PROVIDER_ID, claudeModelCatalog(new Date().toISOString())],
-    // Ridden providers (OpenRouter, DeepSeek, Kimi, ...) seed from their
-    // registry catalogs; live listModels results merge over these per session.
-    ...PROVIDER_REGISTRY
-      .filter((descriptor) => descriptor.models.length > 0)
-      .map((descriptor): [string, AgentModelCatalog] => [descriptor.providerId, riderCatalog(descriptor.providerId)])
-  ]);
+  /**
+   * providerId → last known catalog. Seeded from the durable cache (entries
+   * downgraded to source:"cache") and replaced by live discovery results.
+   * Providers with no entry render as "unavailable" placeholders; there are
+   * no compiled-in model lists.
+   */
+  private readonly providerCatalogs = new Map<string, AgentModelCatalog>();
 
-  constructor(private readonly options: IsolatedRunServiceOptions) {}
+  constructor(private readonly options: IsolatedRunServiceOptions) {
+    for (const cached of options.catalogCache?.load() ?? []) {
+      if (cached.source === "unavailable" || cached.models.length === 0 || !isRegisteredProvider(cached.providerId)) {
+        continue;
+      }
+      this.providerCatalogs.set(cached.providerId, {
+        ...cached,
+        source: "cache",
+        diagnostics: dedupe([...cached.diagnostics, "Cached from the last successful discovery; press Refresh models to requery."])
+      });
+    }
+  }
+
+  /**
+   * Folds a discovery result into the catalog map and persists successful
+   * live results. The single entry point for every catalog source (host
+   * probes, per-session listModels, rider endpoints).
+   */
+  private absorbCatalog(incoming: AgentModelCatalog): void {
+    const merged = mergeAgentModelCatalog(this.providerCatalogs.get(incoming.providerId), incoming);
+    this.providerCatalogs.set(incoming.providerId, merged);
+    if (incoming.source === "provider" && incoming.models.length > 0) {
+      const live = [...this.providerCatalogs.values()].filter((catalog) => catalog.models.length > 0);
+      try {
+        this.options.catalogCache?.save(live);
+      } catch (error) {
+        this.options.logger.warn("provider catalog cache save failed", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }
 
   isRunInFlight(): boolean {
     return this.runInFlight;
@@ -474,7 +524,7 @@ export class IsolatedRunService {
 
   /**
    * Panel-facing inventory. The redesign hides `removed` runtimes by default so
-   * torn-down generations stop accumulating in the System tab; a post-mortem
+   * torn-down generations stop accumulating in the Runtimes fold; a post-mortem
    * view can opt back in with includeRemoved.
    */
   async listPanelRuntimes(includeRemoved = false): Promise<RuntimeInventoryRecord[]> {
@@ -542,14 +592,21 @@ export class IsolatedRunService {
   ): Promise<{ session: ChatSessionRecord; isolation: IsolationSummary; providerCatalogs: readonly AgentModelCatalog[] }> {
     const normalizedModel = this.normalizeModelSelection(model);
     this.assertSupportedModelSelection(normalizedModel);
+    // The boot timeline needs ONE identity across stages that precede the
+    // durable row (workspace, mounts, clone seeding), so the id is allocated
+    // here and handed to the chat service instead of being minted late.
+    const sessionId = this.options.ids.sessionId();
+    const boot = this.bootStages(sessionId);
     onProgress?.("Preparing the isolated workspace and mounts…");
-    const prepared = await this.prepareWorkspace("chat", workspace, normalizedModel.providerId);
+    const prepared = await this.prepareWorkspace("chat", workspace, normalizedModel.providerId, boot);
     const effectiveWorkspace = prepared.workspaceContext;
     onProgress?.("Starting the sandbox and agent backend…");
+    boot.stage("start");
     const session = await this.options.chatService.startSession({
       template: prepared.template,
       workspacePath: prepared.workspace.workspacePath,
       workspaceOwnerToken: prepared.workspace.ownerToken,
+      sessionId,
       title,
       model: normalizedModel,
       transport: transportForProvider(normalizedModel.providerId),
@@ -562,7 +619,7 @@ export class IsolatedRunService {
       disposeWorkspace: () => this.options.workspaceStore.cleanupWorkspace(prepared.workspace)
     });
     onProgress?.("Loading available models from the agent backend…");
-    await this.refreshModelsForSession(session.sessionId);
+    await this.refreshModelsForSession(session.sessionId, session.providerId);
     this.sessionModes.set(session.sessionId, effectiveWorkspace?.mode ?? "implementation");
     this.stashSessionClones(session.sessionId, prepared.clones);
     return { session, isolation: prepared.isolation, providerCatalogs: this.listChatProviderCatalogs() };
@@ -619,13 +676,29 @@ export class IsolatedRunService {
       spawnedRole: role,
       disposeWorkspace: () => this.options.workspaceStore.cleanupWorkspace(workspace)
     });
-    await this.refreshModelsForSession(session.sessionId);
+    await this.refreshModelsForSession(session.sessionId, session.providerId);
     this.sessionModes.set(session.sessionId, mode);
     return {
       session,
       isolation: isolationSummaryFromTemplate(template, workspace.workspacePath),
       providerCatalogs: this.listChatProviderCatalogs()
     };
+  }
+
+  /**
+   * Records a send that failed before any turn existed as a durable transcript
+   * event, so the failure is visible in the chat instead of vanishing.
+   * Best-effort: recording must never mask the original failure.
+   */
+  async recordChatSendFailure(sessionId: string, error: unknown): Promise<void> {
+    try {
+      await this.options.chatService.recordSendFailure(asId<"SessionId">(sessionId), error);
+    } catch (recordError) {
+      this.options.logger.warn("recording a send failure failed", {
+        sessionId,
+        error: recordError instanceof Error ? recordError.message : String(recordError)
+      });
+    }
   }
 
   /** Resolves when the turn reaches a terminal status; events flow via the bus. */
@@ -744,7 +817,7 @@ export class IsolatedRunService {
     );
     // Mounts may have changed across the restart; the next turn re-briefs.
     this.briefedSessions.delete(sessionId);
-    await this.refreshModelsForSession(session.sessionId);
+    await this.refreshModelsForSession(session.sessionId, session.providerId);
     return { session, providerCatalogs: this.listChatProviderCatalogs() };
   }
 
@@ -811,8 +884,12 @@ export class IsolatedRunService {
     // re-mounts what the agent was already allowed (e.g. a project it asked for)
     // instead of losing it and re-requesting every time.
     const effectiveWorkspace = mergeWorkspaceRoots(baseWorkspace, additionalRoots, stored.mode);
-    const prepared = await this.prepareWorkspace("chat", effectiveWorkspace, normalizedModel.providerId);
+    // A resume re-runs the same seams, so it reports the same stages: the
+    // rail's reconnect spinner reads one vocabulary for both paths.
+    const boot = this.bootStages(asId<"SessionId">(sessionId));
+    const prepared = await this.prepareWorkspace("chat", effectiveWorkspace, normalizedModel.providerId, boot);
     const policyWorkspace = prepared.workspaceContext;
+    boot.stage("start");
     const session = await this.options.chatService.resumeSession({
       sessionId: asId<"SessionId">(sessionId),
       template: prepared.template,
@@ -830,7 +907,7 @@ export class IsolatedRunService {
     this.stashSessionClones(session.sessionId, prepared.clones);
     // Mounts changed with the fresh runtime; the next turn must re-brief.
     this.briefedSessions.delete(session.sessionId);
-    await this.refreshModelsForSession(session.sessionId);
+    await this.refreshModelsForSession(session.sessionId, session.providerId);
     return { session, isolation: prepared.isolation, providerCatalogs: this.listChatProviderCatalogs() };
   }
 
@@ -1078,7 +1155,7 @@ export class IsolatedRunService {
     lines.push("");
 
     lines.push("## Team memory");
-    lines.push("_Source: the memory store (Tasks tab → Memory). Grouped by scope, most specific first; tagged memories require a matching detected tag. Agent proposals entered via the approval gate; user entries via quick-add._");
+    lines.push("_Source: the memory store. Grouped by scope, most specific first; tagged memories require a matching detected tag. Agent proposals entered via the approval gate; user entries via quick-add._");
     const memoryGroups = this.options.memoryService === undefined
       ? []
       : await this.options.memoryService.briefingRecords({
@@ -1106,7 +1183,7 @@ export class IsolatedRunService {
       lines.push("_Source: `drydock.mcp.configPath`._");
       lines.push(this.options.mcpConfigJson === undefined ? "- none configured" : "- host config file written to `/workspace/.mcp.json` before the first turn");
     } else {
-      lines.push("_Source: MCP registry (System tab) resolved through the override cascade - defaults → workspace → task → chat. Rendered to `/workspace/.mcp.json` over the exec channel; toggles apply next turn._");
+      lines.push("_Source: MCP registry (Configure → MCP Servers) resolved through the override cascade - defaults → workspace → task → chat. Rendered to `/workspace/.mcp.json` over the exec channel; toggles apply next turn._");
       const effective = await this.effectiveMcpServers(sessionId).catch(() => [] as McpEffectiveServer[]);
       if (effective.length === 0) {
         lines.push("- no servers registered");
@@ -1473,18 +1550,26 @@ export class IsolatedRunService {
   }
 
   listChatProviderCatalogs(): readonly AgentModelCatalog[] {
-    return [...this.providerCatalogs.values()].map((catalog) => {
-      const descriptor = providerDescriptor(catalog.providerId);
+    // Registry order, one entry per registered provider: a provider that has
+    // never been discovered still gets an honest "unavailable" row so the
+    // picker can say so (and offer Refresh) instead of omitting it.
+    return PROVIDER_REGISTRY.map((descriptor) => {
+      const catalog = this.providerCatalogs.get(descriptor.providerId) ?? {
+        providerId: descriptor.providerId,
+        displayName: descriptor.displayName,
+        models: [],
+        refreshedAt: this.options.clock.isoNow(),
+        source: "unavailable" as const,
+        diagnostics: [
+          `No models discovered yet. Connect ${descriptor.displayName} or press Refresh models; a model id can also be typed directly.`
+        ]
+      };
       return {
         ...catalog,
-        authStatus: this.providerAuthStatuses.get(catalog.providerId) ?? "unknown",
-        loginHint: this.loginHint(catalog.providerId),
-        ...(descriptor === undefined
-          ? {}
-          : {
-              authKind: (descriptor.connect.oauth !== undefined ? "oauth" : "api-key") as "oauth" | "api-key",
-              ...(descriptor.connect.apiKey === undefined ? {} : { keyUrl: descriptor.connect.apiKey.keyUrl })
-            })
+        authStatus: this.providerAuthStatuses.get(descriptor.providerId) ?? "unknown",
+        loginHint: this.loginHint(descriptor.providerId),
+        authKind: (descriptor.connect.oauth !== undefined ? "oauth" : "api-key") as "oauth" | "api-key",
+        ...(descriptor.connect.apiKey === undefined ? {} : { keyUrl: descriptor.connect.apiKey.keyUrl })
       };
     });
   }
@@ -1608,61 +1693,110 @@ export class IsolatedRunService {
   }
 
   /**
-   * Refreshes provider catalogs and auth statuses with inert host capability
+   * Refreshes provider catalogs and auth statuses with inert capability
    * discovery (allowed by the threat model) - no prompt or model output ever
-   * flows through these calls. The primary source is the host Codex
-   * app-server model/list; the OPENAI_API_KEY ping remains a fallback. A
-   * Host and live-sandbox results are merged because either side can be newer
-   * or broader than the other.
+   * flows through these calls. Sources, all live: the host Codex app-server's
+   * model/list, each rider's registry-described models endpoint, and - for
+   * native Claude, whose credential only exists inside sandboxes - any live
+   * Claude session's in-runtime probe. `force` (the user's explicit Refresh)
+   * bypasses the TTL; failures land in the catalogs as diagnostics instead of
+   * being swallowed.
    */
-  async refreshHostProviderCatalogs(options?: { readonly forceAuthProbe?: boolean }): Promise<readonly AgentModelCatalog[]> {
+  async refreshHostProviderCatalogs(options?: { readonly force?: boolean; readonly forceAuthProbe?: boolean }): Promise<readonly AgentModelCatalog[]> {
     this.options.securityPolicy?.assertPolicyCurrent();
     if (this.options.securityPolicy?.allowNetworkedAiOnThisMachine === false) {
       return this.listChatProviderCatalogs();
     }
     const now = Date.now();
-    const catalogRefreshDue = now - this.hostCatalogRefreshedAt >= HOST_CATALOG_TTL_MS;
+    const force = options?.force === true;
+    const catalogRefreshDue = force || now - this.hostCatalogRefreshedAt >= HOST_CATALOG_TTL_MS;
     // The auth probe is a cheap, inert LOCAL read (`sbx secret ls` + secret-ref
-    // existence); an explicit recheck must always run it. Only the
-    // network-touching model-catalog fetch stays behind the TTL - gating the
-    // probe too is what made "Recheck" a silent no-op for five minutes after
-    // a completed login.
+    // existence); an explicit recheck (and the login poller) always runs it.
+    // The network-touching model discovery runs on the TTL or a full `force`.
     if (catalogRefreshDue || options?.forceAuthProbe === true) {
       await this.refreshProviderAuthStatuses();
     }
     if (catalogRefreshDue) {
       this.hostCatalogRefreshedAt = now;
       this.options.securityPolicy?.assertNetworkedAiAllowed();
-      const hostCatalog = await this.fetchCodexCatalogFromHost();
-      if (hostCatalog !== null) {
-        this.providerCatalogs.set(
-          CODEX_PROVIDER_ID,
-          mergeAgentModelCatalog(this.providerCatalogs.get(CODEX_PROVIDER_ID), hostCatalog)
-        );
+      const discoverRider = this.options.discoverProviderModels
+        ?? ((descriptor: ProviderDescriptor) => fetchProviderModelsFromHost(descriptor, {
+          ...(this.options.providerSecrets === undefined ? {} : { providerSecrets: this.options.providerSecrets }),
+          logger: this.options.logger,
+          isoNow: () => this.options.clock.isoNow()
+        }));
+      const discoveries: Promise<AgentModelCatalog>[] = [
+        this.fetchCodexCatalogFromHost(),
+        this.fetchClaudeCatalogViaLiveSession(),
+        ...PROVIDER_REGISTRY
+          .filter((descriptor) => descriptor.discovery !== undefined)
+          .map((descriptor) => discoverRider(descriptor))
+      ];
+      for (const catalog of await Promise.all(discoveries)) {
+        this.absorbCatalog(catalog);
       }
     }
     return this.listChatProviderCatalogs();
   }
 
-  private async fetchCodexCatalogFromHost(): Promise<AgentModelCatalog | null> {
-    if (this.options.hostCodexPath !== undefined) {
-      try {
-        const catalog = await fetchCodexHostModelCatalog({
-          codexPath: this.options.hostCodexPath,
-          cwd: process.cwd(),
-          ...(this.options.environment === undefined ? {} : { environment: this.options.environment }),
-          isoNow: () => this.options.clock.isoNow()
-        });
-        if (catalog.models.length > 0) {
-          return { ...catalog, providerId: CODEX_PROVIDER_ID, displayName: "Codex / OpenAI" };
-        }
-      } catch (error) {
-        this.options.logger.warn("host codex model discovery failed", {
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
+  private async fetchCodexCatalogFromHost(): Promise<AgentModelCatalog> {
+    if (this.options.hostCodexPath === undefined) {
+      return this.unavailableCatalog(
+        CODEX_PROVIDER_ID,
+        "Codex / OpenAI",
+        "No host Codex CLI found (native codex.exe; npm shims are not spawnable). Install it or set CODEX_PATH - or start a Codex chat, which discovers models from inside the sandbox."
+      );
     }
-    return fetchOpenAiModelCatalogFromHost(this.options.logger, this.options.environment ?? process.env);
+    try {
+      const catalog = await fetchCodexHostModelCatalog({
+        codexPath: this.options.hostCodexPath,
+        cwd: process.cwd(),
+        ...(this.options.environment === undefined ? {} : { environment: this.options.environment }),
+        isoNow: () => this.options.clock.isoNow()
+      });
+      if (catalog.models.length > 0) {
+        return { ...catalog, providerId: CODEX_PROVIDER_ID, displayName: "Codex / OpenAI" };
+      }
+      return this.unavailableCatalog(CODEX_PROVIDER_ID, "Codex / OpenAI", "The host Codex app-server answered without any models.");
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.options.logger.warn("host codex model discovery failed", { error: reason });
+      return this.unavailableCatalog(CODEX_PROVIDER_ID, "Codex / OpenAI", `Host Codex model discovery failed: ${reason}`);
+    }
+  }
+
+  /**
+   * Native Claude's credential lives only inside sandboxes, so its catalog can
+   * be refreshed exclusively through a live Claude session's runtime. With no
+   * live session the cached list (if any) stands, with an honest hint.
+   */
+  private async fetchClaudeCatalogViaLiveSession(): Promise<AgentModelCatalog> {
+    const liveIds = this.options.chatService.liveSessionIds(CLAUDE_PROVIDER_ID);
+    const sessionId = liveIds[0];
+    if (sessionId === undefined) {
+      return this.unavailableCatalog(
+        CLAUDE_PROVIDER_ID,
+        "Claude / Anthropic",
+        "Claude models are discovered from inside a running session (the credential never leaves the sandbox). Start a Claude chat to refresh the list."
+      );
+    }
+    try {
+      return await this.options.chatService.listModels(sessionId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return this.unavailableCatalog(CLAUDE_PROVIDER_ID, "Claude / Anthropic", `Claude model discovery via the live session failed: ${reason}`);
+    }
+  }
+
+  private unavailableCatalog(providerId: string, displayName: string, reason: string): AgentModelCatalog {
+    return {
+      providerId,
+      displayName,
+      models: [],
+      refreshedAt: this.options.clock.isoNow(),
+      source: "unavailable",
+      diagnostics: [reason]
+    };
   }
 
   isChatSessionLive(sessionId: string): boolean {
@@ -1759,23 +1893,22 @@ export class IsolatedRunService {
     return this.options.chatService.runSidecarPrompt(asId<"SessionId">(sessionId), buildSummaryPrompt(log));
   }
 
-  private async refreshModelsForSession(sessionId: SessionId): Promise<void> {
+  private async refreshModelsForSession(sessionId: SessionId, providerId?: string): Promise<void> {
     try {
       this.options.securityPolicy?.assertNetworkedAiAllowed();
       const catalog = await this.options.chatService.listModels(sessionId);
-      const displayCatalog: AgentModelCatalog = {
-        ...catalog,
-        displayName: catalog.displayName || catalog.providerId
-      };
-      this.providerCatalogs.set(
-        catalog.providerId,
-        mergeAgentModelCatalog(this.providerCatalogs.get(catalog.providerId), displayCatalog)
-      );
+      this.absorbCatalog({ ...catalog, displayName: catalog.displayName || catalog.providerId });
     } catch (error) {
-      this.options.logger.warn("chat provider model discovery failed", {
-        sessionId,
-        error: error instanceof Error ? error.message : String(error)
-      });
+      const reason = error instanceof Error ? error.message : String(error);
+      this.options.logger.warn("chat provider model discovery failed", { sessionId, error: reason });
+      if (providerId !== undefined) {
+        const descriptor = providerDescriptor(providerId);
+        this.absorbCatalog(this.unavailableCatalog(
+          providerId,
+          descriptor?.displayName ?? providerId,
+          `Model discovery at session start failed: ${reason}`
+        ));
+      }
     }
   }
 
@@ -1806,12 +1939,32 @@ export class IsolatedRunService {
     this.runInFlight = true;
   }
 
-  private async prepareWorkspace(prefix: string, workspaceContext?: ChatWorkspaceContext, providerId?: string): Promise<PreparedWorkspace> {
+  /**
+   * Boot timeline reporter for one session (UX overhaul P4). The bus comes
+   * through the chat service so no second wiring point is needed; partial test
+   * compositions without one simply report nothing.
+   */
+  private bootStages(sessionId: SessionId): BootStageReporter {
+    const chatService: ChatSessionService | undefined = this.options.chatService;
+    return new BootStageReporter(chatService?.bus, sessionId);
+  }
+
+  private async prepareWorkspace(
+    prefix: string,
+    workspaceContext?: ChatWorkspaceContext,
+    providerId?: string,
+    boot?: BootStageReporter
+  ): Promise<PreparedWorkspace> {
     this.options.securityPolicy?.assertNetworkedAiAllowed();
     const effectiveContext = this.enforceWorkspacePolicy(workspaceContext);
+    // Stage 1: the disposable workspace the sandbox will own.
+    boot?.stage("create");
     const workspace = await this.options.workspaceStore.createWorkspace(prefix);
     try {
       await writeFile(path.join(workspace.workspacePath, "README.md"), "# Isolated run disposable workspace\n", "utf8");
+      // Stage 2, in its two shapes: clone mode seeds repositories INTO the
+      // workspace, everything else resolves live mounts around it.
+      boot?.stage(effectiveContext?.mode === "clone" ? "clone" : "mount");
       // Clone mode: each root is git-cloned INTO the workspace, and buildMountPolicy
       // yields NO project-root mounts for clone mode - so the only rw mount is the
       // workspace itself, which now contains the clones. That is the design.
@@ -2254,40 +2407,8 @@ function mergeSyncResults(verb: string, results: readonly CloneSyncResult[]): Cl
   };
 }
 
-function fallbackCodexCatalog(reason?: string): AgentModelCatalog {
-  return {
-    providerId: CODEX_PROVIDER_ID,
-    displayName: "Codex / OpenAI",
-    models: [
-      { id: "gpt-5.5", displayName: "GPT-5.5", isDefault: true, hidden: false },
-      { id: "gpt-5.4", displayName: "GPT-5.4", isDefault: false, hidden: false },
-      { id: "gpt-5.4-mini", displayName: "GPT-5.4-Mini", isDefault: false, hidden: false },
-      { id: "gpt-5.3-codex-spark", displayName: "GPT-5.3-Codex-Spark", isDefault: false, hidden: false }
-    ],
-    refreshedAt: new Date().toISOString(),
-    source: "fallback",
-    diagnostics: [reason ?? "Static Codex catalog; the host Codex app-server refresh replaces it when available."]
-  };
-}
-
 function transportForProvider(providerId: string): AgentTransport {
   return providerTransport(providerId);
-}
-
-/** Registry seed catalog for a ridden provider, stamped with a fresh timestamp. */
-function riderCatalog(providerId: string): AgentModelCatalog {
-  const descriptor = providerDescriptor(providerId);
-  if (descriptor === undefined) {
-    throw new Error(`Unknown provider ${providerId} has no registry catalog.`);
-  }
-  return {
-    providerId: descriptor.providerId,
-    displayName: descriptor.displayName,
-    models: [...descriptor.models],
-    refreshedAt: new Date().toISOString(),
-    source: "fallback",
-    diagnostics: [descriptor.catalogDiagnostic ?? "Static registry catalog."]
-  };
 }
 
 /**
@@ -2304,59 +2425,6 @@ export function parseSbxSecretServices(stdout: string): ReadonlySet<string> {
     }
   }
   return services;
-}
-
-const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
-const HOST_MODEL_FAMILY = /^(gpt-5|gpt-4\.1|gpt-4o|o3|o4|codex)/;
-const HOST_PING_TIMEOUT_MS = 8_000;
-
-/**
- * Inert host-side model listing. Reads OPENAI_API_KEY from the private runtime
- * environment; returns null (caller keeps its current catalog) when the key is
- * absent or the ping fails. Never sends prompts or workspace data.
- */
-async function fetchOpenAiModelCatalogFromHost(
-  logger: Logger,
-  environment: NodeJS.ProcessEnv
-): Promise<AgentModelCatalog | null> {
-  const apiKey = environment["OPENAI_API_KEY"];
-  if (!apiKey) return null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => { controller.abort(); }, HOST_PING_TIMEOUT_MS);
-  try {
-    const response = await fetch(OPENAI_MODELS_URL, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: controller.signal
-    });
-    if (!response.ok) {
-      logger.warn("host model ping rejected", { status: response.status });
-      return null;
-    }
-    const body = await response.json() as { readonly data?: readonly { readonly id?: string }[] };
-    const ids = (body.data ?? [])
-      .map((entry) => entry.id)
-      .filter((id): id is string => typeof id === "string" && HOST_MODEL_FAMILY.test(id))
-      .sort();
-    if (ids.length === 0) return null;
-    return {
-      providerId: CODEX_PROVIDER_ID,
-      displayName: "Codex / OpenAI",
-      models: ids.map((id) => ({
-        id,
-        displayName: id,
-        isDefault: id === "gpt-5",
-        hidden: false
-      })),
-      refreshedAt: new Date().toISOString(),
-      source: "provider",
-      diagnostics: ["Models listed via inert host API ping; prompts never leave the micro-VM path."]
-    };
-  } catch (error) {
-    logger.warn("host model ping failed", { error: error instanceof Error ? error.message : String(error) });
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function isFinalTextEvent(value: unknown): value is { readonly type: "agent.text"; readonly final: boolean } {

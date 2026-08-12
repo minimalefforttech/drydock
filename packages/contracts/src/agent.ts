@@ -62,8 +62,16 @@ export interface AgentModelCatalog {
   readonly providerId: string;
   readonly displayName: string;
   readonly models: readonly AgentModelSummary[];
+  /** When the models list was actually produced by its source (not when it was loaded). */
   readonly refreshedAt: string;
-  readonly source: "provider" | "fallback";
+  /**
+   * Where the models list came from. "provider" is a live discovery result;
+   * "cache" is a persisted copy of an earlier live result (usable for
+   * selection, shown with its age); "unavailable" means discovery has never
+   * succeeded and `models` is empty - the UI must say so rather than invent a
+   * list. There is deliberately no compiled-in fallback source.
+   */
+  readonly source: "provider" | "cache" | "unavailable";
   readonly diagnostics: readonly string[];
   readonly authStatus?: ProviderAuthStatus;
   /** Display-safe command the user can run to sign the provider in. */

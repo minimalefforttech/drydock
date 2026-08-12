@@ -61,6 +61,13 @@ export interface CodexAppServerSession {
 
 const ULTRA_MODE_INSTRUCTION = "Ultra mode is enabled for this turn. Use the maximum supported reasoning effort and proactively delegate independent work to subagents when that would materially improve speed or quality. Consolidate their results before responding.";
 
+/**
+ * Quiet windows tolerated before a silent turn is failed honestly. The first
+ * windows keep the turn alive so the UI's "Give it a poke?" nudge can break a
+ * standoff; a turn that outlasts them all is treated as dead.
+ */
+const MAX_QUIET_WINDOWS = 3;
+
 export class CodexAppServerTransport {
   private readonly timeoutMs: number;
   private readonly inactivityTimeoutMs: number;
@@ -118,6 +125,16 @@ export class CodexAppServerTransport {
 
   async sendPrompt(session: CodexAppServerSession, prompt: AgentPrompt, runId: RunId): Promise<void> {
     await this.options.authorizePrompt?.();
+    // Turn boundary: notifications that straggled in after the previous turn
+    // ended (late child completions, post-cancel acks) must not be replayed
+    // into this turn's stream under the new run id.
+    const dropped = session.client.clearNotificationQueue();
+    if (dropped > 0) {
+      this.options.logger?.info("dropped stale app-server notifications at turn start", {
+        runId: String(runId),
+        dropped
+      });
+    }
     const ultra = prompt.metadata?.["reasoningEffort"] === "ultra";
     const turnStart = await session.client.request("turn/start", {
       threadId: session.threadId,
@@ -162,6 +179,7 @@ export class CodexAppServerTransport {
     // appended live so the chat tab's raw view reflects the app-server stream.
     const sessionId = session.connection.sessionId;
     this.options.rawSink?.beginTurn(sessionId);
+    let consecutiveQuietWindows = 0;
     try {
       while (true) {
         let notification: JsonRpcMessage;
@@ -169,19 +187,45 @@ export class CodexAppServerTransport {
           notification = await session.client.nextNotification(controller.signal, this.inactivityTimeoutMs);
         } catch (error) {
           if (error instanceof NotificationTimeoutError) {
-            // The app-server has gone quiet. A standoff is often recoverable, so
-            // we do NOT hard-fail the turn - we keep it alive and waiting. The UI
-            // surfaces a "Give it a poke?" prompt that calls poke() (a soft
-            // turn/interrupt) to try to break the standoff without killing the
-            // container. Log so the silence is visible in diagnostics.
-            this.options.logger?.info("codex app-server quiet; turn kept alive for a poke", {
-              runId: String(runId),
-              quietMs: this.inactivityTimeoutMs
+            // The app-server has gone quiet. A standoff is often recoverable,
+            // so the first quiet windows keep the turn alive - the UI surfaces
+            // a "Give it a poke?" prompt that calls poke() (a soft
+            // turn/interrupt). A turn that stays silent through repeated
+            // windows is dead, though; ending it honestly frees the session
+            // instead of spinning forever.
+            consecutiveQuietWindows += 1;
+            if (consecutiveQuietWindows < MAX_QUIET_WINDOWS) {
+              this.options.logger?.info("codex app-server quiet; turn kept alive for a poke", {
+                runId: String(runId),
+                quietMs: this.inactivityTimeoutMs,
+                consecutiveQuietWindows
+              });
+              continue;
+            }
+            // Ask the app-server to abandon the dead turn so the thread is
+            // clean for the next prompt; best-effort, same shape as poke().
+            const staleTurnId = session.providerTurnIds.get(runId);
+            session.client.notify("turn/interrupt", {
+              threadId: session.threadId,
+              ...(staleTurnId === undefined ? {} : { turnId: staleTurnId })
             });
-            continue;
+            const quietMinutes = Math.round((this.inactivityTimeoutMs * MAX_QUIET_WINDOWS) / 60_000);
+            yield session.normalizer.syntheticError(
+              {
+                sessionId,
+                runId,
+                agentRole: session.connection.agentRole,
+                runtimeId: session.connection.runtime.runtimeId,
+                lineage: session.lineage
+              },
+              "CODEX_TURN_STALLED",
+              `The agent produced no output for ${String(quietMinutes)} minutes and did not respond to a nudge, so the turn was stopped. Send the message again to retry.`
+            );
+            return;
           }
           throw error;
         }
+        consecutiveQuietWindows = 0;
         this.options.rawSink?.write(sessionId, `${JSON.stringify(notification)}\n`);
         if (notification.method === "turn/started") {
           // Only the ROOT thread's turn id may drive turn/interrupt - collab

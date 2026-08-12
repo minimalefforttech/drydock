@@ -1,0 +1,1022 @@
+/*
+ * Task Hub styles (UX overhaul, P3).
+ *
+ * VS Code theme variables only; no remote assets. The panel's strict CSP has no
+ * 'unsafe-inline' for styles, so every state cue is a CLASS - there is not one
+ * style attribute in the hub. Calm by construction: cards are separated by a
+ * hairline and an icon band rather than by boxes, running is quiet, done fades,
+ * amber means "needs you", red means failed, and rust is the ONE accent (the
+ * same edge the rail spends on the active task).
+ */
+
+:root {
+  --hub-run: var(--vscode-charts-green, #3fb950);
+  --hub-warn: var(--vscode-editorWarning-foreground, #d29922);
+  --hub-fail: var(--vscode-errorForeground, #f85149);
+  --hub-quiet: var(--vscode-descriptionForeground, #8b949e);
+  --hub-line: var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  --hub-accent: var(--vscode-charts-orange, #cc6633);
+  --hub-hover: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--vscode-editor-background);
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size, 13px);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4)) transparent;
+}
+
+.hub {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 14px 20px 40px;
+}
+
+/* --- header ------------------------------------------------------------- */
+
+.hub-header {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.hub-header.done .hub-title {
+  color: var(--hub-quiet);
+}
+
+.hub-header-band {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.hub-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.hub-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+.hub-title:hover {
+  background: var(--hub-hover);
+}
+
+.hub-title:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 1px;
+}
+
+.hub-title-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-focusBorder, var(--hub-line));
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.hub-meta {
+  margin: 0;
+  padding-left: 22px;
+  color: var(--hub-quiet);
+  font-size: 0.88em;
+}
+
+/* --- header links (bordered icon chips) --------------------------------- */
+
+.hub-links {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+
+.hub-link,
+.hub-chip-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--hub-line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--hub-quiet);
+  font-family: inherit;
+  font-size: 0.85em;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.hub-link:hover,
+.hub-chip-action:hover {
+  color: var(--vscode-foreground);
+  border-color: var(--hub-accent);
+}
+
+.hub-link:focus-visible,
+.hub-chip-action:focus-visible,
+.hub-band-link:focus-visible,
+.hub-overflow-trigger:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 1px;
+}
+
+/* --- overflow menu ------------------------------------------------------ */
+
+.hub-overflow {
+  position: relative;
+  flex: none;
+}
+
+.hub-overflow-trigger {
+  border: none;
+  background: transparent;
+  color: var(--hub-quiet);
+  font-family: inherit;
+  font-size: 1.1em;
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.hub-overflow-trigger:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.hub-menu {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 5;
+  min-width: 190px;
+  padding: 4px;
+  border: 1px solid var(--hub-line);
+  border-radius: 5px;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.28);
+}
+
+.hub-overflow.open .hub-menu {
+  display: block;
+}
+
+.hub-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  font-family: inherit;
+  font-size: 0.9em;
+  padding: 5px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.hub-menu-item:hover {
+  background: var(--vscode-menu-selectionBackground, var(--hub-hover));
+}
+
+.hub-menu-item.danger {
+  color: var(--hub-fail);
+}
+
+/* --- back chip ---------------------------------------------------------- */
+
+.hub-backchip {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--hub-accent);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--hub-accent);
+  font-family: inherit;
+  font-size: 0.82em;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.hub-backchip:hover {
+  background: var(--hub-hover);
+}
+
+/* --- attention rail ----------------------------------------------------- */
+
+.hub-attention {
+  border-left: 2px solid var(--hub-warn);
+  padding-left: 10px;
+}
+
+.hub-attention-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.hub-attention-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.hub-attention-row:hover {
+  background: var(--hub-hover);
+}
+
+.hub-attention-row:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: -1px;
+}
+
+.hub-attention-kind {
+  flex: none;
+  font-size: 0.72em;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--hub-warn);
+}
+
+.hub-attention-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- stat tiles --------------------------------------------------------- */
+
+.hub-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.hub-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--hub-line);
+  border-radius: 5px;
+  padding: 7px 10px;
+}
+
+.hub-tile-value {
+  font-size: 1.15em;
+  font-variant-numeric: tabular-nums;
+}
+
+.hub-tile-label {
+  font-size: 0.74em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--hub-quiet);
+}
+
+/* --- cards -------------------------------------------------------------- */
+
+.hub-card {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--hub-line);
+  padding-top: 6px;
+}
+
+.hub-band {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--hub-quiet);
+  padding: 2px 0 4px;
+}
+
+.hub-band.attention {
+  color: var(--hub-warn);
+}
+
+.hub-band-label {
+  font-size: 0.78em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hub-band-count {
+  font-size: 0.78em;
+  color: var(--hub-quiet);
+}
+
+.hub-band-link {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--hub-quiet);
+  font-family: inherit;
+  font-size: 0.82em;
+  padding: 1px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.hub-band-link:hover {
+  color: var(--hub-accent);
+}
+
+.hub-card-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.hub-icon {
+  flex: none;
+}
+
+/* --- rows --------------------------------------------------------------- */
+
+.hub-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.hub-row.static {
+  cursor: default;
+}
+
+.hub-row:hover {
+  background: var(--hub-hover);
+}
+
+.hub-row:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: -1px;
+}
+
+.hub-row.attention {
+  border-left-color: var(--hub-warn);
+}
+
+.hub-row-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-row-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--hub-quiet);
+  font-size: 0.85em;
+}
+
+.hub-row-time {
+  margin-left: auto;
+  flex: none;
+  color: var(--hub-quiet);
+  font-size: 0.82em;
+  font-variant-numeric: tabular-nums;
+}
+
+.hub-row-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  border: 1px solid var(--hub-line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--hub-quiet);
+  font-family: inherit;
+  font-size: 0.8em;
+  padding: 1px 6px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.hub-row:hover .hub-row-action,
+.hub-row-action:focus-visible {
+  opacity: 1;
+}
+
+.hub-row-action:hover {
+  color: var(--hub-fail);
+  border-color: var(--hub-fail);
+}
+
+/* --- chips -------------------------------------------------------------- */
+
+.hub-chip {
+  flex: none;
+  font-size: 0.74em;
+  border-radius: 3px;
+  padding: 0 5px;
+  border: 1px solid var(--hub-line);
+  color: var(--hub-quiet);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-chip.quiet {
+  border-color: transparent;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.18));
+}
+
+.hub-chip.warn {
+  border-color: var(--hub-warn);
+  color: var(--hub-warn);
+  background: transparent;
+}
+
+/* --- new-chat composer (P4) --------------------------------------------- */
+
+.hub-composer {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+}
+
+/* Collapsed: one quiet invitation, never a call to action competing with the
+   chat rows above it. */
+.hub-newchat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  border: 1px dashed var(--hub-line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--hub-quiet);
+  font-family: inherit;
+  font-size: 0.88em;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.hub-newchat:hover {
+  color: var(--vscode-foreground);
+  border-color: var(--hub-accent);
+  border-style: solid;
+}
+
+.hub-newchat:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 1px;
+}
+
+.hub-composer-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--hub-line);
+  border-left: 2px solid var(--hub-accent);
+  border-radius: 5px;
+  padding: 10px 12px;
+}
+
+.hub-composer-card.failed {
+  border-left-color: var(--hub-fail);
+}
+
+.hub-composer-card.booting {
+  border-left-color: var(--hub-run);
+}
+
+.hub-composer-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.hub-composer-field.hidden {
+  display: none;
+}
+
+.hub-composer-label {
+  font-size: 0.74em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--hub-quiet);
+}
+
+.hub-composer-control {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* The vanishing provenance suffix: present until the field is touched. */
+.hub-composer-prov {
+  flex: none;
+  color: var(--hub-quiet);
+  font-size: 0.78em;
+  opacity: 0.75;
+}
+
+.hub-composer-input,
+.hub-composer-select,
+.hub-composer-prompt {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 0.92em;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--hub-line);
+  border-radius: 3px;
+  padding: 3px 6px;
+}
+
+.hub-composer-prompt {
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.hub-composer-input:focus,
+.hub-composer-select:focus,
+.hub-composer-prompt:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder, var(--hub-accent));
+}
+
+/* Access: three segments, and one line saying what the choice does to files. */
+.hub-segmented {
+  display: inline-flex;
+  align-self: flex-start;
+  border: 1px solid var(--hub-line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.hub-segment {
+  border: none;
+  border-right: 1px solid var(--hub-line);
+  background: transparent;
+  color: var(--hub-quiet);
+  font-family: inherit;
+  font-size: 0.84em;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+
+.hub-segment:last-child {
+  border-right: none;
+}
+
+.hub-segment:hover:not(:disabled) {
+  color: var(--vscode-foreground);
+  background: var(--hub-hover);
+}
+
+.hub-segment.on {
+  color: var(--vscode-foreground);
+  background: var(--hub-hover);
+  box-shadow: inset 0 -2px 0 0 var(--hub-accent);
+}
+
+.hub-segment:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.hub-composer-consequence {
+  margin: 2px 0 0;
+  color: var(--hub-quiet);
+  font-size: 0.82em;
+}
+
+.hub-composer-consequence.policy {
+  color: var(--hub-warn);
+}
+
+.hub-composer-advanced > summary {
+  cursor: pointer;
+  color: var(--hub-quiet);
+  font-size: 0.82em;
+  list-style: none;
+}
+
+.hub-composer-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.hub-composer-advanced > summary::before {
+  content: "\25B8  ";
+  font-size: 0.9em;
+}
+
+.hub-composer-advanced[open] > summary::before {
+  content: "\25BE  ";
+}
+
+.hub-composer-advanced-row {
+  margin: 4px 0 0;
+  padding-left: 14px;
+  color: var(--hub-quiet);
+  font-size: 0.82em;
+  opacity: 0.6;
+}
+
+.hub-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hub-composer-start {
+  border: 1px solid var(--vscode-button-background, var(--hub-accent));
+  border-radius: 4px;
+  background: var(--vscode-button-background, var(--hub-accent));
+  color: var(--vscode-button-foreground, #fff);
+  font-family: inherit;
+  font-size: 0.88em;
+  padding: 4px 14px;
+  cursor: pointer;
+}
+
+.hub-composer-start:hover {
+  background: var(--vscode-button-hoverBackground, var(--hub-accent));
+}
+
+.hub-composer-ghost {
+  border: 1px solid var(--hub-line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--hub-quiet);
+  font-family: inherit;
+  font-size: 0.88em;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.hub-composer-ghost:hover {
+  color: var(--vscode-foreground);
+  border-color: var(--hub-accent);
+}
+
+.hub-composer-ghost.quiet {
+  border-color: transparent;
+}
+
+.hub-composer-start:focus-visible,
+.hub-composer-ghost:focus-visible,
+.hub-composer-link:focus-visible,
+.hub-segment:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 1px;
+}
+
+.hub-composer-notice {
+  margin: 0;
+  color: var(--hub-fail);
+  font-size: 0.84em;
+}
+
+/* Boot timeline: the stages the host actually reports, with their own seconds. */
+.hub-composer-boot-title {
+  margin: 0;
+  font-size: 0.9em;
+}
+
+.hub-composer-stages {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.hub-stage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.86em;
+}
+
+.hub-stage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  border: 1.5px solid var(--hub-quiet);
+}
+
+.hub-stage.done .hub-stage-dot {
+  background: var(--hub-run);
+  border-color: var(--hub-run);
+}
+
+.hub-stage.current .hub-stage-dot {
+  background: var(--hub-run);
+  border-color: var(--hub-run);
+  animation: hub-pulse 1.8s ease-in-out infinite;
+}
+
+.hub-stage.pending {
+  color: var(--hub-quiet);
+  opacity: 0.55;
+}
+
+.hub-stage-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-stage-time {
+  flex: none;
+  color: var(--hub-quiet);
+  font-size: 0.92em;
+  font-variant-numeric: tabular-nums;
+}
+
+.hub-composer-boot-total {
+  margin: 0;
+  color: var(--hub-quiet);
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+}
+
+.hub-composer-queued {
+  margin: 0;
+  color: var(--hub-warn);
+  font-size: 0.88em;
+}
+
+/* Receipt: one row, then out of the way. */
+.hub-composer-receipt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  font-size: 0.88em;
+  color: var(--hub-quiet);
+}
+
+.hub-composer-receipt-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hub-composer-tick {
+  color: var(--hub-run);
+}
+
+.hub-composer-link {
+  border: none;
+  background: transparent;
+  color: var(--hub-quiet);
+  font-family: inherit;
+  font-size: 1em;
+  padding: 0 2px;
+  border-radius: 3px;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.hub-composer-link:hover {
+  color: var(--hub-accent);
+}
+
+/* --- system ------------------------------------------------------------- */
+
+.hub-system > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.hub-system > summary::-webkit-details-marker {
+  display: none;
+}
+
+.hub-system > summary::before {
+  content: "\25B8";
+  font-size: 0.8em;
+  color: var(--hub-quiet);
+}
+
+.hub-system[open] > summary::before {
+  content: "\25BE";
+}
+
+.hub-system-line {
+  margin: 3px 0 0;
+  padding: 0 6px;
+  color: var(--hub-quiet);
+  font-size: 0.84em;
+  word-break: break-all;
+}
+
+.hub-system-line.quiet {
+  opacity: 0.85;
+}
+
+.hub-inline-link {
+  border: none;
+  background: transparent;
+  color: var(--hub-quiet);
+  font-family: inherit;
+  font-size: 1em;
+  padding: 0 2px;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.hub-inline-link:hover {
+  color: var(--hub-accent);
+}
+
+.hub-launch {
+  margin: 6px 0 2px;
+  padding: 0 6px;
+}
+
+.hub-launch > summary {
+  cursor: pointer;
+  color: var(--hub-quiet);
+  font-size: 0.84em;
+}
+
+.hub-launch-pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border: 1px solid var(--hub-line);
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.82em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+
+/* --- empty / notices ---------------------------------------------------- */
+
+.hub-blank {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  padding: 42px 16px;
+}
+
+.hub-blank-title {
+  margin: 0;
+  font-size: 1.05em;
+}
+
+.hub-blank-line {
+  margin: 0;
+  max-width: 460px;
+  color: var(--hub-quiet);
+  font-size: 0.9em;
+}
+
+.hub-blank-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.hub-empty,
+.hub-summary-line {
+  margin: 0;
+  padding: 4px 6px;
+  color: var(--hub-quiet);
+  font-size: 0.88em;
+}
+
+.hub-notice {
+  margin: 0;
+  padding: 6px 8px;
+  border-left: 2px solid var(--hub-fail);
+  color: var(--hub-fail);
+  font-size: 0.88em;
+}
+
+/* --- dots (same language as the rail) ----------------------------------- */
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  align-self: center;
+}
+
+.dot.dot-lg {
+  width: 10px;
+  height: 10px;
+}
+
+.dot-running {
+  background: var(--hub-run);
+  animation: hub-pulse 1.8s ease-in-out infinite;
+}
+
+.dot-starting,
+.dot-queued {
+  background: transparent;
+  border: 1.5px solid var(--hub-run);
+}
+
+.dot-starting {
+  animation: hub-pulse 1.8s ease-in-out infinite;
+}
+
+.dot-idle {
+  background: var(--hub-run);
+  opacity: 0.5;
+}
+
+.dot-awaiting {
+  background: var(--hub-warn);
+}
+
+.dot-failed {
+  background: var(--hub-fail);
+}
+
+.dot-done {
+  background: var(--hub-quiet);
+  opacity: 0.6;
+}
+
+.dot-offline {
+  background: transparent;
+  border: 1.5px solid var(--hub-quiet);
+}
+
+@keyframes hub-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.4); }
+  50% { box-shadow: 0 0 0 3px rgba(63, 185, 80, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot-running,
+  .dot-starting {
+    animation: none;
+  }
+}
+
+@media (max-width: 620px) {
+  .hub-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hub-links .hub-link span {
+    display: none;
+  }
+}

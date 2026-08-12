@@ -9,10 +9,12 @@
  * tests can pin exactly.
  */
 
+import { fleetActivityLine, fleetResultLine } from "@drydock/contracts";
 import type {
   AccessRequestSummary,
   AgentQuestionSummary,
   AgentsOverviewState,
+  AgentsSessionLine,
   AgentsTaskGroup,
   ChatSessionRecord,
   ChatSessionSummary,
@@ -125,6 +127,64 @@ export function buildLandingItems(
   return items;
 }
 
+/**
+ * One line per session, derived from what this assembly already sees - pending
+ * questions/access, the decorated root-agent fold, stored status, and the
+ * unlanded changeset rows. No new storage, no polling: the webview re-derives
+ * the activity line through the SAME contracts function when a live activity
+ * push lands, so a pushed row and a refetched row cannot disagree.
+ */
+function buildSessionLines(
+  sessions: readonly ChatSessionSummary[],
+  questions: readonly AgentQuestionSummary[],
+  accessRequests: readonly AccessRequestSummary[],
+  unlanded: readonly TaskChangesetRecord[]
+): AgentsSessionLine[] {
+  const questionBySession = new Map<string, string>();
+  for (const question of questions) {
+    // Oldest pending question wins - it is the one that has waited longest.
+    if (!questionBySession.has(question.sessionId)) questionBySession.set(question.sessionId, question.question);
+  }
+  const accessSessions = new Set(accessRequests.map((request) => request.sessionId));
+  const changesBySession = new Map<string, { files: number; repos: Set<string> }>();
+  for (const row of unlanded) {
+    const key = row.sessionId as string;
+    const entry = changesBySession.get(key) ?? { files: 0, repos: new Set<string>() };
+    entry.files += row.fileCount;
+    entry.repos.add(row.repoName);
+    changesBySession.set(key, entry);
+  }
+
+  const lines: AgentsSessionLine[] = [];
+  for (const session of sessions) {
+    const question = questionBySession.get(session.sessionId);
+    const root = session.agentActivity?.root;
+    const changes = changesBySession.get(session.sessionId);
+    const activityLine = fleetActivityLine({
+      status: session.status,
+      ...(session.live === undefined ? {} : { live: session.live }),
+      ...(session.runningElsewhere === undefined ? {} : { runningElsewhere: session.runningElsewhere }),
+      ...(question === undefined ? {} : { pendingQuestion: question }),
+      ...(accessSessions.has(session.sessionId) ? { pendingAccess: true } : {}),
+      ...(root === undefined ? {} : { root }),
+      ...(session.description === undefined ? {} : { description: session.description })
+    });
+    const resultLine = fleetResultLine({
+      status: session.status,
+      ...(changes === undefined ? {} : { changedFiles: changes.files, changedRepos: changes.repos.size }),
+      ...(root?.lastActivity === undefined ? {} : { lastActivity: root.lastActivity })
+    });
+    if (activityLine === undefined && resultLine === undefined && changes === undefined) continue;
+    lines.push({
+      sessionId: session.sessionId,
+      ...(activityLine === undefined ? {} : { activityLine }),
+      ...(resultLine === undefined ? {} : { resultLine }),
+      ...(changes === undefined ? {} : { landable: true })
+    });
+  }
+  return lines;
+}
+
 export async function buildAgentsOverview(ports: AgentsOverviewPorts): Promise<AgentsOverviewState> {
   const [records, tasks, columns, questions, accessRequests] = await Promise.all([
     ports.listSessions(),
@@ -192,6 +252,12 @@ export async function buildAgentsOverview(ports: AgentsOverviewPorts): Promise<A
 
   const unlanded = ports.listUnlandedChangesets === undefined ? [] : await ports.listUnlandedChangesets();
   const landing = buildLandingItems(unlanded, tasks);
+  const sessionLines = buildSessionLines(
+    [...groups.flatMap((group) => group.sessions), ...orphanSessions],
+    questions,
+    accessRequests,
+    unlanded
+  );
 
   return {
     generatedAt: ports.now(),
@@ -200,6 +266,7 @@ export async function buildAgentsOverview(ports: AgentsOverviewPorts): Promise<A
     questions,
     accessRequests,
     agentIdleThresholdMs: ports.agentIdleThresholdMs(),
-    ...(landing.length === 0 ? {} : { landing })
+    ...(landing.length === 0 ? {} : { landing }),
+    ...(sessionLines.length === 0 ? {} : { sessionLines })
   };
 }

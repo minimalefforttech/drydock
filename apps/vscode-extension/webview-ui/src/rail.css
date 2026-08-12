@@ -1,0 +1,369 @@
+/*
+ * Left-rail styles (UX overhaul, P1) - Tasks, Recents, Workspaces.
+ *
+ * VS Code theme variables only; no remote assets. The rail's strict CSP has no
+ * 'unsafe-inline' for styles, so every status/depth cue is a CLASS - there are
+ * no style attributes anywhere in the rail. Quiet by construction: the 9px dot
+ * is the only colour, amber means "needs you", red means failed, done fades.
+ */
+
+:root {
+  --rail-run: var(--vscode-charts-green, #3fb950);
+  --rail-warn: var(--vscode-editorWarning-foreground, #d29922);
+  --rail-fail: var(--vscode-errorForeground, #f85149);
+  --rail-quiet: var(--vscode-descriptionForeground, #8b949e);
+  --rail-line: var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  /* The active-task edge: rust, the one accent the rail spends. */
+  --rail-active: var(--vscode-charts-orange, #cc6633);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size, 13px);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4)) transparent;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 10px;
+}
+
+/* --- sections ----------------------------------------------------------- */
+
+.rail-cluster {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--rail-line);
+  padding-bottom: 3px;
+  margin-bottom: 3px;
+}
+
+.rail-section-label {
+  font-size: 0.78em;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--rail-quiet);
+  padding: 2px 10px 3px;
+}
+
+.rail-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.rail-more {
+  font-size: 0.85em;
+  color: var(--rail-quiet);
+  padding: 2px 10px 4px 28px;
+}
+
+.rail-earlier {
+  margin-top: 4px;
+  border-top: 1px solid var(--rail-line);
+}
+
+.rail-earlier > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 5px 10px;
+  font-size: 0.85em;
+  color: var(--rail-quiet);
+}
+
+.rail-earlier > summary::-webkit-details-marker {
+  display: none;
+}
+
+.rail-earlier > summary::before {
+  content: "\25B8";
+  padding-right: 5px;
+}
+
+.rail-earlier[open] > summary::before {
+  content: "\25BE";
+}
+
+.rail-earlier .rail-row .rail-title {
+  color: var(--rail-quiet);
+}
+
+.rail-empty,
+.rail-notice {
+  color: var(--rail-quiet);
+  font-size: 0.9em;
+  padding: 8px 10px;
+  margin: 0;
+}
+
+.rail-notice {
+  color: var(--rail-fail);
+}
+
+/* --- rows --------------------------------------------------------------- */
+
+.rail-row {
+  border-left: 2px solid transparent;
+}
+
+.rail-row-main,
+.rail-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.rail-row-main:hover,
+.rail-child:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.rail-row-main:focus-visible,
+.rail-child:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: -1px;
+}
+
+/* The active-task spine: a rust edge, nothing else moves. */
+.rail-row.active {
+  border-left-color: var(--rail-active);
+}
+
+.rail-row.attention {
+  border-left-color: var(--rail-warn);
+}
+
+.rail-row.failed {
+  border-left-color: var(--rail-fail);
+}
+
+.rail-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--rail-quiet);
+  font-size: 0.85em;
+}
+
+.rail-meta.path {
+  flex: 1 1 auto;
+  direction: rtl;
+  text-align: left;
+}
+
+.rail-reason {
+  color: var(--rail-quiet);
+  font-size: 0.85em;
+  padding: 0 10px 4px 28px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- children (subtasks / set members) ---------------------------------- */
+
+.rail-children {
+  margin-left: 15px;
+  border-left: 1px solid var(--rail-line);
+}
+
+.rail-child {
+  padding-left: 8px;
+}
+
+.rail-child .rail-title {
+  font-size: 0.92em;
+}
+
+/* --- controls ----------------------------------------------------------- */
+
+.rail-twisty,
+.rail-twisty-spacer {
+  width: 14px;
+  flex: none;
+  text-align: center;
+}
+
+.rail-twisty,
+.rail-action,
+.rail-tag,
+.rail-link {
+  border: none;
+  background: transparent;
+  color: var(--rail-quiet);
+  font-family: inherit;
+  font-size: 0.85em;
+  padding: 0 3px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.rail-twisty:hover,
+.rail-action:hover:not(:disabled),
+.rail-tag:hover,
+.rail-link:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.rail-action {
+  flex: none;
+  opacity: 0;
+}
+
+.rail-row-main:hover .rail-action,
+.rail-child:hover .rail-action,
+.rail-action:focus-visible {
+  opacity: 1;
+}
+
+/* A guarded delete stays visible but visibly inert. */
+.rail-action:disabled,
+.rail-row-main:hover .rail-action:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+/* Workspace rows are containers, not targets: only their controls act. */
+.rail-set > .rail-row-main,
+.rail-set .rail-child {
+  cursor: default;
+}
+
+.rail-tag {
+  border: 1px solid var(--rail-line);
+  font-size: 0.72em;
+  letter-spacing: 0.04em;
+  flex: none;
+}
+
+.rail-chip {
+  font-size: 0.72em;
+  border-radius: 3px;
+  padding: 0 4px;
+  flex: none;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-badge-foreground, var(--rail-quiet));
+}
+
+.rail-chip.in-use {
+  background: transparent;
+  border: 1px solid var(--rail-warn);
+  color: var(--rail-warn);
+}
+
+.rail-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--rail-line));
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-family: inherit;
+  font-size: 0.9em;
+}
+
+.rail-adder {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px 2px;
+  border-top: 1px solid var(--rail-line);
+  margin-top: 4px;
+}
+
+.rail-footer {
+  padding: 4px 8px 0;
+  border-top: 1px solid var(--rail-line);
+  margin-top: 4px;
+}
+
+.rail-link {
+  padding: 2px 4px;
+}
+
+/* --- dots --------------------------------------------------------------- */
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  align-self: center;
+}
+
+.dot-running {
+  background: var(--rail-run);
+  animation: rail-pulse 1.8s ease-in-out infinite;
+}
+
+.dot-starting,
+.dot-queued {
+  background: transparent;
+  border: 1.5px solid var(--rail-run);
+}
+
+.dot-starting {
+  animation: rail-pulse 1.8s ease-in-out infinite;
+}
+
+.dot-idle {
+  background: var(--rail-run);
+  opacity: 0.5;
+}
+
+.dot-awaiting {
+  background: var(--rail-warn);
+}
+
+.dot-failed {
+  background: var(--rail-fail);
+}
+
+.dot-done {
+  background: var(--rail-quiet);
+  opacity: 0.6;
+}
+
+.dot-offline {
+  background: transparent;
+  border: 1.5px solid var(--rail-quiet);
+}
+
+@keyframes rail-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.4); }
+  50% { box-shadow: 0 0 0 3px rgba(63, 185, 80, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot-running,
+  .dot-starting {
+    animation: none;
+  }
+}

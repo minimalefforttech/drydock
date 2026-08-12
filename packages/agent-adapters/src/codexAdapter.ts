@@ -41,11 +41,12 @@ export interface CodexAdapterOptions {
   /** Rider identity (e.g. "openrouter"); defaults to the native "codex" provider. */
   readonly providerId?: string;
   /**
-   * Static catalog override for ridden providers. The app-server's model/list
+   * Live catalog source for ridden providers. The app-server's model/list
    * advertises OpenAI models regardless of the configured model_provider, so
-   * riders answer listModels from their registry seed instead.
+   * riders answer listModels from their own registry-described discovery
+   * endpoint instead.
    */
-  readonly staticCatalog?: AgentModelCatalog;
+  readonly catalogSource?: () => Promise<AgentModelCatalog>;
 }
 
 export class CodexAdapter implements AgentAdapter {
@@ -142,6 +143,15 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async sendPrompt(connection: AgentConnection, prompt: AgentPrompt): Promise<RunId> {
+    // A rider (catalogSource present) runs behind a foreign endpoint that
+    // rejects Codex's own default model id, and there is no compiled-in
+    // default to substitute - the turn must pick a model explicitly.
+    const model = prompt.metadata?.["model"];
+    if (this.options.catalogSource !== undefined && (typeof model !== "string" || model.length === 0)) {
+      throw new Error(
+        `${String(this.providerId)} needs an explicit model for this turn. Pick one from the model menu (Refresh models if the list is empty), or type a model id.`
+      );
+    }
     if (connection.transport === "codex-app-server") {
       const runId = this.options.ids.runId();
       const appServer = this.requiredAppServerSession(connection);
@@ -152,14 +162,21 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async listModels(connection: AgentConnection): Promise<AgentModelCatalog> {
-    if (this.options.staticCatalog !== undefined) {
-      return this.options.staticCatalog;
+    if (this.options.catalogSource !== undefined) {
+      return this.options.catalogSource();
     }
     if (connection.transport === "codex-app-server") {
       const appServer = this.requiredAppServerSession(connection);
       return appServer.transport.listModels(appServer.session);
     }
-    return fallbackCatalog();
+    return {
+      providerId: String(this.providerId),
+      displayName: "Codex / OpenAI",
+      models: [],
+      refreshedAt: new Date().toISOString(),
+      source: "unavailable",
+      diagnostics: ["Codex model/list is available only on the app-server transport; this connection is exec-json."]
+    };
   }
 
   async restoreContext(connection: AgentConnection, messages: readonly AgentContextMessage[]): Promise<void> {
@@ -232,15 +249,3 @@ export class CodexAdapter implements AgentAdapter {
   }
 }
 
-function fallbackCatalog(): AgentModelCatalog {
-  return {
-    providerId: "codex",
-    displayName: "Codex / OpenAI",
-    models: [
-      { id: "gpt-5", displayName: "GPT-5", isDefault: true, hidden: false }
-    ],
-    refreshedAt: new Date().toISOString(),
-    source: "fallback",
-    diagnostics: ["Codex app-server model/list is available only on the app-server transport."]
-  };
-}

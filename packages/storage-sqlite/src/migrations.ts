@@ -497,6 +497,9 @@ export function applyMigrations(connection: SqliteConnection): void {
   // Task FAQ auto-answer toggle (ADR 0007); 0 = off (the safe default -
   // the global config is a second gate).
   ensureColumn(connection, "work_tasks", "auto_answer_faq", "INTEGER NOT NULL DEFAULT 0");
+  // UX overhaul P1: "Don't ask for this task" on the workspace-mismatch toast;
+  // 0 = keep asking (the default), reversible from the task menu.
+  ensureColumn(connection, "work_tasks", "dont_ask_workspace", "INTEGER NOT NULL DEFAULT 0");
   // HITL verify gate (ADR 0007): "hitl" arms it (NULL = no gate);
   // verified_at is the human's stamp, cleared when the gate re-arms.
   ensureColumn(connection, "subtasks", "verify_mode", "TEXT NULL");
@@ -650,6 +653,17 @@ export function applyMigrations(connection: SqliteConnection): void {
   // Plans belong to tasks (ADR 0006 doctrine extended to planning): additive
   // and nullable - existing rows stay valid as orphan plans.
   ensureColumn(connection, "planner_plans", "task_id", "TEXT NULL");
+
+  // Small durable key/value state for the app itself (active-task spine and
+  // the one-time UI flags that follow it). Kept here rather than in VS Code's
+  // globalState so every window reads the same state root.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS app_state (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
   sanitizeLegacySessionEvents(connection, legacySessionEventsTable);
 }
 

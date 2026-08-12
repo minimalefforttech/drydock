@@ -109,7 +109,9 @@ export function registerIsolatedRunCommands(
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand("drydock.panel.open", async () => {
-    await vscode.commands.executeCommand("drydock.controlPanel.focus");
+    // The Control Panel retired with UX overhaul P7; the left rail's Tasks view
+    // is the entry point Drydock opens on now.
+    await vscode.commands.executeCommand("drydock.tasks.focus");
   }));
 }
 

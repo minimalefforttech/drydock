@@ -27,7 +27,8 @@ test("subtask runs resolve the durable task policy into a clone workspace", asyn
         startedWorkspace = workspace;
         return { session: session("session-1") };
       },
-      sendChatTurn: async (_sessionId, prompt) => { sent.push(prompt); }
+      sendChatTurn: async (_sessionId, prompt) => { sent.push(prompt); },
+      recordChatSendFailure: async () => undefined
     }
   });
 
@@ -64,7 +65,8 @@ test("subtask runs fail actionably instead of falling back to an empty workspace
         starts += 1;
         return { session: session("session-1") };
       },
-      sendChatTurn: async () => undefined
+      sendChatTurn: async () => undefined,
+      recordChatSendFailure: async () => undefined
     }
   });
 

@@ -4,6 +4,7 @@
 
 export * from "./accessRequestProtocol.js";
 export * from "./accessRequestService.js";
+export * from "./activeTaskService.js";
 export * from "./agentQuestionService.js";
 export * from "./clock.js";
 export * from "./chatExport.js";

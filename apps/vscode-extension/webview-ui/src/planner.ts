@@ -4,7 +4,7 @@
  * A plan-document review workspace: plan files and heading outline on the
  * left, the selected artifact viewer in the centre, and a plan-wide notes
  * queue on the right. Plan creation, selection, aspect management, and the
- * planning conversation stay in the Drydock Plan tab in the VS Code sidebar.
+ * planning conversation stay in the Drydock sidebar.
  * Both rails collapse at narrower editor widths; layout preferences persist
  * via webview state (UI-local only - domain data is always refetched).
  *
@@ -191,7 +191,7 @@ function applyPush(payload: PanelPushPayload): void {
       void refreshState();
       return;
     case "planner.showPlan":
-      // Another surface (the sidebar Plan tab, an auto-open on session start)
+      // Another surface (an auto-open on session start)
       // asked this panel to land on a specific plan.
       if (payload.planId !== currentPlanId) {
         void openPlan(payload.planId);

@@ -96,24 +96,40 @@ export class ClaudeEventNormalizer {
     const events: AgentEvent[] = [];
     let claudeSessionId: string | undefined;
     for (const line of stdout.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const raw = JSON.parse(trimmed) as JsonValue;
-        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-          const sessionId = stringValue(raw["session_id"]);
-          if (sessionId !== null) {
-            claudeSessionId = sessionId;
-          }
-          events.push(...this.normalize(raw, context));
-        }
-      } catch {
-        // Non-JSON output (progress noise) is ignored, same as the Codex path.
+      const parsed = this.parseLine(line, context);
+      if (parsed.claudeSessionId !== undefined) {
+        claudeSessionId = parsed.claudeSessionId;
       }
+      events.push(...parsed.events);
     }
     return {
       events,
       ...(claudeSessionId === undefined ? {} : { claudeSessionId })
+    };
+  }
+
+  /**
+   * Streaming entry point: one raw stdout line → its events plus the session
+   * id when the line carries one. `dropped` marks a non-empty line that was
+   * not parseable JSON, so the transport can report stream corruption instead
+   * of losing it silently.
+   */
+  parseLine(line: string, context: ClaudeNormalizerContext): ClaudeParseResult & { readonly dropped?: boolean } {
+    const trimmed = line.trim();
+    if (!trimmed) return { events: [] };
+    let raw: JsonValue;
+    try {
+      raw = JSON.parse(trimmed) as JsonValue;
+    } catch {
+      return { events: [], dropped: true };
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return { events: [], dropped: true };
+    }
+    const sessionId = stringValue(raw["session_id"]);
+    return {
+      events: this.normalize(raw, context),
+      ...(sessionId === null ? {} : { claudeSessionId: sessionId })
     };
   }
 

@@ -18,13 +18,17 @@
  * Subagent rows are folded from the same bus agent-events through the same
  * contracts projection (`agentActivitySummaryOfTree`) the sidebar ⑂ chips
  * use, so the two surfaces cannot disagree.
+ *
+ * The panel also answers the four runtime requests behind its collapsed
+ * Runtimes fold (UX overhaul P7) - list, stop, reconcile, sbx login - which the
+ * retired System tab used to own. Same handlers as the control panel's, minus
+ * the inventory push: the fold refetches on open and after its own actions.
  */
 
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import {
   agentActivitySummaryOfTree,
-  cardDetailLevel,
   parsePanelRequest,
   reduceAgentTree,
   treeSourceFromEvent,
@@ -41,6 +45,7 @@ import {
 import type { Logger, ProductBusEvent } from "@drydock/core";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import { buildAgentsOverview } from "../services/agentsOverviewAppService.js";
+import { toRuntimeSummary } from "../services/isolatedRunService.js";
 import { buildBoardState } from "./boardShared.js";
 import { isSessionRunningElsewhere, toAgentQuestionSummary, toChatSessionSummary } from "./controlPanelProvider.js";
 
@@ -284,6 +289,79 @@ export class AgentsPanelProvider {
         this.respond(request.requestId, { type: "chat.cancelTurn", accepted: true });
         return;
       }
+      case "chat.endSession": {
+        // Row overflow (P5): the same end the sidebar performs. The bus's
+        // session-updated push re-decorates the row; no local bookkeeping.
+        const session = await backend.appService.endChatSession(payload.sessionId, "agents-panel-end");
+        this.respond(request.requestId, { type: "chat.endSession", session: this.decorateSession(backend, session) });
+        return;
+      }
+      case "runtime.openTerminal": {
+        // Row overflow (P5): a real terminal INTO this chat's container, the
+        // same shell the sidebar opens (guarded by the same policy assertion).
+        backend.appService.assertRuntimeTerminalAllowed();
+        const runtime = (await backend.appService.listRuntimes())
+          .find((record) => record.sessionId === payload.sessionId && record.status === "running");
+        if (runtime === undefined) {
+          throw new Error("This chat has no running container yet. Send a message to start it, then open the terminal.");
+        }
+        const terminal = vscode.window.createTerminal({
+          name: `Container · ${runtime.externalName}`,
+          shellPath: backend.sbxDisplayPath,
+          shellArgs: ["exec", runtime.externalName, "/bin/bash"]
+        });
+        terminal.show();
+        this.respond(request.requestId, { type: "runtime.openTerminal", accepted: true });
+        return;
+      }
+      case "chat.rawStream": {
+        // Expand-in-place (P5): the current (or last) turn's raw agent stream,
+        // captured in-memory only. Fetched once per expand - never polled.
+        const snapshot = backend.rawStreamStore.snapshot(payload.sessionId);
+        this.respond(request.requestId, {
+          type: "chat.rawStream",
+          text: snapshot?.text ?? "",
+          lastChunkAt: snapshot?.lastChunkAt ?? null
+        });
+        return;
+      }
+      case "isolatedRun.listRuntimes": {
+        // Runtimes fold (UX overhaul P7): the System tab's runtime list found a
+        // new home at the bottom of the fleet. Same projection, no polling -
+        // the fold refetches when it is opened and after its own actions.
+        const runtimes = (await backend.appService.listPanelRuntimes()).map(toRuntimeSummary);
+        this.respond(request.requestId, { type: "isolatedRun.listRuntimes", runtimes });
+        return;
+      }
+      case "isolatedRun.stopRuntime": {
+        const result = await backend.appService.stopRuntime(payload.runtimeId, "force-remove");
+        this.respond(request.requestId, {
+          type: "isolatedRun.stopRuntime",
+          runtimeId: payload.runtimeId,
+          status: result.status,
+          diagnostics: result.diagnostics
+        });
+        return;
+      }
+      case "runtime.reconcile": {
+        // Reap quarantined/lost rows whose sandbox is gone, purge old removed rows.
+        await backend.reconcileOnActivate();
+        this.respond(request.requestId, { type: "runtime.reconcile", accepted: true });
+        return;
+      }
+      case "runtime.sbxLogin": {
+        backend.appService.assertInteractiveSetupAllowed("Docker Sandbox sign-in");
+        // `sbx login` drives its own OAuth flow in a visible terminal; no secret
+        // ever passes through the extension.
+        const terminal = vscode.window.createTerminal({
+          name: "Docker Sandbox login",
+          shellPath: backend.sbxDisplayPath,
+          shellArgs: ["login"]
+        });
+        terminal.show();
+        this.respond(request.requestId, { type: "runtime.sbxLogin", launched: `${backend.sbxDisplayPath} login` });
+        return;
+      }
       case "agents.landSession": {
         // Landing (ADR 0014): the SAME full pull as the Changes tray - clone
         // work into the local working tree, then bookkeeping marks the
@@ -336,9 +414,8 @@ export class AgentsPanelProvider {
     const nonce = randomBytes(16).toString("hex");
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "agents.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "agents.css"));
-    // The density default (ADR 0013) rides in as a body data attribute -
-    // sanitized to the closed enum, so no free-form setting text reaches HTML.
-    const cardDetail = cardDetailLevel(vscode.workspace.getConfiguration("drydock").get("ui.cardDetail"));
+    // No density attribute here (UX overhaul P5): the flat list has one row
+    // shape, so `ui.cardDetail` has nothing to vary. The board keeps it.
     // Strict CSP, matching the task-board/task-review panels exactly: no remote
     // content, scripts only with this nonce, styles only from the extension,
     // no 'unsafe-inline' anywhere. All dynamic text renders via textContent in
@@ -352,7 +429,7 @@ export class AgentsPanelProvider {
   <link rel="stylesheet" href="${styleUri.toString()}">
   <title>Drydock: Agents</title>
 </head>
-<body data-card-detail="${cardDetail}" data-start-guide="${startGuide ? "true" : "false"}">
+<body data-start-guide="${startGuide ? "true" : "false"}">
   <div id="app"></div>
   <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
 </body>

@@ -12,8 +12,8 @@
  * extension host must reject anything it returns null for.
  */
 
-import type { AgentModelCatalog } from "./agent.js";
-import { usageTokens, type SessionAgentTree } from "./agentTree.js";
+import type { AgentModelCatalog, ProviderAuthStatus } from "./agent.js";
+import { usageTokens, type AgentsSessionLine, type SessionAgentTree } from "./agentTree.js";
 import type { DiffChangeKind, DiffViewMode, ReviewThreadStatus } from "./diffs.js";
 import type { TranscriptLine } from "./events.js";
 import type { AgentRole } from "./ids.js";
@@ -50,6 +50,10 @@ export const MAX_SECRET_INPUT_LENGTH = 4_096;
 export const MAX_PATH_LENGTH = 1_024;
 export const MAX_COMMENT_LENGTH = 4_000;
 export const MAX_NAME_LENGTH = 200;
+/** Upper bound on `session.recents { limit }` (the rail's default is 7). */
+export const MAX_RECENTS_LIMIT = 50;
+/** Rows the rail's Recents list asks for when it names no limit. */
+export const DEFAULT_RECENTS_LIMIT = 7;
 
 export interface ChatModelSelection {
   readonly providerId: string;
@@ -83,9 +87,7 @@ export type ChatSummarizeMode = "log" | "ai";
 
 export type PanelRequestPayload =
   | { readonly type: "panel.init" }
-  | { readonly type: "isolatedRun.probeAppServer" }
   | { readonly type: "isolatedRun.listRuntimes"; readonly includeRemoved?: boolean }
-  | { readonly type: "runtime.stats"; readonly runtimeIds?: readonly string[] }
   | { readonly type: "runtime.reconcile" }
   | { readonly type: "isolatedRun.stopRuntime"; readonly runtimeId: string }
   | { readonly type: "runtime.sbxLogin" }
@@ -121,15 +123,20 @@ export type PanelRequestPayload =
   | { readonly type: "session.setDescription"; readonly sessionId: string; readonly description: string }
   | { readonly type: "session.delete"; readonly sessionId: string }
   | { readonly type: "session.summarize"; readonly sessionId: string; readonly mode: ChatSummarizeMode }
+  /** Rail Recents: one row per task = its newest chat, host-deduped (cap 50). */
+  | { readonly type: "session.recents"; readonly limit?: number }
   | { readonly type: "task.list" }
   | { readonly type: "task.create"; readonly title: string; readonly description?: string }
   | { readonly type: "task.update"; readonly taskId: string; readonly title?: string; readonly description?: string; readonly state?: WorkTaskState; readonly autoAnswerFaq?: boolean }
   | { readonly type: "task.delete"; readonly taskId: string }
-  | { readonly type: "task.link"; readonly taskId: string; readonly workspaceSetId?: string; readonly sessionId?: string }
+  /** `subtaskId` (session targets only) links the chat to a card, not the task itself. */
+  | { readonly type: "task.link"; readonly taskId: string; readonly workspaceSetId?: string; readonly sessionId?: string; readonly subtaskId?: string }
   | { readonly type: "task.unlink"; readonly taskId: string; readonly workspaceSetId?: string; readonly sessionId?: string }
+  /** Active-task spine: the one task every surface follows (null = none). */
+  | { readonly type: "active.get" }
+  | { readonly type: "active.set"; readonly taskId: string | null }
   | { readonly type: "workspace.openInNewWindow"; readonly workspaceSetId: string }
   | { readonly type: "workspace.activate"; readonly taskId?: string; readonly workspaceSetId?: string }
-  | { readonly type: "work.history"; readonly workspaceSetId?: string; readonly projectId?: string }
   | { readonly type: "memory.list" }
   | { readonly type: "memory.resolve"; readonly memoryCandidateId: string; readonly approve: boolean; readonly edits?: MemoryEditsInput }
   | { readonly type: "memory.open"; readonly memoryCandidateId: string }
@@ -191,6 +198,14 @@ export type PanelRequestPayload =
   | { readonly type: "task.faq.list"; readonly taskId: string }
   | { readonly type: "task.faq.add"; readonly taskId: string; readonly pattern: string; readonly answer: string }
   | { readonly type: "task.faq.remove"; readonly taskId: string; readonly faqId: string }
+  /** Task Hub (UX overhaul P3): ONE composite read for a task's whole overview. */
+  | { readonly type: "hub.state"; readonly taskId: string }
+  /**
+   * "Open that surface" relay for webviews with no command access: the host
+   * executes the existing `drydock.*.open` command. One request instead of a
+   * per-surface message per new panel.
+   */
+  | { readonly type: "panel.openSurface"; readonly surface: PanelSurface; readonly taskId?: string; readonly planId?: string }
   | { readonly type: "taskBoard.open"; readonly startGuide?: boolean }
   | { readonly type: "agents.open"; readonly startGuide?: boolean }
   | { readonly type: "agents.state" }
@@ -220,7 +235,29 @@ export type PanelRequestPayload =
   | { readonly type: "planner.setPrototypeScripts"; readonly artifactId: string; readonly enabled: boolean }
   | { readonly type: "planner.aspects.list" }
   | { readonly type: "planner.aspects.save"; readonly aspect: PlannerAspectSaveInput }
-  | { readonly type: "planner.aspects.archive"; readonly aspectId: string; readonly archived: boolean };
+  | { readonly type: "planner.aspects.archive"; readonly aspectId: string; readonly archived: boolean }
+  /**
+   * Configure panel (UX overhaul P6). ONE composite read plus a handful of
+   * bounded writes; the panel has no Save button, so every write is its own
+   * request and the row reports itself saved when the host answers.
+   */
+  | { readonly type: "config.state"; readonly scope?: ConfigScope }
+  | { readonly type: "config.setSetting"; readonly section: ConfigSettingSection; readonly key: string; readonly value: ConfigSettingValue }
+  | { readonly type: "config.mcpToggle"; readonly serverId: string; readonly enabled: boolean }
+  | { readonly type: "config.mcpAdd"; readonly name: string; readonly command: string; readonly args: readonly string[] }
+  | { readonly type: "config.provider.signIn"; readonly providerId: string }
+  | { readonly type: "config.provider.setDefaultModel"; readonly providerId: string; readonly model: string }
+  /** "Edit the file ↗": the host opens it only if it is one of the paths it just advertised. */
+  | { readonly type: "config.openFile"; readonly path: string };
+
+/**
+ * Editor-area surfaces a webview may ask the host to open. A closed enum, not
+ * a command name: the webview never names a command, the host maps each entry
+ * to the `drydock.*.open` command it already registers.
+ */
+export const PANEL_SURFACES = ["hub", "board", "agents", "planner", "review"] as const;
+
+export type PanelSurface = (typeof PANEL_SURFACES)[number];
 
 /**
  * A `planner.aspects.save` input: `aspectId` present updates that aspect,
@@ -347,6 +384,30 @@ export interface ChatSessionSummary {
   readonly updatedAt: string;
 }
 
+/**
+ * One Recents row (UX overhaul, P1): a task and the single most recent chat
+ * across the task's AND its subtasks' linked sessions. Exactly one row per
+ * task - the rail's Recents list is a task list wearing its newest chat, not
+ * a session list. Status/liveness reuse the ChatSessionSummary vocabulary so
+ * the dot cannot disagree with the Agents panel.
+ */
+export interface RecentChatSummary {
+  readonly sessionId: string;
+  readonly title: string;
+  readonly taskId: string;
+  readonly taskTitle: string;
+  /** Durable ChatSessionStatus (starting | active | ended | failed). */
+  readonly status: string;
+  /** Authoritative liveness in THIS host (ChatSessionSummary.live). */
+  readonly live?: boolean;
+  /** Live in another VS Code window: view-only here. */
+  readonly runningElsewhere?: boolean;
+  /** A pending question / access request / failed turn waits on the user. */
+  readonly needsAttention?: boolean;
+  /** The chosen chat's last activity (its session updatedAt). */
+  readonly lastActivityAt: string;
+}
+
 /** One compact live/delegated-agent summary for scan views. */
 export interface AgentActivityItem {
   readonly nodeId: string;
@@ -458,6 +519,8 @@ export interface AgentsOverviewState {
   readonly agentIdleThresholdMs: number;
   /** Landing drawer (ADR 0014): subtasks with unlanded changesets, disjoint-first. */
   readonly landing?: readonly LandingItem[];
+  /** Flat-list one-liners, one per session with something to say (UX overhaul P5). */
+  readonly sessionLines?: readonly AgentsSessionLine[];
 }
 
 /** One agent-changed file in a clone, relative to the sync base. */
@@ -805,6 +868,8 @@ export interface WorkTaskSummary {
   /** ADR 0007: FAQ entry count (absent when zero) and the per-task auto-answer toggle. */
   readonly faqCount?: number;
   readonly autoAnswerFaq?: boolean;
+  /** UX overhaul P1: the workspace-mismatch toast is suppressed for this task. */
+  readonly dontAskWorkspace?: boolean;
   /** This task's subtasks, ordered by sortOrder. */
   readonly subtasks: readonly SubtaskSummary[];
 }
@@ -815,14 +880,75 @@ export interface BoardState {
   readonly tasks: readonly WorkTaskSummary[];
 }
 
-/** One touch-history entry: who worked a workspace, through which chat, when. */
-export interface WorkHistoryEntry {
-  readonly taskId?: string;
-  readonly taskTitle?: string;
+// ---------------------------------------------------------------------------
+// Task Hub (UX overhaul P3) - overview-first projection over existing services
+// ---------------------------------------------------------------------------
+
+/**
+ * One row in the hub's Chats card: a Recents row (same status/liveness
+ * vocabulary, so the hub's dot cannot disagree with the rail or the fleet)
+ * plus the provider/model label and turn liveness the hub shows.
+ */
+export interface HubChatSummary extends RecentChatSummary {
+  readonly providerId: string;
+  readonly model?: string;
+  /** A turn is in flight right now (ChatSessionSummary.agentActivity root). */
+  readonly turnActive?: boolean;
+  /** Present when the chat belongs to one of the task's subtasks. */
+  readonly subtaskId?: string;
+}
+
+/**
+ * One "waiting on you" item in the attention rail, deep-linked to the session
+ * that raised it. Pending only - resolved items leave the rail entirely.
+ */
+export interface HubAttentionItem {
+  readonly kind: "question" | "access";
   readonly sessionId: string;
-  readonly sessionTitle: string;
-  readonly lastActivityAt: string;
-  readonly turnCount: number;
+  /** One display line: the question asked, or the access an agent wants. */
+  readonly headline: string;
+}
+
+/**
+ * The hub's four quiet tiles. cpu/mem are summed across the task's running
+ * sandboxes and are absent when nothing could be sampled (the sampler is
+ * Windows-only); tokens is absent when no agent activity has been folded yet.
+ */
+export interface HubStats {
+  /** Summed CPU busy across the task's sandboxes, percent of one core. */
+  readonly cpuPercent?: number;
+  readonly memBytes?: number;
+  readonly tokens?: number;
+  readonly runtimeCount: number;
+}
+
+/** The collapsed System card: what this task is actually running on. */
+export interface HubSystemState {
+  readonly runtimes: readonly RuntimeSummary[];
+  /** Display-only mount lines ("rw <path>"); never runtime handles. */
+  readonly mounts: readonly string[];
+  /** Reconstructed `sbx create …` for the newest live runtime, when there is one. */
+  readonly launchCommand?: string;
+}
+
+/**
+ * Everything the Task Hub renders for one task. A projection assembled from
+ * the services that already own each part - the hub stores nothing of its own
+ * and every row links out to the surface that owns the depth.
+ */
+export interface HubState {
+  readonly task: WorkTaskSummary;
+  readonly chats: readonly HubChatSummary[];
+  /** `task.subtasks`, hoisted so the Subtasks card reads exactly one field. */
+  readonly subtasks: readonly SubtaskSummary[];
+  /** Plans linked to this task, newest-updated first. */
+  readonly plans: readonly PlanSummary[];
+  readonly attention: readonly HubAttentionItem[];
+  readonly stats: HubStats;
+  readonly system: HubSystemState;
+  /** Workspace-set name for the header chip; absent when the task links none. */
+  readonly workspaceName?: string;
+  readonly generatedAt: string;
 }
 
 /** Display-safe projection of a memory (agent-proposed or user quick-add). */
@@ -940,6 +1066,182 @@ export interface ActiveEditorRef {
   readonly name: string;
 }
 
+// ---------------------------------------------------------------------------
+// Configure panel (UX overhaul P6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a Configure row's value actually lives - the panel's whole trust
+ * story in one word, rendered as a chip beside every row:
+ *
+ * - `local`    SQLite (Drydock owns it; editable right here)
+ * - `settings` a VS Code setting (written through the settings API)
+ * - `project`  a `.drydock/` file in an open folder (READ-ONLY here; the row
+ *              offers "edit the file ↗" instead of a control)
+ */
+export type ConfigProvenance = "local" | "settings" | "project";
+
+/** Global = this machine; project = the merged view with the open folders' files. */
+export type ConfigScope = "global" | "project";
+
+/** Left-nav sections, in render order. */
+export const CONFIG_SECTIONS = [
+  "providers",
+  "mcp",
+  "models",
+  "preprompts",
+  "recipes",
+  "memories",
+  "runtime",
+  "security"
+] as const;
+
+export type ConfigSection = (typeof CONFIG_SECTIONS)[number];
+
+/** Sections allowed to write a setting; a closed enum, never a free-form key namespace. */
+export const CONFIG_SETTING_SECTIONS = ["runtime", "security", "memories", "preprompts"] as const;
+
+export type ConfigSettingSection = (typeof CONFIG_SETTING_SECTIONS)[number];
+
+/** One glob→tag row of `drydock.memory.tagRules`, as edited by the panel. */
+export interface ConfigTagRuleInput {
+  readonly globs: readonly string[];
+  readonly tag: string;
+}
+
+/**
+ * A JSON-safe settings value. Deliberately narrow: the four scalar/collection
+ * shapes the surfaced `drydock.*` settings actually use, plus the tag-rule
+ * object array. Anything else is rejected at the boundary.
+ */
+export type ConfigSettingValue =
+  | string
+  | number
+  | boolean
+  | readonly string[]
+  | Readonly<Record<string, string>>
+  | readonly ConfigTagRuleInput[];
+
+/** How a settings row renders (and how its value is validated). */
+export type ConfigSettingKind = "boolean" | "number" | "string" | "string-list" | "string-map" | "tag-rules";
+
+/**
+ * One surfaced `drydock.*` setting. `key` omits the `drydock.` prefix (the
+ * host re-adds it), and `requiresReload` drives the row's reload chip - most
+ * machine-scope runtime/security settings only take effect on the next window.
+ */
+export interface ConfigSettingRow {
+  readonly key: string;
+  /** Which section renders it, and the only section allowed to write it. */
+  readonly section: ConfigSettingSection;
+  /** Plain-language one-liner; the row's only bold text. */
+  readonly label: string;
+  /** The dim second line: what it actually does, honestly. */
+  readonly detail: string;
+  readonly kind: ConfigSettingKind;
+  readonly value: ConfigSettingValue;
+  readonly requiresReload: boolean;
+  readonly provenance: ConfigProvenance;
+  readonly min?: number;
+  readonly max?: number;
+  /** Present when a managed policy or another setting pins this row read-only. */
+  readonly lockedReason?: string;
+}
+
+/** One provider card: auth state plus the single default-model choice. */
+export interface ConfigProviderRow {
+  readonly providerId: string;
+  readonly label: string;
+  readonly authStatus: ProviderAuthStatus;
+  readonly authKind?: "oauth" | "api-key";
+  /** Display-safe command the sign-in button will run. */
+  readonly loginHint?: string;
+  readonly models: readonly ConfigModelOption[];
+  /** Stored per-provider default (app_state); absent = the registry default. */
+  readonly defaultModel?: string;
+  /** Chats in the recent window that ran on this provider; omitted when unknown. */
+  readonly usedByRecentChats?: number;
+}
+
+export interface ConfigModelOption {
+  readonly id: string;
+  readonly displayName: string;
+}
+
+/** One MCP row: quiet by design - toggle, name, transport, tools, provenance. */
+export interface ConfigMcpRow {
+  readonly serverId: string;
+  readonly name: string;
+  readonly provenance: ConfigProvenance;
+  readonly enabled: boolean;
+  /** stdio today; the field exists so the chip never has to lie later. */
+  readonly transport: string;
+  /** Tools the server advertises, when the host knows; omitted otherwise. */
+  readonly toolCount?: number;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly sensitive: boolean;
+  /** Non-local rows: the file to open with `config.openFile`. */
+  readonly filePath?: string;
+}
+
+export interface ConfigRecipeRow {
+  readonly recipeId: string;
+  readonly name: string;
+  readonly description?: string;
+  readonly stepCount: number;
+  readonly provenance: ConfigProvenance;
+}
+
+export interface ConfigAspectRow {
+  readonly aspectId: string;
+  readonly label: string;
+  readonly expectedArtifacts: readonly string[];
+  readonly provenance: ConfigProvenance;
+}
+
+/** A merged tag rule: shipped defaults (`local`, read-only) then settings rows. */
+export interface ConfigTagRuleRow {
+  readonly globs: readonly string[];
+  readonly tag: string;
+  readonly provenance: ConfigProvenance;
+}
+
+/** A standing-instructions file: the settings one, or a detected repo file. */
+export interface ConfigPrepromptRow {
+  readonly label: string;
+  /** Host path, display-safe; also the `config.openFile` argument. */
+  readonly path: string;
+  readonly provenance: ConfigProvenance;
+  readonly exists: boolean;
+  readonly bytes?: number;
+}
+
+/**
+ * Everything the Configure panel renders, in one read. Project scope returns
+ * the MERGED list (project rows included and marked read-only); global scope
+ * returns only what this machine owns.
+ */
+export interface ConfigState {
+  readonly scope: ConfigScope;
+  /** Basename of the first open folder; absent in an empty window. */
+  readonly projectLabel?: string;
+  readonly availability: BackendAvailability;
+  readonly providers: readonly ConfigProviderRow[];
+  readonly mcp: readonly ConfigMcpRow[];
+  readonly recipes: readonly ConfigRecipeRow[];
+  readonly aspects: readonly ConfigAspectRow[];
+  readonly tagRules: readonly ConfigTagRuleRow[];
+  readonly preprompts: readonly ConfigPrepromptRow[];
+  /** Every surfaced `drydock.*` setting, in render order; filter by `section`. */
+  readonly settings: readonly ConfigSettingRow[];
+  /**
+   * The exact host paths `config.openFile` will accept for this state. The
+   * webview never invents a path; the host re-checks against this same list.
+   */
+  readonly editablePaths: readonly string[];
+}
+
 export interface PanelInitState {
   readonly availability: BackendAvailability;
   readonly runtimes: readonly RuntimeSummary[];
@@ -957,9 +1259,7 @@ export interface PanelInitState {
 
 export type PanelResponsePayload =
   | { readonly type: "panel.init"; readonly state: PanelInitState }
-  | { readonly type: "isolatedRun.probeAppServer"; readonly accepted: true }
   | { readonly type: "isolatedRun.listRuntimes"; readonly runtimes: readonly RuntimeSummary[] }
-  | { readonly type: "runtime.stats"; readonly stats: readonly RuntimeStatsSummary[] }
   | { readonly type: "runtime.reconcile"; readonly accepted: true }
   | { readonly type: "isolatedRun.stopRuntime"; readonly runtimeId: string; readonly status: string; readonly diagnostics: readonly string[] }
   | { readonly type: "runtime.sbxLogin"; readonly launched: string }
@@ -1003,15 +1303,17 @@ export type PanelResponsePayload =
    * `session.summaryReady` push (a model turn can outlive the request timeout).
    */
   | { readonly type: "session.summarize"; readonly sessionId: string; readonly mode: ChatSummarizeMode; readonly accepted: true }
+  | { readonly type: "session.recents"; readonly recents: readonly RecentChatSummary[] }
   | { readonly type: "task.list"; readonly tasks: readonly WorkTaskSummary[] }
   | { readonly type: "task.create"; readonly task: WorkTaskSummary }
   | { readonly type: "task.update"; readonly task: WorkTaskSummary }
   | { readonly type: "task.delete"; readonly taskId: string }
   | { readonly type: "task.link"; readonly task: WorkTaskSummary }
   | { readonly type: "task.unlink"; readonly task: WorkTaskSummary }
+  | { readonly type: "active.get"; readonly activeTaskId: string | null }
+  | { readonly type: "active.set"; readonly activeTaskId: string | null }
   | { readonly type: "workspace.openInNewWindow"; readonly accepted: true }
   | { readonly type: "workspace.activate"; readonly result: WorkspaceActivateResult }
-  | { readonly type: "work.history"; readonly entries: readonly WorkHistoryEntry[] }
   | { readonly type: "memory.list"; readonly candidates: readonly MemoryCandidateSummary[]; readonly detectedTags: readonly string[] }
   | { readonly type: "memory.resolve"; readonly candidate: MemoryCandidateSummary }
   | { readonly type: "memory.open"; readonly accepted: true }
@@ -1071,6 +1373,8 @@ export type PanelResponsePayload =
   | { readonly type: "task.faq.list"; readonly faqs: readonly TaskFaqRecord[] }
   | { readonly type: "task.faq.add"; readonly faqs: readonly TaskFaqRecord[] }
   | { readonly type: "task.faq.remove"; readonly faqs: readonly TaskFaqRecord[] }
+  | { readonly type: "hub.state"; readonly state: HubState }
+  | { readonly type: "panel.openSurface"; readonly accepted: true }
   | { readonly type: "taskBoard.open"; readonly accepted: true }
   | { readonly type: "agents.open"; readonly accepted: true }
   | { readonly type: "agents.state"; readonly state: AgentsOverviewState }
@@ -1097,7 +1401,15 @@ export type PanelResponsePayload =
   | { readonly type: "planner.setPrototypeScripts"; readonly artifact: PlanArtifactSummary }
   | { readonly type: "planner.aspects.list"; readonly aspects: readonly PlanAspectSummary[] }
   | { readonly type: "planner.aspects.save"; readonly aspects: readonly PlanAspectSummary[] }
-  | { readonly type: "planner.aspects.archive"; readonly aspects: readonly PlanAspectSummary[] };
+  | { readonly type: "planner.aspects.archive"; readonly aspects: readonly PlanAspectSummary[] }
+  | { readonly type: "config.state"; readonly state: ConfigState }
+  /** No Save button: the write already happened; the row shows "saved to settings". */
+  | { readonly type: "config.setSetting"; readonly ok: true }
+  | { readonly type: "config.mcpToggle"; readonly servers: readonly ConfigMcpRow[] }
+  | { readonly type: "config.mcpAdd"; readonly servers: readonly ConfigMcpRow[] }
+  | { readonly type: "config.provider.signIn"; readonly providerId: string; readonly launched: string; readonly mode: "guided" | "terminal" }
+  | { readonly type: "config.provider.setDefaultModel"; readonly providerId: string; readonly model: string }
+  | { readonly type: "config.openFile"; readonly opened: boolean };
 
 export interface PanelResponseOk {
   readonly protocolVersion: typeof WEBVIEW_PROTOCOL_VERSION;
@@ -1118,15 +1430,21 @@ export interface PanelResponseError {
 export type PanelResponse = PanelResponseOk | PanelResponseError;
 
 export type PanelPushPayload =
-  | { readonly type: "panel.availability"; readonly availability: BackendAvailability }
+  /** Boot-stage progress for a starting session (UX overhaul P4): the composer timeline + reconnect spinners consume the same events. */
+  | { readonly type: "chat.bootProgress"; readonly sessionId: string; readonly stage: "create" | "mount" | "clone" | "start" }
   /** Open file-scheme folders changed in this VS Code window. */
   | { readonly type: "workspace.folders"; readonly openFolderNames: readonly string[] }
   | { readonly type: "runtime.inventory"; readonly runtimes: readonly RuntimeSummary[] }
   | { readonly type: "run.started"; readonly isolation: IsolationSummary }
-  | { readonly type: "run.failed"; readonly message: string }
+  /**
+   * A send/dispatch failed before (or outside) a live turn, so no transcript
+   * event exists for it. `sessionId` is present whenever the failure belongs
+   * to a chat session; only pre-session boot failures omit it. The webview
+   * must surface the message to the user, not just log it.
+   */
+  | { readonly type: "run.failed"; readonly sessionId?: string; readonly message: string }
   /** Human-readable phase while a new isolated chat backend is booting. */
   | { readonly type: "chat.startProgress"; readonly message: string }
-  | { readonly type: "probe.completed"; readonly status: string; readonly diagnostics: readonly string[] }
   | { readonly type: "chat.turnStarted"; readonly sessionId: string; readonly runId: string }
   | { readonly type: "chat.event"; readonly sessionId: string; readonly line: SequencedTranscriptLine }
   | { readonly type: "chat.turnCompleted"; readonly sessionId: string; readonly runId: string; readonly status: string }
@@ -1152,6 +1470,14 @@ export type PanelPushPayload =
   | { readonly type: "policy.accessRequested"; readonly accessRequest: AccessRequestSummary }
   | { readonly type: "task.updated"; readonly task: WorkTaskSummary }
   | { readonly type: "task.deleted"; readonly taskId: string }
+  /** The active-task spine moved; every surface retargets off this push. */
+  | { readonly type: "activeTask"; readonly activeTaskId: string | null }
+  /**
+   * Task Hub: go back one step to the previously active task (the Alt+Left
+   * command; the same return the transient back-chip performs). The webview
+   * owns the one-step history, so the push carries no target.
+   */
+  | { readonly type: "hub.back" }
   | { readonly type: "memory.candidateAdded"; readonly candidate: MemoryCandidateSummary }
   | { readonly type: "taskReview.updated"; readonly taskId: string }
   | { readonly type: "codeReview.updated"; readonly taskId: string }
@@ -1165,14 +1491,14 @@ export type PanelPushPayload =
    * session's chat (the planner.showPlan pattern; nodeId → Agents lens).
    */
   | { readonly type: "panel.showSession"; readonly sessionId: string; readonly nodeId?: string }
-  /** Sidebar navigation: show the Plan tab and optionally select a plan. */
-  | { readonly type: "panel.showPlan"; readonly planId?: string }
   /** Coarse invalidation: the planner webview refetches planner.state. */
   | { readonly type: "planner.changed"; readonly planId: string }
   /** Panel navigation: another surface asked the panel to show this plan. */
   | { readonly type: "planner.showPlan"; readonly planId: string }
   /** Cross-panel onboarding: begin this panel's full guided tour after its initial state is ready. */
   | { readonly type: "help.startTour" }
+  /** A `drydock.*` setting changed outside the Configure panel; it refetches config.state. */
+  | { readonly type: "config.changed" }
   /** Terminal result of a planner.create / planner.startSession boot. */
   | { readonly type: "planner.sessionReady"; readonly planId: string; readonly sessionId: string; readonly ok: boolean; readonly error?: string };
 
@@ -1212,19 +1538,28 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
   const payload = value as Record<string, unknown>;
   switch (payload["type"]) {
     case "panel.init":
-    case "isolatedRun.probeAppServer":
     case "runtime.sbxLogin":
     case "session.list":
     case "task.list":
     case "workspace.state":
     case "workspace.registerOpenFolders":
     case "runtime.reconcile":
+    case "active.get":
       return { type: payload["type"] };
-    case "runtime.stats": {
-      const ids = payload["runtimeIds"];
-      if (ids === undefined) return { type: "runtime.stats" };
-      if (!Array.isArray(ids) || !ids.every((id) => isBoundedString(id, MAX_ID_LENGTH))) return null;
-      return { type: "runtime.stats", runtimeIds: ids };
+    case "active.set": {
+      // Null clears the spine; anything else must be a bounded task id.
+      const taskId = payload["taskId"];
+      if (taskId === null) return { type: "active.set", taskId: null };
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      return { type: "active.set", taskId };
+    }
+    case "session.recents": {
+      // The rail asks for a handful of rows; the cap keeps a hostile webview
+      // from turning one request into a full-history scan.
+      const limit = payload["limit"];
+      if (limit === undefined) return { type: "session.recents" };
+      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_RECENTS_LIMIT) return null;
+      return { type: "session.recents", limit };
     }
     case "task.create": {
       const title = payload["title"];
@@ -1365,6 +1700,27 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
     case "agents.state":
     case "recipes.list":
       return { type: payload["type"] };
+    case "hub.state": {
+      const taskId = payload["taskId"];
+      if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      return { type: "hub.state", taskId };
+    }
+    case "panel.openSurface": {
+      // A closed surface enum plus optional bounded ids: the webview can name
+      // where to go, never what command to run.
+      const surface = payload["surface"];
+      if (!isPanelSurface(surface)) return null;
+      const taskId = payload["taskId"];
+      const planId = payload["planId"];
+      if (taskId !== undefined && !isBoundedString(taskId, MAX_ID_LENGTH)) return null;
+      if (planId !== undefined && !isBoundedString(planId, MAX_ID_LENGTH)) return null;
+      return {
+        type: "panel.openSurface",
+        surface,
+        ...(taskId === undefined ? {} : { taskId }),
+        ...(planId === undefined ? {} : { planId })
+      };
+    }
     case "taskBoard.open":
     case "agents.open": {
       const startGuide = payload["startGuide"];
@@ -1502,35 +1858,29 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const taskId = payload["taskId"];
       const workspaceSetId = payload["workspaceSetId"];
       const sessionId = payload["sessionId"];
+      const subtaskId = payload["subtaskId"];
       if (!isBoundedString(taskId, MAX_ID_LENGTH)) return null;
       // Exactly one link target per request.
       if ((workspaceSetId === undefined) === (sessionId === undefined)) return null;
       if (workspaceSetId !== undefined && !isBoundedString(workspaceSetId, MAX_ID_LENGTH)) return null;
       if (sessionId !== undefined && !isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
+      // A subtask narrows a SESSION link to one card; unlink has no such form.
+      if (subtaskId !== undefined
+        && (payload["type"] !== "task.link" || sessionId === undefined || !isBoundedString(subtaskId, MAX_ID_LENGTH))) {
+        return null;
+      }
       return {
         type: payload["type"],
         taskId,
         ...(workspaceSetId === undefined ? {} : { workspaceSetId }),
-        ...(sessionId === undefined ? {} : { sessionId })
+        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(subtaskId === undefined ? {} : { subtaskId })
       };
     }
     case "workspace.openInNewWindow": {
       const workspaceSetId = payload["workspaceSetId"];
       if (!isBoundedString(workspaceSetId, MAX_ID_LENGTH)) return null;
       return { type: "workspace.openInNewWindow", workspaceSetId };
-    }
-    case "work.history": {
-      const workspaceSetId = payload["workspaceSetId"];
-      const projectId = payload["projectId"];
-      // Exactly one scope per query.
-      if ((workspaceSetId === undefined) === (projectId === undefined)) return null;
-      if (workspaceSetId !== undefined && !isBoundedString(workspaceSetId, MAX_ID_LENGTH)) return null;
-      if (projectId !== undefined && !isBoundedString(projectId, MAX_ID_LENGTH)) return null;
-      return {
-        type: "work.history",
-        ...(workspaceSetId === undefined ? {} : { workspaceSetId }),
-        ...(projectId === undefined ? {} : { projectId })
-      };
     }
     case "workspace.activate": {
       const taskId = payload["taskId"];
@@ -1582,6 +1932,62 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const memoryCandidateId = payload["memoryCandidateId"];
       if (!isBoundedString(memoryCandidateId, MAX_ID_LENGTH)) return null;
       return { type: "memory.delete", memoryCandidateId };
+    }
+    case "config.state": {
+      const scope = payload["scope"];
+      if (scope === undefined) return { type: "config.state" };
+      if (scope !== "global" && scope !== "project") return null;
+      return { type: "config.state", scope };
+    }
+    case "config.setSetting": {
+      const section = payload["section"];
+      const key = payload["key"];
+      if (!isConfigSettingSection(section)) return null;
+      // Settings keys are a shape, not free text: the host re-adds the
+      // `drydock.` prefix and additionally checks the key against the rows it
+      // just advertised, so a hostile webview cannot reach another extension's
+      // configuration even if this guard were the only one.
+      if (!isBoundedString(key, MAX_NAME_LENGTH) || !CONFIG_SETTING_KEY_RE.test(key)) return null;
+      const value = parseConfigSettingValue(payload["value"]);
+      if (value === null) return null;
+      return { type: "config.setSetting", section, key, value };
+    }
+    case "config.mcpToggle": {
+      const serverId = payload["serverId"];
+      const enabled = payload["enabled"];
+      if (!isBoundedString(serverId, MAX_ID_LENGTH)) return null;
+      if (typeof enabled !== "boolean") return null;
+      return { type: "config.mcpToggle", serverId, enabled };
+    }
+    case "config.mcpAdd": {
+      const name = payload["name"];
+      const command = payload["command"];
+      if (!isBoundedString(name, MAX_NAME_LENGTH)) return null;
+      if (!isBoundedString(command, MAX_MCP_COMMAND_LENGTH)) return null;
+      const args = payload["args"];
+      if (!Array.isArray(args) || args.length > MAX_MCP_ARG_COUNT) return null;
+      for (const arg of args) {
+        if (typeof arg !== "string" || arg.length === 0 || arg.length > MAX_MCP_COMMAND_LENGTH) return null;
+      }
+      return { type: "config.mcpAdd", name, command, args: args as string[] };
+    }
+    case "config.provider.signIn": {
+      const providerId = payload["providerId"];
+      if (!isBoundedString(providerId, MAX_MODEL_ID_LENGTH)) return null;
+      return { type: "config.provider.signIn", providerId };
+    }
+    case "config.provider.setDefaultModel": {
+      const providerId = payload["providerId"];
+      const model = payload["model"];
+      if (!isBoundedString(providerId, MAX_MODEL_ID_LENGTH)) return null;
+      // The empty string clears the stored default (back to the registry pick).
+      if (!isBoundedText(model, MAX_MODEL_ID_LENGTH)) return null;
+      return { type: "config.provider.setDefaultModel", providerId, model };
+    }
+    case "config.openFile": {
+      const filePath = payload["path"];
+      if (!isBoundedString(filePath, MAX_PATH_LENGTH)) return null;
+      return { type: "config.openFile", path: filePath };
     }
     case "mcp.list":
       return { type: "mcp.list" };
@@ -2177,6 +2583,10 @@ function isWorkTaskState(value: unknown): value is WorkTaskState {
   return typeof value === "string" && (WORK_TASK_STATES as readonly string[]).includes(value);
 }
 
+function isPanelSurface(value: unknown): value is PanelSurface {
+  return typeof value === "string" && (PANEL_SURFACES as readonly string[]).includes(value);
+}
+
 function isColumnCategory(value: unknown): value is ColumnCategory {
   return typeof value === "string" && (COLUMN_CATEGORIES as readonly string[]).includes(value);
 }
@@ -2364,6 +2774,69 @@ function parseMcpServerDraft(value: unknown): McpServerDraft | null {
 /** Like isBoundedString but admits the empty string (clear/blank semantics). */
 function isBoundedText(value: unknown, maxLength: number): value is string {
   return typeof value === "string" && value.length <= maxLength;
+}
+
+// --- Configure panel (P6) ---------------------------------------------------
+
+/** `runtime.pathAdditions`, `security.cloneOnly`, `memory.tagRules`, … */
+const CONFIG_SETTING_KEY_RE = /^[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)*$/;
+const MAX_CONFIG_LIST_ITEMS = 64;
+const MAX_CONFIG_MAP_ENTRIES = 64;
+const MAX_CONFIG_TAG_RULE_GLOBS = 32;
+
+function isConfigSettingSection(value: unknown): value is ConfigSettingSection {
+  return typeof value === "string" && (CONFIG_SETTING_SECTIONS as readonly string[]).includes(value);
+}
+
+/**
+ * Validates a settings value into the closed set of JSON-safe shapes the
+ * surfaced `drydock.*` settings use. Returns null for anything else - no
+ * nested objects, no nulls, no numbers that would not survive a round trip.
+ */
+function parseConfigSettingValue(value: unknown): ConfigSettingValue | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") return value.length <= MAX_PATH_LENGTH ? value : null;
+  if (Array.isArray(value)) {
+    if (value.length > MAX_CONFIG_LIST_ITEMS) return null;
+    if (value.every((entry) => typeof entry === "string")) {
+      const items = value as string[];
+      return items.every((entry) => entry.length <= MAX_PATH_LENGTH) ? items : null;
+    }
+    // The other accepted array is the memory tag-rule table.
+    const rules: ConfigTagRuleInput[] = [];
+    for (const entry of value) {
+      const rule = parseConfigTagRule(entry);
+      if (rule === null) return null;
+      rules.push(rule);
+    }
+    return rules;
+  }
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length > MAX_CONFIG_MAP_ENTRIES) return null;
+    const map: Record<string, string> = {};
+    for (const [key, entryValue] of entries) {
+      if (key.length === 0 || key.length > MAX_NAME_LENGTH) return null;
+      if (typeof entryValue !== "string" || entryValue.length > MAX_PATH_LENGTH) return null;
+      map[key] = entryValue;
+    }
+    return map;
+  }
+  return null;
+}
+
+function parseConfigTagRule(value: unknown): ConfigTagRuleInput | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const tag = record["tag"];
+  if (!isBoundedString(tag, MAX_NAME_LENGTH)) return null;
+  const globs = record["globs"];
+  if (!Array.isArray(globs) || globs.length === 0 || globs.length > MAX_CONFIG_TAG_RULE_GLOBS) return null;
+  for (const glob of globs) {
+    if (!isBoundedString(glob, MAX_NAME_LENGTH)) return null;
+  }
+  return { globs: globs as string[], tag };
 }
 
 /**

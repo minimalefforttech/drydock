@@ -2,7 +2,7 @@
   "name": "drydock",
   "displayName": "Drydock",
   "description": "Drydock — the engineering AI workbench: contained coding agents, blast-radius approvals, cross-project review.",
-  "version": "0.12.5",
+  "version": "0.15.0",
   "license": "MIT",
   "publisher": "local",
   "private": true,
@@ -26,7 +26,13 @@
     "onCommand:drydock.isolatedRun.status",
     "onCommand:drydock.security.exportEvidence",
     "onCommand:drydock.panel.open",
-    "onView:drydock.controlPanel"
+    "onCommand:drydock.taskHub.open",
+    "onCommand:drydock.quickChat",
+    "onCommand:drydock.configure.open",
+    "onView:drydock.chatRail",
+    "onView:drydock.tasks",
+    "onView:drydock.recents",
+    "onView:drydock.workspaces"
   ],
   "contributes": {
     "viewsContainers": {
@@ -35,6 +41,11 @@
           "id": "drydock",
           "title": "Drydock",
           "icon": "media/icon.svg"
+        },
+        {
+          "id": "drydock-chat",
+          "title": "Drydock Chat",
+          "icon": "media/icon.svg"
         }
       ]
     },
@@ -42,10 +53,37 @@
       "drydock": [
         {
           "type": "webview",
-          "id": "drydock.controlPanel",
-          "name": "Control Panel",
+          "id": "drydock.tasks",
+          "name": "Tasks",
           "icon": "media/icon.svg",
-          "contextualTitle": "Drydock"
+          "contextualTitle": "Drydock",
+          "size": 3
+        },
+        {
+          "type": "webview",
+          "id": "drydock.recents",
+          "name": "Recents",
+          "icon": "media/icon.svg",
+          "contextualTitle": "Drydock",
+          "size": 1
+        },
+        {
+          "type": "webview",
+          "id": "drydock.workspaces",
+          "name": "Workspaces",
+          "icon": "media/icon.svg",
+          "contextualTitle": "Drydock",
+          "size": 1,
+          "visibility": "collapsed"
+        }
+      ],
+      "drydock-chat": [
+        {
+          "type": "webview",
+          "id": "drydock.chatRail",
+          "name": "Chat",
+          "icon": "media/icon.svg",
+          "contextualTitle": "Drydock Chat"
         }
       ]
     },
@@ -68,7 +106,7 @@
       },
       {
         "command": "drydock.panel.open",
-        "title": "Drydock: Open Control Panel"
+        "title": "Drydock: Open Tasks"
       },
       {
         "command": "drydock.taskReview.open",
@@ -88,7 +126,36 @@
       },
       {
         "command": "drydock.taskBoard.open",
-        "title": "Drydock: Open Task Board"
+        "title": "Drydock: Open Task Board",
+        "icon": "$(project)"
+      },
+      {
+        "command": "drydock.rail.newTask",
+        "title": "Drydock: New Task",
+        "icon": "$(add)"
+      },
+      {
+        "command": "drydock.taskHub.open",
+        "title": "Drydock: Open Task Hub",
+        "icon": "$(compass)"
+      },
+      {
+        "command": "drydock.quickChat",
+        "title": "Drydock: Quick Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "drydock.configure.open",
+        "title": "Drydock: Configure",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "drydock.taskHub.back",
+        "title": "Drydock: Task Hub — Back to Previous Task"
+      },
+      {
+        "command": "drydock.rail.resetWorkspacePrompt",
+        "title": "Drydock: Re-enable Workspace Prompt for a Task"
       },
       {
         "command": "drydock.planner.open",
@@ -96,7 +163,8 @@
       },
       {
         "command": "drydock.agents.open",
-        "title": "Drydock: Open Agents"
+        "title": "Drydock: Open Agents",
+        "icon": "$(pulse)"
       },
       {
         "command": "drydock.security.exportEvidence",
@@ -111,7 +179,42 @@
         "title": "Task Review: Resolve Review Comment"
       }
     ],
+    "keybindings": [
+      {
+        "command": "drydock.taskHub.back",
+        "key": "alt+left",
+        "mac": "alt+left",
+        "when": "activeWebviewPanelId == 'drydock.taskHub'"
+      },
+      {
+        "command": "drydock.quickChat",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d"
+      }
+    ],
     "menus": {
+      "view/title": [
+        {
+          "command": "drydock.rail.newTask",
+          "group": "navigation@1",
+          "when": "view == drydock.tasks"
+        },
+        {
+          "command": "drydock.taskBoard.open",
+          "group": "navigation@2",
+          "when": "view == drydock.tasks"
+        },
+        {
+          "command": "drydock.agents.open",
+          "group": "navigation@3",
+          "when": "view == drydock.tasks || view == drydock.recents"
+        },
+        {
+          "command": "drydock.configure.open",
+          "group": "navigation@4",
+          "when": "view == drydock.tasks"
+        }
+      ],
       "comments/commentThread/context": [
         {
           "command": "drydock.taskReview.addComment",

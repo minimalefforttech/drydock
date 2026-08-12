@@ -1,7 +1,7 @@
 /**
  * Mock extension host for the webview visual-test harness.
  *
- * Loads BEFORE the real bundled main.js and provides acquireVsCodeApi plus a
+ * Loads BEFORE the real bundled webview entry (chatRail.js, agents.js, …) and provides acquireVsCodeApi plus a
  * fixture-backed message host speaking the exact envelope protocol
  * (protocolVersion 1, request/response/push). Fixtures are deterministic
  * dummy data - no real backend, no docker, no network. Drive scripted flows
@@ -286,10 +286,63 @@
   ];
   let mcpSerial = 2;
 
-  const workHistory = [
-    { taskId: "t-1", taskTitle: "Alembic publish support", sessionId: "s-live", sessionTitle: "Add alembic support to asset_api", lastActivityAt: iso(2), turnCount: 7 },
-    { sessionId: "s-ended", sessionTitle: "Investigate USD 24 upgrade", lastActivityAt: iso(1900), turnCount: 3 }
+  // --- Configure fixture (UX overhaul P6; Memories re-homed per ADR 0020) ---
+  // One mutable ConfigState worth of rows: config.setSetting writes back so
+  // value round-trips and the saved note are observable without a real host.
+  const configDefaultModels = { codex: "gpt-5.5" };
+  const configSettings = [
+    { key: "runtime.pathAdditions", section: "runtime", label: "Extra folders on PATH", detail: "Prepended when Drydock runs sbx and the agent CLIs.", kind: "string-list", value: ["C:\\tools\\ffmpeg\\bin"], requiresReload: true, provenance: "settings" },
+    { key: "runtime.env", section: "runtime", label: "Extra environment variables", detail: "Passed to Drydock's runtime tools. Do not put secrets here.", kind: "string-map", value: { REZ_CONFIG_FILE: "C:\\rez\\config.py" }, requiresReload: true, provenance: "settings" },
+    { key: "orchestrator.maxConcurrentRuns", section: "runtime", label: "Agents running at once", detail: "Further starts wait in a visible queue; Auto derives from this machine.", kind: "number", value: 0, requiresReload: false, min: 0, max: 64, provenance: "settings" },
+    { key: "deniedPaths", section: "security", label: "Folders the agent can never reach", detail: "Excluded from mounts, snapshots, and diffs.", kind: "string-list", value: ["C:\\finance"], requiresReload: true, provenance: "settings" },
+    { key: "security.cloneOnly", section: "security", label: "Always work in a private clone", detail: "Agents get a copy of the repository instead of your live folder.", kind: "boolean", value: false, requiresReload: true, provenance: "settings" },
+    { key: "memory.tagRules", section: "memories", label: "Extra file patterns that tag a project", detail: "Tags are detected per mounted folder and decide which tagged team memories a briefing carries. These extend the built-in table below.", kind: "tag-rules", value: [{ globs: ["*.usd", "*.usda"], tag: "usd" }], requiresReload: true, provenance: "settings" },
+    { key: "teamInstructionsPath", section: "preprompts", label: "Studio standing instructions", detail: "A markdown file appended to every session briefing, capped at 8 KB.", kind: "string", value: "C:\\studio\\drydock-instructions.md", requiresReload: true, provenance: "settings" }
   ];
+  const configTagRules = [
+    { globs: ["*.py", "pyproject.toml"], tag: "python", provenance: "local" },
+    { globs: ["package.py"], tag: "rez", provenance: "local" },
+    { globs: ["*.ma", "*.mb"], tag: "maya", provenance: "local" },
+    { globs: ["*.usd", "*.usda"], tag: "usd", provenance: "settings" }
+  ];
+  const configState = (scope) => ({
+    scope: scope === "project" ? "project" : "global",
+    projectLabel: "demo-project",
+    availability: { available: true, sbxDisplayPath: "C:\\tools\\sbx\\sbx.exe" },
+    providers: catalogs.map((catalog) => ({
+      providerId: catalog.providerId,
+      label: catalog.displayName,
+      authStatus: catalog.authStatus,
+      authKind: "oauth",
+      ...(catalog.loginHint === undefined ? {} : { loginHint: catalog.loginHint }),
+      models: catalog.models.filter((model) => !model.hidden).map((model) => ({ id: model.id, displayName: model.displayName })),
+      ...(configDefaultModels[catalog.providerId] === undefined ? {} : { defaultModel: configDefaultModels[catalog.providerId] }),
+      usedByRecentChats: catalog.providerId === "codex" ? 4 : 1
+    })),
+    mcp: mcpServers.map((server) => ({
+      serverId: server.serverId,
+      name: server.name,
+      provenance: server.source === "settings" ? "settings" : "local",
+      enabled: server.enabledByDefault,
+      transport: "stdio",
+      command: server.command,
+      args: server.args,
+      sensitive: server.sensitive,
+      ...(server.source === "settings" ? { filePath: "C:\\studio\\mcp.json" } : {})
+    })),
+    recipes: [
+      { recipeId: "rc-1", name: "Bug fix with repro", description: "Repro test first, fix second, verify third.", stepCount: 3, provenance: "local" }
+    ],
+    aspects: [
+      { aspectId: "asp-1", label: "Test plan", expectedArtifacts: ["test-plan.md"], provenance: "local" }
+    ],
+    tagRules: configTagRules,
+    preprompts: [
+      { label: "Studio standing instructions", path: "C:\\studio\\drydock-instructions.md", provenance: "settings", exists: true, bytes: 2048 }
+    ],
+    settings: configSettings,
+    editablePaths: ["C:\\studio\\mcp.json", "C:\\studio\\drydock-instructions.md"]
+  });
 
   const runtimes = [
     { runtimeId: "r-1", externalName: "drydock-slive-gen1-worker", status: "running", startedAt: iso(60) }
@@ -705,7 +758,6 @@
       case "provider.cancelLogin": return respond(requestId, { type, providerId: payload.providerId, cancelled: false });
       case "isolatedRun.listRuntimes": return respond(requestId, { type, runtimes });
       case "isolatedRun.stopRuntime": return respond(requestId, { type, runtimeId: payload.runtimeId, status: "removed", diagnostics: [] });
-      case "isolatedRun.probeAppServer": return respond(requestId, { type, accepted: true });
       case "workspace.state": return respond(requestId, { type, state: workspacePolicy });
       case "workspace.registerOpenFolders": return respond(requestId, { type, projects: workspacePolicy.projects });
       case "workspace.createSet": return respondError(requestId, "harness: not implemented");
@@ -1055,10 +1107,12 @@
         return respond(requestId, { type, task });
       }
       case "agents.state": {
-        // Fleet snapshot (agents.html, ADR 0013): assembled from the same
+        // Fleet snapshot (agents.html, UX overhaul P5): assembled from the same
         // session/task/question/access fixtures the sidebar uses, mirroring
         // the host's grouping - task links plus a grafted role child under
-        // s-live; every unlinked session lands in the orphan drawer.
+        // s-live; every unlinked session lands in the orphan drawer. The flat
+        // list reads `sessionLines` (one activity/result line per session, plus
+        // the landable flag) exactly as the host derives them.
         const fleetLive = new Set(["s-live", "s-waiting", "s-clone"]);
         const decorate = (session) => ({ ...session, live: fleetLive.has(session.sessionId) });
         const roleChild = {
@@ -1080,14 +1134,47 @@
           groups.push({ task, ...(column ? { columnName: column.name, columnCategory: column.category } : {}), sessions: members });
         }
         const orphanSessions = sessions.filter((session) => !grouped.has(session.sessionId)).map(decorate);
+        const pendingQuestions = agentQuestions.filter((question) => question.status === "pending");
+        const pendingAccess = workspacePolicy.accessRequests.filter((request_) => request_.status === "pending");
+        // Same order as the host's fleetActivityLine: question → posture →
+        // command → output → stored phrase; result lines price the changeset.
+        const sessionLines = [...groups.flatMap((group) => group.sessions), ...orphanSessions].map((session) => {
+          const question = pendingQuestions.find((entry) => entry.sessionId === session.sessionId);
+          const root = session.agentActivity?.root;
+          const changes = harnessLanding.filter((item) => item.sessionId === session.sessionId)
+            .flatMap((item) => item.repos);
+          const files = changes.reduce((sum, repo) => sum + repo.fileCount, 0);
+          const repos = new Set(changes.map((repo) => repo.repoName)).size;
+          const activityLine = question ? `? ${question.question}`
+            : pendingAccess.some((entry) => entry.sessionId === session.sessionId) ? "? waiting on a workspace access decision"
+            : session.runningElsewhere ? "running in another window - view only"
+            : session.status === "starting" ? "resuming - recreating the runtime and clones"
+            : root?.lastCommand ? `$ ${root.lastCommand}`
+            : root?.lastActivity ? root.lastActivity
+            : session.description ? session.description
+            : session.status === "failed" ? "the last turn failed"
+            : session.status === "ended" ? undefined
+            : session.live ? "no activity this turn yet" : "not running - open the chat to resume";
+          const settled = session.status === "ended" || session.status === "failed";
+          const resultLine = !settled ? undefined
+            : files > 0 ? `${files} file${files === 1 ? "" : "s"} changed${repos > 1 ? ` across ${repos} repos` : ""} - not landed`
+            : root?.lastActivity ?? (session.status === "failed" ? "the last turn failed" : "ended with nothing reported");
+          return {
+            sessionId: session.sessionId,
+            ...(activityLine === undefined ? {} : { activityLine }),
+            ...(resultLine === undefined ? {} : { resultLine }),
+            ...(files > 0 ? { landable: true } : {})
+          };
+        });
         return respond(requestId, { type, state: {
           generatedAt: new Date().toISOString(),
           groups,
           orphanSessions,
-          questions: agentQuestions.filter((question) => question.status === "pending"),
-          accessRequests: workspacePolicy.accessRequests.filter((request_) => request_.status === "pending"),
+          questions: pendingQuestions,
+          accessRequests: pendingAccess,
           agentIdleThresholdMs: 5 * 60_000,
-          ...(harnessLanding.length === 0 ? {} : { landing: harnessLanding })
+          ...(harnessLanding.length === 0 ? {} : { landing: harnessLanding }),
+          sessionLines
         } });
       }
       case "agents.landSession": {
@@ -1100,6 +1187,25 @@
       case "agents.openSession":
         harnessLog(`agents.openSession ${String(payload.sessionId)}${payload.nodeId ? ` node=${String(payload.nodeId)}` : ""}`);
         return respond(requestId, { type, accepted: true });
+      case "chat.rawStream": {
+        // Expand-in-place (agents.html) + the chat tab's raw-stream disclosure:
+        // a deterministic captured stream, newest last. s-ended captured none.
+        harnessLog(`chat.rawStream ${String(payload.sessionId)}`);
+        const captured = payload.sessionId === "s-ended" ? "" : [
+          "{\"type\":\"session.configured\",\"model\":\"gpt-5.5\"}",
+          "{\"type\":\"agent.text\",\"text\":\"Reading publish_hooks.py\"}",
+          "{\"type\":\"agent.command\",\"command\":[\"grep\",\"-R\",\"ALLOWED\",\"src\"],\"status\":\"started\"}",
+          "{\"type\":\"agent.command\",\"status\":\"completed\",\"exitCode\":0}",
+          "{\"type\":\"agent.file_edit\",\"path\":\"exporters/alembic.py\",\"changeKind\":\"modify\"}",
+          "{\"type\":\"agent.text\",\"text\":\"wiring exporter registry\"}"
+        ].join("\n");
+        return respond(requestId, { type, text: captured, lastChunkAt: iso(1) });
+      }
+      case "runtime.openTerminal":
+        // Real host: a VS Code terminal into the session's container. In the
+        // browser there is no terminal - the log line is the observable effect.
+        harnessLog(`runtime.openTerminal ${String(payload.sessionId)}`);
+        return respond(requestId, { type, accepted: true });
       case "agents.open":
         harnessLog("agents.open");
         return respond(requestId, { type, accepted: true });
@@ -1109,7 +1215,6 @@
         // the observable effect).
         harnessLog(`taskBoard.open`);
         return respond(requestId, { type, accepted: true });
-      case "work.history": return respond(requestId, { type, entries: workHistory });
       case "memory.list": return respond(requestId, { type, candidates: memoryCandidates, detectedTags });
       case "memory.resolve": {
         const candidate = memoryCandidates.find((entry) => entry.memoryCandidateId === payload.memoryCandidateId);
@@ -1151,6 +1256,43 @@
         // Log the send so a visual check can assert the Memories "Open" row wiring.
         harnessLog(`memory.open ${String(payload.memoryCandidateId)}`);
         return respond(requestId, { type, accepted: true });
+      case "config.state":
+        return respond(requestId, { type, state: configState(payload.scope) });
+      case "config.setSetting": {
+        const setting = configSettings.find((entry) => entry.key === payload.key);
+        if (!setting) return respondError(requestId, `unknown setting ${String(payload.key)}`);
+        setting.value = payload.value;
+        harnessLog(`config.setSetting ${String(payload.key)}`);
+        return respond(requestId, { type, ok: true });
+      }
+      case "config.mcpToggle": {
+        const server = mcpServers.find((entry) => entry.serverId === payload.serverId);
+        if (!server) return respondError(requestId, "unknown server");
+        server.enabledByDefault = payload.enabled;
+        harnessLog(`config.mcpToggle ${String(payload.serverId)} ${payload.enabled ? "on" : "off"}`);
+        return respond(requestId, { type, servers: configState("global").mcp });
+      }
+      case "config.mcpAdd": {
+        mcpSerial += 1;
+        mcpServers.push({
+          serverId: `mcp-${String(mcpSerial + 1)}`, name: payload.name, command: payload.command,
+          args: payload.args, envKeys: [], enabledByDefault: true, sensitive: false, source: "registry"
+        });
+        harnessLog(`config.mcpAdd ${payload.name}`);
+        return respond(requestId, { type, servers: configState("global").mcp });
+      }
+      case "config.provider.signIn":
+        harnessLog(`config.provider.signIn ${String(payload.providerId)}`);
+        return respond(requestId, { type, providerId: payload.providerId, launched: "sbx run claude", mode: "terminal" });
+      case "config.provider.setDefaultModel": {
+        if (payload.model === "") delete configDefaultModels[payload.providerId];
+        else configDefaultModels[payload.providerId] = payload.model;
+        harnessLog(`config.provider.setDefaultModel ${String(payload.providerId)} ${String(payload.model)}`);
+        return respond(requestId, { type, providerId: payload.providerId, model: payload.model });
+      }
+      case "config.openFile":
+        harnessLog(`config.openFile ${String(payload.path)}`);
+        return respond(requestId, { type, opened: true });
       case "mcp.list": return respond(requestId, { type, servers: mcpServers, overrides: mcpOverrides });
       case "mcp.save": {
         const draft = payload.server;
@@ -1639,7 +1781,7 @@
   };
 
   window.__harness = {
-    fixtures: { sessions, catalogs, workspacePolicy, diffChanges, cloneRepos, tasks, boardColumns, memoryCandidates, workHistory, taskReviewProjects, taskReviewSessions, taskReviewComments, planner: { plans: plannerPlans, artifacts: plannerArtifacts, annotations: plannerAnnotations, aspects: plannerAspects }, comments: [
+    fixtures: { sessions, catalogs, workspacePolicy, diffChanges, cloneRepos, tasks, boardColumns, memoryCandidates, taskReviewProjects, taskReviewSessions, taskReviewComments, planner: { plans: plannerPlans, artifacts: plannerArtifacts, annotations: plannerAnnotations, aspects: plannerAspects }, comments: [
       { commentId: "c-1", filePath: "publish_hooks.py", startLine: 12, endLine: 14, body: "Guard the allowlist behind config.", author: "user", status: "open", createdAt: iso(30) }
     ] },
     log: [],

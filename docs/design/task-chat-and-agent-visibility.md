@@ -1,5 +1,12 @@
 # Task Chat And Agent Visibility
 
+> **Superseded in part by ADR 0020 (calm-workbench shell).** The chat, mounts,
+> file tokens, transcript rendering and delegated-agent rules below are current.
+> The four-tab sidebar that hosted them is not: the chat moved to the chat rail
+> (`drydock.chatRail`), Tasks to the left rail + Task Hub, Plan to the Planner
+> panel, System to Configure and the Agents panel's Runtimes fold. Read tab
+> names below as the surface that inherited them.
+
 ## Purpose
 
 This document describes the current panel contract behind ADRs 0006 and 0012.

@@ -8,9 +8,16 @@ Every panel has a `?` help centre with a spotlight tour. Starting a tour switche
 
 The rest of this page shows the panels with demo data active but no tour running.
 
-## Tasks (sidebar)
+> **Out of date (ADR 0020).** These captures are from the retired four-tab
+> Control Panel. Tasks now live in the left rail plus the Task Hub, the chat in
+> the chat rail, plans in the Planner panel, and the System tab's contents in
+> Configure and the Agents panel's Runtimes fold. The behaviour each shot
+> describes is unchanged; the surfaces moved. Recapture is pending, and demo
+> mode itself is now panel-only - the rails never enable it.
 
-The Tasks tab is the home surface: create tasks, move them through stages with the column pill, and manage each task's subtasks, linked chats, review, and plan from one card.
+## Tasks (left rail + Task Hub)
+
+Tasks are the home surface: create tasks, move them through stages with the column pill, and manage each task's subtasks, linked chats, review, and plan from one place. (Shot below: the retired Tasks tab.)
 
 ![Tasks tab](images/sidebar-tasks.png)
 
@@ -88,9 +95,9 @@ The Code Review panel is the PR-style read over the same data: a scope seg (All 
 
 ![Code review](images/code-review.png)
 
-## System
+## Runtimes and settings
 
-The System tab covers runtime inventory and testing controls: probe the app-server, inspect and stop runtimes, clean up stale ones, and read per-session chat diagnostics and the event log.
+**Retired surface.** The System tab's settings moved to Configure (providers, MCP registry, runtime, security) and its runtime inventory to a collapsed Runtimes fold at the bottom of the Agents panel - inspect, stop, clean up stale, sign in. The app-server probe and the diagnostics/event-log feeds retired outright: the raw agent stream, the launch-command disclosure and a real terminal into the container are the diagnostics now.
 
 ![System tab](images/sidebar-system.png)
 

@@ -8,7 +8,6 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   PROVIDER_REGISTRY,
-  providerDefaultModel,
   providerDescriptor,
   providerEgressResources,
   providerTransport
@@ -59,8 +58,9 @@ test("every descriptor is display-safe and structurally complete", () => {
       if (descriptor.wire.kind === "openai-compat") {
         assert.ok(descriptor.wire.envKey, `${descriptor.providerId} openai-compat wire needs envKey`);
       }
-      assert.ok(descriptor.models.length > 0, `${descriptor.providerId} rider needs a seed catalog`);
-      assert.ok(providerDefaultModel(descriptor.providerId), `${descriptor.providerId} rider needs a default model`);
+      // No compiled-in model lists: riders describe LIVE discovery instead.
+      assert.ok(descriptor.discovery !== undefined, `${descriptor.providerId} rider needs live model discovery`);
+      assert.match(descriptor.discovery.url, /^https:\/\//);
     }
   }
 });

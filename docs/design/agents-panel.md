@@ -11,6 +11,19 @@ Related: `task-chat-and-agent-visibility.md` (lineage + activity summaries),
 (capability tiers), ADR 0008 (ownership), ADR 0014 (changeset landing), and
 ADR 0015 (durable queue/park policy).
 
+> **Presentation superseded by the UX overhaul's P5 clarity pass**
+> (`ux-overhaul-implementation.md`, `../ideas/ux-overhaul-calm-workbench.md`).
+> The panel is now a FLAT recent-first list - one 2-line row per session (dot ·
+> title · owning task · elapsed, then one live mono activity line), pinned rows
+> for anything waiting on a person, expand-in-place for the raw-stream tail /
+> subagent children / meta, per-row `Land changes`, filters
+> `All · Needs you · Active`, and an opt-in group-by-task toggle. The grouped
+> grid, hover cards, chip clusters, orphan drawer, bulk Landing drawer and the
+> panel's density levels (ADR 0013) are retired; the board keeps density as-is.
+> Everything below still describes the DATA plane accurately - only the
+> "Structure", "Row anatomy" and "Density and usage" sections describe the
+> retired presentation.
+
 ## What the panel answers
 
 - Which tasks have live work right now, and how much?
@@ -113,6 +126,10 @@ Composed host-side, folded client-side:
   liveness, ownership, lineage, and `agentActivity`. The activity summary
   gains an optional `root` item (the session's own agent this turn) so fleet
   rows know pulse/last-command/tokens on boot; the sidebar ⑂ chip ignores it.
+  P5 adds `sessionLines` to that state: one `activityLine` / `resultLine` /
+  `landable` per session, derived by `fleetActivityLine` and `fleetResultLine`
+  in contracts. The webview calls the SAME functions when an activity push
+  lands mid-turn, so a pushed row and a refetched row cannot disagree.
 - Structural bus events collapse into ONE debounced coarse push,
   `agents.changed`, and the webview refetches - the board's self-healing
   shape. The panel host subscribes to `board-changed` (which task
@@ -159,6 +176,22 @@ Composed host-side, folded client-side:
 | Transport tier `none` | "No subagent signal", never an empty-quiet tree |
 | Stored-active but not live | Rendered as not live (reload killed backend) |
 
+## Runtimes fold (ADR 0020)
+
+A collapsed `Runtimes` section sits below the fleet, at the very bottom of the
+panel: the container inventory the retired System tab used to own. One line per
+non-removed runtime - name (mono) · state · uptime - with `Stop` revealed only
+on hover or keyboard focus and armed by a first click, plus `Clean up stale`
+(`runtime.reconcile`). When the sandbox tooling refuses to answer, the fold
+shows the error and a `Sign in to Docker Sandbox` button (`runtime.sbxLogin`).
+
+It is a fold, not a dashboard: closed by default, it issues no request at all
+until it is opened, and it never polls - it refetches on open and after its own
+actions. Per-sandbox CPU/memory/IO sampling did **not** come with it
+(`runtime.stats` retired); the chat's own per-session stats bar
+(`chat.runtimeStats`) is unchanged. The four requests are answered by
+`agentsPanelProvider.ts`, which is its own dispatcher.
+
 ## Non-goals (v1)
 
 Bulk stop/start, acting on another window's sessions, per-native-node cancel
@@ -169,8 +202,8 @@ convergence exception.
 
 ## Visual-test coverage
 
-The webview harness gains an `agents` page pinning: grouped rows with
-attention-first ordering; chips and loud/quiet accents; subagent indentation
-and tier notes; running-elsewhere posture; the orphan drawer; filter behavior;
-all three density levels; live token scope; starting/resuming; the Landing
-drawer; and empty states (no tasks, no live work).
+The webview harness `agents` page pins: flat rows with attention-first
+ordering; loud/quiet accents; subagent indentation and tier notes;
+running-elsewhere posture; filter behavior; live token scope;
+starting/resuming; per-row landing; the Runtimes fold (V77); and empty states
+(no tasks, no live work).

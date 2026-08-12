@@ -1,7 +1,7 @@
 /**
  * Shared MCP toggle UI (docs/design/mcp-and-memory.md).
  *
- * Servers are DEFINED in the System tab; every other surface (workspace rows,
+ * Servers are DEFINED in Configure; every other surface (workspace rows,
  * task menus, the chat FileMap) renders the same tri-state popover built
  * here: one row per registered server with inherit / on / off, plus a note
  * naming where the current state comes from. Toggles apply NEXT TURN — the

@@ -46,6 +46,12 @@ export interface WorkTaskRecord {
   readonly clonePolicy?: TaskClonePolicy;
   /** ADR 0007: agent questions matching this task's FAQ auto-answer (also gated by global config). */
   readonly autoAnswerFaq?: boolean;
+  /**
+   * UX overhaul P1: the user dismissed this task's workspace-mismatch toast
+   * for good. Reversible from the task ⋯ menu; absent/false = keep asking
+   * once per window session.
+   */
+  readonly dontAskWorkspace?: boolean;
 }
 
 /** A task points at the places its work happens. Exactly one target per link. */
@@ -67,6 +73,8 @@ export interface WorkTaskUpdate {
   /** null clears doneAt. */
   readonly doneAt?: string | null;
   readonly autoAnswerFaq?: boolean;
+  /** UX overhaul P1: suppress this task's workspace-mismatch toast. */
+  readonly dontAskWorkspace?: boolean;
   readonly updatedAt: string;
 }
 

@@ -6,7 +6,7 @@
 
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { asId, type ChatSessionRecord, type ChatSessionSummary, type WorkTaskSummary } from "@drydock/contracts";
+import { asId, type ChatSessionRecord, type ChatSessionSummary, type TaskChangesetRecord, type WorkTaskSummary } from "@drydock/contracts";
 import { buildAgentsOverview, buildLandingItems, type AgentsOverviewColumn, type AgentsOverviewPorts } from "./agentsOverviewAppService.js";
 
 function sessionRecord(sessionId: string, extra?: Partial<ChatSessionRecord>): ChatSessionRecord {
@@ -200,4 +200,69 @@ test("buildLandingItems flags overlap-unknown when a row has no stored paths", (
   // capture order (unknown sorts after known-disjoint, before overlapping).
   assert.equal(fresh?.overlapUnknown, true);
   assert.deepEqual(items.map((item) => item.subtaskId), ["sub-legacy", "sub-new"]);
+});
+
+// --- Fleet row lines (UX overhaul P5) -----------------------------------------
+
+test("session lines derive one activity line per session, questions first", async () => {
+  const sessions = [
+    // s-1 carries the fixture's pending question (see makePorts).
+    sessionRecord("s-1", { description: "root cause in publish hooks" }),
+    sessionRecord("s-2"),
+    sessionRecord("s-3", { status: "ended" })
+  ];
+  const tasks = [taskSummary("t-1", ["s-1", "s-2", "s-3"])];
+  const ports: AgentsOverviewPorts = {
+    ...makePorts({ sessions, tasks }),
+    decorateSession: (record): ChatSessionSummary => ({
+      sessionId: record.sessionId,
+      title: record.title,
+      status: record.status,
+      providerId: record.providerId,
+      ...(record.description === undefined ? {} : { description: record.description }),
+      ...(record.sessionId === "s-2"
+        ? {
+          live: true,
+          agentActivity: {
+            running: 0,
+            failed: 0,
+            root: { nodeId: "root", label: "agent", status: "running", lastCommand: "pytest tests/", toolUses: 3 }
+          }
+        }
+        : {}),
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt
+    })
+  };
+  const overview = await buildAgentsOverview(ports);
+  const lines = new Map((overview.sessionLines ?? []).map((line) => [line.sessionId, line]));
+  assert.equal(lines.get("s-1")?.activityLine, "? Mock the ledger?");
+  assert.equal(lines.get("s-2")?.activityLine, "$ pytest tests/");
+  // An ended session with no fold says nothing live; its result line speaks.
+  assert.equal(lines.get("s-3")?.activityLine, undefined);
+  assert.equal(lines.get("s-3")?.resultLine, "ended with nothing reported");
+  assert.equal(lines.get("s-1")?.landable, undefined);
+});
+
+test("unlanded changesets mark a session landable and price its result line", async () => {
+  const sessions = [sessionRecord("s-land", { status: "ended" })];
+  const tasks = [taskSummary("t-1", ["s-land"])];
+  const changeset = (repoName: string, fileCount: number): TaskChangesetRecord => ({
+    changesetId: `cs-${repoName}`,
+    taskId: asId<"TaskId">("t-1"),
+    subtaskId: asId<"SubtaskId">("sub-1"),
+    sessionId: asId<"SessionId">("s-land"),
+    repoName,
+    patchSha256: "0".repeat(64),
+    patchBytes: 10,
+    fileCount,
+    capturedAt: "2026-07-12T00:00:00.000Z"
+  });
+  const overview = await buildAgentsOverview({
+    ...makePorts({ sessions, tasks }),
+    listUnlandedChangesets: () => Promise.resolve([changeset("api", 3), changeset("tools", 1)])
+  });
+  const line = (overview.sessionLines ?? []).find((entry) => entry.sessionId === "s-land");
+  assert.equal(line?.landable, true);
+  assert.equal(line?.resultLine, "4 files changed across 2 repos - not landed");
 });
