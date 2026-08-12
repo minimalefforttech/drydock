@@ -224,6 +224,7 @@ class FakeAdapter implements ValidationExecAdapter {
   syncInput: SyncInput | undefined;
   fixtureInput: FixtureInput | undefined;
   runInput: RunInput | undefined;
+  runArgs: readonly string[] | undefined;
   cleanupInput: { jobRoot: string; keepJobId: string } | undefined;
 
   constructor(private readonly script: AdapterScript = {}) {}
@@ -260,6 +261,7 @@ class FakeAdapter implements ValidationExecAdapter {
     if (script === VALIDATION_RUN_GUEST_SCRIPT) {
       this.kinds.push("run");
       this.runInput = input as RunInput;
+      this.runArgs = args;
       assert.ok(timeoutMs > 0, "the run exec must carry the hard turn cap");
       const emit = (line: string): void => { onStdoutLine?.(line); };
       const hooks: RunHooks = { emit, signal };
@@ -277,12 +279,12 @@ class FakeAdapter implements ValidationExecAdapter {
 
 class FakeTimerBank implements ValidationTimers {
   private nextToken = 1;
-  private readonly pending = new Map<number, () => void>();
+  private readonly pending = new Map<number, { handler: () => void; ms: number }>();
 
-  set(handler: () => void, _ms: number): unknown {
+  set(handler: () => void, ms: number): unknown {
     const token = this.nextToken;
     this.nextToken += 1;
-    this.pending.set(token, handler);
+    this.pending.set(token, { handler, ms });
     return token;
   }
 
@@ -294,10 +296,23 @@ class FakeTimerBank implements ValidationTimers {
     return this.pending.size;
   }
 
+  /** The budgets (ms) of every currently-armed timer, newest last. */
+  get budgets(): number[] {
+    return [...this.pending.values()].map((entry) => entry.ms);
+  }
+
   fireAll(): void {
-    const handlers = [...this.pending.values()];
+    const entries = [...this.pending.values()];
     this.pending.clear();
-    for (const handler of handlers) handler();
+    for (const entry of entries) entry.handler();
+  }
+
+  /** Fire only timers whose budget has elapsed by `elapsedMs` - as if that much
+   * wall time passed with the others still counting down. */
+  fireElapsed(elapsedMs: number): void {
+    const due = [...this.pending.entries()].filter(([, entry]) => entry.ms <= elapsedMs);
+    for (const [token] of due) this.pending.delete(token);
+    for (const [, entry] of due) entry.handler();
   }
 }
 
@@ -330,6 +345,13 @@ async function settle(): Promise<void> {
   for (let turn = 0; turn < 20; turn += 1) {
     await new Promise((resolve) => { setTimeout(resolve, 0); });
   }
+}
+
+/** A promise with its resolver exposed - a controllable gate for interleaving. */
+function deferred(): { readonly promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
 }
 
 /** Resolves when the run is aborted - how a real exec ends on cancellation. */
@@ -400,9 +422,10 @@ function harness(input: {
   adapters?: Record<string, FakeAdapter>;
   adapterFor?: (runtime: NamedRuntimeConfig) => ValidationExecAdapter | null;
   changeset?: (call: number) => ValidationChangeset | null;
+  store?: MemoryValidationStore;
   overrides?: Partial<ValidationJobServiceOptions>;
 } = {}): Harness {
-  const store = new MemoryValidationStore();
+  const store = input.store ?? new MemoryValidationStore();
   for (const runtime of input.runtimes ?? [runtimeConfig({ runtimeId: "default" })]) {
     store.runtimes.push(runtime);
   }
@@ -500,6 +523,13 @@ test("a resolved job queues, runs, and lands a passing receipt", async () => {
   assert.equal(finished?.resolvedRuntimeId, "default");
   assert.equal(finished?.queuePosition, undefined);
   assert.ok(finished?.completedAt);
+
+  // The run wrapper carries the job id on its command line (a trailing argv
+  // element, never spliced into script text) so sweepGuestJob can find and reap
+  // it - an env-only token is invisible to Win32_Process.
+  const ran = bench.adapters.get("default");
+  assert.equal(ran?.runArgs?.[4], VALIDATION_RUN_GUEST_SCRIPT);
+  assert.ok(ran?.runArgs?.includes(job.jobId), "the job id tags the wrapper process");
 
   const receipt = await bench.store.getReceiptByJob(job.jobId);
   assert.equal(receipt?.verdict, "passed");
@@ -617,6 +647,37 @@ test("a runtime with no usable adapter parks instead of failing mysteriously", a
   assert.match(parked?.parkedReason ?? "", /has no exec connection/);
 });
 
+test("a runtime archived while a job waits in its queue parks the job in the pipeline (H1)", async () => {
+  const gates: (() => void)[] = [];
+  const adapter = new FakeAdapter({
+    run: async () => new Promise<Partial<CommandResult>>((resolve) => {
+      gates.push(() => { resolve({ exitCode: 0 }); });
+    })
+  });
+  const bench = harness({ adapters: { default: adapter } });
+
+  const head = await bench.service.enqueue(request());
+  const follower = await bench.service.enqueue(request());
+  assert.ok(head && follower);
+  await until(() => gates.length === 1, "the head job to reach its run");
+
+  // The runtime is archived AFTER both jobs were enqueued and routed: the
+  // follower is already `queued` on it, so only a pipeline-time re-check parks it.
+  const runtime = bench.store.runtimes.find((entry) => entry.runtimeId === "default");
+  assert.ok(runtime);
+  (runtime as { archived?: boolean }).archived = true;
+
+  gates[0]?.(); // the head (already running) finishes, freeing the runtime for the follower
+  await bench.service.whenIdle();
+
+  assert.equal((await bench.store.getJob(head.jobId))?.state, "completed");
+  const parked = await bench.store.getJob(follower.jobId);
+  assert.equal(parked?.state, "parked");
+  assert.match(parked?.parkedReason ?? "", /was archived and no longer runs new validation jobs/);
+  // The follower never ran: only the head ever reached its run exec.
+  assert.equal(adapter.kinds.filter((kind) => kind === "run").length, 1);
+});
+
 // ---------------------------------------------------------------------------
 // Serialization (behavior 2)
 // ---------------------------------------------------------------------------
@@ -676,6 +737,70 @@ test("jobs on different runtimes run concurrently", async () => {
   for (const gate of [...gates]) gate();
   await bench.service.whenIdle();
   assert.equal(bench.store.receipts.length, 2);
+});
+
+test("a job that becomes runnable mid-drain is launched by the trailing-edge pass", async () => {
+  // The bug this guards: a drain pass reads the queue and sees the runtime busy;
+  // the running job then finishes DURING an await inside that same pass, firing
+  // drain() again. A plain single-flight drain would just await-and-return, and
+  // the freed runtime's next job would sit `queued` until an unrelated
+  // completion. The trailing-edge flag forces one more pass instead.
+  const runGates: Array<(value: Partial<CommandResult>) => void> = [];
+  const adapter = new FakeAdapter({
+    run: async () => new Promise<Partial<CommandResult>>((resolve) => { runGates.push(resolve); })
+  });
+
+  const reachedPositionWrite = deferred();
+  const releasePositionWrite = deferred();
+  let gatedOnce = false;
+
+  // A store that holds the FIRST follower queue-position write, freezing a drain
+  // pass mid-await so the head job can complete (and re-fire drain) inside it.
+  class GatedStore extends MemoryValidationStore {
+    override async updateJobState(jobId: ValidationJobId, patch: ValidationJobPatch): Promise<void> {
+      if (patch.queuePosition === 1 && !gatedOnce) {
+        gatedOnce = true;
+        reachedPositionWrite.resolve();
+        await releasePositionWrite.promise;
+      }
+      await super.updateJobState(jobId, patch);
+    }
+  }
+
+  const store = new GatedStore();
+  const bench = harness({ adapters: { default: adapter }, store });
+
+  const head = await bench.service.enqueue(request());
+  assert.ok(head);
+  await until(() => runGates.length === 1, "the head job to reach its run");
+
+  // Enqueueing the follower opens a drain pass; its queue-position write blocks
+  // inside the gated store, so that pass is now active and awaiting.
+  const enqueueFollower = bench.service.enqueue(request());
+  await reachedPositionWrite.promise;
+
+  // The head completes WHILE that pass is frozen: its `finally` fires drain(),
+  // which must set the trailing-edge flag rather than merely await the pass.
+  runGates[0]?.({ exitCode: 0 });
+  await until(
+    () => bench.store.jobs.find((entry) => entry.jobId === head.jobId)?.state === "completed",
+    "the head job to complete while the drain pass is held"
+  );
+  await settle();
+
+  // Release the held write; the pass ends and the trailing pass must launch the
+  // follower onto the now-idle runtime, with no further enqueue from us.
+  releasePositionWrite.resolve();
+
+  const follower = await enqueueFollower;
+  assert.ok(follower);
+  await until(() => runGates.length === 2, "the follower to be launched by the trailing-edge pass");
+  runGates[1]?.({ exitCode: 0 });
+  await bench.service.whenIdle();
+
+  assert.equal((await bench.store.getJob(head.jobId))?.state, "completed");
+  assert.equal((await bench.store.getJob(follower.jobId))?.state, "completed");
+  assert.equal(adapter.kinds.filter((kind) => kind === "run").length, 2);
 });
 
 // ---------------------------------------------------------------------------
@@ -833,15 +958,16 @@ test("a profile's own license wording counts as a license wait", async () => {
 test("silence past the inactivity budget aborts, sweeps, and reads as hung (not as a verdict)", async () => {
   const timers = new FakeTimerBank();
   const adapter = new FakeAdapter({
-    run: async ({ signal }) => {
-      timers.fireAll();
+    run: async ({ emit, signal }) => {
+      emit("collected 14 items"); // first line: the tight inactivity budget now governs
+      timers.fireElapsed(90_000); // 90 s of mid-run silence elapses
       await untilAborted(signal);
       return { exitCode: null, signal: "SIGTERM" };
     }
   });
   const bench = harness({
     adapters: { default: adapter },
-    overrides: { timers, inactivityTimeoutMs: 90_000 }
+    overrides: { timers, inactivityTimeoutMs: 90_000, startupTimeoutMs: 600_000 }
   });
   const job = await bench.service.enqueue(request());
   await bench.service.whenIdle();
@@ -851,6 +977,59 @@ test("silence past the inactivity budget aborts, sweeps, and reads as hung (not 
   const receipt = await bench.store.getReceiptByJob(job.jobId);
   assert.equal(receipt?.verdict, "error");
   assert.match(receipt?.summary ?? "", /No output for 90 s - treat this run as hung/);
+  assert.deepEqual(adapter.swept, [job.jobId]);
+});
+
+test("a cold DCC start within the startup budget is not treated as a stall (E4)", async () => {
+  const timers = new FakeTimerBank();
+  let budgetBeforeFirstLine = -1;
+  let budgetAfterFirstLine = -1;
+  const adapter = new FakeAdapter({
+    run: async ({ emit }) => {
+      // Before any output the watchdog carries the larger STARTUP budget, so the
+      // inactivity budget elapsing during a cold start must NOT abort the run.
+      budgetBeforeFirstLine = timers.budgets[0] ?? -1;
+      timers.fireElapsed(120_000);
+      emit("collected 14 items");
+      budgetAfterFirstLine = timers.budgets[0] ?? -1;
+      return { exitCode: 0 };
+    }
+  });
+  const bench = harness({
+    adapters: { default: adapter },
+    overrides: { timers, inactivityTimeoutMs: 120_000, startupTimeoutMs: 600_000 }
+  });
+  const job = await bench.service.enqueue(request());
+  await bench.service.whenIdle();
+  assert.ok(job);
+
+  assert.equal(budgetBeforeFirstLine, 600_000, "the startup budget governs before the first line");
+  assert.equal(budgetAfterFirstLine, 120_000, "the first line hands over to the tight inactivity budget");
+  assert.equal((await bench.store.getJob(job.jobId))?.state, "completed");
+  assert.equal((await bench.store.getReceiptByJob(job.jobId))?.verdict, "passed");
+});
+
+test("a guest that never emits a line is stopped by the startup budget and reads as not launching", async () => {
+  const timers = new FakeTimerBank();
+  const adapter = new FakeAdapter({
+    run: async ({ signal }) => {
+      timers.fireElapsed(600_000); // the startup budget elapses with no output at all
+      await untilAborted(signal);
+      return { exitCode: null, signal: "SIGTERM" };
+    }
+  });
+  const bench = harness({
+    adapters: { default: adapter },
+    overrides: { timers, inactivityTimeoutMs: 120_000, startupTimeoutMs: 600_000 }
+  });
+  const job = await bench.service.enqueue(request());
+  await bench.service.whenIdle();
+  assert.ok(job);
+
+  assert.equal((await bench.store.getJob(job.jobId))?.state, "failed");
+  const receipt = await bench.store.getReceiptByJob(job.jobId);
+  assert.equal(receipt?.verdict, "error");
+  assert.match(receipt?.summary ?? "", /No output for 600 s after start - treat this run as not launching/);
   assert.deepEqual(adapter.swept, [job.jobId]);
 });
 
@@ -1170,6 +1349,35 @@ test("a reroute onto a runtime that also lacks the capability stays parked with 
   assert.equal(right.kind, "queued");
   await bench.service.whenIdle();
   assert.equal((await bench.store.getJob(job.jobId))?.state, "completed");
+});
+
+test("rerouting onto an archived runtime stays parked with the archived reason (H1)", async () => {
+  const bench = harness({
+    runtimes: [
+      runtimeConfig({ runtimeId: "default", displayName: "default" }),
+      runtimeConfig({ runtimeId: "old-farm", displayName: "old-farm", archived: true })
+    ],
+    adapters: { default: new FakeAdapter(), "old-farm": new FakeAdapter() },
+    // No adapter for default: the job parks first, giving us a parked job to requeue.
+    adapterFor: (runtime) => (runtime.runtimeId === "default" ? null : new FakeAdapter())
+  });
+  const job = await bench.service.enqueue(request());
+  await bench.service.whenIdle();
+  assert.ok(job);
+  assert.equal((await bench.store.getJob(job.jobId))?.state, "parked");
+
+  const result = await bench.service.requeueParked(job.jobId, {
+    rerouteTo: asId<"ValidationRuntimeId">("old-farm"),
+    confirmedDelta: true
+  });
+  assert.equal(result.kind, "parked");
+  if (result.kind === "parked") {
+    assert.match(result.reason, /"old-farm" was archived and no longer runs new validation jobs/);
+  }
+  // The job stayed put - nothing was queued onto the decommissioned runtime.
+  const still = await bench.store.getJob(job.jobId);
+  assert.equal(still?.state, "parked");
+  assert.equal(still?.resolvedRuntimeId, "default");
 });
 
 test("requeueing a job that is not parked is refused", async () => {

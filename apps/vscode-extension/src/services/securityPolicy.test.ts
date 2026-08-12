@@ -84,6 +84,57 @@ test("Studio restrictions can only tighten clone, omission, deny, and network po
   }
 });
 
+test("production tier (ADR 0022) is studio data denials only, never credential defaults or sensitive files", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-production-tier-"));
+  try {
+    const showData = path.join(root, "Projects");
+    const credentials = path.join(root, "creds");
+    await Promise.all([mkdir(showData, { recursive: true }), mkdir(credentials, { recursive: true })]);
+    const policyPath = path.join(root, "policy.json");
+    await writeFile(policyPath, JSON.stringify({
+      version: 1,
+      policyId: "production-tier",
+      deniedPaths: [showData]
+    }), "utf8");
+
+    const policy = loadEffectiveSecurityPolicy({
+      studioPolicyPath: policyPath,
+      // The credential dir arrives via the base denylist, exactly like the real
+      // ~/.ssh defaults do - it is denied, but it must NOT be production-tier.
+      baseDeniedPaths: [credentials],
+      user: unrestrictedUser
+    });
+
+    // A studio-denied show-data file IS production-tier (snapshot-eligible).
+    assert.equal(policy.isProductionPath(path.join(showData, "ShowA", "hero_rig.ma")), true);
+    // A credential-default path is denied but NOT production-tier.
+    assert.equal(policy.isProductionPath(path.join(credentials, "id_rsa")), false);
+    // A sensitive file, even under the studio data root, is never production-tier.
+    assert.equal(policy.isProductionPath(path.join(showData, "ShowA", "id_rsa")), false);
+    assert.equal(policy.isProductionPath(path.join(showData, "ShowA", ".env")), false);
+    // A path outside every denial is not production-tier.
+    assert.equal(policy.isProductionPath(path.join(root, "elsewhere", "scene.ma")), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an unmanaged machine has no production tier, so the fixture flow is inert", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-no-managed-"));
+  try {
+    const policy = loadEffectiveSecurityPolicy({
+      studioPolicyPath: path.join(root, "absent-policy.json"),
+      baseDeniedPaths: [path.join(root, "creds")],
+      user: unrestrictedUser
+    });
+    assert.equal(policy.managed, false);
+    assert.deepEqual([...policy.productionDataPaths], []);
+    assert.equal(policy.isProductionPath(path.join(root, "creds", "id_rsa")), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("configured denied paths reject relative entries and preserve foreign absolute syntax", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "drydock-denied-paths-"));
   try {

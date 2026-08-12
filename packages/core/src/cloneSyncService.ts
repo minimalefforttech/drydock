@@ -1285,14 +1285,38 @@ const SYMLINK_FILE_MODE = "120000";
  */
 export function assertPatchSafeForWindowsGuest(patch: string): void {
   const symlinks = new Set<string>();
-  const byLowercase = new Map<string, Set<string>>();
+  // Case-collision buckets are keyed on DESTINATION paths only - the files that
+  // will actually coexist on the guest's NTFS tree after the patch applies. Git
+  // emits BOTH spellings of a single case-rename (`--- a/<old>`, `+++ b/<new>`),
+  // which are one file, not a collision; bucketing the union of old+new spellings
+  // (as `parseDiffPaths` returns) would refuse a legitimate rename. So the
+  // destination is computed here, per file-hunk, and `parseDiffPaths` is left
+  // alone for the omission logic that legitimately wants every touched path.
+  const destinationsByLowercase = new Map<string, Set<string>>();
   let currentPath = "";
+  let currentDestination: string | undefined;
+  let currentDeleted = false;
+  let inFile = false;
+
+  const recordDestination = (): void => {
+    if (!inFile || currentDeleted) return;
+    const destination = currentDestination ?? currentPath;
+    if (destination === "") return;
+    const key = destination.toLowerCase();
+    const bucket = destinationsByLowercase.get(key) ?? new Set<string>();
+    bucket.add(destination);
+    destinationsByLowercase.set(key, bucket);
+  };
 
   for (const rawLine of patch.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line.trim());
     if (header?.[2] !== undefined) {
+      recordDestination(); // close the previous file-hunk before starting the next
       currentPath = stripDiffPrefix(header[2]);
+      currentDestination = undefined;
+      currentDeleted = false;
+      inFile = true;
       continue;
     }
     // A symlink shows up as mode 120000 on a create/delete/mode-change line, or
@@ -1303,20 +1327,24 @@ export function assertPatchSafeForWindowsGuest(patch: string): void {
     if ((modeLine?.[1] === SYMLINK_FILE_MODE || indexLine?.[1] === SYMLINK_FILE_MODE) && currentPath !== "") {
       symlinks.add(currentPath);
     }
+    // Where this hunk lands on the guest: a deletion lands nowhere (`+++ /dev/null`
+    // or a `deleted file mode` line), any other `+++` line names the destination,
+    // and otherwise the header's `b/` path stands.
+    if (line.startsWith("deleted file mode")) {
+      currentDeleted = true;
+    } else if (line.startsWith("+++ ")) {
+      const raw = line.slice(4).trim();
+      if (raw === "/dev/null") currentDeleted = true;
+      else currentDestination = stripDiffPrefix(raw);
+    }
   }
-
-  for (const path of parseDiffPaths(patch)) {
-    const key = path.toLowerCase();
-    const bucket = byLowercase.get(key) ?? new Set<string>();
-    bucket.add(path);
-    byLowercase.set(key, bucket);
-  }
+  recordDestination(); // close the final file-hunk
 
   const offenders: string[] = [];
   for (const path of [...symlinks].sort()) {
     offenders.push(`"${path}" is a symbolic link - the Windows validation runtime cannot reproduce one`);
   }
-  for (const bucket of [...byLowercase.values()]) {
+  for (const bucket of [...destinationsByLowercase.values()]) {
     if (bucket.size < 2) continue;
     const variants = [...bucket].sort();
     offenders.push(

@@ -245,6 +245,35 @@ test("detach succeeds for an already-absent VM but surfaces a genuinely stuck on
   assert.match(failed.stderr, /cannot be performed/);
 });
 
+test("detach does not mistake a still-present VM for absent when the failure merely mentions a virtual machine", async () => {
+  // Contains "virtual machine" AND "was not found" - the OLD broad matcher
+  // (`no virtual machine` / `virtual machine .* was not found`) would have called
+  // this absent and stamped exit 0. It is a real stop failure: return it raw so
+  // cleanup quarantines a VM that is still Running.
+  const busy = recordingRunner(() => ({
+    exitCode: 3,
+    stderr: "Cannot stop the virtual machine 'drydock-validate-a' because a required resource was not found; access is denied."
+  }));
+
+  const failed = await makeAdapter(busy.runner).removeRuntime(handle(), true);
+
+  assert.equal(failed.exitCode, 3);
+  assert.match(failed.stderr, /access is denied/);
+  assert.equal(failed.stdout.includes("already absent"), false);
+});
+
+test("an empty VM name is a clear error at the control plane, never a silent absent", async () => {
+  const { runner, calls } = recordingRunner(() => ({}));
+  const adapter = makeAdapter(runner);
+  const namelessHandle: RuntimeHandle = { ...handle(), externalName: "   " };
+
+  // removeRuntime must NOT rewrite a missing name into a synthetic "already
+  // absent; nothing was deleted" - the guard rejects before any script runs.
+  await assert.rejects(adapter.removeRuntime(namelessHandle, true), /VM name is required/);
+  await assert.rejects(async () => adapter.control.stopVm("", false), /VM name is required/);
+  assert.equal(calls.length, 0);
+});
+
 test("external names are token-extracted from the VM list, not trusted whole", async () => {
   const { runner } = recordingRunner(() => ({
     stdout: JSON.stringify([
@@ -333,20 +362,28 @@ test("guestJsonCommand is a fixed-literal powershell invocation for the guest", 
   ]);
 });
 
-test("sweepGuestJob sends the token as stdin JSON, never as script text", async () => {
+test("sweepGuestJob sends the token as stdin JSON, walks the parent tree, and stops every PID", async () => {
   const { runner, calls } = recordingRunner(() => ({ stdout: JSON.stringify({ killed: [4321, 8765] }) }));
 
   const killed = await makeAdapter(runner).sweepGuestJob(handle(), "vjb-0f31a", 20_000);
 
+  // parseKilledPids returns exactly the PID list the guest reported.
   assert.deepEqual(killed, [4321, 8765]);
   const args = calls[0]?.args ?? [];
   assert.deepEqual(args.slice(-5, -1), ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]);
   const script = String(args[args.length - 1]);
   assert.match(script, /\[Console\]::In\.ReadToEnd\(\) \| ConvertFrom-Json/);
   assert.equal(script.includes("vjb-0f31a"), false);
+  // The token reaches the guest only as stdin JSON, never spliced into script text.
   assert.equal(calls[0]?.options.input, JSON.stringify({ jobToken: "vjb-0f31a" }));
-  // The WQL query is unfiltered; the token is compared at runtime in PowerShell.
-  assert.match(script, /Get-CimInstance Win32_Process \| Where-Object/);
+  // The query is unfiltered and the token is compared at runtime in PowerShell.
+  assert.match(script, /Get-CimInstance Win32_Process/);
+  assert.match(script, /-like \('\*' \+ \$token \+ '\*'\)/);
+  // The hung DCC child carries no token, so the sweep walks the parent tree and
+  // stops every descendant of each matched (token-carrying) wrapper process.
+  assert.match(script, /ParentProcessId/);
+  assert.match(script, /childrenByParent/);
+  assert.match(script, /Stop-Process -Id \$target -Force/);
 });
 
 test("sweepGuestJob refuses a token that could widen the -like match, and reads a failure honestly", async () => {

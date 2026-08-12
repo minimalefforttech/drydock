@@ -15,7 +15,9 @@ import {
   assertMountAllowed,
   isHostPathAbsolute,
   isNativeHostPathAbsolute,
+  isPathDenied,
   isPathWithin,
+  isSensitivePath,
   normalizeHostPath,
   normalizePathKey,
   pathMatchesCloneOmission,
@@ -88,6 +90,15 @@ export class EffectiveSecurityPolicy {
   /** Undefined means unrestricted; an empty array intentionally permits none. */
   readonly allowedProjectRoots?: readonly string[];
   readonly deniedPaths: readonly string[];
+  /**
+   * The STUDIO-managed data denials only (ADR 0022): the production locations
+   * an administrator's policy forbids mounting, e.g. `X:\Projects`. This is the
+   * ONLY set that qualifies as production-tier for the snapshot fixture flow -
+   * the built-in credential defaults and personal denials never do, so keys and
+   * secrets can never be routed through the snapshot carve-out. Empty on an
+   * unmanaged machine, which correctly makes the fixture flow inert there.
+   */
+  readonly productionDataPaths: readonly string[];
   readonly cloneOnly: boolean;
   readonly allowNetworkedAiOnThisMachine: boolean;
   readonly cloneOmission: ClonePathOmission;
@@ -107,6 +118,7 @@ export class EffectiveSecurityPolicy {
     readonly studioPolicyRequiredPath?: string;
     readonly allowedProjectRoots?: readonly string[];
     readonly deniedPaths: readonly string[];
+    readonly productionDataPaths?: readonly string[];
     readonly cloneOnly: boolean;
     readonly allowNetworkedAiOnThisMachine: boolean;
     readonly cloneOmission: ClonePathOmission;
@@ -117,12 +129,26 @@ export class EffectiveSecurityPolicy {
     if (input.policyFingerprint !== undefined) this.policyFingerprint = input.policyFingerprint;
     if (input.allowedProjectRoots !== undefined) this.allowedProjectRoots = input.allowedProjectRoots;
     this.deniedPaths = input.deniedPaths;
+    this.productionDataPaths = input.productionDataPaths ?? [];
     this.cloneOnly = input.cloneOnly;
     this.allowNetworkedAiOnThisMachine = input.allowNetworkedAiOnThisMachine;
     this.cloneOmission = input.cloneOmission;
     if (input.validationRuntimes !== undefined) this.validationRuntimes = input.validationRuntimes;
     if (input.studioPolicyPath !== undefined) this.studioPolicyPath = input.studioPolicyPath;
     if (input.studioPolicyRequiredPath !== undefined) this.studioPolicyRequiredPath = input.studioPolicyRequiredPath;
+  }
+
+  /**
+   * True when a host path is production-tier for the ADR 0022 snapshot flow:
+   * denied for mounting by a STUDIO-managed data denial AND not a credential or
+   * secret path. Approving such a path takes the snapshot route (never a
+   * mount); everything else - credential defaults, personal denials, sensitive
+   * files - stays hard-denied and is refused at the normal gate.
+   */
+  isProductionPath(candidate: string): boolean {
+    if (this.productionDataPaths.length === 0) return false;
+    if (isSensitivePath(candidate)) return false;
+    return isPathDenied(candidate, expandDeniedPaths(this.productionDataPaths));
   }
 
   private readonly studioPolicyPath?: string;
@@ -263,6 +289,10 @@ export function loadEffectiveSecurityPolicy(options: LoadSecurityPolicyOptions):
       ...baseDenied,
       ...studioDenied
     ]),
+    // Production-tier (ADR 0022) is the studio's data denials ONLY - never the
+    // credential defaults in baseDenied - so the snapshot flow can never reach
+    // keys or secrets.
+    productionDataPaths: studioDenied,
     cloneOnly,
     allowNetworkedAiOnThisMachine,
     cloneOmission: { sensitive: omitSensitiveFiles, paths: omittedRepoPaths },

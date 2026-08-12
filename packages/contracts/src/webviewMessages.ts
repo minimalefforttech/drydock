@@ -3189,14 +3189,22 @@ function parseValidationCapabilities(value: unknown): readonly string[] | null {
  * product-owned identity file), so this is host/user/port and nothing else.
  * null = malformed; callers decide whether absence is allowed.
  */
+// The connection host/user are spliced into the ssh argv as `user@host` BEFORE
+// the `--` terminator, so a value beginning with `-` would be parsed by ssh.exe
+// as an option (e.g. `-oProxyCommand=...` → host-side RCE). These anchored
+// charsets forbid a leading hyphen and every shell/ssh metacharacter, matching
+// the SAFE_JOB_TOKEN discipline already applied to guest job tokens.
+const VALIDATION_SSH_USER_RE = /^[A-Za-z0-9_.][A-Za-z0-9_.-]*$/;
+const VALIDATION_SSH_HOST_RE = /^[A-Za-z0-9_.:][A-Za-z0-9_.:-]*$/;
+
 function parseValidationConnection(value: unknown): ValidationConnectionInput | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   const host = record["host"];
   const user = record["user"];
   const port = record["port"];
-  if (!isBoundedString(host, MAX_NAME_LENGTH)) return null;
-  if (!isBoundedString(user, MAX_NAME_LENGTH)) return null;
+  if (!isBoundedString(host, MAX_NAME_LENGTH) || !VALIDATION_SSH_HOST_RE.test(host)) return null;
+  if (!isBoundedString(user, MAX_NAME_LENGTH) || !VALIDATION_SSH_USER_RE.test(user)) return null;
   if (port !== undefined && (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535)) {
     return null;
   }

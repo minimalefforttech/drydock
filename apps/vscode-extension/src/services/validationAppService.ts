@@ -963,14 +963,14 @@ export class ValidationAppService {
   // -------------------------------------------------------------------------
 
   /**
-   * True when a host path is a production-tier location: exactly the paths the
-   * effective policy forbids mounting. Approving one of these takes the
-   * snapshot route, so the approval card must say `snapshot`, not `mount`.
+   * True when a host path is a production-tier location (ADR 0022): a
+   * STUDIO-managed data denial that is not a credential/secret path. Approving
+   * one takes the snapshot route, so the card says `snapshot`, not `mount`.
+   * Credential defaults and personal denials are NOT production - they stay
+   * hard-denied at the normal gate, so keys can never reach the snapshot flow.
    */
   isProductionPath(hostPath: string): boolean {
-    const policy = this.options.securityPolicy;
-    if (policy === undefined) return false;
-    return isDeniedHostPath(hostPath, policy.deniedPaths);
+    return this.options.securityPolicy?.isProductionPath(hostPath) ?? false;
   }
 
   /**
@@ -985,6 +985,14 @@ export class ValidationAppService {
     readonly sessionId: string;
     readonly hostPath: string;
   }): Promise<ProductionFixtureGrant> {
+    // Defense in depth (ADR 0022 A1/B1): re-run the managed-policy freshness
+    // check and re-assert production tier at the copy boundary, so a stale
+    // policy or a non-production path can never reach the snapshot copy even if
+    // an earlier gate was bypassed.
+    this.options.securityPolicy?.assertPolicyCurrent();
+    if (!this.isProductionPath(input.hostPath)) {
+      throw new Error(`${input.hostPath} is not a production-tier path, so it cannot be snapshotted as a fixture.`);
+    }
     let stats: Awaited<ReturnType<typeof stat>>;
     try {
       stats = await stat(input.hostPath);
@@ -1005,10 +1013,15 @@ export class ValidationAppService {
       );
     }
     const directory = this.sessionFixtureDir(input.sessionId);
-    await mkdir(directory, { recursive: true });
-    const relativePath = safeFixtureName(input.hostPath);
+    // Namespace each grant by a hash of its SOURCE path so two files that share
+    // a basename (X:\shots\010\scene.ma and X:\shots\020\scene.ma) never
+    // overwrite each other - a silent overwrite would ship one file while the
+    // receipt attests another.
+    const relativePath = fixtureRelPath(input.hostPath);
+    const target = path.join(directory, ...relativePath.split("/"));
+    await mkdir(path.dirname(target), { recursive: true });
     const content = await readFile(input.hostPath);
-    await writeFile(path.join(directory, relativePath), content);
+    await writeFile(target, content);
     const contentSha256 = stats.size <= FIXTURE_HASH_BUDGET_BYTES
       ? createHash("sha256").update(content).digest("hex")
       : undefined;
@@ -1035,34 +1048,62 @@ export class ValidationAppService {
     };
   }
 
-  /** Everything staged for a session, with per-file hashes for the manifest. */
+  /**
+   * Everything staged for a session, with per-file hashes for the manifest.
+   * Grants live one subdirectory deep (a source-path hash), so this walks that
+   * one level; relative paths are reported forward-slashed for the guest.
+   */
   async stagedFixtures(sessionId: string): Promise<readonly StagedFixture[]> {
     const directory = this.sessionFixtureDir(sessionId);
-    let names: string[];
-    try {
-      names = await readdir(directory);
-    } catch {
-      return [];
-    }
+    const files = await this.listStagedFiles(directory);
     const staged: StagedFixture[] = [];
-    for (const name of names.sort()) {
-      const full = path.join(directory, name);
+    for (const relativePath of files) {
+      const full = path.join(directory, ...relativePath.split("/"));
       try {
         const stats = await stat(full);
         if (!stats.isFile()) continue;
         const content = await readFile(full);
         staged.push({
-          relativePath: name,
+          relativePath,
           bytes: stats.size,
           ...(stats.size <= FIXTURE_HASH_BUDGET_BYTES
             ? { contentSha256: createHash("sha256").update(content).digest("hex") }
             : {})
         });
       } catch (error) {
-        this.options.logger.warn("staged fixture unreadable; skipped", { relativePath: name, error: messageOf(error) });
+        this.options.logger.warn("staged fixture unreadable; skipped", { relativePath, error: messageOf(error) });
       }
     }
     return staged;
+  }
+
+  /** Forward-slashed relative paths of every staged file, one grant-dir deep, sorted. */
+  private async listStagedFiles(directory: string): Promise<string[]> {
+    let entries: string[];
+    try {
+      entries = await readdir(directory);
+    } catch {
+      return [];
+    }
+    const files: string[] = [];
+    for (const entry of entries) {
+      const full = path.join(directory, entry);
+      try {
+        const stats = await stat(full);
+        if (stats.isFile()) {
+          files.push(entry);
+          continue;
+        }
+        if (!stats.isDirectory()) continue;
+        for (const child of await readdir(full)) {
+          const childStats = await stat(path.join(full, child));
+          if (childStats.isFile()) files.push(`${entry}/${child}`);
+        }
+      } catch (error) {
+        this.options.logger.warn("staged fixture entry unreadable; skipped", { entry, error: messageOf(error) });
+      }
+    }
+    return files.sort();
   }
 
   /** The staged set as job payloads plus the hash the receipt records. */
@@ -1157,21 +1198,16 @@ function safeFixtureName(hostPath: string): string {
 }
 
 /**
- * Case-insensitive containment against the policy's denied roots. Deliberately
- * local: `isPathDenied` in core is the mount gate's spelling, and this is a
- * classification question about a FILE, which may sit under a denied root.
+ * A collision-free staged relative path for a source host path: a short hash of
+ * the (case-folded) source directory over the safe basename. Two sources that
+ * share a basename land in different grant dirs, so a later grant never
+ * overwrites an earlier one and the manifest stays honest.
  */
-function isDeniedHostPath(candidate: string, deniedPaths: readonly string[]): boolean {
-  const normalized = normalizeForCompare(candidate);
-  return deniedPaths.some((denied) => {
-    const root = normalizeForCompare(denied);
-    if (root === "") return false;
-    return normalized === root || normalized.startsWith(`${root}/`);
-  });
-}
-
-function normalizeForCompare(value: string): string {
-  return value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+function fixtureRelPath(hostPath: string): string {
+  const normalized = hostPath.replace(/\\/g, "/").toLowerCase();
+  const dir = normalized.slice(0, normalized.lastIndexOf("/") + 1);
+  const bucket = createHash("sha256").update(dir).digest("hex").slice(0, 12);
+  return `${bucket}/${safeFixtureName(hostPath)}`;
 }
 
 /** The suite's headline state: breach outranks fail outranks unknown. */

@@ -24,6 +24,7 @@ import {
   formatSizeLabel,
   isAgentWork,
   productionSummaryOptions,
+  toAccessRequestSummary,
   WorkspaceReviewAppService,
   type WorkspaceReviewAppServiceOptions
 } from "./workspaceReviewAppService.js";
@@ -429,6 +430,34 @@ test("production summaries carry a size for real files and omit it otherwise", a
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("size is read only for a pending production card, never for resolved history", () => {
+  const statted: string[] = [];
+  const options = {
+    isProduction: (candidate: string) => candidate.startsWith("X:"),
+    sizeLabelFor: (candidate: string) => {
+      statted.push(candidate);
+      return "48 MB";
+    }
+  };
+  const record = (status: AccessRequestRecord["status"]): AccessRequestRecord => ({
+    accessRequestId: asId<"AccessRequestId">(`ar-${status}`),
+    sessionId: asId<"SessionId">("s-1"),
+    hostPath: "X:\\Projects\\ShowA\\hero.ma",
+    mode: "read-only",
+    reason: "repro",
+    status,
+    requestedAt: "2026-08-13T00:00:00.000Z"
+  });
+  // A pending production card carries the size (one stat, the surface that needs it).
+  const pending = toAccessRequestSummary(record("pending"), options);
+  assert.equal(pending.sizeLabel, "48 MB");
+  // Resolved/denied history is summarized in bulk on every hub refresh; it must
+  // NOT stat (a disconnected X:\ would hang the main thread).
+  toAccessRequestSummary(record("approved"), options);
+  toAccessRequestSummary(record("denied"), options);
+  assert.deepEqual(statted, ["X:\\Projects\\ShowA\\hero.ma"], "only the pending record was statted");
 });
 
 test("production request paths pass only as existing regular files (A1/A2/A3)", async () => {

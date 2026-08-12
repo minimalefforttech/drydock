@@ -155,6 +155,12 @@ export interface ValidationJobServiceOptions {
   readonly jobTurnTimeoutMs?: number;
   /** Silence that counts as a hang. Default 120 s. PAUSED during license waits. */
   readonly inactivityTimeoutMs?: number;
+  /**
+   * First-output budget for a cold DCC start, used until the first stdout line
+   * arrives and then handed over to `inactivityTimeoutMs`. Default 10 minutes,
+   * clamped so it never exceeds `jobTurnTimeoutMs`.
+   */
+  readonly startupTimeoutMs?: number;
   readonly ids?: ValidationJobIdGenerator;
   readonly timers?: ValidationTimers;
   /** Monotonic-ish milliseconds for license-wait arithmetic. Default `Date.now`. */
@@ -182,9 +188,15 @@ export type ValidationRequeueResult =
  * `guestJsonCommand` in `@drydock/runtime-adapters` - core cannot import that
  * package (adapters depend on core, not the other way round), and duplicating
  * five tokens beats inverting the dependency.
+ *
+ * `tag` values (when given) are appended as trailing argv elements - NOT spliced
+ * into the script text - so they appear on the guest process's CommandLine where
+ * `sweepGuestJob` can find it (Win32_Process exposes no environment block, so an
+ * env-only token is invisible to a sweep). The wrapper ignores them; they exist
+ * only to label the process.
  */
-export function validationGuestCommand(fixedScript: string): string[] {
-  return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", fixedScript];
+export function validationGuestCommand(fixedScript: string, ...tags: readonly string[]): string[] {
+  return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", fixedScript, ...tags];
 }
 
 /**
@@ -343,6 +355,14 @@ export const VALIDATION_CLEANUP_GUEST_SCRIPT = [
 const DEFAULT_GUEST_JOB_ROOT = "C:\\drydock\\jobs";
 const DEFAULT_JOB_TURN_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 120_000;
+/**
+ * First-output budget for a cold DCC start. `mayapy`/`hython` can take minutes to
+ * emit their first line (ssh dial + guest PowerShell start + DCC warm-up), so the
+ * tight inactivity budget must NOT govern until output has actually been seen.
+ * Clamped to the hard turn cap in the constructor - a genuinely stuck startup is
+ * still bounded.
+ */
+const DEFAULT_STARTUP_TIMEOUT_MS = 600_000;
 const GUEST_SETUP_TIMEOUT_MS = 300_000;
 const GUEST_CLEANUP_TIMEOUT_MS = 60_000;
 const GUEST_SWEEP_TIMEOUT_MS = 30_000;
@@ -388,13 +408,17 @@ export class ValidationJobService {
   private readonly pending = new Map<ValidationJobId, JobMaterial>();
   /** Jobs already requeued once after an interruption (E7: requeue-once, then park). */
   private readonly restartRetried = new Set<ValidationJobId>();
+  /** The active drain loop (single-flight), or undefined when the queue is idle. */
   private drainPromise: Promise<void> | undefined;
+  /** Set while a drain loop runs to force one more `drainQueue` pass (trailing edge). */
+  private drainAgain = false;
   /** Serializes state writes fired from streaming callbacks so order is stable. */
   private stateWrites: Promise<void> = Promise.resolve();
 
   private readonly guestJobRoot: string;
   private readonly jobTurnTimeoutMs: number;
   private readonly inactivityTimeoutMs: number;
+  private readonly startupTimeoutMs: number;
   private readonly timers: ValidationTimers;
   private readonly monotonicNow: () => number;
   private readonly ids: ValidationJobIdGenerator;
@@ -403,6 +427,12 @@ export class ValidationJobService {
     this.guestJobRoot = options.guestJobRoot ?? DEFAULT_GUEST_JOB_ROOT;
     this.jobTurnTimeoutMs = options.jobTurnTimeoutMs ?? DEFAULT_JOB_TURN_TIMEOUT_MS;
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
+    // The hard turn cap still bounds a genuinely stuck startup, so the first-output
+    // budget is never allowed to exceed it.
+    this.startupTimeoutMs = Math.min(
+      options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
+      this.jobTurnTimeoutMs
+    );
     this.timers = options.timers ?? SYSTEM_TIMERS;
     this.monotonicNow = options.monotonicNow ?? (() => Date.now());
     this.ids = options.ids ?? DEFAULT_IDS;
@@ -531,6 +561,13 @@ export class ValidationJobService {
 
     const to = await this.options.store.getRuntime(targetId);
     if (to === null) throw new Error(`"${targetId}" is no longer in the runtime registry.`);
+    // H1's "archived parks" rule again: getRuntime returns archived rows, so a
+    // reroute onto a decommissioned runtime must be refused here rather than
+    // queued to fail (or, worse, run) on a VM that takes no new jobs.
+    if (to.archived === true) {
+      const reason = `"${to.displayName}" was archived and no longer runs new validation jobs. Route this job to another runtime.`;
+      return { kind: "parked", job: await this.parkAndRead(jobId, reason), reason };
+    }
     const from = job.resolvedRuntimeId === undefined || job.resolvedRuntimeId === targetId
       ? null
       : await this.options.store.getRuntime(job.resolvedRuntimeId);
@@ -657,20 +694,38 @@ export class ValidationJobService {
   // Drain
   // -------------------------------------------------------------------------
 
-  /** Single-flight, mirroring `SubtaskOrchestrator.drainQueue`. */
-  private async drain(): Promise<void> {
-    const active = this.drainPromise;
-    if (active !== undefined) {
-      await active;
-      return;
+  /**
+   * Single-flight WITH a trailing edge.
+   *
+   * A `drainQueue` pass reads `listQueuedJobs` once and claims per-runtime work
+   * synchronously. But the running job on a runtime can finish DURING an `await`
+   * inside that pass - freeing the runtime after the pass already decided it was
+   * busy. A plain single-flight drain would then leave the next job `queued` on
+   * an idle runtime until some unrelated completion happened to drain again.
+   *
+   * So a drain requested while one is active does not merely await it: it sets
+   * `drainAgain`, and the active loop runs one more pass after the current one
+   * settles. This is NOT what `SubtaskOrchestrator` does (it loops over shared
+   * mutable state); the trailing flag is what gives this queue the same "no job
+   * is stranded" guarantee.
+   */
+  private drain(): Promise<void> {
+    if (this.drainPromise !== undefined) {
+      this.drainAgain = true;
+      return this.drainPromise;
     }
-    const drain = this.drainQueue();
-    this.drainPromise = drain;
-    try {
-      await drain;
-    } finally {
-      if (this.drainPromise === drain) this.drainPromise = undefined;
-    }
+    const loop = (async (): Promise<void> => {
+      try {
+        do {
+          this.drainAgain = false;
+          await this.drainQueue();
+        } while (this.drainAgain);
+      } finally {
+        this.drainPromise = undefined;
+      }
+    })();
+    this.drainPromise = loop;
+    return loop;
   }
 
   private async drainQueue(): Promise<void> {
@@ -741,6 +796,16 @@ export class ValidationJobService {
     const runtime = await this.options.store.getRuntime(runtimeId);
     if (runtime === null) {
       await this.park(jobId, `"${runtimeId}" is no longer in the runtime registry. Route this job to another runtime.`);
+      return;
+    }
+    // A runtime archived while this job sat in the queue no longer takes new jobs
+    // (H1). getRuntime returns archived rows, so this is re-checked here and not
+    // just at enqueue - otherwise a queued job would run on a decommissioned VM.
+    if (runtime.archived === true) {
+      await this.park(
+        jobId,
+        `"${runtime.displayName}" was archived and no longer runs new validation jobs. Route this job to another runtime.`
+      );
       return;
     }
     const adapter = this.options.adapterFor(runtime);
@@ -957,13 +1022,22 @@ export class ValidationJobService {
     let licenseWaitSince: number | undefined;
     let watchdog: unknown;
     let stalledForMs: number | undefined;
+    // Until the first line of output, the watchdog uses the larger STARTUP budget:
+    // a cold DCC start (ssh dial + guest PowerShell + mayapy/hython warm-up) must
+    // not be read as a hang (E4). The first line flips it to the tight inactivity
+    // budget, and `stalledDuringStartup` lets the receipt say which one tripped.
+    let firstLineSeen = false;
+    let stalledDuringStartup = false;
 
     const armWatchdog = (): void => {
       if (watchdog !== undefined) this.timers.clear(watchdog);
+      const budget = firstLineSeen ? this.inactivityTimeoutMs : this.startupTimeoutMs;
+      const duringStartup = !firstLineSeen;
       watchdog = this.timers.set(() => {
-        stalledForMs = this.inactivityTimeoutMs;
+        stalledForMs = budget;
+        stalledDuringStartup = duringStartup;
         entry.controller.abort();
-      }, this.inactivityTimeoutMs);
+      }, budget);
     };
     const disarmWatchdog = (): void => {
       if (watchdog === undefined) return;
@@ -975,6 +1049,9 @@ export class ValidationJobService {
       const at = this.monotonicNow();
       tail.push(line);
       if (tail.length > OUTPUT_TAIL_LINES) tail.shift();
+      // Any output at all means the process launched, so from here the tight
+      // inactivity budget governs - including the re-arm after a license wait.
+      firstLineSeen = true;
 
       if (licenseWaitSince !== undefined) {
         // Output resumed: the wait is over and its duration is evidence.
@@ -995,7 +1072,9 @@ export class ValidationJobService {
     let result: CommandResult;
     try {
       result = await context.adapter.exec(
-        validationGuestCommand(VALIDATION_RUN_GUEST_SCRIPT),
+        // Tag the wrapper process with the job id so sweepGuestJob (which matches
+        // CommandLine and tree-walks) can find and reap it and its DCC children.
+        validationGuestCommand(VALIDATION_RUN_GUEST_SCRIPT, jobId),
         this.jobTurnTimeoutMs,
         JSON.stringify({
           env: this.composeEnv(context),
@@ -1030,12 +1109,10 @@ export class ValidationJobService {
     }
     if (stalledForMs !== undefined) {
       await this.sweep(context);
-      await this.finish(
-        context,
-        "error",
-        `No output for ${formatSeconds(stalledForMs)} - treat this run as hung. The guest processes were stopped.`,
-        tail
-      );
+      const message = stalledDuringStartup
+        ? `No output for ${formatSeconds(stalledForMs)} after start - treat this run as not launching. The guest processes were stopped.`
+        : `No output for ${formatSeconds(stalledForMs)} - treat this run as hung. The guest processes were stopped.`;
+      await this.finish(context, "error", message, tail);
       return;
     }
     if (result.timedOut) {

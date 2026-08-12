@@ -901,15 +901,20 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       ? {}
       : {
           validateHostPath: (candidate: string) => {
-            // ADR 0022 A1/B1: a production-tier path must be REQUESTABLE so
-            // the snapshot flow can answer it - the normal gate would refuse
-            // it here and leave the sanctioned fixture route unreachable. It
-            // stays unmountable: prepareApproval still refuses denied paths,
-            // and approval routes through the fixture port instead. Only an
-            // existing regular file passes, and a canonical target that
-            // escapes the production tier (symlink/junction) falls back to
-            // the normal gate.
+            // ADR 0022 A1/B1: a production-tier path (a STUDIO-managed data
+            // denial, never a credential default) must be REQUESTABLE so the
+            // snapshot flow can answer it - the normal gate would refuse it
+            // here and leave the sanctioned fixture route unreachable. It stays
+            // unmountable: prepareApproval still refuses denied paths, and
+            // approval routes through the fixture port instead. Only an
+            // existing regular file passes, and a canonical target that escapes
+            // the production tier (symlink/junction) falls back to the normal
+            // gate.
             if (isProductionRequestPath?.(candidate) === true) {
+              // Keep the managed-policy freshness check the normal gate would
+              // run: a policy tightened since startup must still fail closed on
+              // this path.
+              options.securityPolicy?.assertPolicyCurrent();
               const canonical = canonicalizeProductionRequestPath(candidate);
               if (isProductionRequestPath(canonical) === true) return canonical;
               return options.securityPolicy?.assertHostPathAllowed(canonical) ?? canonical;

@@ -706,6 +706,8 @@ test("a production-tier approval copies the file, records the grant, and mounts 
     securityPolicy: new EffectiveSecurityPolicy({
       managed: true,
       deniedPaths: [production],
+      // Production tier is the STUDIO data denial, not the whole denylist.
+      productionDataPaths: [production],
       cloneOnly: false,
       allowNetworkedAiOnThisMachine: true,
       cloneOmission: { sensitive: false, paths: [] }
@@ -719,11 +721,11 @@ test("a production-tier approval copies the file, records the grant, and mounts 
   assert.equal(service.isProductionPath(path.join(tmpdir(), "elsewhere.ma")), false);
 
   const grant = await service.grantProductionFixture({ sessionId: "session-1", hostPath: source });
-  assert.equal(grant.relativePath, "hero_rig.ma", "the staged name never carries the source path");
+  assert.match(grant.relativePath, /\/hero_rig\.ma$/, "the staged basename never carries the source path");
   assert.equal(grant.bytes, "maya ascii".length);
   assert.equal(typeof grant.contentSha256, "string");
   assert.equal(
-    await readFile(path.join(staging, "session-1", "hero_rig.ma"), "utf8"),
+    await readFile(path.join(staging, "session-1", ...grant.relativePath.split("/")), "utf8"),
     "maya ascii"
   );
   assert.equal(events.length, 1);
@@ -747,7 +749,17 @@ test("a folder request is refused with the narrower ask spelled out", async (t) 
     await rm(staging, { recursive: true, force: true });
     await rm(production, { recursive: true, force: true });
   });
-  const { service } = build({ fixtureStagingRoot: staging });
+  const { service } = build({
+    fixtureStagingRoot: staging,
+    securityPolicy: new EffectiveSecurityPolicy({
+      managed: true,
+      deniedPaths: [production],
+      productionDataPaths: [production],
+      cloneOnly: false,
+      allowNetworkedAiOnThisMachine: true,
+      cloneOmission: { sensitive: false, paths: [] }
+    })
+  });
   await assert.rejects(
     () => service.grantProductionFixture({ sessionId: "session-1", hostPath: production }),
     /Ask for the specific file you need/
@@ -756,6 +768,71 @@ test("a folder request is refused with the narrower ask spelled out", async (t) 
     () => service.grantProductionFixture({ sessionId: "session-1", hostPath: path.join(production, "absent.ma") }),
     /could not be read/
   );
+});
+
+test("credential and sensitive paths are never production-tier, so keys cannot be snapshotted", async (t) => {
+  const staging = await mkdtemp(path.join(tmpdir(), "drydock-fixtures-"));
+  const production = await mkdtemp(path.join(tmpdir(), "drydock-production-"));
+  t.after(async () => {
+    await rm(staging, { recursive: true, force: true });
+    await rm(production, { recursive: true, force: true });
+  });
+  // A managed studio denial covers the production data root only. Credential
+  // and secret paths live in the base denylist, which is NOT production-tier.
+  const secret = path.join(production, ".ssh", "id_rsa");
+  const { service } = build({
+    fixtureStagingRoot: staging,
+    securityPolicy: new EffectiveSecurityPolicy({
+      managed: true,
+      deniedPaths: [production],
+      productionDataPaths: [production],
+      cloneOnly: false,
+      allowNetworkedAiOnThisMachine: true,
+      cloneOmission: { sensitive: false, paths: [] }
+    })
+  });
+  // Even though the secret sits under a studio-denied root, a sensitive path is
+  // never production-tier, so it cannot enter the snapshot flow.
+  assert.equal(service.isProductionPath(secret), false);
+  await assert.rejects(
+    () => service.grantProductionFixture({ sessionId: "session-1", hostPath: secret }),
+    /not a production-tier path/
+  );
+});
+
+test("two grants sharing a basename never overwrite each other", async (t) => {
+  const staging = await mkdtemp(path.join(tmpdir(), "drydock-fixtures-"));
+  const production = await mkdtemp(path.join(tmpdir(), "drydock-production-"));
+  t.after(async () => {
+    await rm(staging, { recursive: true, force: true });
+    await rm(production, { recursive: true, force: true });
+  });
+  const shotA = path.join(production, "010", "scene.ma");
+  const shotB = path.join(production, "020", "scene.ma");
+  await mkdir(path.dirname(shotA), { recursive: true });
+  await mkdir(path.dirname(shotB), { recursive: true });
+  await writeFile(shotA, "geometry A");
+  await writeFile(shotB, "geometry B");
+  const { service } = build({
+    fixtureStagingRoot: staging,
+    securityPolicy: new EffectiveSecurityPolicy({
+      managed: true,
+      deniedPaths: [production],
+      productionDataPaths: [production],
+      cloneOnly: false,
+      allowNetworkedAiOnThisMachine: true,
+      cloneOmission: { sensitive: false, paths: [] }
+    })
+  });
+  const grantA = await service.grantProductionFixture({ sessionId: "session-1", hostPath: shotA });
+  const grantB = await service.grantProductionFixture({ sessionId: "session-1", hostPath: shotB });
+  assert.notEqual(grantA.relativePath, grantB.relativePath, "distinct sources get distinct staged paths");
+  const staged = await service.stagedFixtures("session-1");
+  assert.equal(staged.length, 2, "both grants survive; neither overwrote the other");
+  const bytes = await Promise.all(
+    staged.map((entry) => readFile(path.join(staging, "session-1", ...entry.relativePath.split("/")), "utf8"))
+  );
+  assert.deepEqual(bytes.sort(), ["geometry A", "geometry B"]);
 });
 
 test("the fixture manifest hash is order-independent and content-sensitive", () => {

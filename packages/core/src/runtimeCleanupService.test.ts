@@ -65,6 +65,24 @@ test("a detached Hyper-V VM reads as already gone, not as a cleanup failure", as
   assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-vm")))?.status, "removed");
 });
 
+test("a still-running Hyper-V VM whose failure merely mentions a virtual machine is quarantined, not reaped", async () => {
+  const inventory = new SingleRuntimeStore(runtimeRecord("runtime-vm", "drydock-validate-a", "running", "hyperv"));
+  const service = new RuntimeCleanupService({
+    clock: new FixedClock(),
+    inventory,
+    // "no virtual machine" appears but NOT Hyper-V's absent-VM wording ("... found
+    // with/matching" / "unable to find a virtual machine"). The OLD broad matcher
+    // would have reaped the row; this VM is still Running and must be quarantined.
+    runtimeAdapters: [new CannedAdapter(commandResult(1, "Cannot stop 'drydock-validate-a'; access is denied (no virtual machine management permission)."), "hyperv")],
+    logger: new NullLogger()
+  });
+
+  const result = await service.cleanupRuntime(asId<"RuntimeId">("runtime-vm"), "force-remove");
+
+  assert.equal(result.status, "failed");
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-vm")))?.status, "quarantined");
+});
+
 test("cleanup picks the adapter named by the RECORD when several kinds are registered", async () => {
   const inventory = new SingleRuntimeStore(runtimeRecord("runtime-vm", "drydock-validate-a", "running", "hyperv"));
   const sandbox = new CannedAdapter(commandResult(1, "permission denied while removing container"));

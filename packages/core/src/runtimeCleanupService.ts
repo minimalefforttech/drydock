@@ -97,9 +97,18 @@ export class RuntimeCleanupService {
  * Hyper-V phrases (ADR 0022) matter for the same reason the sbx ones do: a
  * validation VM that a human already deleted must reap the row, not leave it
  * quarantined forever.
+ *
+ * The docker-sandbox phrases stay broad and read the combined output. The
+ * Hyper-V phrases are tightened to Hyper-V's specific absent-VM wording (no bare
+ * `no virtual machine`, no unanchored `.*`) and read stderr/error ONLY: Hyper-V
+ * lists VM names on stdout, and a real stop/remove failure that merely mentions
+ * "virtual machine" must never reap the row of a VM the product still owns.
  */
 function isAlreadyGone(result: CommandResult): boolean {
-  const detail = `${result.stderr} ${result.error ?? ""} ${result.stdout}`.toLowerCase();
-  return /not found|no such|does not exist|unknown sandbox|no container|unable to find a virtual machine|no virtual machine|virtual machine .* was not found/
-    .test(detail);
+  const combined = `${result.stderr} ${result.error ?? ""} ${result.stdout}`.toLowerCase();
+  if (/not found|no such|does not exist|unknown sandbox|no container/.test(combined)) {
+    return true;
+  }
+  const hypervDetail = `${result.stderr} ${result.error ?? ""}`.toLowerCase();
+  return /unable to find (a )?virtual machine|no virtual machine (was )?found (with|matching)/.test(hypervDetail);
 }

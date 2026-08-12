@@ -2190,7 +2190,10 @@ export function isolationSummaryFromTemplate(template: RuntimeTemplate, workspac
       : undefined;
   const network = template.network === "allowed" && allowlist !== undefined ? "provider-scoped" : "none";
   return {
-    runtimeKind: "docker-sandbox",
+    // Report the template's actual kind, not a hardcoded literal: the isolation
+    // card must state the real containment model (a hyperv validation runtime is
+    // not a docker sandbox).
+    runtimeKind: template.type,
     network,
     ...(network === "provider-scoped" && allowlist !== undefined ? { networkAllowlist: allowlist } : {}),
     mounts: template.mounts.map((mount) => ({

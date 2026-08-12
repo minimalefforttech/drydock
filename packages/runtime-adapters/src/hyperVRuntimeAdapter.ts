@@ -89,8 +89,16 @@ const PROBE_COMMAND: readonly string[] = ["cmd", "/c", "exit", "0"];
 /**
  * Guest-side orphan sweep. The job token arrives as STDIN JSON, never as script
  * text. `-like` runs against each fetched `CommandLine` at runtime - the token
- * is compared, not spliced into a WQL filter - and the sweeping process itself
- * is skipped so a sweep can never kill its own shell.
+ * is compared, not spliced into a WQL filter.
+ *
+ * The token rides on the job RUN wrapper's OWN command line (the job service
+ * appends it as a trailing argv element), but the hung DCC child does NOT carry
+ * it - a stuck `mayapy.exe` is a CHILD of the token-carrying `powershell.exe`,
+ * with no token on its own command line. So matching the token finds only the
+ * root: the script then walks `Win32_Process.ParentProcessId` to collect every
+ * descendant of each matched process and `Stop-Process -Force`es the whole
+ * de-duplicated set. The sweeping process itself is skipped so a sweep can never
+ * kill its own shell, and the `$targets` set makes the walk cycle-safe.
  */
 const SWEEP_GUEST_JOB_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
@@ -98,10 +106,28 @@ const SWEEP_GUEST_JOB_SCRIPT = [
   "$token = [string]$request.jobToken",
   "$killed = @()",
   "if ($token.Length -gt 0) {",
-  "  $procs = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like ('*' + $token + '*') })",
-  "  foreach ($proc in $procs) {",
-  "    if ($proc.ProcessId -eq $PID) { continue }",
-  "    try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop; $killed += $proc.ProcessId } catch { }",
+  "  $all = @(Get-CimInstance Win32_Process)",
+  "  $childrenByParent = @{}",
+  "  foreach ($proc in $all) {",
+  "    $parentId = [int]$proc.ParentProcessId",
+  "    if (-not $childrenByParent.ContainsKey($parentId)) { $childrenByParent[$parentId] = @() }",
+  "    $childrenByParent[$parentId] += [int]$proc.ProcessId",
+  "  }",
+  "  $targets = @{}",
+  "  $queue = [System.Collections.Queue]::new()",
+  "  foreach ($proc in @($all | Where-Object { $_.CommandLine -like ('*' + $token + '*') })) {",
+  "    $rootId = [int]$proc.ProcessId",
+  "    if (-not $targets.ContainsKey($rootId)) { $targets[$rootId] = $true; $queue.Enqueue($rootId) }",
+  "  }",
+  "  while ($queue.Count -gt 0) {",
+  "    $current = [int]$queue.Dequeue()",
+  "    foreach ($childId in $childrenByParent[$current]) {",
+  "      if (-not $targets.ContainsKey($childId)) { $targets[$childId] = $true; $queue.Enqueue($childId) }",
+  "    }",
+  "  }",
+  "  foreach ($target in @($targets.Keys)) {",
+  "    if ($target -eq $PID) { continue }",
+  "    try { Stop-Process -Id $target -Force -ErrorAction Stop; $killed += $target } catch { }",
   "  }",
   "}",
   "ConvertTo-Json -Compress -InputObject @{ killed = @($killed) }"
@@ -304,9 +330,11 @@ export class HyperVRuntimeAdapter implements RuntimeAdapter {
   }
 
   /**
-   * Kills guest processes left behind by one job. The token is matched against
-   * each process's command line INSIDE the guest script; it never enters script
-   * text or a WQL filter. Returns the PIDs actually stopped.
+   * Kills guest processes left behind by one job: every process whose command
+   * line carries the job token (matched INSIDE the guest script, never in script
+   * text or a WQL filter) PLUS the descendant tree of each - the hung DCC child
+   * is a child of the token-carrying wrapper and carries no token itself.
+   * Returns the PIDs actually stopped.
    */
   async sweepGuestJob(
     handle: RuntimeHandle,
@@ -369,10 +397,24 @@ export function guestJsonCommand(fixedScript: string): string[] {
   return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", fixedScript];
 }
 
-/** True when a stop failed only because the VM is no longer on this host. */
+/**
+ * Hyper-V's specific "the named VM does not exist" phrasings. Deliberately NOT
+ * the bare substring `no virtual machine` (which shows up in unrelated errors
+ * like "no virtual machine management service permission") and with NO
+ * unanchored `.*`, so a still-Running VM whose failure text merely mentions a
+ * virtual machine can never satisfy it.
+ */
+const VM_ABSENT_PATTERN = /unable to find (a )?virtual machine|no virtual machine (was )?found (with|matching)/;
+
+/**
+ * True when a stop failed ONLY because the named VM is no longer on this host.
+ * Scoped to stderr/error: Hyper-V lists VM names on stdout, so a name appearing
+ * there must never read as "gone". A stop that fails because the VM is locked,
+ * access is denied, or the name was empty is returned unchanged for a human.
+ */
 function isVmAbsent(result: CommandResult): boolean {
-  const detail = `${result.stderr} ${result.error ?? ""} ${result.stdout}`.toLowerCase();
-  return /unable to find a virtual machine|no virtual machine|virtual machine .* was not found/.test(detail);
+  const detail = `${result.stderr} ${result.error ?? ""}`.toLowerCase();
+  return VM_ABSENT_PATTERN.test(detail);
 }
 
 /** Tolerant read of the sweep reply; unreadable output means "nothing killed". */

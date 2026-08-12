@@ -1105,6 +1105,16 @@ test("createRuntime validates its enum, its capability list, and its exec addres
   assert.equal(parsePanelRequest(wrap({ ...base, connection: { host: "10.0.0.5", user: "d", port: 70_000 } })), null);
   // Creation cannot clear an address it never set.
   assert.equal(parsePanelRequest(wrap({ ...base, connection: null })), null);
+  // ssh argv injection: host/user reach `user@host` before `--`, so a value
+  // beginning with `-` or carrying shell metacharacters is rejected.
+  assert.equal(parsePanelRequest(wrap({ ...base, connection: { host: "10.0.0.5", user: "-oProxyCommand=calc.exe" } })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, connection: { host: "-x", user: "drydock" } })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, connection: { host: "10.0.0.5", user: "d r" } })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, connection: { host: "h;calc", user: "drydock" } })), null);
+  assert.equal(parsePanelRequest(wrap({ ...base, connection: { host: "h$(x)", user: "drydock" } })), null);
+  // Normal hostnames, IPv4, IPv6, and usernames still parse.
+  assert.notEqual(parsePanelRequest(wrap({ ...base, connection: { host: "vm-host.studio.local", user: "td_1" } })), null);
+  assert.notEqual(parsePanelRequest(wrap({ ...base, connection: { host: "fe80::1", user: "drydock" } })), null);
 });
 
 test("updateRuntime takes a partial edit and only null clears the address", () => {

@@ -905,7 +905,13 @@ export function toAccessRequestSummary(
   // supplied the fields stay ABSENT - an unasked question is not a "no".
   const classify = options?.isProduction;
   const production = classify !== undefined && classify(record.hostPath);
-  const sizeLabel = production ? options?.sizeLabelFor?.(record.hostPath) : undefined;
+  // Size is only read for a PENDING production card - the one surface where the
+  // user needs it to decide. Statting resolved/denied history would hit every
+  // (possibly disconnected) production share on every hub refresh and hang the
+  // extension-host main thread.
+  const sizeLabel = production && record.status === "pending"
+    ? options?.sizeLabelFor?.(record.hostPath)
+    : undefined;
   return {
     ...(classify === undefined
       ? {}

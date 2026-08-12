@@ -1149,17 +1149,76 @@ test("paths that differ only by capitalization are rejected together", () => {
   });
 });
 
-test("a rename that only changes capitalization is not a collision", () => {
-  // Git renames emit both spellings, but a/ and b/ naming the SAME file after a
-  // case-only rename is legitimate: it is one file, applied as one file.
+test("a case-only rename with an edit is one file, not a collision", () => {
+  // The shape git ACTUALLY emits for a rename-with-content-change: `--- a/<old>`
+  // and `+++ b/<new>` carry both spellings, but only the destination (`+++`)
+  // exists on NTFS after apply. Bucketing the union of both spellings (the old
+  // bug) refused this legitimate single-file rename.
   const patch = [
-    "diff --git a/src/Icons.py b/src/Icons.py",
-    "similarity index 100%",
+    "diff --git a/src/icons.py b/src/Icons.py",
+    "similarity index 88%",
     "rename from src/icons.py",
     "rename to src/Icons.py",
+    "index 1111111..2222222 100644",
+    "--- a/src/icons.py",
+    "+++ b/src/Icons.py",
+    "@@ -1 +1 @@",
+    "-old",
+    "+new",
     ""
   ].join("\n");
   assert.doesNotThrow(() => { assertPatchSafeForWindowsGuest(patch); });
+});
+
+test("deleting a file and adding its case-variant is not a collision - only one is a destination", () => {
+  // `Bar.py` is deleted (`+++ /dev/null`, `deleted file mode`) so it lands
+  // nowhere on the guest; `bar.py` is added. The two never coexist on NTFS, so
+  // this must be accepted even though their lowercase spellings match.
+  const patch = [
+    "diff --git a/Bar.py b/Bar.py",
+    "deleted file mode 100644",
+    "index 1111111..0000000",
+    "--- a/Bar.py",
+    "+++ /dev/null",
+    "@@ -1 +0,0 @@",
+    "-gone",
+    "diff --git a/bar.py b/bar.py",
+    "new file mode 100644",
+    "index 0000000..2222222",
+    "--- /dev/null",
+    "+++ b/bar.py",
+    "@@ -0,0 +1 @@",
+    "+fresh",
+    ""
+  ].join("\n");
+  assert.doesNotThrow(() => { assertPatchSafeForWindowsGuest(patch); });
+});
+
+test("two genuinely distinct files differing only by case are still refused, listing both", () => {
+  // Each has its own `diff --git` + `+++` line, so both are destinations that
+  // would collapse into one file on NTFS - the real collision the guard exists
+  // to catch, which the destination-only rework must NOT weaken.
+  const patch = [
+    "diff --git a/pkg/Foo.py b/pkg/Foo.py",
+    "index 1111111..2222222 100644",
+    "--- a/pkg/Foo.py",
+    "+++ b/pkg/Foo.py",
+    "@@ -1 +1 @@",
+    "-a",
+    "+b",
+    "diff --git a/pkg/foo.py b/pkg/foo.py",
+    "index 3333333..4444444 100644",
+    "--- a/pkg/foo.py",
+    "+++ b/pkg/foo.py",
+    "@@ -1 +1 @@",
+    "-c",
+    "+d",
+    ""
+  ].join("\n");
+  assert.throws(() => { assertPatchSafeForWindowsGuest(patch); }, (error: Error) => {
+    assert.match(error.message, /"pkg\/Foo\.py" and "pkg\/foo\.py" differ only by capitalization/);
+    return true;
+  });
 });
 
 test("every offender is listed in one message, not just the first", () => {

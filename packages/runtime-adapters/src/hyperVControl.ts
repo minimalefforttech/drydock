@@ -243,11 +243,13 @@ export class HyperVControl {
 
   /** Starts a stopped VM; already-running is a successful no-op. */
   startVm(name: string): Promise<CommandResult> {
+    assertNonEmpty(name, "VM name");
     return this.run(START_VM_SCRIPT, { [ENV_VM_NAME]: name }, this.timeoutMs);
   }
 
   /** `turnOff` is the hard power cut; otherwise the guest is asked to shut down. */
   stopVm(name: string, turnOff: boolean): Promise<CommandResult> {
+    assertNonEmpty(name, "VM name");
     return this.run(
       turnOff ? TURN_OFF_VM_SCRIPT : STOP_VM_SCRIPT,
       { [ENV_VM_NAME]: name },
@@ -256,6 +258,7 @@ export class HyperVControl {
   }
 
   checkpoint(name: string, checkpointName: string): Promise<CommandResult> {
+    assertNonEmpty(name, "VM name");
     assertNonEmpty(checkpointName, "checkpoint name");
     return this.run(
       CHECKPOINT_VM_SCRIPT,
@@ -265,6 +268,7 @@ export class HyperVControl {
   }
 
   restoreCheckpoint(name: string, checkpointName: string): Promise<CommandResult> {
+    assertNonEmpty(name, "VM name");
     assertNonEmpty(checkpointName, "checkpoint name");
     return this.run(
       RESTORE_CHECKPOINT_SCRIPT,
