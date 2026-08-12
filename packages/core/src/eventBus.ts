@@ -18,7 +18,10 @@ import type {
   SubtaskId,
   TaskId,
   TranscriptLine,
-  TurnTerminalStatus
+  TurnTerminalStatus,
+  ValidationJobId,
+  ValidationJobState,
+  ValidationRuntimeId
 } from "@drydock/contracts";
 
 export type ProductBusEvent =
@@ -51,7 +54,30 @@ export type ProductBusEvent =
    * timeline and the rail's reconnect spinner render the same stages whatever
    * the agent CLI does with its stdout.
    */
-  | { readonly kind: "boot-progress"; readonly sessionId: SessionId; readonly stage: BootStage };
+  | { readonly kind: "boot-progress"; readonly sessionId: SessionId; readonly stage: BootStage }
+  /** A validation job moved through its lifecycle (ADR 0022): chips re-render from this. */
+  | {
+      readonly kind: "validation-job-changed";
+      readonly jobId: ValidationJobId;
+      readonly state: ValidationJobState;
+      readonly sessionId?: SessionId;
+      readonly taskId?: TaskId;
+      readonly subtaskId?: SubtaskId;
+    }
+  /** Coarse validation-registry invalidation (ADR 0022): runtimes, associations, or health moved. */
+  | { readonly kind: "validation-runtime-changed" }
+  /**
+   * A must-fail probe PASSED (ADR 0022 F5): security incident, not inconvenience.
+   * Carries everything the persistent banner renders; the runtime is already
+   * quarantined and its queue blocked by the time this is published.
+   */
+  | {
+      readonly kind: "validation-quarantine";
+      readonly runtimeId: ValidationRuntimeId;
+      readonly probeId: string;
+      readonly detail: string;
+      readonly at: string;
+    };
 
 /**
  * Boot timeline stages. `mount` and `clone` are the two shapes of the same

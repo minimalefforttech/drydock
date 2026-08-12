@@ -8,17 +8,20 @@
 import type { CleanupMode, CleanupResult, CommandResult, RuntimeId, RuntimeInventoryStore } from "@drydock/contracts";
 import type { Clock } from "./clock.js";
 import type { Logger } from "./logger.js";
-import type { RuntimeAdapter } from "./runtimeAdapter.js";
+import { RuntimeAdapterRegistry, type RuntimeAdapterSelection } from "./runtimeAdapter.js";
 
-export interface RuntimeCleanupServiceOptions {
+export type RuntimeCleanupServiceOptions = {
   readonly clock: Clock;
   readonly inventory: RuntimeInventoryStore;
-  readonly runtimeAdapter: RuntimeAdapter;
   readonly logger: Logger;
-}
+} & RuntimeAdapterSelection;
 
 export class RuntimeCleanupService {
-  constructor(private readonly options: RuntimeCleanupServiceOptions) {}
+  private readonly adapters: RuntimeAdapterRegistry;
+
+  constructor(private readonly options: RuntimeCleanupServiceOptions) {
+    this.adapters = new RuntimeAdapterRegistry(options);
+  }
 
   async cleanupRuntime(runtimeId: RuntimeId, mode: CleanupMode): Promise<CleanupResult> {
     const record = await this.options.inventory.getRuntime(runtimeId);
@@ -30,6 +33,23 @@ export class RuntimeCleanupService {
     if (mode === "quarantine-only") {
       await this.options.inventory.updateRuntimeStatus(runtimeId, "quarantined", this.options.clock.isoNow());
       return { runtimeId, status: "quarantined", mode, diagnostics: ["Quarantined without destructive cleanup."] };
+    }
+
+    // A record whose adapter kind is not registered in THIS process (a hyperv
+    // row on a host that no longer discovers Hyper-V, say) must not be reported
+    // as cleaned. Quarantine it with the reason so the row stays visible and a
+    // later process with that adapter can finish the job.
+    const runtimeAdapter = this.adapters.find(record.adapter);
+    if (runtimeAdapter === undefined) {
+      await this.options.inventory.updateCleanupAttempt(runtimeId, this.options.clock.isoNow(), true);
+      await this.options.inventory.updateRuntimeStatus(runtimeId, "quarantined", this.options.clock.isoNow());
+      const diagnostic = `No runtime adapter is registered for kind "${record.adapter}"; ${record.externalName} was quarantined instead of removed. Registered kinds: ${this.adapters.kinds.join(", ")}.`;
+      this.options.logger.warn("runtime cleanup skipped: adapter kind unavailable", {
+        runtimeId,
+        externalName: record.externalName,
+        adapter: record.adapter
+      });
+      return { runtimeId, status: "quarantined", mode, diagnostics: [diagnostic] };
     }
 
     const handle = {
@@ -47,11 +67,11 @@ export class RuntimeCleanupService {
     const diagnostics: string[] = [];
     try {
       await this.options.inventory.updateRuntimeStatus(runtimeId, "stopping", this.options.clock.isoNow());
-      const stop = await this.options.runtimeAdapter.stopRuntime(handle, "cleanup");
+      const stop = await runtimeAdapter.stopRuntime(handle, "cleanup");
       diagnostics.push(`stop exit: ${String(stop.exitCode)}`);
       await this.options.inventory.updateRuntimeStatus(runtimeId, "stopped", this.options.clock.isoNow());
       await this.options.inventory.updateRuntimeStatus(runtimeId, "removing", this.options.clock.isoNow());
-      const remove = await this.options.runtimeAdapter.removeRuntime(handle, true);
+      const remove = await runtimeAdapter.removeRuntime(handle, true);
       diagnostics.push(`remove exit: ${String(remove.exitCode)}`);
       // A remove that fails because the sandbox is ALREADY GONE is a success, not
       // a quarantine - otherwise every cleanup of a sandbox that `sbx reset` (or a
@@ -72,8 +92,14 @@ export class RuntimeCleanupService {
   }
 }
 
-/** True when a remove failed only because the sandbox no longer exists. */
+/**
+ * True when a remove failed only because the runtime no longer exists. The
+ * Hyper-V phrases (ADR 0022) matter for the same reason the sbx ones do: a
+ * validation VM that a human already deleted must reap the row, not leave it
+ * quarantined forever.
+ */
 function isAlreadyGone(result: CommandResult): boolean {
   const detail = `${result.stderr} ${result.error ?? ""} ${result.stdout}`.toLowerCase();
-  return /not found|no such|does not exist|unknown sandbox|no container/.test(detail);
+  return /not found|no such|does not exist|unknown sandbox|no container|unable to find a virtual machine|no virtual machine|virtual machine .* was not found/
+    .test(detail);
 }

@@ -20,6 +20,7 @@ import type { AgentRole } from "./ids.js";
 import type { MemoryCandidateStatus, MemoryOrigin, MemoryScope } from "./memory.js";
 import type { McpOverrideScope } from "./mcp.js";
 import type { AgentQuestionImage, AgentQuestionStep } from "./questions.js";
+import type { RuntimeAdapterKind } from "./runtime.js";
 import {
   PLAN_ANNOTATION_STATUSES,
   parsePlanAnchor,
@@ -313,7 +314,8 @@ export interface BackendAvailability {
 
 /** Display-safe projection of the isolation boundary for one run. */
 export interface IsolationSummary {
-  readonly runtimeKind: "docker-sandbox";
+  /** Host -> webview only; the webview renders it as text and never sends it back. */
+  readonly runtimeKind: RuntimeAdapterKind;
   readonly network: "none" | "provider-scoped";
   /** Comma-separated allowlist when network is provider-scoped. */
   readonly networkAllowlist?: string;

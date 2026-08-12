@@ -51,6 +51,23 @@ export type ValidationRuntimeLifecycle = "keep-warm" | "on-demand" | "pinned";
 export type ValidationTopologyPreset = "single" | "default-plus-named" | "per-project";
 
 /**
+ * How the host reaches one validation runtime's guest OS (ADR 0022 M3). This is
+ * connection DATA, not a live channel: the `hyperv` adapter opens one `ssh.exe`
+ * process per exec because Windows OpenSSH has no ControlMaster multiplexing
+ * (`spike-report.md`), so nothing here is held open between calls.
+ *
+ * `host` is the guest's address on the internal switch, `user` the guest
+ * account the exec channel authenticates as, and `port` is present only when the
+ * guest does not listen on 22. Credentials never live here - the adapter is
+ * configured with a product-owned identity file and known-hosts path.
+ */
+export interface ValidationRuntimeConnection {
+  readonly host: string;
+  readonly port?: number;
+  readonly user: string;
+}
+
+/**
  * One named validation runtime (ADR 0022). Identity is `runtimeId` - renaming
  * is display-only, so associations, jobs, and receipts survive it (edge case
  * H5). `capabilities` are the profile's declared abilities (`msvc`, `maya`,
@@ -63,6 +80,13 @@ export interface NamedRuntimeConfig {
   readonly lifecycle: ValidationRuntimeLifecycle;
   readonly capabilities: readonly string[];
   readonly policyProfileRef: string;
+  /**
+   * Where the exec channel connects for this runtime (M3). Absent until the
+   * setup wizard (M7) records it; a runtime with no connection can be listed and
+   * routed to but cannot execute, so the job service parks rather than guessing
+   * an address.
+   */
+  readonly connection?: ValidationRuntimeConnection;
   /**
    * Marks a TD-gated broad profile such as `production_tester` (a standing
    * fixture set is a deliberate exception, not a shortcut). Carries a permanent
@@ -82,6 +106,8 @@ export interface NamedRuntimeUpdate {
   readonly lifecycle?: ValidationRuntimeLifecycle;
   readonly capabilities?: readonly string[];
   readonly policyProfileRef?: string;
+  /** `null` clears the connection (the runtime becomes unreachable, not deleted). */
+  readonly connection?: ValidationRuntimeConnection | null;
   readonly profileException?: boolean;
   readonly archived?: boolean;
   readonly updatedAt?: string;

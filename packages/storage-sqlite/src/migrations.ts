@@ -683,6 +683,7 @@ export function applyMigrations(connection: SqliteConnection): void {
       policy_profile_ref TEXT NOT NULL,
       profile_exception INTEGER NOT NULL DEFAULT 0,
       archived INTEGER NOT NULL DEFAULT 0,
+      connection_json TEXT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -766,6 +767,11 @@ export function applyMigrations(connection: SqliteConnection): void {
     CREATE INDEX IF NOT EXISTS idx_validation_receipts_changeset
       ON validation_receipts(changeset_ref);
   `);
+  // Exec-channel address (ADR 0022 M3), added the same day the table landed:
+  // the DDL above carries it for fresh state files, and this upgrades any dev DB
+  // created between M2 and M3. Nullable - a runtime with no connection is
+  // routable but not executable, which the job service parks on.
+  ensureColumn(connection, "validation_runtimes", "connection_json", "TEXT NULL");
 
   sanitizeLegacySessionEvents(connection, legacySessionEventsTable);
 }

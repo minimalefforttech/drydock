@@ -9,7 +9,7 @@
 
 import { execFile as execFileCb } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, realpathSync, statSync } from "node:fs";
+import { chmodSync, existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -43,9 +43,13 @@ import {
 } from "@drydock/core";
 import {
   discoverDockerSandboxCommand,
+  discoverPowerShellCommand,
+  discoverSshCommand,
   discoverStandaloneClaudeCommand,
   discoverStandaloneCodexCommand,
-  DockerSandboxRuntimeAdapter
+  DockerSandboxRuntimeAdapter,
+  HyperVControl,
+  HyperVRuntimeAdapter
 } from "@drydock/runtime-adapters";
 import {
   applyMigrations,
@@ -125,6 +129,17 @@ export interface BackendReady {
   readonly rawStreamStore: SessionRawStreamStore;
   /** Session + inventory reconciliation, run once after activation. */
   readonly reconcileOnActivate: () => Promise<void>;
+  /**
+   * Builds a Hyper-V validation-runtime adapter for one named runtime's exec
+   * address (ADR 0022 M3). Undefined off Windows or when ssh/powershell
+   * discovery failed - validation is then unavailable, and callers say so rather
+   * than pretending a runtime can be reached.
+   */
+  readonly hyperVAdapterFactory?: (
+    connection: import("@drydock/contracts").ValidationRuntimeConnection
+  ) => import("@drydock/runtime-adapters").HyperVRuntimeAdapter;
+  /** Host-wide Hyper-V queries (VM state, checkpoints, counters); same caveat. */
+  readonly hyperVControl?: import("@drydock/runtime-adapters").HyperVControl;
   readonly sbxDisplayPath: string;
   /** Host Claude CLI, when present; powers the guided sign-in flow only. */
   readonly hostClaudePath?: string;
@@ -465,10 +480,48 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     cwd: stateRootPath,
     logger
   });
+  // ADR 0022 M3: Hyper-V validation runtimes are a SECOND runtime class, not a
+  // replacement for sandboxes. Two pieces are composed here and handed to the
+  // backend; neither is on any session path.
+  //  - `hyperVControl` needs only powershell.exe and answers host-wide questions
+  //    (which VMs exist, their state, checkpoints, counters).
+  //  - `hyperVAdapterFactory` builds one adapter PER NAMED RUNTIME, because the
+  //    exec channel's address is per-runtime configuration rather than a single
+  //    host-wide endpoint. M4's job service calls it as it resolves a runtime.
+  // Both stay undefined off Windows or when discovery fails, so callers must
+  // degrade honestly instead of assuming Hyper-V is available.
+  const sshPath = process.platform === "win32" ? discoverSshCommand(runtimeEnvironment) : null;
+  const powershellPath = process.platform === "win32" ? discoverPowerShellCommand(runtimeEnvironment) : null;
+  const hyperVControl = powershellPath === null
+    ? undefined
+    : new HyperVControl({ powershellPath, commandRunner, cwd: stateRootPath, environment: runtimeEnvironment });
+  // Product-owned SSH material. The known-hosts file is where the adapter pins
+  // each guest's key on first connect (never the user's ~/.ssh/known_hosts); the
+  // identity file is the product's own key, used only once the M7 wizard has
+  // generated it - hence the existence check at build time, not compose time.
+  const hyperVKnownHostsFile = path.join(stateDir, "hyperv_known_hosts");
+  const hyperVIdentityFile = path.join(stateDir, "hyperv_ed25519");
+  const hyperVAdapterFactory = sshPath === null || powershellPath === null
+    ? undefined
+    : (target: import("@drydock/contracts").ValidationRuntimeConnection): HyperVRuntimeAdapter =>
+        new HyperVRuntimeAdapter({
+          sshPath,
+          powershellPath,
+          commandRunner,
+          cwd: stateRootPath,
+          logger,
+          connection: target,
+          knownHostsFile: hyperVKnownHostsFile,
+          ...(existsSync(hyperVIdentityFile) ? { identityFile: hyperVIdentityFile } : {}),
+          environment: runtimeEnvironment
+        });
+  // Session plumbing stays docker-only for now: validation runtimes are driven
+  // by M4's job service, not by the session lifecycle.
+  const runtimeAdapters = [runtimeAdapter];
   const lifecycle = new RuntimeLifecycleService({
     clock,
     inventory,
-    runtimeAdapter,
+    runtimeAdapters,
     logger,
     ...(options.securityPolicy === undefined
       ? {}
@@ -485,7 +538,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
           }
         })
   });
-  const cleanup = new RuntimeCleanupService({ clock, inventory, runtimeAdapter, logger });
+  const cleanup = new RuntimeCleanupService({ clock, inventory, runtimeAdapters, logger });
   const hostCodexPath = managed ? null : discoverStandaloneCodexCommand(runtimeEnvironment);
   // Host Claude CLI powers only the guided sign-in flow (`claude setup-token`
   // on the host, where the browser works); prompts still never run host-side.
@@ -604,7 +657,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       );
     }
   });
-  const runtimeReconcile = new RuntimeReconcileService({ clock, inventory, runtimeAdapter, logger });
+  const runtimeReconcile = new RuntimeReconcileService({ clock, inventory, runtimeAdapters, logger });
   // Clone mode: host-side git plumbing (clone/status/inbound/outbound/discard)
   // over the shared CommandRunner. No docker, no network - pure host git.
   const gitPath = discoverHostGitCommand(runtimeEnvironment, options.securityPolicy?.managed === true)
@@ -1090,6 +1143,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     }
     // Fetch the live external-name set ONCE and share it with the session
     // reconciler (adoption) so the two reconcilers do not each list sbx.
+    // ADR 0022 M4: sessions only ever adopt sandboxes, so this stays a single
+    // sbx fetch; the union across adapters arrives with hyperv inventory rows.
     const externalRuntimeNames = new Set(await runtimeAdapter.listExternalRuntimeNames(RUNTIME_NAME_PREFIX));
     const sessionCounts = await chatService.reconcileSessions(externalRuntimeNames);
     const result = await runtimeReconcile.reconcile();
@@ -1151,6 +1206,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     securityEvents,
     rawStreamStore,
     reconcileOnActivate,
+    ...(hyperVAdapterFactory === undefined ? {} : { hyperVAdapterFactory }),
+    ...(hyperVControl === undefined ? {} : { hyperVControl }),
     sbxDisplayPath: sbxPath,
     ...(hostClaudePath === null ? {} : { hostClaudePath }),
     runtimeEnvironment,

@@ -14,37 +14,42 @@ import type {
 } from "@drydock/contracts";
 import type { Clock } from "./clock.js";
 import type { Logger } from "./logger.js";
-import type { RuntimeAdapter } from "./runtimeAdapter.js";
+import { RuntimeAdapterRegistry, type RuntimeAdapterSelection } from "./runtimeAdapter.js";
 import { buildRuntimeName } from "./runtimeNames.js";
 
-export interface RuntimeLifecycleServiceOptions {
+export type RuntimeLifecycleServiceOptions = {
   readonly clock: Clock;
   readonly inventory: RuntimeInventoryStore;
-  readonly runtimeAdapter: RuntimeAdapter;
   readonly logger: Logger;
   /** Final authorization immediately before the external runtime is created. */
   readonly authorizeStart?: (request: StartRuntimeRequest) => void | Promise<void>;
   readonly runtimeNamePrefix?: string;
-}
+} & RuntimeAdapterSelection;
 
 export class RuntimeLifecycleService {
   private readonly prefix: string;
+  private readonly adapters: RuntimeAdapterRegistry;
 
   constructor(private readonly options: RuntimeLifecycleServiceOptions) {
     this.prefix = options.runtimeNamePrefix ?? "drydock";
+    this.adapters = new RuntimeAdapterRegistry(options);
   }
 
   async startRuntime(request: StartRuntimeRequest): Promise<RuntimeHandle> {
+    // Resolve the adapter BEFORE anything durable is written: a template kind
+    // nobody can service must fail loudly, not leave a `starting` row that no
+    // adapter can ever clean up.
+    const runtimeAdapter = this.adapters.require(request.template.type, `template ${request.template.id}`);
     const startedAt = this.options.clock.isoNow();
     const externalName = buildRuntimeName(this.prefix, request.sessionId, request.generationId, request.agentRole);
-    const record = makeStartingRecord(request, externalName, this.options.runtimeAdapter.adapter, startedAt);
+    const record = makeStartingRecord(request, externalName, runtimeAdapter.adapter, startedAt);
     await this.options.inventory.insertRuntime(record);
     this.options.logger.info("runtime starting", { runtimeId: request.runtimeId, externalName });
 
     let handle: RuntimeHandle | undefined;
     try {
       await this.options.authorizeStart?.(request);
-      handle = await this.options.runtimeAdapter.createRuntime(request, externalName);
+      handle = await runtimeAdapter.createRuntime(request, externalName);
       await this.options.inventory.updateRuntimeStatus(request.runtimeId, "running", this.options.clock.isoNow());
       this.options.logger.info("runtime running", { runtimeId: request.runtimeId, externalName });
       return handle;
@@ -52,7 +57,7 @@ export class RuntimeLifecycleService {
       let finalStatus: RuntimeStatus = "lost";
       if (handle !== undefined) {
         try {
-          const removal = await this.options.runtimeAdapter.removeRuntime(handle, true);
+          const removal = await runtimeAdapter.removeRuntime(handle, true);
           if (removal.exitCode === 0) {
             finalStatus = "removed";
           } else {
@@ -90,9 +95,12 @@ export class RuntimeLifecycleService {
 
   async stopRuntime(runtimeId: RuntimeInventoryRecord["runtimeId"], reason: string): Promise<void> {
     const record = await this.requiredRecord(runtimeId);
+    // The RECORD names the adapter kind, so a stop resolves the same adapter
+    // that started it even when several kinds are registered.
+    const runtimeAdapter = this.adapters.require(record.adapter, `runtime ${record.runtimeId}`);
     const handle = handleFromRecord(record);
     await this.setStatus(runtimeId, "stopping");
-    const result = await this.options.runtimeAdapter.stopRuntime(handle, reason);
+    const result = await runtimeAdapter.stopRuntime(handle, reason);
     if (result.exitCode !== 0) {
       throw new Error(`Runtime stop failed for ${record.externalName}: ${result.stderr || result.error || result.stdout}`);
     }

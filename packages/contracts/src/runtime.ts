@@ -175,4 +175,12 @@ export interface RuntimeInventoryReconcileResult {
   readonly reconciledAt: string;
   readonly externalOnly: readonly string[];
   readonly missingExternal: readonly RuntimeId[];
+  /**
+   * Rows this pass could not judge, because no adapter is registered for their
+   * kind or that adapter's listing failed (ADR 0022 M3). They are left
+   * UNTOUCHED: "we could not look" is not evidence the runtime is gone, and
+   * marking it lost on absence of evidence is exactly the silent degradation
+   * the honesty rules forbid.
+   */
+  readonly unresolvedAdapters?: readonly RuntimeId[];
 }

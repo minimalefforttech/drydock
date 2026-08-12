@@ -35,6 +35,7 @@ import type {
   ValidationReceiptId,
   ValidationRegistrySettings,
   ValidationRegistrySettingsUpdate,
+  ValidationRuntimeConnection,
   ValidationRuntimeId,
   ValidationRuntimeLifecycle,
   ValidationRuntimeStore,
@@ -82,8 +83,9 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
     this.connection.database.prepare(`
       INSERT INTO validation_runtimes (
         runtime_id, display_name, image, lifecycle, capabilities_json,
-        policy_profile_ref, profile_exception, archived, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        policy_profile_ref, profile_exception, archived, connection_json,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.runtimeId,
       record.displayName,
@@ -93,6 +95,7 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
       record.policyProfileRef,
       record.profileException === true ? 1 : 0,
       record.archived === true ? 1 : 0,
+      record.connection === undefined ? null : JSON.stringify(record.connection),
       record.createdAt,
       record.updatedAt
     );
@@ -124,6 +127,11 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
     if (update.profileException !== undefined) {
       assignments.push("profile_exception = ?");
       values.push(update.profileException ? 1 : 0);
+    }
+    if (update.connection !== undefined) {
+      // `null` clears the address; omitting the key leaves the stored one alone.
+      assignments.push("connection_json = ?");
+      values.push(update.connection === null ? null : JSON.stringify(update.connection));
     }
     if (update.archived !== undefined) {
       assignments.push("archived = ?");
@@ -482,6 +490,7 @@ interface RuntimeRow {
   readonly policy_profile_ref: string;
   readonly profile_exception: number;
   readonly archived: number;
+  readonly connection_json: string | null;
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -561,6 +570,7 @@ const JOB_STATES: readonly ValidationJobState[] = [
 const VERDICTS: readonly ValidationVerdict[] = ["passed", "failed", "error"];
 
 function mapRuntime(row: RuntimeRow): NamedRuntimeConfig {
+  const connection = parseConnection(row.connection_json);
   return {
     runtimeId: row.runtime_id as ValidationRuntimeId,
     displayName: row.display_name,
@@ -571,6 +581,7 @@ function mapRuntime(row: RuntimeRow): NamedRuntimeConfig {
       : "on-demand",
     capabilities: parseStringArray(row.capabilities_json),
     policyProfileRef: row.policy_profile_ref,
+    ...(connection === null ? {} : { connection }),
     ...(row.profile_exception === 0 ? {} : { profileException: true }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -649,6 +660,35 @@ function parseStringArray(json: string): readonly string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Tolerant exec-address parse (ADR 0022 M3). A row whose JSON is unreadable, or
+ * that names no host/user, reads as NO CONNECTION - the runtime then shows as
+ * unreachable and the job service parks, which beats handing the adapter a
+ * half-formed address to dial.
+ */
+function parseConnection(raw: string | null): ValidationRuntimeConnection | null {
+  if (raw === null || raw.length === 0) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  const candidate = value as Record<string, unknown>;
+  const host = candidate["host"];
+  const user = candidate["user"];
+  if (typeof host !== "string" || host.length === 0) return null;
+  if (typeof user !== "string" || user.length === 0) return null;
+  const port = candidate["port"];
+  const validPort = typeof port === "number" && Number.isInteger(port) && port > 0 && port <= 65_535;
+  return {
+    host,
+    ...(validPort ? { port: port as number } : {}),
+    user
+  };
 }
 
 function isTopologyPreset(value: string | undefined): value is ValidationTopologyPreset {

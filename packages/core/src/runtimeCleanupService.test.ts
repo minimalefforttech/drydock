@@ -50,12 +50,68 @@ test("cleanup still quarantines on a genuine remove failure", async () => {
   assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-stuck")))?.status, "quarantined");
 });
 
+test("a detached Hyper-V VM reads as already gone, not as a cleanup failure", async () => {
+  const inventory = new SingleRuntimeStore(runtimeRecord("runtime-vm", "drydock-validate-a", "running", "hyperv"));
+  const service = new RuntimeCleanupService({
+    clock: new FixedClock(),
+    inventory,
+    runtimeAdapters: [new CannedAdapter(commandResult(1, "Hyper-V was unable to find a virtual machine with the requested name."), "hyperv")],
+    logger: new NullLogger()
+  });
+
+  const result = await service.cleanupRuntime(asId<"RuntimeId">("runtime-vm"), "force-remove");
+
+  assert.equal(result.status, "removed");
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-vm")))?.status, "removed");
+});
+
+test("cleanup picks the adapter named by the RECORD when several kinds are registered", async () => {
+  const inventory = new SingleRuntimeStore(runtimeRecord("runtime-vm", "drydock-validate-a", "running", "hyperv"));
+  const sandbox = new CannedAdapter(commandResult(1, "permission denied while removing container"));
+  const hyperv = new CannedAdapter(commandResult(0, ""), "hyperv");
+  const service = new RuntimeCleanupService({
+    clock: new FixedClock(),
+    inventory,
+    runtimeAdapters: [sandbox, hyperv],
+    logger: new NullLogger()
+  });
+
+  const result = await service.cleanupRuntime(asId<"RuntimeId">("runtime-vm"), "force-remove");
+
+  assert.equal(result.status, "removed");
+  assert.equal(sandbox.removeCalls, 0);
+  assert.equal(hyperv.removeCalls, 1);
+});
+
+test("a record whose adapter kind is unavailable quarantines with a diagnostic that names it", async () => {
+  const inventory = new SingleRuntimeStore(runtimeRecord("runtime-vm", "drydock-validate-a", "running", "hyperv"));
+  const service = new RuntimeCleanupService({
+    clock: new FixedClock(),
+    inventory,
+    runtimeAdapter: new CannedAdapter(commandResult(0, "")),
+    logger: new NullLogger()
+  });
+
+  const result = await service.cleanupRuntime(asId<"RuntimeId">("runtime-vm"), "force-remove");
+
+  assert.equal(result.status, "quarantined");
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-vm")))?.status, "quarantined");
+  assert.match(String(result.diagnostics[0]), /No runtime adapter is registered for kind "hyperv"/);
+  assert.match(String(result.diagnostics[0]), /Registered kinds: docker-sandbox/);
+});
+
 class CannedAdapter implements RuntimeAdapter {
-  readonly adapter = "docker-sandbox" as const;
-  constructor(private readonly removeResult: CommandResult) {}
+  readonly adapter: RuntimeInventoryRecord["adapter"];
+  removeCalls = 0;
+  constructor(private readonly removeResult: CommandResult, adapter: RuntimeInventoryRecord["adapter"] = "docker-sandbox") {
+    this.adapter = adapter;
+  }
   createRuntime(_request: StartRuntimeRequest, _externalName: string): Promise<RuntimeHandle> { throw new Error("not used"); }
   stopRuntime(_handle: RuntimeHandle, _reason: string): Promise<CommandResult> { return Promise.resolve(commandResult(0, "")); }
-  removeRuntime(_handle: RuntimeHandle, _force: boolean): Promise<CommandResult> { return Promise.resolve(this.removeResult); }
+  removeRuntime(_handle: RuntimeHandle, _force: boolean): Promise<CommandResult> {
+    this.removeCalls += 1;
+    return Promise.resolve(this.removeResult);
+  }
   listExternalRuntimeNames(_namePrefix: string): Promise<string[]> { return Promise.resolve([]); }
 }
 
@@ -93,7 +149,12 @@ function commandResult(exitCode: number, stderr: string): CommandResult {
   return { command: "sbx", args: [], cwd: ".", exitCode, signal: null, stdout: "", stderr, durationMs: 1, timedOut: false };
 }
 
-function runtimeRecord(runtimeId: string, externalName: string, status: RuntimeStatus): RuntimeInventoryRecord {
+function runtimeRecord(
+  runtimeId: string,
+  externalName: string,
+  status: RuntimeStatus,
+  adapter: RuntimeInventoryRecord["adapter"] = "docker-sandbox"
+): RuntimeInventoryRecord {
   return {
     runtimeId: asId<"RuntimeId">(runtimeId),
     runtimeGenerationId: asId<"RuntimeGenerationId">(`generation-${runtimeId}`),
@@ -101,7 +162,7 @@ function runtimeRecord(runtimeId: string, externalName: string, status: RuntimeS
     chatId: asId<"ChatId">(`chat-${runtimeId}`),
     agentRole: "worker",
     templateId: "template-test",
-    adapter: "docker-sandbox",
+    adapter,
     externalName,
     status,
     startedAt: "2026-07-02T00:00:00.000Z",

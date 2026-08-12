@@ -443,6 +443,12 @@ export class IsolatedRunService {
    * rates diffed against the previous sample, so the first poll returns nulls
    * for those. Windows-only (the nerdbox shim model); other platforms return
    * empty and the UI omits the usage line.
+   *
+   * The shim reader is DOCKER-SANDBOX SPECIFIC. Other adapter kinds (ADR 0022's
+   * `hyperv` validation runtimes) report `available: false` rather than being
+   * measured with a model that does not describe them - M4/M7 add their counters
+   * through `hyperVControl`. Reporting a VM's usage as a sandbox's would be a
+   * confident wrong number, which is worse than an honest blank.
    */
   async sampleRuntimeStats(runtimeIds?: readonly string[]): Promise<RuntimeStatsSummary[]> {
     const sbxPath = this.options.sbxPath;
@@ -451,10 +457,10 @@ export class IsolatedRunService {
       return [];
     }
     const wanted = runtimeIds === undefined ? undefined : new Set(runtimeIds);
-    const running = (await this.listRuntimes()).filter(
+    const allRunning = (await this.listRuntimes()).filter(
       (runtime) => runtime.status === "running" && (wanted === undefined || wanted.has(String(runtime.runtimeId)))
     );
-    if (running.length === 0) {
+    if (allRunning.length === 0) {
       return [];
     }
     const unavailable = (runtime: RuntimeInventoryRecord): RuntimeStatsSummary => ({
@@ -467,9 +473,14 @@ export class IsolatedRunService {
       loadAvg1: null,
       threads: null
     });
+    const running = allRunning.filter((runtime) => runtime.adapter === "docker-sandbox");
+    const unmeasured = allRunning.filter((runtime) => runtime.adapter !== "docker-sandbox").map(unavailable);
+    if (running.length === 0) {
+      return unmeasured;
+    }
     const [shimPids, snapshot] = await Promise.all([readSandboxShimPids(sbxPath), snapshotProcessTree(runner)]);
     if (snapshot === null) {
-      return running.map(unavailable);
+      return [...running.map(unavailable), ...unmeasured];
     }
     const nowMs = this.options.clock.now().getTime();
     const stats = running.map((runtime): RuntimeStatsSummary => {
@@ -507,7 +518,7 @@ export class IsolatedRunService {
     for (const key of [...this.statsSamples.keys()]) {
       if (!alive.has(key)) this.statsSamples.delete(key);
     }
-    return stats;
+    return [...stats, ...unmeasured];
   }
 
   /** Live usage for a session's running sandbox (the chat panel's usage bar). */

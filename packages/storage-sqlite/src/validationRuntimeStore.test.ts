@@ -154,6 +154,100 @@ test("runtime registry round-trips, updates, archives, and survives a reopen", a
   }
 });
 
+test("the exec address round-trips, clears with null, and tolerates junk", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  const dbPath = path.join(dir, "connection.sqlite");
+  try {
+    const connection = new SqliteConnection(dbPath);
+    applyMigrations(connection);
+    const store = new SqliteValidationRuntimeStore(connection);
+
+    // A runtime with no address is legal: routable, not yet executable.
+    await store.insertRuntime(runtime({ runtimeId: "vrt-blank" }));
+    assert.equal("connection" in ((await store.getRuntime(asId<"ValidationRuntimeId">("vrt-blank"))) ?? {}), false);
+
+    await store.insertRuntime({
+      ...runtime({ runtimeId: "vrt-1" }),
+      connection: { host: "10.10.0.5", port: 2222, user: "validator" }
+    });
+    assert.deepEqual((await store.getRuntime(asId<"ValidationRuntimeId">("vrt-1")))?.connection, {
+      host: "10.10.0.5",
+      port: 2222,
+      user: "validator"
+    });
+
+    // Editing the address leaves the rest of the record alone; the default port
+    // is absent rather than invented.
+    await store.updateRuntime(asId<"ValidationRuntimeId">("vrt-1"), {
+      connection: { host: "10.10.0.9", user: "validator" },
+      updatedAt: "2026-08-12T10:00:00.000Z"
+    });
+    const moved = await store.getRuntime(asId<"ValidationRuntimeId">("vrt-1"));
+    assert.deepEqual(moved?.connection, { host: "10.10.0.9", user: "validator" });
+    assert.equal(moved?.image, "win11-dcc-2026.03");
+
+    // null clears the address (the runtime becomes unreachable, not deleted).
+    await store.updateRuntime(asId<"ValidationRuntimeId">("vrt-1"), { connection: null, updatedAt: "2026-08-12T11:00:00.000Z" });
+    assert.equal("connection" in ((await store.getRuntime(asId<"ValidationRuntimeId">("vrt-1"))) ?? {}), false);
+    connection.close();
+
+    // Durable across a reopen, and half-formed rows read as "no address" rather
+    // than handing the adapter something to dial.
+    const reopened = new SqliteConnection(dbPath);
+    applyMigrations(reopened);
+    const reopenedStore = new SqliteValidationRuntimeStore(reopened);
+    reopened.database.exec(`
+      UPDATE validation_runtimes SET connection_json = '{"host":"10.10.0.5"}' WHERE runtime_id = 'vrt-1';
+      UPDATE validation_runtimes SET connection_json = '{oops' WHERE runtime_id = 'vrt-blank';
+    `);
+    assert.equal("connection" in ((await reopenedStore.getRuntime(asId<"ValidationRuntimeId">("vrt-1"))) ?? {}), false);
+    assert.equal("connection" in ((await reopenedStore.getRuntime(asId<"ValidationRuntimeId">("vrt-blank"))) ?? {}), false);
+    // An out-of-range port is dropped, but the reachable part of the address stays.
+    reopened.database.exec(`UPDATE validation_runtimes SET connection_json = '{"host":"h","user":"u","port":0}' WHERE runtime_id = 'vrt-1'`);
+    assert.deepEqual((await reopenedStore.getRuntime(asId<"ValidationRuntimeId">("vrt-1")))?.connection, { host: "h", user: "u" });
+    reopened.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a state file created before the exec address existed gains the column on open", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  try {
+    const connection = new SqliteConnection(path.join(dir, "upgrade.sqlite"));
+    // The M2 table shape, exactly as it shipped to dev machines this morning.
+    connection.database.exec(`
+      CREATE TABLE validation_runtimes (
+        runtime_id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        image TEXT NOT NULL,
+        lifecycle TEXT NOT NULL,
+        capabilities_json TEXT NOT NULL,
+        policy_profile_ref TEXT NOT NULL,
+        profile_exception INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+
+    applyMigrations(connection);
+    const store = new SqliteValidationRuntimeStore(connection);
+    await store.insertRuntime({
+      ...runtime({ runtimeId: "vrt-1" }),
+      connection: { host: "10.10.0.5", user: "validator" }
+    });
+
+    assert.deepEqual((await store.getRuntime(asId<"ValidationRuntimeId">("vrt-1")))?.connection, {
+      host: "10.10.0.5",
+      user: "validator"
+    });
+    connection.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("associations key on (project, source) so a managed row never clobbers a personal one", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
   try {

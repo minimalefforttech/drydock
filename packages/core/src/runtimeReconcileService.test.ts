@@ -8,6 +8,7 @@ import {
   asId,
   type CommandResult,
   type JsonObject,
+  type RuntimeAdapterKind,
   type RuntimeHandle,
   type RuntimeInventoryRecord,
   type RuntimeInventoryStore,
@@ -70,10 +71,80 @@ test("reconciliation reaps orphaned quarantined/lost/stopped rows to removed", a
   assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-live-lost")))?.status, "quarantined");
 });
 
-class ListingRuntimeAdapter implements RuntimeAdapter {
-  readonly adapter = "docker-sandbox" as const;
+test("reconciliation unions external names across adapters and judges each record by its own kind", async () => {
+  const inventory = new MemoryRuntimeInventoryStore([
+    runtimeRecord("runtime-sbx", "drydock-present-worker", "running"),
+    runtimeRecord("runtime-vm", "drydock-validate-a", "running", "hyperv"),
+    runtimeRecord("runtime-vm-gone", "drydock-validate-b", "running", "hyperv")
+  ]);
+  const service = new RuntimeReconcileService({
+    clock: new FixedClock(),
+    inventory,
+    runtimeAdapters: [
+      new ListingRuntimeAdapter(["drydock-present-worker"]),
+      new ListingRuntimeAdapter(["drydock-validate-a", "drydock-validate-c"], "hyperv")
+    ],
+    logger: new NullLogger()
+  });
 
-  constructor(private readonly names: readonly string[]) {}
+  const result = await service.reconcile();
+
+  // Each record is judged against the union, so a hyperv row is not "lost"
+  // merely because it is absent from the sandbox list.
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-sbx")))?.status, "running");
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-vm")))?.status, "running");
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-vm-gone")))?.status, "lost");
+  assert.deepEqual(result.missingExternal, [asId<"RuntimeId">("runtime-vm-gone")]);
+  assert.deepEqual(result.externalOnly, ["drydock-validate-c"]);
+  assert.equal(result.unresolvedAdapters, undefined);
+});
+
+test("an adapter whose listing FAILS leaves its records untouched instead of lost", async () => {
+  const inventory = new MemoryRuntimeInventoryStore([
+    runtimeRecord("runtime-sbx", "drydock-present-worker", "running"),
+    runtimeRecord("runtime-vm", "drydock-validate-a", "running", "hyperv")
+  ]);
+  const service = new RuntimeReconcileService({
+    clock: new FixedClock(),
+    inventory,
+    runtimeAdapters: [
+      new ListingRuntimeAdapter(["drydock-present-worker"]),
+      new ThrowingListRuntimeAdapter("hyperv")
+    ],
+    logger: new NullLogger()
+  });
+
+  const result = await service.reconcile();
+
+  // "We could not look" is not evidence the VM is gone.
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-vm")))?.status, "running");
+  assert.deepEqual(result.missingExternal, []);
+  assert.deepEqual(result.unresolvedAdapters, [asId<"RuntimeId">("runtime-vm")]);
+});
+
+test("records whose adapter kind is not registered at all are reported, never judged", async () => {
+  const inventory = new MemoryRuntimeInventoryStore([
+    runtimeRecord("runtime-vm", "drydock-validate-a", "running", "hyperv")
+  ]);
+  const service = new RuntimeReconcileService({
+    clock: new FixedClock(),
+    inventory,
+    runtimeAdapter: new ListingRuntimeAdapter([]),
+    logger: new NullLogger()
+  });
+
+  const result = await service.reconcile();
+
+  assert.equal((await inventory.getRuntime(asId<"RuntimeId">("runtime-vm")))?.status, "running");
+  assert.deepEqual(result.unresolvedAdapters, [asId<"RuntimeId">("runtime-vm")]);
+});
+
+class ListingRuntimeAdapter implements RuntimeAdapter {
+  readonly adapter: RuntimeAdapterKind;
+
+  constructor(private readonly names: readonly string[], adapter: RuntimeAdapterKind = "docker-sandbox") {
+    this.adapter = adapter;
+  }
 
   createRuntime(_request: StartRuntimeRequest, _externalName: string): Promise<RuntimeHandle> {
     throw new Error("not used");
@@ -89,6 +160,31 @@ class ListingRuntimeAdapter implements RuntimeAdapter {
 
   listExternalRuntimeNames(namePrefix: string): Promise<string[]> {
     return Promise.resolve(this.names.filter((name) => name.startsWith(namePrefix)));
+  }
+}
+
+/** Stands in for a hypervisor that is momentarily unreachable. */
+class ThrowingListRuntimeAdapter implements RuntimeAdapter {
+  readonly adapter: RuntimeAdapterKind;
+
+  constructor(adapter: RuntimeAdapterKind) {
+    this.adapter = adapter;
+  }
+
+  createRuntime(_request: StartRuntimeRequest, _externalName: string): Promise<RuntimeHandle> {
+    throw new Error("not used");
+  }
+
+  stopRuntime(_handle: RuntimeHandle, _reason: string): Promise<CommandResult> {
+    throw new Error("not used");
+  }
+
+  removeRuntime(_handle: RuntimeHandle, _force: boolean): Promise<CommandResult> {
+    throw new Error("not used");
+  }
+
+  listExternalRuntimeNames(_namePrefix: string): Promise<string[]> {
+    return Promise.reject(new Error("Get-VM failed: the Hyper-V Virtual Machine Management service is not running."));
   }
 }
 
@@ -155,7 +251,12 @@ class NullLogger implements Logger {
   error(_message: string, _metadata?: JsonObject): void {}
 }
 
-function runtimeRecord(runtimeId: string, externalName: string, status: RuntimeStatus): RuntimeInventoryRecord {
+function runtimeRecord(
+  runtimeId: string,
+  externalName: string,
+  status: RuntimeStatus,
+  adapter: RuntimeAdapterKind = "docker-sandbox"
+): RuntimeInventoryRecord {
   return {
     runtimeId: asId<"RuntimeId">(runtimeId),
     runtimeGenerationId: asId<"RuntimeGenerationId">(`generation-${runtimeId}`),
@@ -163,7 +264,7 @@ function runtimeRecord(runtimeId: string, externalName: string, status: RuntimeS
     chatId: asId<"ChatId">(`chat-${runtimeId}`),
     agentRole: "worker",
     templateId: "template-test",
-    adapter: "docker-sandbox",
+    adapter,
     externalName,
     status,
     startedAt: "2026-07-02T00:00:00.000Z",

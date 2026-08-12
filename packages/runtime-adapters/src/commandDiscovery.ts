@@ -41,6 +41,33 @@ export function discoverStandaloneCodexCommand(environment: NodeJS.ProcessEnv = 
   return findCommand(["codex", "codex.exe"], "CODEX_PATH", candidates, environment);
 }
 
+/**
+ * Windows OpenSSH client, the exec channel for validation runtimes (ADR 0022).
+ * The inbox copy under System32 is preferred over anything on PATH: a PATH
+ * `ssh` may be a Git-for-Windows or WSL shim with different option handling,
+ * and the adapter's fixed option set assumes the Microsoft build.
+ */
+export function discoverSshCommand(environment: NodeJS.ProcessEnv = process.env): string | null {
+  const systemRoot = environment["SystemRoot"] ?? "C:\\Windows";
+  const preferred = process.platform === "win32"
+    ? [path.join(systemRoot, "System32", "OpenSSH", "ssh.exe")]
+    : ["/usr/bin/ssh"];
+  return findCommand(["ssh", "ssh.exe"], "SSH_PATH", preferred, environment);
+}
+
+/**
+ * Windows PowerShell, the Hyper-V control plane (ADR 0022). Deliberately the
+ * v1.0 inbox host rather than `pwsh`: the Hyper-V module ships with Windows and
+ * the fixed-literal scripts are written against that host's behaviour.
+ */
+export function discoverPowerShellCommand(environment: NodeJS.ProcessEnv = process.env): string | null {
+  const systemRoot = environment["SystemRoot"] ?? "C:\\Windows";
+  const preferred = process.platform === "win32"
+    ? [path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")]
+    : [];
+  return findCommand(["powershell", "powershell.exe"], "POWERSHELL_PATH", preferred, environment);
+}
+
 export function findCommand(
   names: readonly string[],
   envKey: string,
