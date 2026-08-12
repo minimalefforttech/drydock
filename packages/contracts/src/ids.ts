@@ -34,6 +34,12 @@ export type SubtaskId = Brand<string, "SubtaskId">;
 export type PlanId = Brand<string, "PlanId">;
 export type PlanArtifactId = Brand<string, "PlanArtifactId">;
 export type PlanAnnotationId = Brand<string, "PlanAnnotationId">;
+/** A named validation runtime in the ADR 0022 registry (identity survives renames). */
+export type ValidationRuntimeId = Brand<string, "ValidationRuntimeId">;
+/** One queued/running validation job (ADR 0022). */
+export type ValidationJobId = Brand<string, "ValidationJobId">;
+/** One piece of validation evidence, bound to a changeset (ADR 0022). */
+export type ValidationReceiptId = Brand<string, "ValidationReceiptId">;
 
 export type AgentRole = "researcher" | "planner" | "worker" | "tester" | "reviewer" | "memory-extractor";
 

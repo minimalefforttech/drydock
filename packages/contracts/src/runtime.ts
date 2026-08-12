@@ -17,7 +17,11 @@ import type {
 } from "./ids.js";
 import type { JsonObject } from "./json.js";
 
-export type RuntimeAdapterKind = "docker-sandbox" | "docker" | "wsl" | "custom";
+/**
+ * `hyperv` is the validation-runtime class (ADR 0022): a product-adopted
+ * Windows VM that only ever runs validation jobs, never agent sessions.
+ */
+export type RuntimeAdapterKind = "docker-sandbox" | "docker" | "wsl" | "hyperv" | "custom";
 
 export type RuntimeStatus =
   | "starting"

@@ -664,6 +664,109 @@ export function applyMigrations(connection: SqliteConnection): void {
       updated_at TEXT NOT NULL
     );
   `);
+
+  // Validation runtimes (ADR 0022): the named registry, its association table,
+  // registry settings, the job queue, and evidence receipts. Nothing is seeded -
+  // the registry starts empty and the setup wizard creates the default runtime.
+  // Associations key on (project_root_id, source) so a studio-managed row never
+  // clobbers the user's personal row for the same project (edge case H6).
+  // Runtimes are referenced by id STRING from associations, jobs, and receipts
+  // with no foreign key: deleting a runtime goes through the reassignment guard
+  // (H5), and evidence must survive the runtime that produced it.
+  connection.database.exec(`
+    CREATE TABLE IF NOT EXISTS validation_runtimes (
+      runtime_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      image TEXT NOT NULL,
+      lifecycle TEXT NOT NULL,
+      capabilities_json TEXT NOT NULL,
+      policy_profile_ref TEXT NOT NULL,
+      profile_exception INTEGER NOT NULL DEFAULT 0,
+      archived INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS validation_associations (
+      project_root_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      runtime_id TEXT NOT NULL,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (project_root_id, source)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_validation_associations_runtime
+      ON validation_associations(runtime_id);
+
+    CREATE TABLE IF NOT EXISTS validation_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS validation_jobs (
+      job_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      task_id TEXT,
+      subtask_id TEXT,
+      agent_id TEXT,
+      project_root_id TEXT,
+      requested_runtime_id TEXT,
+      resolved_runtime_id TEXT,
+      profile_ref TEXT NOT NULL,
+      changeset_ref TEXT NOT NULL,
+      state TEXT NOT NULL,
+      parked_reason TEXT,
+      queue_position INTEGER,
+      license_wait_ms INTEGER,
+      receipt_id TEXT,
+      queued_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_validation_jobs_task
+      ON validation_jobs(task_id);
+
+    CREATE INDEX IF NOT EXISTS idx_validation_jobs_session
+      ON validation_jobs(session_id);
+
+    CREATE INDEX IF NOT EXISTS idx_validation_jobs_state
+      ON validation_jobs(state, queued_at);
+
+    CREATE TABLE IF NOT EXISTS validation_receipts (
+      receipt_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      runtime_id TEXT NOT NULL,
+      policy_profile_ref TEXT NOT NULL,
+      changeset_ref TEXT NOT NULL,
+      mirror_version INTEGER,
+      mirror_freshness_at TEXT,
+      fixture_manifest_hash TEXT,
+      license_wait_ms INTEGER NOT NULL,
+      probes_green_at TEXT,
+      image_generation INTEGER,
+      revert_generation INTEGER,
+      verdict TEXT NOT NULL,
+      summary TEXT,
+      failing_test TEXT,
+      failing_assertion TEXT,
+      superseded INTEGER NOT NULL DEFAULT 0,
+      superseded_at TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(job_id) REFERENCES validation_jobs(job_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_validation_receipts_job
+      ON validation_receipts(job_id);
+
+    CREATE INDEX IF NOT EXISTS idx_validation_receipts_changeset
+      ON validation_receipts(changeset_ref);
+  `);
+
   sanitizeLegacySessionEvents(connection, legacySessionEventsTable);
 }
 

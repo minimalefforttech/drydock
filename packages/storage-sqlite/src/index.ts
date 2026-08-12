@@ -21,6 +21,7 @@ export * from "./subtaskStore.js";
 export * from "./taskChangesetStore.js";
 export * from "./taskFaqStore.js";
 export * from "./taskRecipeStore.js";
+export * from "./validationRuntimeStore.js";
 export * from "./workSessionStore.js";
 export * from "./workspacePolicyStore.js";
 export * from "./workTaskStore.js";
