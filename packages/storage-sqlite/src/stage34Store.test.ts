@@ -18,8 +18,8 @@ import { SqliteAccessRequestStore, SqliteProjectCatalogStore, SqliteWorkspaceSet
 test("workspace policy records persist across reopen", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
   const dbPath = path.join(dir, "stage3.sqlite");
+  const connection = new SqliteConnection(dbPath);
   try {
-    const connection = new SqliteConnection(dbPath);
     applyMigrations(connection);
     const projects = new SqliteProjectCatalogStore(connection);
     const sets = new SqliteWorkspaceSetStore(connection);
@@ -52,6 +52,103 @@ test("workspace policy records persist across reopen", async () => {
     assert.equal(approved[0]?.resolvedBy, "user");
     assert.equal(pending.length, 0);
   } finally {
+    connection.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("T3.5: deleteProject prunes a workspace set left with zero members", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  const dbPath = path.join(dir, "stage3-prune.sqlite");
+  const connection = new SqliteConnection(dbPath);
+  try {
+    applyMigrations(connection);
+    const projects = new SqliteProjectCatalogStore(connection);
+    const sets = new SqliteWorkspaceSetStore(connection);
+
+    await projects.insertProject(project("project-a", "C:\\repos\\a"), "c:/repos/a");
+    await projects.insertProject(project("project-b", "C:\\repos\\b"), "c:/repos/b");
+    await projects.insertProject(project("project-c", "C:\\repos\\c"), "c:/repos/c");
+    await sets.insertWorkspaceSet(workspaceSet("set-1", ["project-a", "project-b"]));
+    // An unrelated set must survive set-1's pruning untouched.
+    await sets.insertWorkspaceSet(workspaceSet("set-2", ["project-c"]));
+
+    // Removing one of two members only trims the membership; the set survives
+    // (validateSet's "at least one project" rule is not yet violated).
+    await projects.deleteProject(asId<"ProjectId">("project-b"));
+    const afterFirst = await sets.getWorkspaceSet(asId<"WorkspaceSetId">("set-1"));
+    assert.deepEqual(afterFirst?.projectIds, ["project-a"]);
+
+    // Removing the LAST member prunes the set entirely instead of leaving it
+    // to silently resolve to zero mounts.
+    await projects.deleteProject(asId<"ProjectId">("project-a"));
+    assert.equal(await sets.getWorkspaceSet(asId<"WorkspaceSetId">("set-1")), null);
+
+    // The unrelated set (and its still-valid project) are untouched.
+    const survivor = await sets.getWorkspaceSet(asId<"WorkspaceSetId">("set-2"));
+    assert.deepEqual(survivor?.projectIds, ["project-c"]);
+    assert.equal((await projects.listProjects()).length, 1);
+  } finally {
+    connection.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("T3.8: insertWorkspaceSet rolls back entirely when a member references a missing project", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  const dbPath = path.join(dir, "stage3-txn-insert.sqlite");
+  const connection = new SqliteConnection(dbPath);
+  try {
+    applyMigrations(connection);
+    const projects = new SqliteProjectCatalogStore(connection);
+    const sets = new SqliteWorkspaceSetStore(connection);
+    await projects.insertProject(project("project-a", "C:\\repos\\a"), "c:/repos/a");
+
+    // The second member's project_id does not exist in project_records, so
+    // the FK on workspace_set_projects throws partway through the membership
+    // insert loop - the whole transaction (the workspace_sets row AND the
+    // first, otherwise-valid membership row) must roll back rather than
+    // leave a partially-created set behind.
+    await assert.rejects(
+      () => sets.insertWorkspaceSet(workspaceSet("set-bad", ["project-a", "project-missing"])),
+      /FOREIGN KEY/
+    );
+
+    assert.equal(await sets.getWorkspaceSet(asId<"WorkspaceSetId">("set-bad")), null);
+    const leaked = connection.database.prepare(
+      "SELECT project_id FROM workspace_set_projects WHERE workspace_set_id = ?"
+    ).all("set-bad") as unknown as { readonly project_id: string }[];
+    assert.equal(leaked.length, 0);
+  } finally {
+    connection.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("T3.8: updateWorkspaceSet rolls back to the prior membership when a new member references a missing project", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  const dbPath = path.join(dir, "stage3-txn-update.sqlite");
+  const connection = new SqliteConnection(dbPath);
+  try {
+    applyMigrations(connection);
+    const projects = new SqliteProjectCatalogStore(connection);
+    const sets = new SqliteWorkspaceSetStore(connection);
+    await projects.insertProject(project("project-a", "C:\\repos\\a"), "c:/repos/a");
+    await sets.insertWorkspaceSet(workspaceSet("set-1", ["project-a"]));
+
+    await assert.rejects(
+      () => sets.updateWorkspaceSet({ ...workspaceSet("set-1", ["project-missing"]), name: "Renamed" }),
+      /FOREIGN KEY/
+    );
+
+    // Neither the rename nor the membership swap took effect - the OLD
+    // membership (deleted, then meant to be replaced, in the same
+    // transaction as the failed insert) is exactly what survives.
+    const after = await sets.getWorkspaceSet(asId<"WorkspaceSetId">("set-1"));
+    assert.equal(after?.name, "Test set");
+    assert.deepEqual(after?.projectIds, ["project-a"]);
+  } finally {
+    connection.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -59,8 +156,8 @@ test("workspace policy records persist across reopen", async () => {
 test("diff baselines and review threads persist with per-file replacement", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
   const dbPath = path.join(dir, "stage4.sqlite");
+  const connection = new SqliteConnection(dbPath);
   try {
-    const connection = new SqliteConnection(dbPath);
     applyMigrations(connection);
     const diffs = new SqliteDiffBaselineStore(connection);
     const reviews = new SqliteReviewStore(connection);
@@ -114,6 +211,80 @@ test("diff baselines and review threads persist with per-file replacement", asyn
     assert.equal(comments[0]?.status, "resolved");
     assert.equal(comments[0]?.updatedAt, "2026-07-02T00:00:09.000Z");
   } finally {
+    connection.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("T3.8: insertBaseline rolls back entirely when two snapshots collide on path", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  const dbPath = path.join(dir, "stage4-txn-insert.sqlite");
+  const connection = new SqliteConnection(dbPath);
+  try {
+    applyMigrations(connection);
+    const diffs = new SqliteDiffBaselineStore(connection);
+
+    // Two snapshots for the same path violate the (baseline_id, path)
+    // primary key partway through the insert loop - the baseline row itself
+    // (inserted first, in the same transaction) must roll back too, instead
+    // of leaving a baseline with a partial file list.
+    await assert.rejects(
+      () => diffs.insertBaseline(baseline("baseline-bad"), [
+        { path: "a.txt", sha256: "a".repeat(64), size: 1, mtimeMs: 1, capturedAtMs: 1, blobStored: true },
+        { path: "a.txt", sha256: "b".repeat(64), size: 2, mtimeMs: 2, capturedAtMs: 2, blobStored: true }
+      ]),
+      /UNIQUE constraint|PRIMARY KEY/i
+    );
+
+    assert.equal(await diffs.getBaseline(asId<"BaselineId">("baseline-bad")), null);
+    assert.equal((await diffs.listFileSnapshots(asId<"BaselineId">("baseline-bad"))).length, 0);
+  } finally {
+    connection.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("T3.8: deleteBaseline rolls back when the second delete throws mid-sequence", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  const dbPath = path.join(dir, "stage4-txn-delete.sqlite");
+  const connection = new SqliteConnection(dbPath);
+  try {
+    applyMigrations(connection);
+    const diffs = new SqliteDiffBaselineStore(connection);
+    await diffs.insertBaseline(baseline("baseline-x"), [
+      { path: "a.txt", sha256: "a".repeat(64), size: 1, mtimeMs: 1, capturedAtMs: 1, blobStored: true }
+    ]);
+
+    // deleteBaseline has no natural constraint to violate (DELETE cannot
+    // trip a FK/PK), so the crash this transaction guards against is forced
+    // directly: the SECOND prepared statement's run() is made to throw,
+    // simulating a mid-sequence failure, and restored immediately after.
+    const rawDb = connection.database as unknown as {
+      prepare: (sql: string) => { run: (...args: unknown[]) => unknown };
+    };
+    const realPrepare = rawDb.prepare.bind(rawDb);
+    let calls = 0;
+    rawDb.prepare = (sql: string) => {
+      calls += 1;
+      const statement = realPrepare(sql);
+      if (calls === 2) {
+        statement.run = () => {
+          throw new Error("forced failure");
+        };
+      }
+      return statement;
+    };
+    try {
+      await assert.rejects(() => diffs.deleteBaseline(asId<"BaselineId">("baseline-x")), /forced failure/);
+    } finally {
+      rawDb.prepare = realPrepare;
+    }
+
+    // Rolled back: the first delete (the file row) did not survive on its own.
+    assert.equal((await diffs.listFileSnapshots(asId<"BaselineId">("baseline-x"))).length, 1);
+    assert.notEqual(await diffs.getBaseline(asId<"BaselineId">("baseline-x")), null);
+  } finally {
+    connection.close();
     await rm(dir, { recursive: true, force: true });
   }
 });

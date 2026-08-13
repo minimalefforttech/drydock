@@ -70,10 +70,23 @@ export const MAX_MEMORY_TAG_LENGTH = 32;
 
 export interface MemoryCandidateStore {
   insertCandidate(record: MemoryCandidateRecord): Promise<void>;
+  /**
+   * Atomic capture guard (T3.9): inserts unless a PENDING candidate already
+   * has the same content, checked and inserted in one call with no
+   * intervening await so two concurrent captures of identical content cannot
+   * both pass the check. Returns false (no row written) when skipped.
+   */
+  insertCandidateIfNoPendingDuplicate(record: MemoryCandidateRecord): Promise<boolean>;
   getCandidate(memoryCandidateId: MemoryCandidateId): Promise<MemoryCandidateRecord | null>;
   /** Newest-first; all statuses when the filter is omitted. */
   listCandidates(status?: MemoryCandidateStatus): Promise<MemoryCandidateRecord[]>;
-  updateCandidateStatus(memoryCandidateId: MemoryCandidateId, status: MemoryCandidateStatus, resolvedAt: string): Promise<void>;
+  /**
+   * Compare-and-swap (T3.9): applies only while the row is still 'pending'.
+   * Returns true when this call performed the transition, false when the id
+   * is unknown or a concurrent resolve already moved it off 'pending' - the
+   * caller's write is then a safe no-op rather than clobbering that outcome.
+   */
+  updateCandidateStatus(memoryCandidateId: MemoryCandidateId, status: MemoryCandidateStatus, resolvedAt: string): Promise<boolean>;
   /** Applies human edits to a still-pending candidate (approval-time trims). */
   updateCandidateContent(memoryCandidateId: MemoryCandidateId, edits: MemoryCandidateEdits): Promise<void>;
   deleteCandidate(memoryCandidateId: MemoryCandidateId): Promise<void>;

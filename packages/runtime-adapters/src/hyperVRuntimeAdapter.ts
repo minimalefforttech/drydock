@@ -98,12 +98,22 @@ const PROBE_COMMAND: readonly string[] = ["cmd", "/c", "exit", "0"];
  * root: the script then walks `Win32_Process.ParentProcessId` to collect every
  * descendant of each matched process and `Stop-Process -Force`es the whole
  * de-duplicated set. The sweeping process itself is skipped so a sweep can never
- * kill its own shell, and the `$targets` set makes the walk cycle-safe.
+ * kill its own shell, and the `$seen` set makes the walk cycle-safe.
+ *
+ * `wrapperPid` (optional) roots the walk even after the wrapper is GONE: an
+ * aborted exec kills the token-carrying wrapper first, so its orphaned DCC
+ * child matches nothing - only the PID the wrapper announced at start still
+ * anchors the parent-link walk (T5.1). The recorded PID is walk-only, never
+ * killed on its own: if the OS recycled it to an unrelated process, that
+ * process is spared (its children are a remote-enough risk to accept, and the
+ * sweep runs within the job turn that recorded the PID).
  */
 export const SWEEP_GUEST_JOB_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
   "$request = [Console]::In.ReadToEnd() | ConvertFrom-Json",
   "$token = [string]$request.jobToken",
+  "$wrapperPid = 0",
+  "if ($null -ne $request.wrapperPid) { $wrapperPid = [int]$request.wrapperPid }",
   "$killed = @()",
   "if ($token.Length -gt 0) {",
   "  $all = @(Get-CimInstance Win32_Process)",
@@ -113,16 +123,24 @@ export const SWEEP_GUEST_JOB_SCRIPT = [
   "    if (-not $childrenByParent.ContainsKey($parentId)) { $childrenByParent[$parentId] = @() }",
   "    $childrenByParent[$parentId] += [int]$proc.ProcessId",
   "  }",
+  // $seen is the cycle-safe walk set; $targets is what actually gets stopped.
+  // Token matches are both. The recorded wrapper PID is WALK-ONLY: its
+  // descendants are targets (an orphaned DCC child of a dead wrapper carries
+  // no token - this root is the only thing that still finds it), but the PID
+  // itself is stopped only when the token confirms it, so a PID the OS
+  // recycled to an unrelated process is never killed on the wrapper's word.
+  "  $seen = @{}",
   "  $targets = @{}",
   "  $queue = [System.Collections.Queue]::new()",
   "  foreach ($proc in @($all | Where-Object { $_.CommandLine -like ('*' + $token + '*') })) {",
   "    $rootId = [int]$proc.ProcessId",
-  "    if (-not $targets.ContainsKey($rootId)) { $targets[$rootId] = $true; $queue.Enqueue($rootId) }",
+  "    if (-not $seen.ContainsKey($rootId)) { $seen[$rootId] = $true; $targets[$rootId] = $true; $queue.Enqueue($rootId) }",
   "  }",
+  "  if ($wrapperPid -gt 0 -and -not $seen.ContainsKey($wrapperPid)) { $seen[$wrapperPid] = $true; $queue.Enqueue($wrapperPid) }",
   "  while ($queue.Count -gt 0) {",
   "    $current = [int]$queue.Dequeue()",
   "    foreach ($childId in $childrenByParent[$current]) {",
-  "      if (-not $targets.ContainsKey($childId)) { $targets[$childId] = $true; $queue.Enqueue($childId) }",
+  "      if (-not $seen.ContainsKey($childId)) { $seen[$childId] = $true; $targets[$childId] = $true; $queue.Enqueue($childId) }",
   "    }",
   "  }",
   "  foreach ($target in @($targets.Keys)) {",
@@ -340,16 +358,20 @@ export class HyperVRuntimeAdapter implements RuntimeAdapter {
     handle: RuntimeHandle,
     jobToken: string,
     timeoutMs: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    wrapperPid?: number
   ): Promise<number[]> {
     if (!SAFE_JOB_TOKEN.test(jobToken)) {
       throw new Error(`Refusing to sweep with job token "${jobToken}": tokens must match ${String(SAFE_JOB_TOKEN)}.`);
     }
+    // A malformed PID is dropped rather than shipped: the guest coerces with
+    // [int], and a kill-tree root deserves host-side strictness too.
+    const root = wrapperPid !== undefined && Number.isInteger(wrapperPid) && wrapperPid > 0 ? wrapperPid : undefined;
     const result = await this.exec(
       handle,
       guestJsonCommand(SWEEP_GUEST_JOB_SCRIPT),
       timeoutMs,
-      JSON.stringify({ jobToken }),
+      JSON.stringify({ jobToken, ...(root === undefined ? {} : { wrapperPid: root }) }),
       signal
     );
     if (result.exitCode !== 0) {

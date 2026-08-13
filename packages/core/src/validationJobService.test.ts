@@ -33,6 +33,7 @@ import type {
   ValidationRegistrySettingsUpdate,
   ValidationRuntimeId,
   ValidationRuntimeStore,
+  ValidationTaskOverride,
   TaskId,
   WorkspaceRootId
 } from "@drydock/contracts";
@@ -121,6 +122,12 @@ class MemoryValidationStore implements ValidationRuntimeStore {
   async setTaskOverride(taskId: TaskId, runtimeId: ValidationRuntimeId | null): Promise<void> {
     if (runtimeId === null) this.taskOverrides.delete(String(taskId));
     else this.taskOverrides.set(String(taskId), runtimeId);
+  }
+
+  // T5.2: only ValidationAppService.deleteRuntime calls this; the job service
+  // under test here never does.
+  async listTaskOverridesForRuntime(): Promise<ValidationTaskOverride[]> {
+    throw new Error("not used");
   }
 
   async getQuarantine(runtimeId: ValidationRuntimeId): Promise<ValidationQuarantineRecord | null> {
@@ -221,6 +228,7 @@ interface FixtureInput {
 class FakeAdapter implements ValidationExecAdapter {
   readonly kinds: string[] = [];
   readonly swept: string[] = [];
+  readonly sweptWrapperPids: (number | undefined)[] = [];
   ensureRunningCalls = 0;
   syncInput: SyncInput | undefined;
   fixtureInput: FixtureInput | undefined;
@@ -272,8 +280,9 @@ class FakeAdapter implements ValidationExecAdapter {
     return commandResult({});
   };
 
-  async sweepGuestJob(jobToken: string): Promise<number[]> {
+  async sweepGuestJob(jobToken: string, _timeoutMs: number, _signal?: AbortSignal, wrapperPid?: number): Promise<number[]> {
     this.swept.push(jobToken);
+    this.sweptWrapperPids.push(wrapperPid);
     return [4242];
   }
 }
@@ -541,6 +550,8 @@ test("a resolved job queues, runs, and lands a passing receipt", async () => {
   assert.equal(receipt?.superseded, false);
   // Never invented: no mirror root, no probe provider, no fixture hash.
   assert.equal(receipt?.mirrorVersion, undefined);
+  assert.equal(receipt?.mirrorOk, undefined);
+  assert.equal(receipt?.mirrorSkippedVersions, undefined);
   assert.equal(receipt?.probesGreenAt, undefined);
   assert.equal(receipt?.fixtureManifestHash, undefined);
 
@@ -1034,6 +1045,40 @@ test("a guest that never emits a line is stopped by the startup budget and reads
   assert.deepEqual(adapter.swept, [job.jobId]);
 });
 
+test("the wrapper PID announcement roots the sweep without flipping budgets or reaching the tail", async () => {
+  const timers = new FakeTimerBank();
+  let budgetAfterMarker = -1;
+  const adapter = new FakeAdapter({
+    run: async ({ emit, signal }) => {
+      emit("drydock-wrapper-pid: 5150"); // transport metadata, not DCC output
+      budgetAfterMarker = timers.budgets[0] ?? -1;
+      emit("collected 14 items"); // the REAL first line flips to inactivity
+      emit("drydock-wrapper-pid: 4"); // forged post-output marker: inert text
+      timers.fireElapsed(90_000);
+      await untilAborted(signal);
+      return { exitCode: null, signal: "SIGTERM" };
+    }
+  });
+  const bench = harness({
+    adapters: { default: adapter },
+    overrides: { timers, inactivityTimeoutMs: 90_000, startupTimeoutMs: 600_000 }
+  });
+  const job = await bench.service.enqueue(request());
+  await bench.service.whenIdle();
+  assert.ok(job);
+
+  assert.equal(budgetAfterMarker, 600_000, "the announcement must not hand over to the inactivity budget");
+  assert.deepEqual(adapter.swept, [job.jobId]);
+  assert.deepEqual(
+    adapter.sweptWrapperPids,
+    [5150],
+    "the sweep is rooted at the announced PID, and only the first pre-output marker counts"
+  );
+  const receipt = await bench.store.getReceiptByJob(job.jobId);
+  assert.equal(receipt?.verdict, "error");
+  assert.doesNotMatch(receipt?.summary ?? "", /drydock-wrapper-pid/);
+});
+
 test("the hard turn cap stops a run that is still producing output", async () => {
   const adapter = new FakeAdapter({
     run: async ({ emit }) => {
@@ -1081,16 +1126,44 @@ test("a failing suite completes the job and puts the failing test on the receipt
   assert.equal(receipt?.summary, "1 failed, 13 passed in 2.10s");
 });
 
+test("receipt evidence is redacted: credentials in guest output never reach the store", async () => {
+  // A prompt-injected agent whose test prints a token must not turn stored,
+  // UI-rendered, shareable evidence into an exfiltration channel (T2.1).
+  const adapter = new FakeAdapter({
+    run: async ({ emit }) => {
+      emit("=================================== FAILURES ===================================");
+      emit("FAILED tests/test_leak.py::test_env - AssertionError: leaked Bearer abc.def-123 and ghp_abcdefghijklmnopqrst1234");
+      emit("========================= 1 failed, 0 passed in 0.10s =========================");
+      return { exitCode: 1 };
+    }
+  });
+  const bench = harness({ adapters: { default: adapter } });
+  const job = await bench.service.enqueue(request());
+  await bench.service.whenIdle();
+  assert.ok(job);
+
+  const receipt = await bench.store.getReceiptByJob(job.jobId);
+  assert.equal(receipt?.verdict, "failed");
+  assert.equal(receipt?.failingTest, "tests/test_leak.py::test_env");
+  assert.match(receipt?.failingAssertion ?? "", /Bearer \[REDACTED\]/);
+  assert.match(receipt?.failingAssertion ?? "", /\[REDACTED\]/);
+  assert.doesNotMatch(receipt?.failingAssertion ?? "", /ghp_|abc\.def-123/);
+  assert.doesNotMatch(receipt?.summary ?? "", /ghp_|Bearer abc/);
+});
+
 test("receipts carry mirror freshness, probe greenness, and the fixture hash when they are known", async () => {
   const mirrorRoot = await mkdtemp(join(tmpdir(), "validation-mirror-"));
   try {
+    // A degraded/torn mirror (a subtree that did not sync cleanly, plus a
+    // mid-publish version left out) - the receipt must cite THAT, not just a
+    // clean-looking version+timestamp (T3.1, pkgrootMirrorStatus.ts's rule).
     await writeFile(
       join(mirrorRoot, ".drydock-mirror.json"),
       JSON.stringify({
         manifestVersion: 7,
         syncedAt: "2026-08-12T08:30:00.000Z",
-        subtrees: [{ ok: true }],
-        skippedVersions: []
+        subtrees: [{ ok: true }, { ok: false }],
+        skippedVersions: ["1.4.2-rc1"]
       }),
       "utf8"
     );
@@ -1105,6 +1178,8 @@ test("receipts carry mirror freshness, probe greenness, and the fixture hash whe
     const receipt = await bench.store.getReceiptByJob(job?.jobId ?? asId<"ValidationJobId">("x"));
     assert.equal(receipt?.mirrorVersion, 7);
     assert.equal(receipt?.mirrorFreshnessAt, "2026-08-12T08:30:00.000Z");
+    assert.equal(receipt?.mirrorOk, false, "a subtree that failed to sync must not read as clean");
+    assert.deepEqual(receipt?.mirrorSkippedVersions, ["1.4.2-rc1"]);
     assert.equal(receipt?.probesGreenAt, "2026-08-12T09:00:00.000Z");
     assert.equal(receipt?.fixtureManifestHash, "fixture-abc");
   } finally {
@@ -1352,6 +1427,85 @@ test("a reroute onto a runtime that also lacks the capability stays parked with 
   assert.equal((await bench.store.getJob(job.jobId))?.state, "completed");
 });
 
+test("requeueParked re-checks the H8 capability gate after a restart, when `pending` was never populated (T3.2)", async () => {
+  const bench = harness({
+    runtimes: [
+      runtimeConfig({ runtimeId: "default", displayName: "default", capabilities: ["maya"] }),
+      runtimeConfig({ runtimeId: "cpp-builds", displayName: "cpp-builds", capabilities: ["maya", "msvc"] })
+    ],
+    adapters: { default: new FakeAdapter(), "cpp-builds": new FakeAdapter() },
+    overrides: {
+      // Rehydrated from the ref, exactly as `materialize` does for a job
+      // restored after a restart - `pending` is never populated below, since
+      // the job is planted directly in the store rather than enqueued in this
+      // process.
+      profileFor: async () => profile({ profileRef: "cpp_smoke", requiredCapabilities: ["msvc"] })
+    }
+  });
+  bench.store.jobs.push({
+    jobId: asId<"ValidationJobId">("vjob-restarted"),
+    sessionId: asId<"SessionId">("session-1"),
+    chatId: asId<"ChatId">("chat-1"),
+    resolvedRuntimeId: asId<"ValidationRuntimeId">("default"),
+    profileRef: "cpp_smoke",
+    changesetRef: "sha-changeset-1",
+    state: "parked",
+    parkedReason: "\"default\" had no exec connection yet.",
+    queuedAt: "2026-08-12T08:00:00.000Z",
+    updatedAt: "2026-08-12T08:00:05.000Z"
+  });
+
+  // Even requeueing onto the SAME (capability-lacking) runtime - no explicit
+  // reroute at all - must still be caught: `held` is undefined either way.
+  const stillWrong = await bench.service.requeueParked(asId<"ValidationJobId">("vjob-restarted"));
+  assert.equal(stillWrong.kind, "parked");
+  if (stillWrong.kind === "parked") {
+    assert.match(stillWrong.reason, /cpp_smoke needs msvc, which "default" does not have/);
+  }
+  assert.equal((await bench.store.getJob(asId<"ValidationJobId">("vjob-restarted")))?.state, "parked");
+
+  const right = await bench.service.requeueParked(asId<"ValidationJobId">("vjob-restarted"), {
+    rerouteTo: asId<"ValidationRuntimeId">("cpp-builds"),
+    confirmedDelta: true
+  });
+  assert.equal(right.kind, "queued");
+  await bench.service.whenIdle();
+  assert.equal((await bench.store.getJob(asId<"ValidationJobId">("vjob-restarted")))?.state, "completed");
+});
+
+test("requeueParked cannot verify the H8 gate without a rehydratable profile, so it stays parked under the existing reason (T3.2)", async () => {
+  const bench = harness({
+    runtimes: [runtimeConfig({ runtimeId: "default", displayName: "default", capabilities: ["maya"] })],
+    adapters: { default: new FakeAdapter() }
+    // No `profileFor` override: the profile cannot be rehydrated, the same as
+    // a restart whose recipe is gone (`materialize`'s own park reason for this
+    // situation).
+  });
+  bench.store.jobs.push({
+    jobId: asId<"ValidationJobId">("vjob-orphaned-park"),
+    sessionId: asId<"SessionId">("session-1"),
+    chatId: asId<"ChatId">("chat-1"),
+    resolvedRuntimeId: asId<"ValidationRuntimeId">("default"),
+    profileRef: "retired_suite",
+    changesetRef: "sha-changeset-1",
+    state: "parked",
+    parkedReason: "This job was parked for an earlier, unrelated reason.",
+    queuedAt: "2026-08-12T08:00:00.000Z",
+    updatedAt: "2026-08-12T08:00:05.000Z"
+  });
+
+  const result = await bench.service.requeueParked(asId<"ValidationJobId">("vjob-orphaned-park"));
+  assert.equal(result.kind, "parked");
+  if (result.kind === "parked") {
+    assert.equal(result.reason, "This job was parked for an earlier, unrelated reason.", "no reason is invented");
+  }
+  // Nothing was written: guessing "no gap" is the overclaim H8 exists to
+  // prevent, so the job is left exactly as it was rather than re-parked.
+  const untouched = await bench.store.getJob(asId<"ValidationJobId">("vjob-orphaned-park"));
+  assert.equal(untouched?.parkedReason, "This job was parked for an earlier, unrelated reason.");
+  assert.equal(untouched?.updatedAt, "2026-08-12T08:00:05.000Z", "no store write happened");
+});
+
 test("rerouting onto an archived runtime stays parked with the archived reason (H1)", async () => {
   const bench = harness({
     runtimes: [
@@ -1488,17 +1642,21 @@ test("a profile with no command is refused before a job row exists", async () =>
 });
 
 test("a repository name that is not a plain segment never reaches the guest", async () => {
-  const adapter = new FakeAdapter();
-  const bench = harness({
-    adapters: { default: adapter },
-    changeset: () => ({ changesetRef: "sha-evil", patches: [{ repoName: "..\\..\\windows", patch: PLAIN_PATCH }] })
-  });
-  const job = await bench.service.enqueue(request());
-  await bench.service.whenIdle();
-  const receipt = await bench.store.getReceiptByJob(job?.jobId ?? asId<"ValidationJobId">("x"));
-  assert.equal(receipt?.verdict, "error");
-  assert.match(receipt?.summary ?? "", /Refusing to ship repository/);
-  assert.ok(!adapter.kinds.includes("sync"));
+  // "." and ".." survive the charset but name the workspace itself / its
+  // parent under Join-Path (T4.1); the lookahead refuses them host-side.
+  for (const repoName of ["..\\..\\windows", ".", "..", "..."]) {
+    const adapter = new FakeAdapter();
+    const bench = harness({
+      adapters: { default: adapter },
+      changeset: () => ({ changesetRef: "sha-evil", patches: [{ repoName, patch: PLAIN_PATCH }] })
+    });
+    const job = await bench.service.enqueue(request());
+    await bench.service.whenIdle();
+    const receipt = await bench.store.getReceiptByJob(job?.jobId ?? asId<"ValidationJobId">("x"));
+    assert.equal(receipt?.verdict, "error", `repoName ${JSON.stringify(repoName)} must be refused`);
+    assert.match(receipt?.summary ?? "", /Refusing to ship repository/);
+    assert.ok(!adapter.kinds.includes("sync"));
+  }
 });
 
 test("guest commands are fixed-literal PowerShell with parameters on stdin", () => {

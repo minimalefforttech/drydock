@@ -461,7 +461,12 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     void request({ type: "chat.reclaim", sessionId }).then((response) => {
       reclaimButton.disabled = false;
       if (!response.ok) {
-        appendSystemMessage(`Couldn't take over this chat: ${response.error.message}`, "error");
+        // T3.3: `sessionId` is the session this reclaim was FOR, not whatever
+        // is selected now - a push (e.g. panel.showSession) can reselect while
+        // this request is in flight.
+        if (sessionId === state.selectedSessionId) {
+          appendSystemMessage(`Couldn't take over this chat: ${response.error.message}`, "error");
+        }
         renderHeader();
         refreshControls();
         return;
@@ -469,8 +474,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       if (response.payload.type === "chat.reclaim") {
         upsertSession(state, response.payload.session);
         applyProviderCatalogs(state, response.payload.providerCatalogs);
+        // A successful reclaim always brings this session into view here - it's
+        // the whole point of "take over" - so this forced selection is
+        // intentional, not the stale-overwrite this file guards against elsewhere.
         state.selectedSessionId = response.payload.session.sessionId;
-        setTurnActive(false);
+        setSessionTurnActive(sessionId, false);
         appendSystemMessage("Took this chat over in this window. History and project mounts were restored from the saved session.");
       }
       renderHeader();
@@ -1045,25 +1053,22 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     }
   });
   onPush("chat.turnStarted", (payload) => {
-    // Track running turns for EVERY session (not just the selected one) so
-    // Tasks-tab rows can show running-a-turn vs idle-live.
-    state.turnActiveSessionIds.add(payload.sessionId);
-    ctx.bridge.hostChanged();
     if (payload.sessionId === state.selectedSessionId) {
       folder.clearActiveAssistant();
       folder.resetTurn();
       reasoningText = "";
       reasoningActive = false;
-      setTurnActive(true);
     }
+    // Track running turns for EVERY session (not just the selected one) so
+    // Tasks-tab rows can show running-a-turn vs idle-live; setSessionTurnActive
+    // mirrors into the locally-rendered flag only when still selected.
+    setSessionTurnActive(payload.sessionId, true);
   });
   onPush("chat.turnCompleted", (payload) => {
-    state.turnActiveSessionIds.delete(payload.sessionId);
-    ctx.bridge.hostChanged();
+    setSessionTurnActive(payload.sessionId, false);
     if (payload.sessionId === state.selectedSessionId) {
       folder.clearActiveAssistant();
       logChat(`turn ${payload.status}`);
-      setTurnActive(false);
       // Make the outcome visible in the transcript. A failed turn's reason is
       // already shown from its agent.error line; here we cover cancelled turns
       // and turns that completed without producing any output (the "did nothing,
@@ -1220,16 +1225,21 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       : undefined;
 
     if (selected !== undefined && isSessionLiveish(state, selected.sessionId)) {
+      // T3.3: captured now, before the await below - the user may switch to a
+      // DIFFERENT session while this request is in flight, and the response
+      // must only touch that session's own tracked state, never whatever
+      // session happens to be on screen when it lands.
+      const sentSessionId = selected.sessionId;
       folder.appendOptimisticUserLine(prompt);
-      setTurnActive(true);
-      const response = await request({ type: "chat.sendTurn", sessionId: selected.sessionId, prompt, model });
+      setSessionTurnActive(sentSessionId, true);
+      const response = await request({ type: "chat.sendTurn", sessionId: sentSessionId, prompt, model });
       if (response.ok) return;
-      setTurnActive(false);
+      setSessionTurnActive(sentSessionId, false);
       // The backend died since we last heard (a reload race where `live` was
       // briefly stale). Hide the raw "no longer live" error and revive instead.
       if (/no longer live|not live/i.test(response.error.message)) {
         await reviveAndSend(selected, prompt, model, true);
-      } else {
+      } else if (sentSessionId === state.selectedSessionId) {
         appendSystemMessage(`Couldn't send: ${response.error.message}`, "error", true);
       }
       return;
@@ -1245,6 +1255,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
 
     // Lazy spin-up: the FIRST message of a brand-new chat (nothing selected)
     // starts the micro-VM. This is the ONLY path that clears the transcript.
+    // T3.3: captured so a switch to an EXISTING session while this spin-up is
+    // in flight doesn't get the "couldn't start" notice appended to it below.
+    const startedFromSessionId = state.selectedSessionId;
     folder.appendOptimisticUserLine(prompt);
     starting = true;
     refreshControls();
@@ -1268,7 +1281,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     setBusyLine(null);
     starting = false;
     if (!response.ok) {
-      appendSystemMessage(`Couldn't start the chat backend: ${response.error.message}`, "error", true);
+      if (startedFromSessionId === state.selectedSessionId) {
+        appendSystemMessage(`Couldn't start the chat backend: ${response.error.message}`, "error", true);
+      }
       refreshControls();
       return;
     }
@@ -1304,7 +1319,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       renderChat();
       renderChangedFiles();
       renderFacts();
-      setTurnActive(true);
+      // Just-assigned above, so this always targets the now-selected session -
+      // routed through the same helper so state.turnActiveSessionIds (Tasks/
+      // Agents rows) picks it up immediately rather than waiting on the
+      // backend's own chat.turnStarted push.
+      setSessionTurnActive(response.payload.session.sessionId, true);
       ctx.persist();
     }
   }
@@ -1337,6 +1356,13 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     model: ChatModelSelection,
     userRowAlreadyShown = false
   ): Promise<void> {
+    // T3.3: captured now - this function awaits three separate round trips
+    // (confirm dialog, reclaim/resume, sendTurn), and the user may switch to a
+    // different session during any of them. Every appendSystemMessage/
+    // setTurnActive below is guarded on this so a slow revive for `session`
+    // never mutates the transcript or turn state of whatever the user is
+    // looking at by the time each await resolves.
+    const sentSessionId = session.sessionId;
     // A provider switch reboots on the NEW provider's sandbox; same-provider is a
     // plain reconnect. Both keep the durable transcript + project mounts.
     const providerChanged = normalizeProviderId(session.providerId) !== model.providerId;
@@ -1348,7 +1374,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       if (!(await confirmProviderSwitch(session.providerId, model.providerId))) {
         promptInput.value = prompt;
         state.promptDraft = prompt;
-        appendSystemMessage(`Kept this chat on ${providerLabel(session.providerId)}. Its model dropdown is unchanged.`);
+        if (sentSessionId === state.selectedSessionId) {
+          appendSystemMessage(`Kept this chat on ${providerLabel(session.providerId)}. Its model dropdown is unchanged.`);
+        }
         renderProviderControls();
         return;
       }
@@ -1360,9 +1388,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     reconnectLabel = providerChanged ? `Switching to ${providerLabel(model.providerId)}…` : "Reconnecting…";
     setWorkingIndicatorTicking(true);
     refreshControls();
-    appendSystemMessage(providerChanged
-      ? `Switching this chat to ${providerLabel(model.providerId)} - restarting the backend and replaying context…`
-      : "Reconnecting the chat - history, context, and project mounts are kept…");
+    if (sentSessionId === state.selectedSessionId) {
+      appendSystemMessage(providerChanged
+        ? `Switching this chat to ${providerLabel(model.providerId)} - restarting the backend and replaying context…`
+        : "Reconnecting the chat - history, context, and project mounts are kept…");
+    }
     // Send the composer model so a provider switch rebuilds the sandbox for the
     // NEW agent (resuming without it booted the OLD provider, then the turn failed
     // with a provider mismatch). Send NO workspace: the host re-mounts the
@@ -1372,13 +1402,15 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     // provider switch adds the model so reclaim rebuilds on the new agent. Ended/
     // failed sessions resume (which already rebuilds for the model's provider).
     const reviveResponse = isActive
-      ? await request({ type: "chat.reclaim", sessionId: session.sessionId, ...(providerChanged ? { model } : {}) })
-      : await request({ type: "chat.resumeSession", sessionId: session.sessionId, model });
+      ? await request({ type: "chat.reclaim", sessionId: sentSessionId, ...(providerChanged ? { model } : {}) })
+      : await request({ type: "chat.resumeSession", sessionId: sentSessionId, model });
     starting = false;
     reconnecting = false;
     if (!reviveResponse.ok) {
       setWorkingIndicatorTicking(false);
-      appendSystemMessage(`Couldn't ${providerChanged ? "switch" : "reconnect"} the chat: ${reviveResponse.error.message}`, "error", true);
+      if (sentSessionId === state.selectedSessionId) {
+        appendSystemMessage(`Couldn't ${providerChanged ? "switch" : "reconnect"} the chat: ${reviveResponse.error.message}`, "error", true);
+      }
       refreshControls();
       return;
     }
@@ -1390,11 +1422,13 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       renderFacts();
       ctx.persist();
     }
-    setTurnActive(true);
-    const sendResponse = await request({ type: "chat.sendTurn", sessionId: session.sessionId, prompt, model });
+    setSessionTurnActive(sentSessionId, true);
+    const sendResponse = await request({ type: "chat.sendTurn", sessionId: sentSessionId, prompt, model });
     if (!sendResponse.ok) {
-      setTurnActive(false);
-      appendSystemMessage(`Couldn't send: ${sendResponse.error.message}`, "error", true);
+      setSessionTurnActive(sentSessionId, false);
+      if (sentSessionId === state.selectedSessionId) {
+        appendSystemMessage(`Couldn't send: ${sendResponse.error.message}`, "error", true);
+      }
     }
   }
 
@@ -1409,6 +1443,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (turnActive || backendBusy || starting) return;
     const session = currentSession(state);
     if (!session) return;
+    // T3.3's capture rule: the confirm dialog and the restart request below
+    // both yield, and the user can select a DIFFERENT session while either is
+    // pending - the restart must target the session this change was made ON,
+    // and its transcript lines must never land in another session's view.
+    const switchSessionId = session.sessionId;
     const selection = currentModelSelection();
     const providerChanged = normalizeProviderId(session.providerId) !== selection.providerId;
     // A model-only change (same provider) needs no restart - it rides the next
@@ -1426,16 +1465,20 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     reconnectLabel = `Switching to ${providerLabel(selection.providerId)}…`;
     setWorkingIndicatorTicking(true);
     refreshControls();
-    appendSystemMessage(`Switching this chat to ${providerLabel(selection.providerId)} - restarting the backend and replaying context…`);
-    const response = await request({ type: "chat.restartBackend", sessionId: state.selectedSessionId, model: selection });
+    if (switchSessionId === state.selectedSessionId) {
+      appendSystemMessage(`Switching this chat to ${providerLabel(selection.providerId)} - restarting the backend and replaying context…`);
+    }
+    const response = await request({ type: "chat.restartBackend", sessionId: switchSessionId, model: selection });
     backendBusy = false;
     reconnecting = false;
     setWorkingIndicatorTicking(false);
     if (!response.ok) {
-      appendSystemMessage(`Couldn't switch to ${providerLabel(selection.providerId)}: ${response.error.message}`, "error", true);
-      // Revert the selects to the session's actual provider/model.
-      renderProviderControls();
-      refreshControls();
+      if (switchSessionId === state.selectedSessionId) {
+        appendSystemMessage(`Couldn't switch to ${providerLabel(selection.providerId)}: ${response.error.message}`, "error", true);
+        // Revert the selects to the session's actual provider/model.
+        renderProviderControls();
+        refreshControls();
+      }
       return;
     }
     if (response.payload.type === "chat.restartBackend") {
@@ -1446,8 +1489,10 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
       renderFacts();
       ctx.persist();
     }
-    appendSystemMessage(`Switched to ${providerLabel(selection.providerId)}. Send a message to continue.`);
-    refreshControls();
+    if (switchSessionId === state.selectedSessionId) {
+      appendSystemMessage(`Switched to ${providerLabel(selection.providerId)}. Send a message to continue.`);
+      refreshControls();
+    }
   }
 
   function beginRename(): void {
@@ -1775,8 +1820,9 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   async function endSessionAction(): Promise<void> {
-    if (!state.selectedSessionId) return;
-    const response = await request({ type: "chat.endSession", sessionId: state.selectedSessionId });
+    const endedSessionId = state.selectedSessionId;
+    if (!endedSessionId) return;
+    const response = await request({ type: "chat.endSession", sessionId: endedSessionId });
     if (!response.ok) {
       logChat(`end failed: ${response.error.message}`);
       return;
@@ -1784,7 +1830,11 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     if (response.payload.type === "chat.endSession") {
       upsertSession(state, response.payload.session);
       logChat("session ended; runtime removed");
-      setTurnActive(false);
+      // T3.3: a session the user has since switched away from is definitely no
+      // longer running a turn, but that must not clear the flag for whatever
+      // OTHER session is on screen now - setSessionTurnActive only mirrors
+      // into the local flag when endedSessionId is still selected.
+      setSessionTurnActive(endedSessionId, false);
       renderHeader();
       renderProviderControls();
       ctx.persist();
@@ -1862,14 +1912,20 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
   }
 
   async function loadDiffStatus(): Promise<void> {
+    // T3.4: mirrors pollRawStream's staleness guard - without it, a slow
+    // diff.status response for a session the user has since switched away
+    // from would overwrite the NEW session's Changes tray.
+    const sessionId = state.selectedSessionId;
     const response = await request({
       type: "diff.status",
-      ...(state.selectedSessionId ? { sessionId: state.selectedSessionId, view: diffView } : {})
+      ...(sessionId ? { sessionId, view: diffView } : {})
     });
     if (!response.ok) {
       logChat(`diff failed: ${response.error.message}`);
       return;
     }
+    // The selection may have changed while the request was in flight.
+    if (state.selectedSessionId !== sessionId) return;
     if (response.payload.type === "diff.status") {
       diffChanges = response.payload.changes;
       renderChangedFiles();
@@ -2067,6 +2123,30 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     // Only the transcript's working-indicator visibility changed here, and only
     // when the flag actually flipped (avoids clobbering an in-progress render).
     if (changed) renderChat(false);
+  }
+
+  /**
+   * T3.3: records that `sessionId`'s turn started/ended. `turnActive` (above)
+   * is a single flag - it can only ever describe the SELECTED session, since
+   * that's the only one this tab renders. The cross-session tracker
+   * (`state.turnActiveSessionIds`, also fed by the chat.turnStarted/
+   * turnCompleted/run.failed pushes below) is updated unconditionally so
+   * Tasks/Agents rows reflect every session regardless of what's on screen;
+   * the local flag only follows when `sessionId` is STILL the one selected.
+   * Without that guard, an optimistic send on session A (or its later
+   * success/failure) could flip the Stop button/composer for session B after
+   * the user switched to it mid-flight - the flag would then never clear
+   * because B never gets a matching turnCompleted. Every send/revive/end/
+   * reclaim path that reacts to a SPECIFIC session's turn funnels through
+   * this rather than calling setTurnActive directly; selectSession/
+   * resetToNewChat call setTurnActive directly since they are the "read the
+   * state of whatever session is now on screen" side, not a turn transition.
+   */
+  function setSessionTurnActive(sessionId: string, next: boolean): void {
+    if (next) state.turnActiveSessionIds.add(sessionId);
+    else state.turnActiveSessionIds.delete(sessionId);
+    ctx.bridge.hostChanged();
+    if (sessionId === state.selectedSessionId) setTurnActive(next);
   }
 
   // ---------------------------------------------------------------------------
@@ -4657,7 +4737,13 @@ export function createChatTab(ctx: ViewContext): ChatTabView {
     cloneRepos = [];
     openedDiffKeys = new Set();
     sessionHadDiffRows = false;
-    setTurnActive(false);
+    // T3.3: render the NEWLY selected session's own turn state, not a hardcoded
+    // false - state.turnActiveSessionIds already tracks every session with a
+    // running turn (kept current above, regardless of selection), so a session
+    // that has a turn in flight shows "turn in progress" (Stop button, disabled
+    // composer) the moment you switch to it, instead of falsely looking idle
+    // until its next push arrives.
+    setTurnActive(sessionId !== null && state.turnActiveSessionIds.has(sessionId));
     renderHeader();
     renderContextStrip();
     renderProviderControls();

@@ -19,7 +19,7 @@
 
 import { strict as assert } from "node:assert";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -40,13 +40,16 @@ import type {
   ValidationRegistrySettingsUpdate,
   ValidationRuntimeId,
   ValidationRuntimeStore,
+  ValidationTaskOverride,
   TaskId,
   WorkspaceRootId
 } from "@drydock/contracts";
 import {
+  CloneSyncService,
   MemoryLogger,
   ProductEventBus,
   SpawnCommandRunner,
+  validationGuestCommand,
   ValidationJobService,
   VALIDATION_CLEANUP_GUEST_SCRIPT,
   VALIDATION_RUN_GUEST_SCRIPT,
@@ -137,12 +140,12 @@ class LocalExecAdapter implements ValidationExecAdapter {
   };
 
   /** The adapter's own guest sweep script, run locally instead of over ssh. */
-  async sweepGuestJob(jobToken: string, timeoutMs: number, signal?: AbortSignal): Promise<number[]> {
+  async sweepGuestJob(jobToken: string, timeoutMs: number, signal?: AbortSignal, wrapperPid?: number): Promise<number[]> {
     this.sweeps.push(jobToken);
     const result = await this.exec(
       guestJsonCommand(SWEEP_GUEST_JOB_SCRIPT),
       timeoutMs,
-      JSON.stringify({ jobToken }),
+      JSON.stringify({ jobToken, ...(wrapperPid === undefined ? {} : { wrapperPid }) }),
       signal
     );
     if (result.exitCode !== 0) {
@@ -221,6 +224,12 @@ class MemoryValidationStore implements ValidationRuntimeStore {
   async setTaskOverride(taskId: TaskId, runtimeId: ValidationRuntimeId | null): Promise<void> {
     if (runtimeId === null) this.taskOverrides.delete(String(taskId));
     else this.taskOverrides.set(String(taskId), runtimeId);
+  }
+
+  // T5.2: only ValidationAppService.deleteRuntime calls this; this fixture
+  // never exercises that path.
+  async listTaskOverridesForRuntime(): Promise<ValidationTaskOverride[]> {
+    throw new Error("not used");
   }
 
   async getQuarantine(runtimeId: ValidationRuntimeId): Promise<ValidationQuarantineRecord | null> {
@@ -574,20 +583,25 @@ test("blender: a hung DCC trips the stall watchdog; the guest sweep reaps what i
     assert.match(receipt?.summary ?? "", /No output for/);
     assert.equal(bench.adapter.sweeps.length, 1, "a stall must sweep the guest job");
 
-    // Ground truth for the M1 runbook: locally, aborting the exec kills the
-    // token-carrying wrapper BEFORE the sweep runs, so the token-anchored
-    // parent walk may find nothing and the DCC child survives as an orphan.
-    // Over ssh the wrapper's fate depends on sshd's channel-close behavior —
-    // this line records what actually happened on this transport.
+    // T5.1 regression: locally, aborting the exec kills the token-carrying
+    // wrapper BEFORE the sweep runs, so the token-anchored walk alone finds
+    // nothing - exactly the orphan gap the wrapper-PID root closes. The
+    // product sweep must now reap the orphaned DCC child on its own.
     const survivors = await livePidsByCommandLine(marker);
     console.log(
-      `[dcc-sweep] token sweep killed ${String(bench.adapter.sweptPids.length)} pid(s); ` +
-      `${String(survivors.length)} orphaned DCC process(es) survived the sweep`
+      `[dcc-sweep] sweep killed ${String(bench.adapter.sweptPids.length)} pid(s); ` +
+      `${String(survivors.length)} orphaned DCC process(es) survived`
     );
-    await stopPids(survivors);
-    const afterCleanup = await livePidsByCommandLine(marker);
-    assert.equal(afterCleanup.length, 0, "no stall process may outlive the test");
+    assert.equal(
+      survivors.length,
+      0,
+      "the wrapper-PID-rooted sweep must reap the orphaned DCC without test-side help"
+    );
+    assert.ok(bench.adapter.sweptPids.length > 0, "the sweep must report the PIDs it stopped");
   } finally {
+    // Test hygiene, not the product path (T4.6): an assertion failure above
+    // must not leak a 10-minute sleeper.
+    await stopPids(await livePidsByCommandLine(marker));
     await bench.dispose();
   }
 });
@@ -640,5 +654,62 @@ test("hython: real node-graph validation passes cold and warm through the same q
     assert.equal(bench.adapter.sweeps.length, 0);
   } finally {
     await bench.dispose();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Sync script (git + PowerShell only — no DCC required)
+// ---------------------------------------------------------------------------
+
+test("sync: a modify+delete changeset ships as a workspace patch the real guest script applies", {
+  skip: ENABLED ? false : DISABLED_REASON,
+  timeout: 120_000
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "drydock-sync-regress-"));
+  const runner = new SpawnCommandRunner();
+  const git = async (cwd: string, ...args: string[]): Promise<void> => {
+    const result = await runner.run("git", args, { cwd, timeoutMs: 60_000 });
+    assert.equal(result.exitCode, 0, `git ${args.join(" ")}: ${result.stderr || result.stdout}`);
+  };
+  try {
+    // A real clone: base content frozen as refs/sync/base, then agent work
+    // that MODIFIES one file and DELETES another - the exact shape the
+    // pre-T1.1 incremental patch could never apply in an empty guest repo
+    // (my original live fire only ever shipped brand-new files).
+    const clone = join(root, "clone");
+    await mkdir(clone, { recursive: true });
+    await git(clone, "init");
+    await git(clone, "config", "user.name", "drydock-test");
+    await git(clone, "config", "user.email", "drydock-test@localhost");
+    await writeFile(join(clone, "scene.py"), "print('v1')\n", "utf8");
+    await writeFile(join(clone, "legacy.py"), "print('old')\n", "utf8");
+    await git(clone, "add", "-A");
+    await git(clone, "commit", "-m", "base");
+    await git(clone, "update-ref", "refs/sync/base", "HEAD");
+    await writeFile(join(clone, "scene.py"), "print('v2')\n", "utf8");
+    await rm(join(clone, "legacy.py"));
+
+    const sync = new CloneSyncService({ runner });
+    const shipped = await sync.validationWorkspacePatch(clone);
+    assert.ok(shipped, "modify+delete must produce a shippable workspace patch");
+
+    // Drive the REAL guest sync script over the local transport.
+    const jobRoot = join(root, "jobs");
+    const adapter = new LocalExecAdapter(root);
+    const result = await adapter.exec(
+      validationGuestCommand(VALIDATION_SYNC_GUEST_SCRIPT),
+      120_000,
+      JSON.stringify({
+        jobRoot,
+        jobId: "vjob-sync-regress",
+        patches: [{ repoName: "pipeline", patchBase64: Buffer.from(shipped.patch, "utf8").toString("base64") }]
+      })
+    );
+    assert.equal(result.exitCode, 0, `sync script failed: ${result.stdout} ${result.stderr}`);
+    const ws = join(jobRoot, "vjob-sync-regress", "ws", "pipeline");
+    assert.equal(await readFile(join(ws, "scene.py"), "utf8"), "print('v2')\n");
+    assert.equal(existsSync(join(ws, "legacy.py")), false, "deleted files must not reach the guest");
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

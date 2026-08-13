@@ -15,7 +15,7 @@ import type {
   TurnResult,
   WorkTaskStore
 } from "@drydock/contracts";
-import type { Logger, ProductEventBus } from "@drydock/core";
+import { errorMessage, type Logger, type ProductEventBus } from "@drydock/core";
 
 interface QuestionPort {
   listQuestions(status?: AgentQuestionStatus, sessionId?: SessionId): Promise<AgentQuestionRecord[]>;
@@ -185,6 +185,3 @@ function isWordCharacter(value: string | undefined): boolean {
   return value !== undefined && /[\p{L}\p{N}_]/u.test(value);
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

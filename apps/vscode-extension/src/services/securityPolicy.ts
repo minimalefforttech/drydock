@@ -13,6 +13,7 @@ import path from "node:path";
 import type { ValidationTopologyPreset } from "@drydock/contracts";
 import {
   assertMountAllowed,
+  errorMessage,
   isHostPathAbsolute,
   isNativeHostPathAbsolute,
   isPathDenied,
@@ -104,9 +105,13 @@ export class EffectiveSecurityPolicy {
   readonly cloneOmission: ClonePathOmission;
   /**
    * Managed validation-runtime limits, present only when the studio policy
-   * declares them. Nothing enforces them yet: the registry service reads this
-   * surface in M7 to honor the pin, the cap, the creation gate, and the image
-   * allowlist. Absent means "no managed limit", not "denied".
+   * declares them. Enforced in ValidationAppService, which reads this surface
+   * on every registry write: assertImageAllowed/assertProfileExceptionAllowed
+   * reject a create/update that violates the allowlist or the exception gate;
+   * setSettings rejects widening the topology past topologyPin; and
+   * effectiveSettings folds topologyPin in as the preset and warmCap in as
+   * min(personal, managed), so a wider personal value is stored but never
+   * takes effect. Absent means "no managed limit", not "denied".
    */
   readonly validationRuntimes?: ValidationRuntimePolicy;
 
@@ -601,6 +606,3 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

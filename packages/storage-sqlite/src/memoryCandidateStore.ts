@@ -25,6 +25,32 @@ export class SqliteMemoryCandidateStore implements MemoryCandidateStore {
   constructor(private readonly connection: SqliteConnection) {}
 
   async insertCandidate(record: MemoryCandidateRecord): Promise<void> {
+    this.runInsert(record);
+  }
+
+  /**
+   * Atomic capture guard (T3.9). The SELECT and the INSERT below run
+   * synchronously on this one connection with no `await` between them (this
+   * method has no internal await at all), so the whole check-then-insert
+   * completes before a concurrently-scheduled call to this method can begin -
+   * two overlapping captures of identical content cannot both observe "no
+   * pending duplicate yet". See MemoryService.captureCandidates, which relies
+   * on this instead of its own (racy, cross-call) in-memory dedupe set.
+   */
+  async insertCandidateIfNoPendingDuplicate(record: MemoryCandidateRecord): Promise<boolean> {
+    const existing = this.connection.database.prepare(`
+      SELECT 1 FROM memory_candidates
+      WHERE status = 'pending' AND content = ?
+      LIMIT 1
+    `).get(record.content);
+    if (existing !== undefined) {
+      return false;
+    }
+    this.runInsert(record);
+    return true;
+  }
+
+  private runInsert(record: MemoryCandidateRecord): void {
     this.connection.database.prepare(`
       INSERT INTO memory_candidates (
         memory_candidate_id,
@@ -81,12 +107,20 @@ export class SqliteMemoryCandidateStore implements MemoryCandidateStore {
     return rows.map(mapCandidate);
   }
 
-  async updateCandidateStatus(memoryCandidateId: MemoryCandidateId, status: MemoryCandidateStatus, resolvedAt: string): Promise<void> {
-    this.connection.database.prepare(`
+  /**
+   * Compare-and-swap (T3.9): the WHERE clause only matches a still-pending
+   * row, so a concurrent resolve that already transitioned it makes this a
+   * no-op - `changes` comes back 0 and the caller (MemoryService.resolve)
+   * treats that as "someone else already resolved this" instead of clobbering
+   * their outcome.
+   */
+  async updateCandidateStatus(memoryCandidateId: MemoryCandidateId, status: MemoryCandidateStatus, resolvedAt: string): Promise<boolean> {
+    const result = this.connection.database.prepare(`
       UPDATE memory_candidates
       SET status = ?, resolved_at = ?
-      WHERE memory_candidate_id = ?
+      WHERE memory_candidate_id = ? AND status = 'pending'
     `).run(status, resolvedAt, memoryCandidateId);
+    return Number(result.changes) === 1;
   }
 
   async updateCandidateContent(memoryCandidateId: MemoryCandidateId, edits: MemoryCandidateEdits): Promise<void> {

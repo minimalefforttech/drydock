@@ -1004,6 +1004,106 @@ test("outboundChangesetPatch captures agent work as the exact pull delta, null w
   }
 });
 
+test("validationWorkspacePatch ships full-content new-file diffs a fresh repo can apply", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({
+    "a.txt": "alpha\n",
+    "b.txt": "bravo\n",
+    "keep.txt": "keep\n",
+    "renamed-src.txt": "a long enough body to carry rename similarity detection\nsecond line\nthird line\n"
+  });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+
+    // Pristine clone: nothing to ship.
+    assert.equal(await svc.validationWorkspacePatch(clonePath), null);
+
+    // Agent work: modify + delete + rename + add - exactly the shapes an
+    // incremental base..HEAD patch cannot apply in an empty guest repo (T1.1).
+    await writeFile(join(clonePath, "a.txt"), "alpha agent\n", "utf8");
+    await git(clonePath, "rm", "--quiet", "b.txt");
+    await git(clonePath, "mv", "renamed-src.txt", "renamed-dst.txt");
+    await writeAll(join(clonePath, "sub/new.txt"), "fresh\n");
+
+    const shipped = await svc.validationWorkspacePatch(clonePath);
+    assert.ok(shipped);
+    assert.deepEqual([...shipped.paths], ["a.txt", "renamed-dst.txt", "sub/new.txt"]);
+    assert.equal(shipped.fileCount, 3);
+    // Every hunk is a full-content add; nothing references base blobs.
+    assert.match(shipped.patch, /new file mode/);
+    assert.doesNotMatch(shipped.patch, /^deleted file mode/m);
+    assert.doesNotMatch(shipped.patch, /^rename (from|to) /m);
+    assert.doesNotMatch(shipped.patch, /keep\.txt/);
+
+    // The T1.1 regression: the patch must apply in a freshly-init'ed repo
+    // with no base blobs, exactly like the validation guest workspace.
+    const guestWs = join(root, "guest-ws");
+    await mkdir(guestWs, { recursive: true });
+    await git(guestWs, "init");
+    await git(guestWs, "config", "core.autocrlf", "false");
+    const patchFile = join(root, "shipped.patch");
+    await writeFile(patchFile, shipped.patch, "utf8");
+    await git(guestWs, "apply", "--binary", "--whitespace=nowarn", patchFile);
+
+    assert.equal(await read(join(guestWs, "a.txt")), "alpha agent\n");
+    assert.equal(await read(join(guestWs, "sub/new.txt")), "fresh\n");
+    assert.equal(await fileExists(join(guestWs, "renamed-dst.txt")), true);
+    assert.equal(await fileExists(join(guestWs, "renamed-src.txt")), false);
+    assert.equal(await fileExists(join(guestWs, "b.txt")), false, "deleted paths never reach the guest");
+    assert.equal(await fileExists(join(guestWs, "keep.txt")), false, "untouched paths never ship");
+
+    // The capture seam still produces the incremental delta alongside.
+    const captured = await svc.outboundChangesetPatch(clonePath);
+    assert.ok(captured);
+    assert.ok(captured.paths.includes("b.txt"), "capture keeps the deletion");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("validationWorkspacePatch: deletion-only changesets ship nothing; large path sets chunk", async () => {
+  const { root, localRepoPath, cleanup } = await makeLocalRepo({ "only.txt": "gone\n" });
+  try {
+    const svc = service();
+    const { clonePath } = await svc.initClone({
+      localRepoPath,
+      cloneParentDir: join(root, "repos"),
+      name: "proj"
+    });
+
+    // Deletion-only: the changeset exists, but a guest workspace that never
+    // had the file has nothing to apply - honest null, not a broken patch.
+    await git(clonePath, "rm", "--quiet", "only.txt");
+    assert.equal(await svc.validationWorkspacePatch(clonePath), null);
+
+    // 140 long-named files overflow one pathspec chunk; the concatenated
+    // multi-chunk patch must still be one valid, applicable patch.
+    const stem = "x".repeat(40);
+    for (let index = 0; index < 140; index += 1) {
+      await writeAll(join(clonePath, `bulk/${stem}-${String(index).padStart(3, "0")}.txt`), `line ${String(index)}\n`);
+    }
+    const shipped = await svc.validationWorkspacePatch(clonePath);
+    assert.ok(shipped);
+    assert.equal(shipped.fileCount, 140);
+
+    const guestWs = join(root, "guest-ws");
+    await mkdir(guestWs, { recursive: true });
+    await git(guestWs, "init");
+    await git(guestWs, "config", "core.autocrlf", "false");
+    const patchFile = join(root, "shipped.patch");
+    await writeFile(patchFile, shipped.patch, "utf8");
+    await git(guestWs, "apply", "--binary", "--whitespace=nowarn", patchFile);
+    assert.equal(await read(join(guestWs, `bulk/${stem}-139.txt`)), "line 139\n");
+    assert.equal(await fileExists(join(guestWs, "only.txt")), false);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("initClone seedPatches land upstream output inside the sync base", async () => {
   const { root, localRepoPath, cleanup } = await makeLocalRepo({ "a.txt": "alpha\n" });
   try {

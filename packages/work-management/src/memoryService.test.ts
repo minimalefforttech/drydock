@@ -57,6 +57,50 @@ test("resolve approves/rejects once and lists approved contents newest-first", a
   assert.deepEqual(await service.listApprovedContents(1), ["third"]);
 });
 
+test("T3.9: concurrent captureCandidates of identical content lands only one pending row", async () => {
+  const store = new MemoryMemoryStore();
+  const service = new MemoryService(options(store));
+
+  // Two "fire-and-forget" captures proposing the identical content, launched
+  // together (mirrors two overlapping turns). Both calls read the store
+  // before either has inserted, so the in-process dedupe scan alone cannot
+  // stop this - only the store's atomic insertCandidateIfNoPendingDuplicate
+  // (checked in the same synchronous call as the insert) can.
+  const [first, second] = await Promise.all([
+    service.captureCandidates("session-1", [{ content: "run the linter" }]),
+    service.captureCandidates("session-2", [{ content: "run the linter" }])
+  ]);
+
+  // Exactly one of the two calls actually created a record; the loser's
+  // insert was skipped by the atomic guard and returned nothing.
+  assert.equal(first.length + second.length, 1);
+  assert.equal((await service.listCandidates("pending")).length, 1);
+});
+
+test("T3.9: concurrent resolve of the same candidate applies exactly once", async () => {
+  const store = new MemoryMemoryStore();
+  const service = new MemoryService(options(store));
+  const [created] = await service.captureCandidates("session-1", [{ content: "note" }]);
+  const id = created!.memoryCandidateId;
+
+  // Both calls read status "pending" before either writes (the upfront check
+  // in resolve() is TOCTOU-prone by itself), so only the store-level
+  // compare-and-swap on status='pending' can stop a double-apply.
+  const results = await Promise.allSettled([service.resolve(id, true), service.resolve(id, false)]);
+
+  const fulfilled = results.filter((result): result is PromiseFulfilledResult<MemoryCandidateRecord> => result.status === "fulfilled");
+  const rejected = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  // One call wins the CAS; the other observes the loss and throws instead of
+  // silently returning an outcome it did not actually apply.
+  assert.equal(fulfilled.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.match(String(rejected[0]?.reason), /already (approved|rejected)/);
+
+  // The persisted state matches whichever call actually won the race.
+  const final = await service.getCandidate(id);
+  assert.equal(final?.status, fulfilled[0]?.value.status);
+});
+
 test("getCandidate fetches by id and returns null when unknown", async () => {
   const store = new MemoryMemoryStore();
   const service = new MemoryService(options(store));
@@ -95,6 +139,21 @@ class MemoryMemoryStore implements MemoryCandidateStore {
     return Promise.resolve();
   }
 
+  /**
+   * Mirrors SqliteMemoryCandidateStore.insertCandidateIfNoPendingDuplicate:
+   * check-then-push with no `await` anywhere in this method, so it cannot be
+   * interleaved by a concurrently-scheduled call the way a check spread
+   * across multiple awaited store calls could be (T3.9).
+   */
+  insertCandidateIfNoPendingDuplicate(record: MemoryCandidateRecord): Promise<boolean> {
+    const duplicate = this.candidates.some((existing) => existing.status === "pending" && existing.content === record.content);
+    if (duplicate) {
+      return Promise.resolve(false);
+    }
+    this.candidates.push(record);
+    return Promise.resolve(true);
+  }
+
   getCandidate(memoryCandidateId: MemoryCandidateId): Promise<MemoryCandidateRecord | null> {
     return Promise.resolve(this.candidates.find((record) => record.memoryCandidateId === memoryCandidateId) ?? null);
   }
@@ -105,13 +164,15 @@ class MemoryMemoryStore implements MemoryCandidateStore {
     return Promise.resolve([...filtered].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)));
   }
 
-  updateCandidateStatus(memoryCandidateId: MemoryCandidateId, status: MemoryCandidateStatus, resolvedAt: string): Promise<void> {
+  /** Mirrors the SQLite store's compare-and-swap: a no-op off "pending" (T3.9). */
+  updateCandidateStatus(memoryCandidateId: MemoryCandidateId, status: MemoryCandidateStatus, resolvedAt: string): Promise<boolean> {
     const index = this.candidates.findIndex((record) => record.memoryCandidateId === memoryCandidateId);
     const existing = this.candidates[index];
-    if (existing !== undefined) {
-      this.candidates[index] = { ...existing, status, resolvedAt };
+    if (existing === undefined || existing.status !== "pending") {
+      return Promise.resolve(false);
     }
-    return Promise.resolve();
+    this.candidates[index] = { ...existing, status, resolvedAt };
+    return Promise.resolve(true);
   }
 
   updateCandidateContent(memoryCandidateId: MemoryCandidateId, edits: MemoryCandidateEdits): Promise<void> {

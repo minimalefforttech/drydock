@@ -119,6 +119,42 @@ test("migrations sanitize event payloads written by older releases", async () =>
   }
 });
 
+test("listEvents degrades a row with corrupt payload_json instead of throwing (T3.7)", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-event-corrupt-"));
+  const connection = new SqliteConnection(path.join(dir, "state.sqlite"));
+  try {
+    applyMigrations(connection);
+    // Bypass appendStoredEvent (which always writes valid JSON) to simulate a
+    // hand-corrupted or partially-written row landing in the column.
+    connection.database.prepare(`
+      INSERT INTO session_events (id, session_id, run_id, event_type, created_at, payload_json)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run("corrupt-event", "session-corrupt", null, "agent.text", "2026-08-13T00:00:00.000Z", "{not valid json");
+
+    const eventStore = new SqliteEventStore(connection);
+    await eventStore.appendStoredEvent({
+      id: asId<"EventId">("event-ok"),
+      sessionId: asId<"SessionId">("session-corrupt"),
+      eventType: "agent.text",
+      createdAt: "2026-08-13T00:00:01.000Z",
+      payload: { text: "still loads" }
+    });
+
+    // The whole session must still load: the corrupt row degrades to an empty
+    // payload instead of throwing out of listEvents' .map() and losing the
+    // healthy row that follows it.
+    const events = await eventStore.listEvents(asId<"SessionId">("session-corrupt"));
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.id, "corrupt-event");
+    assert.deepEqual(events[0]?.payload, {});
+    assert.equal(events[1]?.id, "event-ok");
+    assert.deepEqual(events[1]?.payload, { text: "still loads" });
+  } finally {
+    connection.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("legacy credential bytes are erased from the database and migration WAL", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-event-erasure-"));
   const databasePath = path.join(dir, "state.sqlite");

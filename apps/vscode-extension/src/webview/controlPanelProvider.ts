@@ -54,7 +54,7 @@ import {
   type WorkTaskRecord,
   type WorkTaskSummary
 } from "@drydock/contracts";
-import { hostPathIdentityKey, sandboxRuntimePath, type AgentQuestionService, type Logger, type ProductBusEvent } from "@drydock/core";
+import { hostPathIdentityKey, sandboxRuntimePath, sensitivePathMatch, type AgentQuestionService, type Logger, type ProductBusEvent } from "@drydock/core";
 import type { BoardService, McpRegistryService, MemoryService, SubtaskService, TaskService } from "@drydock/work-management";
 import type { Backend, BackendReady } from "../compositionRoot.js";
 import type { PlannerAppService } from "../services/plannerAppService.js";
@@ -71,6 +71,7 @@ import {
 import { ProviderConnectService } from "../services/providerConnectService.js";
 import { productionSummaryOptions, toAccessRequestSummary, type WorkspaceReviewAppService } from "../services/workspaceReviewAppService.js";
 import type { ValidationAppService } from "../services/validationAppService.js";
+import type { EffectiveSecurityPolicy } from "../services/securityPolicy.js";
 import { openBaselineDiff } from "./baselineDiff.js";
 import { memoryUri } from "./memoryContentProvider.js";
 import { memoryAnchorPorts, memoryTaskTitles, resolveMemoryEdits, toMemoryCandidateSummary } from "./memoryShared.js";
@@ -151,8 +152,14 @@ function toMcpServerSummary(record: McpServerRecord): McpServerSummary {
  * `:line[:col]`, external http(s) URLs (open in browser), and the sandbox
  * drive-mirror path form (`/c/Users/...` → `C:\Users\...`) so links to mounted
  * host folders open in the editor at the right line.
+ *
+ * Agent output is untrusted - an indirect prompt injection can plant a link to
+ * a secret - so the host path must clear the same policy check
+ * `resolvePolicyOverlayFile` runs before ever reading an overlay file. No
+ * policy loaded (the managed policy failed at startup) refuses too, mirroring
+ * `resolvePolicyOverlayFile`'s own no-policy-means-denied default.
  */
-export async function openAgentFileRef(ref: string): Promise<boolean> {
+export async function openAgentFileRef(ref: string, policy: EffectiveSecurityPolicy | undefined): Promise<boolean> {
   const trimmed = ref.trim();
   if (/^https?:\/\//i.test(trimmed)) {
     await vscode.env.openExternal(vscode.Uri.parse(trimmed));
@@ -165,7 +172,23 @@ export async function openAgentFileRef(ref: string): Promise<boolean> {
   const col = suffix && suffix[2] !== undefined ? Number(suffix[2]) : undefined;
   const hostPath = runtimePathToHostPath(rawPath);
   try {
-    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(hostPath));
+    if (policy === undefined) {
+      throw new Error("no security policy is loaded");
+    }
+    // assertHostFileAllowed canonicalizes (realpath) before checking deniedPaths/
+    // allowedProjectRoots, exactly like resolvePolicyOverlayFile - a trailing-dot,
+    // 8.3, or symlink alias cannot dodge a denied or out-of-scope path this way.
+    const canonicalPath = policy.assertHostFileAllowed(hostPath);
+    // Basename patterns too: deniedPaths covers the credential DIRECTORIES,
+    // but a stray `.pem`/`.env`/`id_rsa` sitting inside an allowed project
+    // root passes that check, and an agent-authored link is exactly the
+    // click-to-exfiltrate channel the sensitive matcher exists for. Mount
+    // approvals escalate on this signal; a one-click open must not undercut it.
+    const sensitive = sensitivePathMatch(canonicalPath);
+    if (sensitive !== null) {
+      throw new Error(`"${sensitive.match}" matches a sensitive-file pattern; open it from the editor yourself if you mean to.`);
+    }
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(canonicalPath));
     const editor = await vscode.window.showTextDocument(doc, { preview: true });
     if (line !== undefined && Number.isFinite(line)) {
       const position = new vscode.Position(Math.max(0, line - 1), Math.max(0, (col ?? 1) - 1));
@@ -282,7 +305,9 @@ export class ControlPanelProvider {
 
   constructor(
     private readonly backend: Backend,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    /** Undefined only when the managed policy failed to load; chat.openFile fails closed then. */
+    private readonly securityPolicy: EffectiveSecurityPolicy | undefined
   ) {
     if (backend.available) {
       // The subscription lives for the extension lifetime; push() is a no-op
@@ -900,7 +925,7 @@ export class ControlPanelProvider {
         return;
       }
       case "chat.openFile": {
-        const opened = await openAgentFileRef(payload.path);
+        const opened = await openAgentFileRef(payload.path, this.securityPolicy);
         this.respond(request.requestId, { type: "chat.openFile", opened });
         return;
       }
@@ -1251,7 +1276,12 @@ export class ControlPanelProvider {
       }
       case "policy.resolveAccess": {
         const workspaceReview = this.requireWorkspaceReview();
-        const accessRequest = await workspaceReview.resolveAccess(payload.accessRequestId, payload.approve, payload.editedHostPath);
+        const accessRequest = await workspaceReview.resolveAccess(
+          payload.accessRequestId,
+          payload.approve,
+          payload.editedHostPath,
+          payload.confirmedEscalation
+        );
         this.respond(request.requestId, { type: "policy.resolveAccess", accessRequest });
         // Approval already applied the mount before marking the request approved;
         // denial is persisted immediately. Once no pending requests remain, clear

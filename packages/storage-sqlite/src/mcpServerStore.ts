@@ -19,6 +19,15 @@ import type { SqliteConnection } from "./sqliteConnection.js";
 export class SqliteMcpServerStore implements McpServerStore {
   constructor(private readonly connection: SqliteConnection) {}
 
+  /**
+   * The conflict target here is server_id (an edit keeps its row), not name -
+   * but migrations.ts also carries a `UNIQUE(name COLLATE NOCASE)` index
+   * (T3.6), so a name collision with a DIFFERENT row (a concurrent create, or
+   * a rename onto an existing name) still throws rather than silently
+   * producing two rows that fight over the same key when rendered to
+   * .mcp.json. The service layer maps that raw constraint error to a
+   * readable message.
+   */
   async upsertServer(record: McpServerRecord): Promise<void> {
     this.connection.database.prepare(`
       INSERT INTO mcp_servers (
@@ -62,9 +71,18 @@ export class SqliteMcpServerStore implements McpServerStore {
     return rows.map(mapServer);
   }
 
+  /** Deletes the server row and its override rows in one transaction (T3.8). */
   async deleteServer(serverId: McpServerId): Promise<void> {
-    this.connection.database.prepare(`DELETE FROM mcp_servers WHERE server_id = ?`).run(serverId);
-    this.connection.database.prepare(`DELETE FROM mcp_overrides WHERE server_id = ?`).run(serverId);
+    const db = this.connection.database;
+    db.exec("BEGIN");
+    try {
+      db.prepare(`DELETE FROM mcp_servers WHERE server_id = ?`).run(serverId);
+      db.prepare(`DELETE FROM mcp_overrides WHERE server_id = ?`).run(serverId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   async setOverride(override: McpOverride): Promise<void> {

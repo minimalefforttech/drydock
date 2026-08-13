@@ -150,12 +150,31 @@ export class SqliteRuntimeInventoryStore implements RuntimeInventoryStore {
   async purgeRuntimes(input: { now: string; removedOlderThanMs: number; lostOlderThanMs: number }): Promise<number> {
     const removedCutoff = new Date(new Date(input.now).getTime() - input.removedOlderThanMs).toISOString();
     const lostCutoff = new Date(new Date(input.now).getTime() - input.lostOlderThanMs).toISOString();
-    const result = this.connection.database.prepare(`
-      DELETE FROM runtime_instances
+    const eligible = `
+      SELECT runtime_id FROM runtime_instances
       WHERE (status = 'removed' AND COALESCE(removed_at, started_at) < ?)
          OR (status = 'lost' AND COALESCE(last_seen_at, started_at) < ?)
-    `).run(removedCutoff, lostCutoff);
-    return Number(result.changes);
+    `;
+    // Cleanup-attempt rows reference runtime_instances WITHOUT ON DELETE
+    // CASCADE, and every normally-removed runtime has at least one (cleanup
+    // records its attempt before flipping status), so a bare parent delete
+    // aborts on the foreign key and takes startup reconciliation down with
+    // it. The retention decision deems the runtime's whole history
+    // disposable, so drop the ledger rows in the same transaction.
+    this.connection.database.exec("BEGIN IMMEDIATE;");
+    try {
+      this.connection.database.prepare(`
+        DELETE FROM runtime_cleanup_attempts WHERE runtime_id IN (${eligible})
+      `).run(removedCutoff, lostCutoff);
+      const result = this.connection.database.prepare(`
+        DELETE FROM runtime_instances WHERE runtime_id IN (${eligible})
+      `).run(removedCutoff, lostCutoff);
+      this.connection.database.exec("COMMIT;");
+      return Number(result.changes);
+    } catch (error) {
+      this.connection.database.exec("ROLLBACK;");
+      throw error;
+    }
   }
 }
 

@@ -57,6 +57,16 @@ export async function openBaselineDiff(
  * folder open through a mapped drive that VS Code already trusts.
  */
 function currentFileUri(rootPath: string, relativePath: string): vscode.Uri {
+  // Mirrors SessionDiffService's resolveInsideRoot containment check: relativePath
+  // is host-computed today (not reachable via normal UI), but nothing at this
+  // call site stopped a forged "..\\..\\.ssh\\id_rsa" from opening as a "diff"
+  // before. Checked once, up front, so it covers both branches below.
+  const resolvedRoot = path.resolve(rootPath);
+  const absolutePath = path.resolve(resolvedRoot, relativePath);
+  const relative = path.relative(resolvedRoot, absolutePath);
+  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Path ${relativePath} escapes the baseline root.`);
+  }
   const rootKey = hostPathIdentityKey(rootPath);
   const openRoot = (vscode.workspace.workspaceFolders ?? []).find((folder) =>
     folder.uri.scheme === "file" && hostPathIdentityKey(folder.uri.fsPath) === rootKey
@@ -65,7 +75,7 @@ function currentFileUri(rootPath: string, relativePath: string): vscode.Uri {
     const parts = relativePath.replace(/\\/g, "/").split("/").filter(Boolean);
     return vscode.Uri.joinPath(openRoot.uri, ...parts);
   }
-  return vscode.Uri.file(path.join(rootPath, relativePath));
+  return vscode.Uri.file(absolutePath);
 }
 
 /** True when a file-scheme URI resolves on disk; used to detect deletes. */

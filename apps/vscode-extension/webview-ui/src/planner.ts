@@ -101,6 +101,17 @@ function request(payload: PanelRequestPayload): Promise<PanelResponse> {
 }
 
 window.addEventListener("message", (event: MessageEvent<unknown>) => {
+  // SECURITY: only the extension host may drive this bus. Genuine host
+  // messages arrive with event.source === window.parent (VS Code's webview
+  // host relays them via contentWindow.postMessage from the OUTER host
+  // frame) or null (this repo's test harness). Reject anything else before
+  // event.data is read - in particular, the PrototypeProvider's sandboxed
+  // iframe (agent-authored HTML, scripts optionally enabled) keeps a
+  // window.parent reference of its OWN and can call postMessage on it, but
+  // that message arrives here with source === the iframe's own
+  // contentWindow, matching neither accepted case, so a forged push/response
+  // envelope from that frame must never reach this handler.
+  if (event.source !== null && event.source !== window.parent) return;
   const message = event.data as HostToWebviewMessage;
   if (typeof message !== "object" || message === null) return;
   if (message.protocolVersion !== WEBVIEW_PROTOCOL_VERSION) return;

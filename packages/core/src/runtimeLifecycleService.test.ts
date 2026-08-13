@@ -47,6 +47,42 @@ test("startRuntime routes to the adapter matching the template's runtime kind", 
   assert.equal(record?.status, "running");
 });
 
+test("startRuntime persists the adapter's network-allow resources into inventory metadata", async () => {
+  // The docker-sandbox adapter's in-process policy map does not survive a
+  // restart, so this write is the only reason a later cleanup pass can still
+  // find the string and revoke the policy (see runtimeCleanupService.test.ts).
+  const inventory = new MemoryRuntimeInventoryStore();
+  const sandbox = new RecordingAdapter("docker-sandbox", "api.example.invalid");
+  const service = new RuntimeLifecycleService({
+    clock: new FixedClock(),
+    inventory,
+    runtimeAdapter: sandbox,
+    logger: new NullLogger()
+  });
+
+  const handle = await service.startRuntime(startRequest("docker-sandbox"));
+
+  assert.equal(handle.networkAllowResources, "api.example.invalid");
+  const record = await inventory.getRuntime(asId<"RuntimeId">("runtime-1"));
+  assert.equal(record?.metadata["networkAllowResources"], "api.example.invalid");
+});
+
+test("startRuntime writes no network-allow metadata when the adapter's handle carries none", async () => {
+  const inventory = new MemoryRuntimeInventoryStore();
+  const sandbox = new RecordingAdapter("docker-sandbox");
+  const service = new RuntimeLifecycleService({
+    clock: new FixedClock(),
+    inventory,
+    runtimeAdapter: sandbox,
+    logger: new NullLogger()
+  });
+
+  await service.startRuntime(startRequest("docker-sandbox"));
+
+  const record = await inventory.getRuntime(asId<"RuntimeId">("runtime-1"));
+  assert.equal(record?.metadata["networkAllowResources"], undefined);
+});
+
 test("an unservable template kind fails before any inventory row is written", async () => {
   const inventory = new MemoryRuntimeInventoryStore();
   const service = new RuntimeLifecycleService({
@@ -123,7 +159,7 @@ class RecordingAdapter implements RuntimeAdapter {
   readonly created: string[] = [];
   readonly stopped: string[] = [];
 
-  constructor(readonly adapter: RuntimeAdapterKind) {}
+  constructor(readonly adapter: RuntimeAdapterKind, private readonly networkAllowResources?: string) {}
 
   createRuntime(request: StartRuntimeRequest, externalName: string): Promise<RuntimeHandle> {
     this.created.push(externalName);
@@ -135,7 +171,8 @@ class RecordingAdapter implements RuntimeAdapter {
       externalName,
       workspacePath: request.workspacePath,
       mounts: [],
-      status: "running"
+      status: "running",
+      ...(this.networkAllowResources === undefined ? {} : { networkAllowResources: this.networkAllowResources })
     });
   }
 

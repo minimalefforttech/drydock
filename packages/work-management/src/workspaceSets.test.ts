@@ -125,6 +125,35 @@ test("workspace sets resolve ordered mount roots and projections", async () => {
   }
 });
 
+test("T3.5: resolving a workspace set left with zero projects errors instead of returning no mounts", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "drydock-sets-empty-"));
+  try {
+    const catalogStore = new MemoryProjectCatalogStore();
+    const catalog = new ProjectCatalogService({ ids: new RandomIdGenerator(), clock: fixedClock(), store: catalogStore });
+    const setStore = new MemoryWorkspaceSetStore();
+    const sets = new WorkspaceSetService({ ids: new RandomIdGenerator(), clock: fixedClock(), catalog: catalogStore, store: setStore });
+
+    const projectPath = path.join(base, "a");
+    await mkdir(projectPath);
+    const projectA = await catalog.registerProject({ path: projectPath });
+    const set = await sets.createWorkspaceSet("Solo", [rw(projectA.projectId)]);
+
+    // Simulate a store implementation (or pre-existing data) that left a set
+    // with zero members - something validateSet itself never permits through
+    // createWorkspaceSet/updateWorkspaceSet. SqliteProjectCatalogStore.
+    // deleteProject prunes this state away entirely on the real store (see
+    // stage34Store.test.ts); this proves the service-level backstop for any
+    // store that doesn't.
+    await setStore.updateWorkspaceSet({ ...set, projectIds: [], members: [] });
+
+    await assert.rejects(() => sets.resolveProjects(set.workspaceSetId), /no projects left/);
+    await assert.rejects(() => sets.resolveMountRoots(set.workspaceSetId), /no projects left/);
+    await assert.rejects(() => sets.projection(set.workspaceSetId), /no projects left/);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test("workspace sets carry per-member read-only, update, and delete", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "drydock-sets-edit-"));
   try {

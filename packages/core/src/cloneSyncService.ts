@@ -37,6 +37,21 @@ const MAX_PATCH_BYTES = 50 * 1024 * 1024;
 /** Cap for the bounded conflict-marker scan of a single working-tree file. */
 const MARKER_SCAN_MAX_BYTES = 2 * 1024 * 1024;
 
+/**
+ * Git's well-known empty-tree object names, one per object format. Fixed
+ * constants of git itself (`git hash-object -t tree /dev/null`), used to
+ * express "full content as new-file diffs" via `diff <empty-tree> HEAD`.
+ */
+const EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const EMPTY_TREE_SHA256 = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
+
+/**
+ * Pathspec budget per git invocation. Windows caps a command line near 32K
+ * characters; the fixed argv prefix (SAFE_GIT_CONFIG et al.) plus quoting
+ * overhead stays well under the remainder at this chunk size.
+ */
+const PATHSPEC_CHUNK_MAX_CHARS = 4000;
+
 const CONFLICT_MARKER = "<<<<<<< ";
 const GIT_NULL_PATH = process.platform === "win32" ? "NUL" : devNull;
 
@@ -446,6 +461,85 @@ export class CloneSyncService {
     } finally {
       await prepared.cleanup();
     }
+  }
+
+  /**
+   * Validation-shipping shape of the outbound changeset (ADR 0022 / T1.1).
+   *
+   * Same base..HEAD file set as {@link outboundChangesetPatch}, expressed as
+   * full-content `new file mode` diffs against git's empty tree. A validation
+   * guest applies patches into a freshly `git init`ed workspace with no base
+   * blobs, so incremental modify/delete/rename hunks can never apply there;
+   * this shape carries each surviving file's entire HEAD content instead
+   * (`--no-renames` decomposes renames so the destination ships whole). Paths
+   * the changeset deletes simply never appear - the guest workspace never had
+   * them. Returns null when nothing ships (clean clone, or a changeset that
+   * only deletes). Capture and landing MUST keep using
+   * `outboundChangesetPatch`: this patch would double-add against a real
+   * repository.
+   */
+  async validationWorkspacePatch(
+    clonePath: string,
+    omission?: ClonePathOmission
+  ): Promise<{ readonly patch: string; readonly fileCount: number; readonly paths: readonly string[] } | null> {
+    await this.commitAgentProgress(clonePath, "[sync] agent");
+    const touchedRaw = await this.gitIn(
+      clonePath,
+      ["diff", "--name-only", "-z", "--no-renames", "refs/sync/base", "HEAD"],
+      "list changeset paths"
+    );
+    const touched = splitZ(touchedRaw.stdout);
+    if (touched.length === 0) return null;
+    // The omission guard sees every touched path, deletions included - an
+    // omitted path must not be touched by the changeset in any direction.
+    assertPathsNotOmitted(touched, omission, "clone changeset");
+
+    const emptyTree = await this.emptyTreeName(clonePath);
+    const paths: string[] = [];
+    let patch = "";
+    let patchBytes = 0;
+    // Chunked pathspecs keep the command line far below the Windows 32K cap
+    // even for changesets touching thousands of paths; `:(literal)` disables
+    // glob interpretation of path characters. Deleted paths contribute nothing
+    // (they exist in neither tree), so no pre-filtering is needed.
+    for (const chunk of chunkForCommandLine(touched)) {
+      const pathspecs = chunk.map((path) => `:(literal)${path}`);
+      const prepared = await this.diffToFile(
+        clonePath,
+        ["diff", "--binary", "--no-renames", emptyTree, "HEAD", "--", ...pathspecs],
+        "build validation workspace patch"
+      );
+      try {
+        if (prepared.bytes === 0) continue;
+        patchBytes += prepared.bytes;
+        if (patchBytes > MAX_PATCH_BYTES) {
+          throw new Error(
+            `Refusing build validation workspace patch of ${String(patchBytes)} bytes: exceeds the ${String(MAX_PATCH_BYTES)}-byte clone-sync cap.`
+          );
+        }
+        patch += await readFile(prepared.patchFile, "utf8");
+      } finally {
+        await prepared.cleanup();
+      }
+      const names = await this.gitIn(
+        clonePath,
+        ["diff", "--name-only", "-z", "--no-renames", emptyTree, "HEAD", "--", ...pathspecs],
+        "list validation workspace paths"
+      );
+      paths.push(...splitZ(names.stdout));
+    }
+    if (patch.length === 0) return null;
+    paths.sort();
+    return { patch, fileCount: paths.length, paths };
+  }
+
+  /** The empty-tree object name for this repository's object format. */
+  private async emptyTreeName(clonePath: string): Promise<string> {
+    // rev-parse is non-fatal in gitIn; older gits without --show-object-format
+    // fall through to SHA-1, which is also their only possible format.
+    const result = await this.gitIn(clonePath, ["rev-parse", "--show-object-format"], "read object format");
+    const format = result.exitCode === 0 ? result.stdout.trim() : "sha1";
+    return format === "sha256" ? EMPTY_TREE_SHA256 : EMPTY_TREE_SHA1;
   }
 
   /**
@@ -1099,6 +1193,25 @@ function gitError(step: string, repoPath: string, result: CommandResult): Error 
 /** Split a NUL-delimited git list into non-empty entries. */
 function splitZ(value: string): string[] {
   return value.split("\0").filter((entry) => entry.length > 0);
+}
+
+/** Split paths into chunks whose joined argv stays inside the command-line budget. */
+function chunkForCommandLine(paths: readonly string[]): string[][] {
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  let currentChars = 0;
+  for (const path of paths) {
+    const cost = path.length + 14; // ":(literal)" prefix + separator/quoting slack
+    if (current.length > 0 && currentChars + cost > PATHSPEC_CHUNK_MAX_CHARS) {
+      chunks.push(current);
+      current = [];
+      currentChars = 0;
+    }
+    current.push(path);
+    currentChars += cost;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
 }
 
 function countPreflightStatus(value: string): { trackedChanges: number; untrackedFiles: number } {

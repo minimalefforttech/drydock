@@ -121,6 +121,15 @@ export interface RuntimeHandle {
   readonly externalName: string;
   readonly workspacePath: string;
   readonly runtimeCwd?: string;
+  /**
+   * Egress allowlist resources string applied at create time (docker-sandbox
+   * only). Carries the value from `createRuntime`'s return through to the
+   * caller so it can be persisted into the inventory record's metadata - the
+   * in-process record of which policies are active does not survive a host
+   * restart, so a handle rebuilt from a persisted record (cleanup) is the
+   * only way removeRuntime can learn what to revoke.
+   */
+  readonly networkAllowResources?: string;
   readonly mounts: readonly MountPolicy[];
   readonly status: "running";
 }

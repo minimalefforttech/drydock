@@ -230,7 +230,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   }));
 
-  const panel = new ControlPanelProvider(backend, logger);
+  const panel = new ControlPanelProvider(backend, logger, securityPolicy);
   const chatRail = new ChatRailViewProvider(context.extensionUri, panel, backend, logger);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(ChatRailViewProvider.viewType, chatRail));
   context.subscriptions.push(chatRail);

@@ -13,6 +13,10 @@ import type { SqliteConnection } from "./sqliteConnection.js";
 import { sanitizePersistedEventPayload } from "./persistenceSanitizer.js";
 
 const SANITIZE_SESSION_EVENTS_MIGRATION = "sanitize-session-events-v2";
+/** T5.2: one-time move of `override.task.<id>` KV rows into their own table. */
+const MIGRATE_TASK_OVERRIDES_MIGRATION = "migrate-validation-task-overrides-v1";
+/** T3.6: one-time collapse of any pre-uniqueness duplicate `mcp_servers.name` rows. */
+const DEDUPE_MCP_SERVER_NAMES_MIGRATION = "dedupe-mcp-server-names-v1";
 
 export function applyMigrations(connection: SqliteConnection): void {
   const legacySessionEventsTable = connection.database.prepare(`
@@ -432,6 +436,17 @@ export function applyMigrations(connection: SqliteConnection): void {
       PRIMARY KEY (scope, ref_id, server_id)
     );
   `);
+  // T3.6: name uniqueness was check-then-write in the service only, so two
+  // concurrent saves of the same name could both insert - renderConfigJson
+  // then keys .mcp.json's mcpServers object by name and one row silently wins.
+  // A DB-level constraint is the real guard; dedupeMcpServerNames runs FIRST so
+  // a database that already has duplicate-name rows (the bug, already
+  // triggered) doesn't fail to build the index below.
+  dedupeMcpServerNames(connection);
+  connection.database.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_servers_name
+      ON mcp_servers(name COLLATE NOCASE);
+  `);
 
   // Task board and subtasks: board columns are global and user-configurable;
   // subtasks are child work items of exactly one task; dependencies are
@@ -700,6 +715,20 @@ export function applyMigrations(connection: SqliteConnection): void {
     CREATE INDEX IF NOT EXISTS idx_validation_associations_runtime
       ON validation_associations(runtime_id);
 
+    -- T5.2: the task-level runtime override, promoted out of validation_settings
+    -- ('override.task.<taskId>' KV rows - migrateTaskOverridesToTable moves any
+    -- that already exist). A real row lets deleteRuntime find and
+    -- reassign/clear a deleted runtime's overrides instead of leaving a KV key
+    -- dangling.
+    CREATE TABLE IF NOT EXISTS validation_task_overrides (
+      task_id TEXT PRIMARY KEY,
+      runtime_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_validation_task_overrides_runtime
+      ON validation_task_overrides(runtime_id);
+
     CREATE TABLE IF NOT EXISTS validation_settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
@@ -746,6 +775,8 @@ export function applyMigrations(connection: SqliteConnection): void {
       changeset_ref TEXT NOT NULL,
       mirror_version INTEGER,
       mirror_freshness_at TEXT,
+      mirror_ok INTEGER,
+      mirror_skipped_versions_json TEXT,
       fixture_manifest_hash TEXT,
       license_wait_ms INTEGER NOT NULL,
       probes_green_at TEXT,
@@ -772,6 +803,17 @@ export function applyMigrations(connection: SqliteConnection): void {
   // created between M2 and M3. Nullable - a runtime with no connection is
   // routable but not executable, which the job service parks on.
   ensureColumn(connection, "validation_runtimes", "connection_json", "TEXT NULL");
+  // T5.3: the VM name captured once at createRuntime. Nullable - a row written
+  // before this column existed has no stored name, so callers fall back to
+  // deriving one from displayName (vmNameFor) exactly as they always did.
+  ensureColumn(connection, "validation_runtimes", "vm_name", "TEXT NULL");
+  // T3.1: mirror health/skipped-versions alongside the version+timestamp that
+  // already shipped - the DDL above carries both for fresh state files, and
+  // this upgrades any dev DB created before they existed. Nullable for the
+  // same reason mirror_version is: absent means no mirror was configured.
+  ensureColumn(connection, "validation_receipts", "mirror_ok", "INTEGER NULL");
+  ensureColumn(connection, "validation_receipts", "mirror_skipped_versions_json", "TEXT NULL");
+  migrateTaskOverridesToTable(connection);
 
   sanitizeLegacySessionEvents(connection, legacySessionEventsTable);
 }
@@ -850,6 +892,108 @@ function checkpointWalOrThrow(connection: SqliteConnection): void {
   };
   if (checkpoint.busy !== 0) {
     throw new Error("Could not securely finalize legacy event redaction because the SQLite WAL is busy. Close other windows and reload.");
+  }
+}
+
+/**
+ * One-time move of task overrides out of the validation_settings KV table
+ * (`override.task.<taskId>` rows) and into validation_task_overrides (T5.2),
+ * so a deleted runtime's overrides can be found and reassigned/cleared
+ * instead of dangling. BEGIN IMMEDIATE + the storage_migrations marker mirror
+ * sanitizeLegacySessionEvents: two extension windows opening the same state
+ * file at once must not both migrate (and, since the source rows are deleted
+ * as part of the same transaction, a bare re-run would otherwise see nothing
+ * to do anyway - the marker also protects a window that runs this before any
+ * KV rows ever existed).
+ */
+function migrateTaskOverridesToTable(connection: SqliteConnection): void {
+  connection.database.exec("BEGIN IMMEDIATE");
+  try {
+    const applied = connection.database.prepare(`
+      SELECT migration_id FROM storage_migrations WHERE migration_id = ?
+    `).get(MIGRATE_TASK_OVERRIDES_MIGRATION);
+    if (applied !== undefined) {
+      connection.database.exec("COMMIT");
+      return;
+    }
+    const rows = connection.database.prepare(`
+      SELECT key, value, updated_at FROM validation_settings WHERE key LIKE 'override.task.%'
+    `).all() as { readonly key: string; readonly value: string; readonly updated_at: string }[];
+    const insert = connection.database.prepare(`
+      INSERT INTO validation_task_overrides (task_id, runtime_id, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(task_id) DO UPDATE SET
+        runtime_id = excluded.runtime_id,
+        updated_at = excluded.updated_at
+    `);
+    const clearKv = connection.database.prepare(`DELETE FROM validation_settings WHERE key = ?`);
+    for (const row of rows) {
+      const taskId = row.key.slice("override.task.".length);
+      if (taskId.length === 0) continue;
+      insert.run(taskId, row.value, row.updated_at);
+      clearKv.run(row.key);
+    }
+    connection.database.prepare(`
+      INSERT OR IGNORE INTO storage_migrations (migration_id, applied_at) VALUES (?, ?)
+    `).run(MIGRATE_TASK_OVERRIDES_MIGRATION, new Date().toISOString());
+    connection.database.exec("COMMIT");
+  } catch (error) {
+    try {
+      connection.database.exec("ROLLBACK");
+    } catch {
+      // COMMIT may already have completed; preserve the original error.
+    }
+    throw error;
+  }
+}
+
+/**
+ * One-time collapse of any duplicate `mcp_servers.name` rows (T3.6), so the
+ * UNIQUE index created right after this runs can actually be built on a
+ * database that already hit the check-then-write race the index now closes.
+ * Keeps the newest row per case-insensitive name (updated_at, then rowid as a
+ * final tiebreak) and drops the rest along with their now-orphaned overrides -
+ * the same cleanup deleteServer already does for a single removed row.
+ * BEGIN IMMEDIATE + the storage_migrations marker mirror
+ * sanitizeLegacySessionEvents for the same cross-window race reason.
+ */
+function dedupeMcpServerNames(connection: SqliteConnection): void {
+  connection.database.exec("BEGIN IMMEDIATE");
+  try {
+    const applied = connection.database.prepare(`
+      SELECT migration_id FROM storage_migrations WHERE migration_id = ?
+    `).get(DEDUPE_MCP_SERVER_NAMES_MIGRATION);
+    if (applied !== undefined) {
+      connection.database.exec("COMMIT");
+      return;
+    }
+    const rows = connection.database.prepare(`
+      SELECT server_id, name FROM mcp_servers
+      ORDER BY name COLLATE NOCASE, updated_at DESC, rowid DESC
+    `).all() as { readonly server_id: string; readonly name: string }[];
+    const deleteServer = connection.database.prepare(`DELETE FROM mcp_servers WHERE server_id = ?`);
+    const deleteOverrides = connection.database.prepare(`DELETE FROM mcp_overrides WHERE server_id = ?`);
+    const keptNames = new Set<string>();
+    for (const row of rows) {
+      const key = row.name.toLowerCase();
+      if (keptNames.has(key)) {
+        deleteServer.run(row.server_id);
+        deleteOverrides.run(row.server_id);
+        continue;
+      }
+      keptNames.add(key);
+    }
+    connection.database.prepare(`
+      INSERT OR IGNORE INTO storage_migrations (migration_id, applied_at) VALUES (?, ?)
+    `).run(DEDUPE_MCP_SERVER_NAMES_MIGRATION, new Date().toISOString());
+    connection.database.exec("COMMIT");
+  } catch (error) {
+    try {
+      connection.database.exec("ROLLBACK");
+    } catch {
+      // COMMIT may already have completed; preserve the original error.
+    }
+    throw error;
   }
 }
 

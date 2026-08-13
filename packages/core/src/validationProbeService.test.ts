@@ -150,6 +150,39 @@ test("a production read that succeeds quarantines the runtime and raises the inc
   assert.equal(run.probes.length, 4);
 });
 
+test("a breach carries the LAST GREEN stamp into the quarantine, then reports none itself", async () => {
+  const h = harness();
+
+  // A clean pass records green at 09:00...
+  const green = await h.service.runProbes(RUNTIME);
+  assert.equal(green.greenAt, "2026-08-12T09:00:00.000Z");
+
+  // ...then the next run breaches at 10:00. The breach run REPLACES the
+  // recorded green, so the banner's "last green probe" can only come from
+  // the stamp handed to the quarantine callback (T5.5).
+  h.setNow("2026-08-12T10:00:00.000Z");
+  h.replies["probe.production-read"] = {
+    json: { path: PRODUCTION_PATH, exists: true, listed: true, entries: 3, error: "" }
+  };
+  await h.service.runProbes(RUNTIME);
+
+  assert.equal(h.quarantined.length, 1);
+  assert.equal(h.quarantined[0]?.lastGreenAt, "2026-08-12T09:00:00.000Z");
+  assert.equal(
+    h.service.probesGreenAt(RUNTIME.runtimeId),
+    undefined,
+    "after the breach the live view honestly reports no green on record"
+  );
+
+  // A first-run breach (nothing green before it) carries no stamp at all.
+  const fresh = harness();
+  fresh.replies["probe.production-read"] = {
+    json: { path: PRODUCTION_PATH, exists: true, listed: true, entries: 1, error: "" }
+  };
+  await fresh.service.runProbes(RUNTIME);
+  assert.equal(fresh.quarantined[0]?.lastGreenAt, undefined);
+});
+
 test("a production path that merely resolves is a breach, not a pass", async () => {
   const h = harness();
   h.replies["probe.production-read"] = {
@@ -447,6 +480,7 @@ interface QuarantineCall {
   readonly runtimeId: string;
   readonly probeId: string;
   readonly detail: string;
+  readonly lastGreenAt?: string;
 }
 
 interface Harness {
@@ -497,8 +531,8 @@ function harness(options: {
     bus,
     execFor: () => (options.noExec === true ? null : exec),
     config: () => (options.unconfigured === true ? undefined : options.config ?? CONFIG),
-    quarantine: (runtimeId: ValidationRuntimeId, probeId: string, detail: string) => {
-      quarantined.push({ runtimeId, probeId, detail });
+    quarantine: (runtimeId: ValidationRuntimeId, probeId: string, detail: string, lastGreenAt?: string) => {
+      quarantined.push({ runtimeId, probeId, detail, ...(lastGreenAt === undefined ? {} : { lastGreenAt }) });
       return options.quarantineError === undefined ? Promise.resolve() : Promise.reject(options.quarantineError);
     }
   });

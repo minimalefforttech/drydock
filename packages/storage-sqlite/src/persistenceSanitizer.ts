@@ -122,6 +122,11 @@ function isSecretKey(key: string): boolean {
     || key.endsWith("credentials");
 }
 
+/**
+ * LOCKSTEP COPY of `redactCredentialText` in `@drydock/core`
+ * `commandRunner.ts` (receipt evidence path): storage and core are sibling
+ * packages over contracts. Change both together.
+ */
 function redactCredentialText(value: string): string {
   return value
     .replace(

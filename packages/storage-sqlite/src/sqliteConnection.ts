@@ -11,6 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 
 export class SqliteConnection {
   readonly database: DatabaseSync;
+  private closed = false;
 
   constructor(readonly databasePath: string) {
     mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -23,7 +24,11 @@ export class SqliteConnection {
     this.database.exec("PRAGMA foreign_keys = ON;");
   }
 
+  /** Idempotent: `DatabaseSync.close()` throws on a second call, and a
+   * belt-and-braces close in a `finally` must never mask the real failure. */
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.database.close();
   }
 }

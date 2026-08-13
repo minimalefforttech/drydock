@@ -106,11 +106,24 @@ export class WorkspaceSetService {
     return this.options.store.listWorkspaceSets();
   }
 
-  /** Ordered member projects; missing catalog entries are a hard error. */
+  /**
+   * Ordered member projects; missing catalog entries are a hard error.
+   *
+   * A zero-member set is ALSO a hard error here (T3.5), mirroring validateSet's
+   * "at least one project" rule at create/update time: a set can only reach
+   * zero members if something removed its last project without going through
+   * this service, so resolving it should fail loudly rather than silently
+   * hand back zero mounts. SqliteProjectCatalogStore.deleteProject prunes a
+   * set it empties out for exactly this reason; this guard is the backstop
+   * for any other store implementation (or pre-existing data) that doesn't.
+   */
   async resolveProjects(workspaceSetId: WorkspaceSetId): Promise<ProjectRecord[]> {
     const record = await this.options.store.getWorkspaceSet(workspaceSetId);
     if (record === null) {
       throw new Error(`Workspace set ${workspaceSetId} was not found.`);
+    }
+    if (record.projectIds.length === 0) {
+      throw new Error(`Workspace set ${workspaceSetId} has no projects left; delete or edit this set.`);
     }
     const projects: ProjectRecord[] = [];
     for (const projectId of record.projectIds) {

@@ -10,7 +10,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -33,6 +33,7 @@ import type {
   ValidationRegistrySettingsUpdate,
   ValidationRuntimeId,
   ValidationRuntimeStore,
+  ValidationTaskOverride,
   WorkspaceRootId
 } from "@drydock/contracts";
 import { MemoryLogger, type ProbeRunResult } from "@drydock/core";
@@ -54,7 +55,7 @@ class MemoryStore implements ValidationRuntimeStore {
   readonly associations: RuntimeAssociation[] = [];
   readonly jobs: ValidationJob[] = [];
   readonly receipts: ValidationReceipt[] = [];
-  readonly overrides = new Map<string, ValidationRuntimeId>();
+  readonly overrides = new Map<string, { readonly runtimeId: ValidationRuntimeId; readonly updatedAt: string }>();
   readonly quarantines = new Map<string, ValidationQuarantineRecord>();
   settings: ValidationRegistrySettings = { topologyPreset: "single" };
 
@@ -131,12 +132,20 @@ class MemoryStore implements ValidationRuntimeStore {
   }
 
   async getTaskOverride(taskId: TaskId): Promise<ValidationRuntimeId | null> {
-    return this.overrides.get(String(taskId)) ?? null;
+    return this.overrides.get(String(taskId))?.runtimeId ?? null;
   }
 
-  async setTaskOverride(taskId: TaskId, runtimeId: ValidationRuntimeId | null): Promise<void> {
+  async setTaskOverride(taskId: TaskId, runtimeId: ValidationRuntimeId | null, updatedAt: string): Promise<void> {
     if (runtimeId === null) this.overrides.delete(String(taskId));
-    else this.overrides.set(String(taskId), runtimeId);
+    else this.overrides.set(String(taskId), { runtimeId, updatedAt });
+  }
+
+  async listTaskOverridesForRuntime(runtimeId: ValidationRuntimeId): Promise<ValidationTaskOverride[]> {
+    const result: ValidationTaskOverride[] = [];
+    for (const [taskId, entry] of this.overrides) {
+      if (entry.runtimeId === runtimeId) result.push({ taskId: taskId as TaskId, runtimeId: entry.runtimeId, updatedAt: entry.updatedAt });
+    }
+    return result;
   }
 
   async getQuarantine(runtimeId: ValidationRuntimeId): Promise<ValidationQuarantineRecord | null> {
@@ -448,6 +457,28 @@ test("the task runtime override round-trips and clears", async () => {
   await assert.rejects(() => service.setTaskRuntime("task-1", "vruntime-ghost"), /not in the validation runtime registry/);
 });
 
+test("deleting a runtime clears a task override that pointed at it, or moves it to the reassignment target", async () => {
+  const { service, store } = build();
+  const fallback = runtime({ displayName: "default" });
+  const alpha = runtime({ displayName: "alpha" });
+  const beta = runtime({ displayName: "beta" });
+  store.runtimes.push(fallback, alpha, beta);
+  store.settings = { topologyPreset: "default-plus-named", defaultRuntimeId: fallback.runtimeId };
+
+  // No association points at alpha, so the H5 guard alone would let this
+  // delete through with no reassignTo - but T5.2's override must not be left
+  // dangling: it clears instead, and the task falls back to the cascade.
+  await service.setTaskRuntime("task-1", String(alpha.runtimeId));
+  await service.deleteRuntime(String(alpha.runtimeId));
+  assert.equal(await service.getTaskRuntime("task-1"), null, "the override was cleared, not left pointing at an archived runtime");
+  assert.equal((await service.resolvedRuntimeForTask("task-1")).runtime?.displayName, "default");
+
+  // A reassignTo moves the override to the SAME target associations would use.
+  await service.setTaskRuntime("task-2", String(beta.runtimeId));
+  await service.deleteRuntime(String(beta.runtimeId), String(fallback.runtimeId));
+  assert.equal(String(await service.getTaskRuntime("task-2")), String(fallback.runtimeId));
+});
+
 // ---------------------------------------------------------------------------
 // Availability ladder
 // ---------------------------------------------------------------------------
@@ -487,6 +518,45 @@ test("a lazy probe that finds a breach blocks the very job that triggered it", a
   assert.equal(await service.availabilityForJob(target), "quarantined");
 });
 
+test("an all-unknown probe run is never green: the job parks missing and the next ask re-probes", async () => {
+  const { service, store, probes } = build({ host: { supported: true, vmState: async () => "running" } });
+  const target = runtime({ displayName: "default" });
+  store.runtimes.push(target);
+
+  // Exec trouble: every probe unknown - no breach, no quarantine, no stamp.
+  const unknownRun: ProbeRunResult = {
+    runtimeId: target.runtimeId,
+    probes: [
+      {
+        probeId: "probe.production-read",
+        title: "Production is unreachable",
+        kind: "must-fail",
+        state: "unknown",
+        detail: "the probe could not run",
+        at: NOW
+      }
+    ],
+    at: NOW
+  };
+  probes.results.set(String(target.runtimeId), unknownRun);
+  assert.equal(
+    await service.availabilityForJob(target),
+    "missing",
+    "isolation never confirmed must park the job, not route it (ADR 0021: unknown is never green)"
+  );
+  assert.equal(probes.runs.length, 1);
+
+  // The trouble clears: the next ask re-probes instead of pinning the
+  // inconclusive run for the whole cadence, and green routes again.
+  probes.results.delete(String(target.runtimeId));
+  assert.equal(await service.availabilityForJob(target), "available");
+  assert.equal(probes.runs.length, 2, "an inconclusive run must not satisfy probe-once");
+
+  // A green run keeps satisfying probe-once - no third run.
+  assert.equal(await service.availabilityForJob(target), "available");
+  assert.equal(probes.runs.length, 2);
+});
+
 test("a VM Hyper-V cannot find is missing; a stopped one is honest queue state", async () => {
   const store = new MemoryStore();
   const target = runtime({ displayName: "default" });
@@ -513,6 +583,48 @@ test("runtime rows carry the VM name a TD must provision under", async () => {
   store.runtimes.push(runtime({ displayName: "C++ Builds (MSVC)" }));
   const { service } = build({ store });
   assert.equal((await service.state()).runtimes[0]?.vmName, "drydock-validation-c-builds-msvc");
+});
+
+test("renaming a runtime does not change the VM it addresses (T5.3: stored vmName wins)", async () => {
+  const store = new MemoryStore();
+  const vmStateCalls: string[] = [];
+  const { service } = build({
+    store,
+    host: {
+      supported: true,
+      vmState: async (vmName: string) => {
+        vmStateCalls.push(vmName);
+        return "running";
+      }
+    }
+  });
+
+  const created = await service.createRuntime({
+    displayName: "Linux Builds",
+    image: "win11-msvc",
+    lifecycle: "on-demand",
+    capabilities: [],
+    policyProfileRef: "validation-standard"
+  });
+  assert.equal((await service.state()).runtimes[0]?.vmName, "drydock-validation-linux-builds");
+
+  // Renaming changes only the display; the VM the row addresses does not
+  // move. Before T5.3 this would have re-derived
+  // "drydock-validation-linux-builds-ubuntu-24-04" and read as `missing`
+  // until a TD renamed the VM to match.
+  await service.updateRuntime(String(created.runtimeId), { displayName: "Linux Builds (Ubuntu 24.04)" });
+  const renamed = await service.state();
+  assert.equal(renamed.runtimes[0]?.displayName, "Linux Builds (Ubuntu 24.04)");
+  assert.equal(renamed.runtimes[0]?.vmName, "drydock-validation-linux-builds", "the stored name survives the rename");
+
+  const current = await store.getRuntime(created.runtimeId);
+  assert.ok(current);
+  await service.availabilityForJob(current);
+  assert.ok(vmStateCalls.length > 0);
+  assert.ok(
+    vmStateCalls.every((name) => name === "drydock-validation-linux-builds"),
+    "every Hyper-V query used the name captured at create time, never one re-derived from the renamed displayName"
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -611,6 +723,102 @@ test("rail status: no registry, blocked, running, failed, ready", async () => {
   const blocked = await service.railStatus("task-1");
   assert.equal(blocked.dot, "blocked");
   assert.match(blocked.line, /quarantined/);
+});
+
+test("rail status scopes parked/active jobs to the resolved runtime, not the task's whole history (T3.11)", async () => {
+  const store = new MemoryStore();
+  const probes = new FakeProbes();
+  const { service } = build({ store, probes });
+
+  const resolvedRuntime = runtime({ displayName: "default" });
+  const staleRuntime = runtime({ displayName: "old-farm" });
+  store.runtimes.push(resolvedRuntime, staleRuntime);
+  store.settings = { topologyPreset: "single", defaultRuntimeId: resolvedRuntime.runtimeId };
+  probes.results.set(String(resolvedRuntime.runtimeId), {
+    runtimeId: resolvedRuntime.runtimeId,
+    probes: [],
+    greenAt: "2026-08-12T09:00:00.000Z",
+    at: "2026-08-12T09:00:00.000Z"
+  });
+
+  // This task's history includes a job parked on a runtime it no longer
+  // resolves to (an old override, or an old association) - it must not read
+  // as if "default" (the CURRENTLY resolved runtime) were the one blocked.
+  store.jobs.push({
+    jobId: asId<"ValidationJobId">("vjob-old-farm"),
+    sessionId: asId<"SessionId">("session-1"),
+    chatId: asId<"ChatId">("chat-1"),
+    taskId: asId<"TaskId">("task-1"),
+    resolvedRuntimeId: staleRuntime.runtimeId,
+    profileRef: "suite",
+    changesetRef: "abc",
+    state: "parked",
+    parkedReason: "old-farm ran out of licenses.",
+    queuedAt: NOW,
+    updatedAt: NOW
+  });
+  const withStaleParked = await service.railStatus("task-1");
+  assert.equal(withStaleParked.dot, "ok", "a park on a runtime this task no longer resolves to must not block");
+  assert.match(withStaleParked.line, /Validation ready on default/);
+
+  // Same for a job still active on the old runtime.
+  const { parkedReason: _staleParked, ...stillStale } = store.jobs[0] as ValidationJob;
+  store.jobs[0] = { ...stillStale, state: "running" };
+  const withStaleActive = await service.railStatus("task-1");
+  assert.equal(
+    withStaleActive.dot,
+    "ok",
+    "activity on a runtime this task no longer resolves to must not read as running here"
+  );
+
+  // But a job genuinely on the resolved runtime still reports normally.
+  store.jobs.push({
+    jobId: asId<"ValidationJobId">("vjob-default"),
+    sessionId: asId<"SessionId">("session-1"),
+    chatId: asId<"ChatId">("chat-1"),
+    taskId: asId<"TaskId">("task-1"),
+    resolvedRuntimeId: resolvedRuntime.runtimeId,
+    profileRef: "suite",
+    changesetRef: "def",
+    state: "running",
+    queuedAt: NOW,
+    updatedAt: NOW
+  });
+  const withOwnActive = await service.railStatus("task-1");
+  assert.equal(withOwnActive.dot, "running");
+  assert.equal(withOwnActive.line, "Validating on default", "the stale runtime's job must not inflate the queued-behind count");
+
+  // The LAST-VERDICT branch is scoped the same way: a failed receipt from the
+  // old runtime must not read as "default" having failed.
+  store.jobs.length = 0;
+  store.jobs.push({
+    jobId: asId<"ValidationJobId">("vjob-old-verdict"),
+    sessionId: asId<"SessionId">("session-1"),
+    chatId: asId<"ChatId">("chat-1"),
+    taskId: asId<"TaskId">("task-1"),
+    resolvedRuntimeId: staleRuntime.runtimeId,
+    profileRef: "suite",
+    changesetRef: "abc",
+    state: "completed",
+    completedAt: NOW,
+    queuedAt: NOW,
+    updatedAt: NOW
+  });
+  store.receipts.push({
+    receiptId: asId<"ValidationReceiptId">("vreceipt-old"),
+    jobId: asId<"ValidationJobId">("vjob-old-verdict"),
+    runtimeId: staleRuntime.runtimeId,
+    policyProfileRef: "validation-standard",
+    changesetRef: "abc",
+    licenseWaitMs: 0,
+    verdict: "failed",
+    failingTest: "test_stale_farm",
+    superseded: false,
+    createdAt: NOW
+  });
+  const withStaleVerdict = await service.railStatus("task-1");
+  assert.equal(withStaleVerdict.dot, "ok", "a failed verdict on a runtime this task moved on from must not read as failed here");
+  assert.doesNotMatch(withStaleVerdict.line, /test_stale_farm/);
 });
 
 // ---------------------------------------------------------------------------
@@ -768,6 +976,45 @@ test("a folder request is refused with the narrower ask spelled out", async (t) 
     () => service.grantProductionFixture({ sessionId: "session-1", hostPath: path.join(production, "absent.ma") }),
     /could not be read/
   );
+});
+
+test("a file over the snapshot size limit is refused, with the byte counts named (T4.4)", async (t) => {
+  const staging = await mkdtemp(path.join(tmpdir(), "drydock-fixtures-"));
+  const production = await mkdtemp(path.join(tmpdir(), "drydock-production-"));
+  t.after(async () => {
+    await rm(staging, { recursive: true, force: true });
+    await rm(production, { recursive: true, force: true });
+  });
+  const oversized = path.join(production, "huge.ma");
+  // A sparse file: truncate reports the full size via stat/fstat without
+  // writing 2 GiB of real bytes, so the limit path is exercised cheaply. The
+  // refusal must come from the SAME handle's fstat used for the read (T4.4).
+  await writeFile(oversized, "");
+  await truncate(oversized, 2 * 1024 * 1024 * 1024 + 1);
+  const { service } = build({
+    fixtureStagingRoot: staging,
+    securityPolicy: new EffectiveSecurityPolicy({
+      managed: true,
+      deniedPaths: [production],
+      productionDataPaths: [production],
+      cloneOnly: false,
+      allowNetworkedAiOnThisMachine: true,
+      cloneOmission: { sensitive: false, paths: [] }
+    })
+  });
+  await assert.rejects(
+    () => service.grantProductionFixture({ sessionId: "session-1", hostPath: oversized }),
+    /is 2\.0 GB, over the 2\.0 GB snapshot limit/
+  );
+  // Refused before anything was staged.
+  assert.deepEqual(await readdir(staging), []);
+
+  // The rejected file's handle was still closed (finally): a normal grant
+  // right after is unaffected by it.
+  const small = path.join(production, "small.ma");
+  await writeFile(small, "ok");
+  const grant = await service.grantProductionFixture({ sessionId: "session-1", hostPath: small });
+  assert.equal(grant.bytes, 2);
 });
 
 test("credential and sensitive paths are never production-tier, so keys cannot be snapshotted", async (t) => {

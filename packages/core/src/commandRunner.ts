@@ -134,6 +134,32 @@ export function sanitizeOutput(value: string): string {
 }
 
 /**
+ * Broad credential redaction for text that becomes durable, UI-rendered
+ * evidence (validation receipt summaries and failure hints). Deliberately a
+ * LOCKSTEP COPY of `redactCredentialText` in
+ * `@drydock/storage-sqlite` `persistenceSanitizer.ts`: core and storage are
+ * sibling packages over contracts, and duplicating these patterns beats
+ * inverting that boundary. Change both together.
+ */
+export function redactCredentialText(value: string): string {
+  const redacted = "[REDACTED]";
+  return value
+    .replace(
+      /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END(?: [A-Z0-9]+)* PRIVATE KEY(?: BLOCK)?-----/g,
+      "[REDACTED PRIVATE KEY]"
+    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+    .replace(
+      /(["']?\b(?:api[-_ ]?key|x-api-key)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi,
+      "$1[REDACTED]"
+    )
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, redacted)
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, redacted)
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, redacted)
+    .replace(/\bAKIA[0-9A-Z]{16}\b/g, redacted);
+}
+
+/**
  * Caps captured output at MAX_CAPTURED_OUTPUT, keeping the TAIL: for control
  * commands the failure detail is at the end, and buffered agent streams keep
  * their terminal line. Live consumers that need every line use

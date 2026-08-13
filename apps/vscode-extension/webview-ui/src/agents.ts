@@ -184,6 +184,12 @@ function request(payload: PanelRequestPayload): Promise<PanelResponse> {
 }
 
 window.addEventListener("message", (event: MessageEvent<unknown>) => {
+  // SECURITY: only the extension host may drive this bus. Genuine host
+  // messages arrive with event.source === window.parent (VS Code's webview
+  // host relays them via contentWindow.postMessage from the OUTER host
+  // frame) or null (this repo's test harness); reject anything else - e.g.
+  // a forged envelope from an embedded frame - before event.data is read.
+  if (event.source !== null && event.source !== window.parent) return;
   const message = event.data as HostToWebviewMessage;
   if (typeof message !== "object" || message === null) return;
   if (message.protocolVersion !== WEBVIEW_PROTOCOL_VERSION) return;

@@ -50,14 +50,38 @@ export class SqliteProjectCatalogStore implements ProjectCatalogStore {
     `).run(record.name, record.path, pathKey, record.kind, record.updatedAt, record.projectId);
   }
 
+  /**
+   * Removes a project and any workspace-set memberships referencing it. A set
+   * this leaves with zero members is pruned outright (T3.5): WorkspaceSetService's
+   * validateSet already refuses to create/update a set with no projects, so an
+   * empty set here is always an artifact of this removal, never a valid state -
+   * left alone it would silently resolve to zero mounts instead of erroring.
+   * All three statements run in one transaction so a crash/throw mid-sequence
+   * cannot leave a half-cleaned membership or a wrongly-pruned set (T3.8).
+   */
   async deleteProject(projectId: ProjectId): Promise<void> {
-    // Drop memberships first so the FK on workspace_set_projects stays satisfied.
-    this.connection.database.prepare(
-      "DELETE FROM workspace_set_projects WHERE project_id = ?"
-    ).run(projectId);
-    this.connection.database.prepare(
-      "DELETE FROM project_records WHERE project_id = ?"
-    ).run(projectId);
+    const db = this.connection.database;
+    db.exec("BEGIN");
+    try {
+      // Drop memberships first so the FK on workspace_set_projects stays satisfied.
+      db.prepare(
+        "DELETE FROM workspace_set_projects WHERE project_id = ?"
+      ).run(projectId);
+      db.prepare(
+        "DELETE FROM project_records WHERE project_id = ?"
+      ).run(projectId);
+      // Prune any workspace set this removal emptied out completely.
+      db.prepare(`
+        DELETE FROM workspace_sets
+        WHERE workspace_set_id NOT IN (
+          SELECT DISTINCT workspace_set_id FROM workspace_set_projects
+        )
+      `).run();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   async getProject(projectId: ProjectId): Promise<ProjectRecord | null> {
@@ -107,22 +131,44 @@ function mapProject(row: ProjectRow): ProjectRecord {
 export class SqliteWorkspaceSetStore implements WorkspaceSetStore {
   constructor(private readonly connection: SqliteConnection) {}
 
+  /** Inserts the set row and its membership rows in one transaction (T3.8). */
   async insertWorkspaceSet(record: WorkspaceSetRecord): Promise<void> {
-    this.connection.database.prepare(`
-      INSERT INTO workspace_sets (workspace_set_id, name, created_at, updated_at)
-      VALUES (?, ?, ?, ?)
-    `).run(record.workspaceSetId, record.name, record.createdAt, record.updatedAt);
-    this.replaceMembers(record);
+    const db = this.connection.database;
+    db.exec("BEGIN");
+    try {
+      db.prepare(`
+        INSERT INTO workspace_sets (workspace_set_id, name, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+      `).run(record.workspaceSetId, record.name, record.createdAt, record.updatedAt);
+      this.replaceMembers(record);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
+  /**
+   * Replaces the set row and its full membership in one transaction (T3.8): a
+   * throw partway (e.g. a member's project FK) leaves the OLD membership
+   * intact instead of a half-deleted, half-inserted (possibly zero-member) set.
+   */
   async updateWorkspaceSet(record: WorkspaceSetRecord): Promise<void> {
-    this.connection.database.prepare(`
-      UPDATE workspace_sets SET name = ?, updated_at = ? WHERE workspace_set_id = ?
-    `).run(record.name, record.updatedAt, record.workspaceSetId);
-    this.connection.database.prepare(
-      "DELETE FROM workspace_set_projects WHERE workspace_set_id = ?"
-    ).run(record.workspaceSetId);
-    this.replaceMembers(record);
+    const db = this.connection.database;
+    db.exec("BEGIN");
+    try {
+      db.prepare(`
+        UPDATE workspace_sets SET name = ?, updated_at = ? WHERE workspace_set_id = ?
+      `).run(record.name, record.updatedAt, record.workspaceSetId);
+      db.prepare(
+        "DELETE FROM workspace_set_projects WHERE workspace_set_id = ?"
+      ).run(record.workspaceSetId);
+      this.replaceMembers(record);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   async deleteWorkspaceSet(workspaceSetId: WorkspaceSetId): Promise<void> {

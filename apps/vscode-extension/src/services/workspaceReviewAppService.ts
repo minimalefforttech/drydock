@@ -319,13 +319,38 @@ export class WorkspaceReviewAppService {
    * succeeds, so a failed restart leaves it pending and retryable. An
    * editedHostPath (the approval card's Edit affordance) rewrites the pending
    * request's path before approval; it is ignored on a denial.
+   *
+   * Escalated approvals (read-write mode, a sensitive path, or a production
+   * path) additionally require `confirmedEscalation` - the card's attestation
+   * that its typed-confirm gate ran. The HOST derives escalation from the
+   * effective path itself rather than trusting the card's classification, so
+   * a forged or stale webview message cannot one-click a grant the designed
+   * interaction would have made the user type for (F3, follow-up to T2.4).
    */
-  async resolveAccess(accessRequestId: string, approve: boolean, editedHostPath?: string): Promise<AccessRequestSummary> {
+  async resolveAccess(
+    accessRequestId: string,
+    approve: boolean,
+    editedHostPath?: string,
+    confirmedEscalation?: boolean
+  ): Promise<AccessRequestSummary> {
     const id = asId<"AccessRequestId">(accessRequestId);
     if (!approve) {
       const denied = await this.options.accessRequests.denyRequest(id, "user");
       this.options.bus.publish({ kind: "access-resolved", request: denied });
       return this.summarize(denied);
+    }
+    const pending = (await this.options.accessRequests.listRequests("pending"))
+      .find((request) => request.accessRequestId === id);
+    if (pending !== undefined) {
+      const effectivePath = editedHostPath ?? pending.hostPath;
+      const escalated = pending.mode === "read-write"
+        || sensitivePathMatch(effectivePath) !== null
+        || (this.options.productionFixtures?.isProductionPath(effectivePath) ?? false);
+      if (escalated && confirmedEscalation !== true) {
+        throw new Error(
+          "This approval is escalated (read-write, sensitive, or production) and needs the card's typed confirmation."
+        );
+      }
     }
     if (editedHostPath !== undefined) {
       await this.options.accessRequests.editRequestPath(id, editedHostPath);

@@ -69,6 +69,7 @@ import type {
 import { asId } from "@drydock/contracts";
 import { randomUUID } from "node:crypto";
 import { assertPatchSafeForWindowsGuest } from "./cloneSyncService.js";
+import { redactCredentialText } from "./commandRunner.js";
 import type { ProductEventBus } from "./eventBus.js";
 import type { Logger } from "./logger.js";
 import { computeReroute, pickAssociation, resolveValidationRuntime } from "./validationRoutingService.js";
@@ -104,15 +105,25 @@ export interface ValidationExecAdapter {
   /** Adopt/boot the VM this adapter is bound to. On-demand boot IS queue state. */
   ensureRunning(): Promise<void>;
   readonly exec: ValidationJobExec;
-  /** Kills guest processes whose command line carries the job token. */
-  sweepGuestJob(jobToken: string, timeoutMs: number, signal?: AbortSignal): Promise<number[]>;
+  /**
+   * Kills guest processes whose command line carries the job token, plus the
+   * descendants of `wrapperPid` when given - the tree root that survives the
+   * wrapper's own death, since an orphaned DCC child carries no token (T5.1).
+   */
+  sweepGuestJob(jobToken: string, timeoutMs: number, signal?: AbortSignal, wrapperPid?: number): Promise<number[]>;
 }
 
 /** One repository's contribution to the shipped changeset. */
 export interface ValidationChangesetPatch {
   /** Directory name under `ws`; must be a plain name (no separators, no `..`). */
   readonly repoName: string;
-  /** Unified diff, as `CloneSyncService.outboundChangesetPatch` produces it. */
+  /**
+   * Unified diff, as `CloneSyncService.validationWorkspacePatch` produces it:
+   * full-content `new file mode` hunks only, applicable in a freshly
+   * `git init`ed guest workspace (T1.1). Incremental capture patches
+   * (`outboundChangesetPatch`) reference base blobs the guest does not have
+   * and MUST NOT be shipped here.
+   */
   readonly patch: string;
 }
 
@@ -194,6 +205,17 @@ export type ValidationRequeueResult =
 export const VALIDATION_TAG_COMMENT = "# drydock-job-token:";
 
 /**
+ * Marker line the run wrapper prints FIRST, announcing its own guest PID. The
+ * host records it as the sweep's tree root: once the wrapper dies (local
+ * abort, ssh channel close), its DCC children carry no job token, and only a
+ * recorded root PID can still anchor the descendant walk. Transport metadata,
+ * not output: `runProfile` swallows the line before the watchdog or the
+ * receipt tail ever see it. Only the FIRST pre-output marker is honored, so
+ * profile code that later prints a forged marker cannot re-root the sweep.
+ */
+export const VALIDATION_WRAPPER_PID_PREFIX = "drydock-wrapper-pid:";
+
+/**
  * Argv for a fixed-literal guest PowerShell script. Deliberately identical to
  * `guestJsonCommand` in `@drydock/runtime-adapters` - core cannot import that
  * package (adapters depend on core, not the other way round), and duplicating
@@ -235,6 +257,7 @@ export const VALIDATION_SYNC_GUEST_SCRIPT = [
   "  exit 2",
   "}",
   "$ws = Join-Path $jobDir 'ws'",
+  "$wsRoot = [System.IO.Path]::GetFullPath((Join-Path $ws '.')) + [System.IO.Path]::DirectorySeparatorChar",
   "$patchDir = Join-Path $jobDir 'patches'",
   "$applied = @()",
   "$failures = @()",
@@ -244,6 +267,11 @@ export const VALIDATION_SYNC_GUEST_SCRIPT = [
   "  $index = $index + 1",
   "  $repo = [string]$entry.repoName",
   "  $repoDir = Join-Path $ws $repo",
+  "  $repoFull = [System.IO.Path]::GetFullPath($repoDir)",
+  "  if (-not $repoFull.StartsWith($wsRoot, [System.StringComparison]::OrdinalIgnoreCase)) {",
+  "    $failures += @{ repoName = $repo; detail = 'the repository name leaves the job workspace' }",
+  "    continue",
+  "  }",
   "  New-Item -ItemType Directory -Force -Path $repoDir | Out-Null",
   "  $patchFile = Join-Path $patchDir ([string]$index + '.patch')",
   "  [System.IO.File]::WriteAllBytes($patchFile, [System.Convert]::FromBase64String([string]$entry.patchBase64))",
@@ -318,6 +346,11 @@ export const VALIDATION_FIXTURE_GUEST_SCRIPT = [
  */
 export const VALIDATION_RUN_GUEST_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
+  // The PID announcement precedes the stdin read: it must arrive even for a
+  // run whose input/profile is broken, or the sweep has no root to fall back
+  // on. The prefix is a compile-time constant, not a spliced parameter.
+  `[Console]::Out.WriteLine('${VALIDATION_WRAPPER_PID_PREFIX} ' + $PID)`,
+  "[Console]::Out.Flush()",
   "$request = [Console]::In.ReadToEnd() | ConvertFrom-Json",
   "if ($null -ne $request.env) {",
   "  foreach ($pair in $request.env.PSObject.Properties) {",
@@ -396,7 +429,9 @@ const DEFAULT_LICENSE_WAIT_PATTERNS: readonly string[] = [
 /** Job dirs and sweep tokens are ids; anything else could widen a guest match. */
 const SAFE_JOB_TOKEN = /^[A-Za-z0-9._-]+$/;
 /** Repo names become a directory under `ws`: one plain segment, nothing else. */
-const SAFE_REPO_NAME = /^[A-Za-z0-9._-]+$/;
+// The lookahead refuses "." and ".." (T4.1): dot-only names survive the
+// charset but name the workspace itself / its parent under Join-Path.
+const SAFE_REPO_NAME = /^(?!\.+$)[A-Za-z0-9._-]+$/;
 const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** States a host restart can leave behind mid-flight (E7). */
@@ -599,13 +634,23 @@ export class ValidationJobService {
 
     // H8 again: a reroute must not move a job onto a runtime that lacks what the
     // profile needs. Catching it here keeps "route to cpp-builds?" a one-click
-    // answer rather than a slow red five minutes later.
+    // answer rather than a slow red five minutes later. `pending` is in-memory
+    // and does not survive a host restart, so a job parked in an earlier
+    // process has no `held` entry here - the profile is rehydrated the same
+    // way `materialize` does (T3.2) rather than skipping the gate silently.
     const held = this.pending.get(jobId);
-    if (held !== undefined) {
-      const gap = capabilityGap(held.request.profile, to, await this.options.store.listRuntimes(true));
-      if (gap !== undefined) {
-        return { kind: "parked", job: await this.parkAndRead(jobId, gap), reason: gap };
-      }
+    const profileForGate = held !== undefined
+      ? held.request.profile
+      : await this.options.profileFor?.(job.profileRef) ?? null;
+    if (profileForGate === null) {
+      // Cannot rehydrate the profile, so the gap cannot be checked either way.
+      // Guessing "no gap" is exactly the overclaim H8 exists to prevent - stay
+      // parked under the reason already on the job rather than invent one.
+      return { kind: "parked", job, reason: job.parkedReason ?? "This job is parked." };
+    }
+    const gap = capabilityGap(profileForGate, to, await this.options.store.listRuntimes(true));
+    if (gap !== undefined) {
+      return { kind: "parked", job: await this.parkAndRead(jobId, gap), reason: gap };
     }
 
     const updated = await this.transition(jobId, {
@@ -1059,6 +1104,18 @@ export class ValidationJobService {
     };
 
     const onStdoutLine = (line: string): void => {
+      // The wrapper's PID announcement is transport metadata, not DCC output:
+      // record it as the sweep root and drop the line, so it neither flips
+      // the startup budget nor pollutes the receipt tail. First marker only,
+      // and only before real output - profile code that prints a forged
+      // marker later can never re-root the sweep at an arbitrary PID (T5.1).
+      if (!firstLineSeen && context.wrapperPid === undefined) {
+        const announced = parseWrapperPidLine(line);
+        if (announced !== undefined) {
+          context.wrapperPid = announced;
+          return;
+        }
+      }
       const at = this.monotonicNow();
       tail.push(line);
       if (tail.length > OUTPUT_TAIL_LINES) tail.shift();
@@ -1189,7 +1246,12 @@ export class ValidationJobService {
 
   private async sweep(context: RunContext): Promise<void> {
     try {
-      const killed = await context.adapter.sweepGuestJob(context.job.jobId, GUEST_SWEEP_TIMEOUT_MS);
+      const killed = await context.adapter.sweepGuestJob(
+        context.job.jobId,
+        GUEST_SWEEP_TIMEOUT_MS,
+        undefined,
+        context.wrapperPid
+      );
       if (killed.length > 0) {
         this.options.logger.info("validation guest processes swept", { jobId: context.job.jobId, killed: killed.length });
       }
@@ -1231,16 +1293,28 @@ export class ValidationJobService {
       runtimeId: context.runtime.runtimeId,
       policyProfileRef: context.runtime.policyProfileRef,
       changesetRef: context.job.changesetRef,
-      ...(mirror === null ? {} : { mirrorVersion: mirror.manifestVersion, mirrorFreshnessAt: mirror.syncedAt }),
+      ...(mirror === null ? {} : {
+        mirrorVersion: mirror.manifestVersion,
+        mirrorFreshnessAt: mirror.syncedAt,
+        // A job that ran against a degraded/torn mirror must say so - citing
+        // only the version+timestamp would claim a clean sync that never
+        // happened (pkgrootMirrorStatus.ts's honesty rule, T3.1).
+        mirrorOk: mirror.ok,
+        mirrorSkippedVersions: mirror.skippedVersions
+      }),
       ...(context.material.request.fixtureManifestHash === undefined
         ? {}
         : { fixtureManifestHash: context.material.request.fixtureManifestHash }),
       licenseWaitMs: context.licenseWaitMs,
       ...(probesGreenAt === undefined ? {} : { probesGreenAt }),
       verdict,
-      summary: truncate(summary, SUMMARY_MAX_CHARS),
-      ...(hints.failingTest === undefined ? {} : { failingTest: hints.failingTest }),
-      ...(hints.failingAssertion === undefined ? {} : { failingAssertion: hints.failingAssertion }),
+      // Guest stdout reaches these three fields, and receipts are durable,
+      // UI-rendered, shareable evidence - redact-by-default applies (T2.1).
+      // The runner's stream sanitizer only strips `sk-`, so the broad pass
+      // happens here at assembly, before store/bus/UI ever see the text.
+      summary: truncate(redactCredentialText(summary), SUMMARY_MAX_CHARS),
+      ...(hints.failingTest === undefined ? {} : { failingTest: redactCredentialText(hints.failingTest) }),
+      ...(hints.failingAssertion === undefined ? {} : { failingAssertion: redactCredentialText(hints.failingAssertion) }),
       superseded,
       ...(superseded ? { supersededAt: now } : {}),
       createdAt: now
@@ -1357,6 +1431,8 @@ interface RunContext {
   readonly material: JobMaterial;
   readonly entry: InFlightJob;
   licenseWaitMs: number;
+  /** Guest wrapper PID announced by the run script; roots the sweep (T5.1). */
+  wrapperPid?: number;
 }
 
 type RouteOutcome =
@@ -1460,6 +1536,17 @@ function assertRunnableProfile(profile: ValidationProfile): void {
   if (profile.argv.length === 0 || (profile.argv[0] ?? "").trim() === "") {
     throw new Error(`Validation profile "${profile.profileRef}" declares no command to run.`);
   }
+}
+
+/**
+ * Reads a wrapper PID announcement (`drydock-wrapper-pid: 1234`), or
+ * undefined for any other line. Strict integer-and-positive: a mangled
+ * announcement must not become a kill root.
+ */
+function parseWrapperPidLine(line: string): number | undefined {
+  if (!line.startsWith(VALIDATION_WRAPPER_PID_PREFIX)) return undefined;
+  const value = Number(line.slice(VALIDATION_WRAPPER_PID_PREFIX.length).trim());
+  return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 /** Reads the guest sync reply; unparseable output falls back to the raw tail. */

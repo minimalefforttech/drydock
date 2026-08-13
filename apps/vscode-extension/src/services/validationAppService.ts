@@ -23,18 +23,19 @@
  *
  * A validation runtime is ADOPTED, never created (M3). The Hyper-V VM it adopts
  * is named `drydock-validation-<display-name-slug>` - the convention the
- * maintenance runbook already tells TDs to provision under. `vmNameFor` is the
- * one place that convention lives, and every runtime row carries the resulting
- * name so the panel can show a TD exactly what to call the VM.
+ * maintenance runbook already tells TDs to provision under. `vmNameFor` computes
+ * that convention and is still what names a BRAND NEW runtime's VM (the "what to
+ * call it" hint at create time).
  *
- * KNOWN COUPLING (open for M8b): because the name is DERIVED from the display
- * name, renaming a runtime re-points it at a differently-named VM, which then
- * reads as `missing` until the VM is renamed to match. That is narrower than
- * edge case H5's promise that renaming is display-only - identity really is the
- * id, and associations, jobs, and receipts are all unaffected - but the adopted
- * VM is currently found by name. The fix is a durable `vmName` captured at adopt
- * time rather than derived; until then the row shows the expected name so the
- * mismatch is visible rather than mysterious.
+ * T5.3: every runtime CAPTURES its vmName once, in createRuntime, rather than
+ * having it derived fresh from displayName on every read. Previously a rename
+ * re-pointed the row at a differently-named VM, which then read as `missing`
+ * until the VM was renamed to match - narrower than edge case H5's promise that
+ * renaming is display-only (identity was always the id; associations, jobs, and
+ * receipts were never affected), but the adopted VM WAS found by a name that
+ * moved with displayName. `readVmState` (the Hyper-V query) and `state()` (the
+ * row the panel renders) both now prefer the stored name and fall back to
+ * `vmNameFor` only for rows written before this field existed.
  *
  * ## Fixtures are copies, never mounts
  *
@@ -47,7 +48,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   asId,
@@ -74,6 +75,7 @@ import {
   type ValidationTopologyPreset
 } from "@drydock/contracts";
 import {
+  errorMessage,
   pickAssociation,
   validateDelete,
   type Logger,
@@ -82,6 +84,7 @@ import {
   type ValidationRequeueResult
 } from "@drydock/core";
 import type { EffectiveSecurityPolicy } from "./securityPolicy.js";
+import { formatSizeLabel } from "./workspaceReviewAppService.js";
 
 /** Default probe cadence: four times a day is enough for a standing invariant. */
 const DEFAULT_PROBE_CADENCE_MS = 6 * 60 * 60 * 1000;
@@ -211,7 +214,7 @@ export class ValidationAppService {
       void this.clearSessionFixtures(event.sessionId).catch((error: unknown) => {
         options.logger.warn("validation fixture cleanup failed", {
           sessionId: event.sessionId,
-          error: messageOf(error)
+          error: errorMessage(error)
         });
       });
     });
@@ -249,7 +252,7 @@ export class ValidationAppService {
     const timers = this.options.timers ?? SYSTEM_INTERVALS;
     this.cadenceTimer = timers.set(() => {
       void this.runScheduledProbes().catch((error: unknown) => {
-        this.options.logger.warn("scheduled validation probes failed", { error: messageOf(error) });
+        this.options.logger.warn("scheduled validation probes failed", { error: errorMessage(error) });
       });
     }, cadenceMs);
   }
@@ -273,7 +276,7 @@ export class ValidationAppService {
       } catch (error) {
         this.options.logger.warn("validation probe run failed", {
           runtimeId: runtime.runtimeId,
-          error: messageOf(error)
+          error: errorMessage(error)
         });
       }
     }
@@ -288,7 +291,8 @@ export class ValidationAppService {
    * quarantine outranks everything (a blocked queue is the point), a VM Hyper-V
    * cannot find is `missing` (the one availability that parks), an off VM is
    * `stopped` (honest queue state - the adapter boots it), and `available` is
-   * only reported after the probe suite has run at least once in this process.
+   * only reported after the probe suite has CONFIRMED isolation in this
+   * process - a green run, not merely a run.
    *
    * That last step is the "probe before the first job after a restart" trigger:
    * `probesGreenAt` is in-memory by design, so a fresh host has no evidence that
@@ -303,7 +307,14 @@ export class ValidationAppService {
     await this.ensureProbedOnce(runtime);
     // The lazy probe may have just raised an incident; re-read rather than
     // reporting the state we sampled before asking.
-    return (await this.options.store.getQuarantine(runtime.runtimeId)) === null ? "available" : "quarantined";
+    if ((await this.options.store.getQuarantine(runtime.runtimeId)) !== null) return "quarantined";
+    // "Unknown is never green" (ADR 0021): exec trouble surfaces as per-probe
+    // unknowns, not breaches, so an all-unknown run raises no quarantine even
+    // though isolation was never confirmed. Only a green stamp may route a
+    // job; anything less parks it as missing. `ensureProbedOnce` retries
+    // inconclusive runs, so a transient guest hiccup clears on the next ask
+    // instead of pinning "unconfirmed" for the whole probe cadence.
+    return this.options.probes.lastResult(runtime.runtimeId)?.greenAt === undefined ? "missing" : "available";
   }
 
   /** The cheap ladder the panel renders: no probes, no VM boots, no guessing. */
@@ -317,13 +328,16 @@ export class ValidationAppService {
     const query = this.options.host.vmState;
     if (!this.options.host.supported || query === undefined) return "unknown";
     try {
-      const state = await query(this.vmNameFor(runtime));
+      // T5.3: the stored name wins - a rename must not re-point this query at a
+      // VM that was never renamed to match. Only a pre-T5.3 row (no stored
+      // name yet) falls back to deriving one from the current displayName.
+      const state = await query(runtime.vmName ?? this.vmNameFor(runtime));
       if (state === null) return "missing";
       return state === "running" ? "available" : "stopped";
     } catch (error) {
       this.options.logger.warn("validation runtime state query failed", {
         runtimeId: runtime.runtimeId,
-        error: messageOf(error)
+        error: errorMessage(error)
       });
       return "unknown";
     }
@@ -331,7 +345,13 @@ export class ValidationAppService {
 
   /** Single-flight per runtime; a failure is logged and never blocks a job. */
   private async ensureProbedOnce(runtime: NamedRuntimeConfig): Promise<void> {
-    if (this.options.probes.lastResult(runtime.runtimeId) !== undefined) return;
+    // A recorded run satisfies "probed once" only if it concluded something:
+    // green, or a breach (whose durable quarantine the ladder reads). An
+    // inconclusive run - unknowns only - must not pin "unconfirmed" until the
+    // next scheduled cadence, or an on-demand runtime could wedge there for
+    // the life of the process.
+    const last = this.options.probes.lastResult(runtime.runtimeId);
+    if (last !== undefined && (last.greenAt !== undefined || last.breach !== undefined)) return;
     const key = String(runtime.runtimeId);
     const running = this.probingOnce.get(key);
     if (running !== undefined) {
@@ -343,7 +363,7 @@ export class ValidationAppService {
       .catch((error: unknown) => {
         this.options.logger.warn("first-job validation probe failed", {
           runtimeId: runtime.runtimeId,
-          error: messageOf(error)
+          error: errorMessage(error)
         });
       })
       .finally(() => {
@@ -392,7 +412,8 @@ export class ValidationAppService {
           displayName: runtime.displayName,
           probeId: quarantine.probeId,
           detail: quarantine.detail,
-          at: quarantine.at
+          at: quarantine.at,
+          ...(quarantine.lastGreenAt === undefined ? {} : { lastGreenAt: quarantine.lastGreenAt })
         });
       }
       const probes = this.probeSummary(runtime.runtimeId);
@@ -406,7 +427,9 @@ export class ValidationAppService {
         ...(runtime.profileException === true ? { profileException: true } : {}),
         ...(runtime.archived === true ? { archived: true } : {}),
         isDefault: stored.defaultRuntimeId === runtime.runtimeId,
-        vmName: this.vmNameFor(runtime),
+        // T5.3: show the name actually in use (stored, once captured) rather
+        // than one re-derived from the current displayName on every read.
+        vmName: runtime.vmName ?? this.vmNameFor(runtime),
         ...(runtime.connection === undefined ? {} : { connectionHost: runtime.connection.host }),
         availability: await this.availabilityForRow(runtime),
         queueDepth: queueDepth.get(String(runtime.runtimeId)) ?? 0,
@@ -510,6 +533,10 @@ export class ValidationAppService {
       policyProfileRef: input.policyProfileRef,
       ...(input.connection === undefined ? {} : { connection: input.connection }),
       ...(input.profileException === true ? { profileException: true } : {}),
+      // T5.3: captured once, now, from the CURRENT displayName - never
+      // recomputed, so a later rename cannot re-point this row at a
+      // differently-named VM the way the pure-derivation approach did.
+      vmName: this.vmNameFor({ displayName: input.displayName }),
       createdAt: now,
       updatedAt: now
     };
@@ -582,6 +609,26 @@ export class ValidationAppService {
       const now = this.options.clock.isoNow();
       for (const row of affected) {
         await this.options.store.upsertAssociation({ ...row, runtimeId: target.runtimeId, updatedAt: now });
+      }
+    }
+    // Task overrides dangled the exact same way (T5.2): `override.task.<id>`
+    // KV rows had no reassignment path when their runtime went away. They move
+    // to the SAME reassignment target as associations above when one is given;
+    // with none they simply clear, so the task falls back to the cascade
+    // instead of pointing at a runtime that no longer resolves. Unlike
+    // associations, an override never blocks the delete by itself - it is a
+    // routing preference, not a commitment other projects rely on.
+    const overrides = await this.options.store.listTaskOverridesForRuntime(id);
+    if (overrides.length > 0) {
+      let target: NamedRuntimeConfig | null = null;
+      if (reassignTo !== undefined) {
+        target = await this.options.store.getRuntime(asId<"ValidationRuntimeId">(reassignTo));
+        if (target === null) throw new Error(`"${reassignTo}" is not in the validation runtime registry.`);
+        if (target.runtimeId === id) throw new Error("Reassign the affected projects to a different runtime than the one being removed.");
+      }
+      const now = this.options.clock.isoNow();
+      for (const override of overrides) {
+        await this.options.store.setTaskOverride(override.taskId, target?.runtimeId ?? null, now);
       }
     }
     await this.options.store.archiveRuntime(id, true, this.options.clock.isoNow());
@@ -677,9 +724,17 @@ export class ValidationAppService {
    * banner event fires, so a UI reacting to the event always finds a blocked
    * queue rather than one that is about to be blocked.
    */
-  async quarantine(runtimeId: ValidationRuntimeId, probeId: string, detail: string): Promise<void> {
+  async quarantine(runtimeId: ValidationRuntimeId, probeId: string, detail: string, lastGreenAt?: string): Promise<void> {
     const at = this.options.clock.isoNow();
-    const payload: ValidationQuarantineRecord = { probeId, detail, at };
+    // The prior green stamp arrives from the probe service because by now its
+    // in-memory record holds the BREACH run (T5.5); durable is the only place
+    // the banner can still read "when was isolation last confirmed".
+    const payload: ValidationQuarantineRecord = {
+      probeId,
+      detail,
+      at,
+      ...(lastGreenAt === undefined ? {} : { lastGreenAt })
+    };
     await this.options.store.setQuarantine(runtimeId, payload, at);
   }
 
@@ -757,6 +812,8 @@ export class ValidationAppService {
             changesetRef: receipt.changesetRef,
             ...(receipt.mirrorVersion === undefined ? {} : { mirrorVersion: receipt.mirrorVersion }),
             ...(receipt.mirrorFreshnessAt === undefined ? {} : { mirrorFreshnessAt: receipt.mirrorFreshnessAt }),
+            ...(receipt.mirrorOk === undefined ? {} : { mirrorOk: receipt.mirrorOk }),
+            ...(receipt.mirrorSkippedVersions === undefined ? {} : { mirrorSkippedVersions: receipt.mirrorSkippedVersions }),
             ...(receipt.probesGreenAt === undefined ? {} : { probesGreenAt: receipt.probesGreenAt }),
             licenseWaitMs: receipt.licenseWaitMs,
             superseded: receipt.superseded,
@@ -871,9 +928,17 @@ export class ValidationAppService {
     const jobs = taskId === undefined
       ? []
       : await this.options.store.listJobs({ taskId: asId<"TaskId">(taskId) });
-    const queued = jobs.filter((job) => job.state === "queued").length;
-    const parked = jobs.find((job) => job.state === "parked");
-    const active = jobs.filter((job) => ACTIVE_JOB_STATES.has(job.state));
+    // A task's job history can span runtimes it no longer resolves to (a
+    // changed picker override, a changed association) - `where` below only
+    // ever names the CURRENTLY resolved one, so every pick that feeds the
+    // line is scoped to it: parked/active (T3.11), and equally the queue
+    // count and the last-verdict row. Otherwise a job left behind on a
+    // runtime this task moved on from would be reported as if it were the
+    // resolved runtime's own state.
+    const onResolvedRuntime = (job: ValidationJob): boolean => job.resolvedRuntimeId === runtime?.runtimeId;
+    const queued = jobs.filter((job) => job.state === "queued" && onResolvedRuntime(job)).length;
+    const parked = jobs.find((job) => job.state === "parked" && onResolvedRuntime(job));
+    const active = jobs.filter((job) => ACTIVE_JOB_STATES.has(job.state) && onResolvedRuntime(job));
     const quarantine = runtime === undefined ? null : await this.options.store.getQuarantine(runtime.runtimeId);
     const where = runtime === undefined ? "" : ` on ${runtime.displayName}`;
 
@@ -897,7 +962,7 @@ export class ValidationAppService {
       };
     }
     const newest = jobs
-      .filter((job) => job.completedAt !== undefined)
+      .filter((job) => job.completedAt !== undefined && onResolvedRuntime(job))
       .sort((a, b) => (a.completedAt ?? "").localeCompare(b.completedAt ?? ""))
       .pop();
     const receipt = newest === undefined ? null : await this.options.store.getReceiptByJob(newest.jobId);
@@ -993,59 +1058,67 @@ export class ValidationAppService {
     if (!this.isProductionPath(input.hostPath)) {
       throw new Error(`${input.hostPath} is not a production-tier path, so it cannot be snapshotted as a fixture.`);
     }
-    let stats: Awaited<ReturnType<typeof stat>>;
+    let handle: Awaited<ReturnType<typeof open>>;
     try {
-      stats = await stat(input.hostPath);
+      handle = await open(input.hostPath, "r");
     } catch {
       throw new Error(`${input.hostPath} could not be read, so there is nothing to snapshot.`);
     }
-    if (stats.isDirectory()) {
-      throw new Error(
-        `${input.hostPath} is a folder. Ask for the specific file you need instead - Drydock copies approved files one by one so every grant is auditable.`
-      );
-    }
-    if (!stats.isFile()) {
-      throw new Error(`${input.hostPath} is not a regular file, so it cannot be snapshotted.`);
-    }
-    if (stats.size > MAX_FIXTURE_BYTES) {
-      throw new Error(
-        `${input.hostPath} is ${formatBytes(stats.size)}, over the ${formatBytes(MAX_FIXTURE_BYTES)} snapshot limit. Narrow the request to the specific file or frame range you need.`
-      );
-    }
-    const directory = this.sessionFixtureDir(input.sessionId);
-    // Namespace each grant by a hash of its SOURCE path so two files that share
-    // a basename (P:\shots\010\scene.ma and P:\shots\020\scene.ma) never
-    // overwrite each other - a silent overwrite would ship one file while the
-    // receipt attests another.
-    const relativePath = fixtureRelPath(input.hostPath);
-    const target = path.join(directory, ...relativePath.split("/"));
-    await mkdir(path.dirname(target), { recursive: true });
-    const content = await readFile(input.hostPath);
-    await writeFile(target, content);
-    const contentSha256 = stats.size <= FIXTURE_HASH_BUDGET_BYTES
-      ? createHash("sha256").update(content).digest("hex")
-      : undefined;
-    this.options.securityEvent?.({
-      eventCode: "fixture.granted",
-      outcome: "allowed",
-      sessionId: asId<"SessionId">(input.sessionId),
-      metadata: {
-        path: input.hostPath,
-        sizeBytes: stats.size,
-        relativePath,
-        ...(contentSha256 === undefined ? {} : { contentSha256 }),
-        // Grants are session-scoped by default (edge case B2); the staging
-        // directory is removed when the session ends.
-        expiry: "session-end"
+    try {
+      // fd-pinned (T4.4): the size check and the bytes shipped below come from
+      // the SAME open handle, so a file replaced on a shared drive between the
+      // two can never ship bytes the size check never saw.
+      const stats = await handle.stat();
+      if (stats.isDirectory()) {
+        throw new Error(
+          `${input.hostPath} is a folder. Ask for the specific file you need instead - Drydock copies approved files one by one so every grant is auditable.`
+        );
       }
-    });
-    const staged = await this.stagedFixtures(input.sessionId);
-    return {
-      relativePath,
-      bytes: stats.size,
-      ...(contentSha256 === undefined ? {} : { contentSha256 }),
-      manifestHash: fixtureManifestHash(staged)
-    };
+      if (!stats.isFile()) {
+        throw new Error(`${input.hostPath} is not a regular file, so it cannot be snapshotted.`);
+      }
+      if (stats.size > MAX_FIXTURE_BYTES) {
+        throw new Error(
+          `${input.hostPath} is ${formatSizeLabel(stats.size)}, over the ${formatSizeLabel(MAX_FIXTURE_BYTES)} snapshot limit. Narrow the request to the specific file or frame range you need.`
+        );
+      }
+      const directory = this.sessionFixtureDir(input.sessionId);
+      // Namespace each grant by a hash of its SOURCE path so two files that share
+      // a basename (P:\shots\010\scene.ma and P:\shots\020\scene.ma) never
+      // overwrite each other - a silent overwrite would ship one file while the
+      // receipt attests another.
+      const relativePath = fixtureRelPath(input.hostPath);
+      const target = path.join(directory, ...relativePath.split("/"));
+      await mkdir(path.dirname(target), { recursive: true });
+      const content = await handle.readFile();
+      await writeFile(target, content);
+      const contentSha256 = stats.size <= FIXTURE_HASH_BUDGET_BYTES
+        ? createHash("sha256").update(content).digest("hex")
+        : undefined;
+      this.options.securityEvent?.({
+        eventCode: "fixture.granted",
+        outcome: "allowed",
+        sessionId: asId<"SessionId">(input.sessionId),
+        metadata: {
+          path: input.hostPath,
+          sizeBytes: stats.size,
+          relativePath,
+          ...(contentSha256 === undefined ? {} : { contentSha256 }),
+          // Grants are session-scoped by default (edge case B2); the staging
+          // directory is removed when the session ends.
+          expiry: "session-end"
+        }
+      });
+      const staged = await this.stagedFixtures(input.sessionId);
+      return {
+        relativePath,
+        bytes: stats.size,
+        ...(contentSha256 === undefined ? {} : { contentSha256 }),
+        manifestHash: fixtureManifestHash(staged)
+      };
+    } finally {
+      await handle.close();
+    }
   }
 
   /**
@@ -1071,7 +1144,7 @@ export class ValidationAppService {
             : {})
         });
       } catch (error) {
-        this.options.logger.warn("staged fixture unreadable; skipped", { relativePath, error: messageOf(error) });
+        this.options.logger.warn("staged fixture unreadable; skipped", { relativePath, error: errorMessage(error) });
       }
     }
     return staged;
@@ -1100,7 +1173,7 @@ export class ValidationAppService {
           if (childStats.isFile()) files.push(`${entry}/${child}`);
         }
       } catch (error) {
-        this.options.logger.warn("staged fixture entry unreadable; skipped", { entry, error: messageOf(error) });
+        this.options.logger.warn("staged fixture entry unreadable; skipped", { entry, error: errorMessage(error) });
       }
     }
     return files.sort();
@@ -1121,7 +1194,7 @@ export class ValidationAppService {
       } catch (error) {
         this.options.logger.warn("staged fixture could not be shipped", {
           relativePath: entry.relativePath,
-          error: messageOf(error)
+          error: errorMessage(error)
         });
       }
     }
@@ -1224,17 +1297,6 @@ function clockTime(iso: string): string {
   if (!Number.isFinite(parsed)) return iso;
   const date = new Date(parsed);
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-  if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} MB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${String(bytes)} bytes`;
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 const SYSTEM_INTERVALS: ValidationIntervalTimers = {

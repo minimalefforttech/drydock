@@ -448,7 +448,12 @@ export interface ValidationProbeServiceOptions {
    * Injected because core owns neither inventory nor the queue - M7 binds it to
    * `RuntimeCleanupService` in `quarantine-only` mode plus the queue block.
    */
-  readonly quarantine?: (runtimeId: ValidationRuntimeId, probeId: string, detail: string) => Promise<void>;
+  readonly quarantine?: (
+    runtimeId: ValidationRuntimeId,
+    probeId: string,
+    detail: string,
+    lastGreenAt?: string
+  ) => Promise<void>;
   readonly probeTimeoutMs?: number;
 }
 
@@ -489,10 +494,14 @@ export class ValidationProbeService {
       ...(breach === undefined ? {} : { breach: { probeId: breach.probeId, detail: breach.detail } }),
       at
     };
+    // The breach run replaces the recorded green, so the banner's "last green
+    // probe" stamp must be captured BEFORE the overwrite and ride the incident
+    // (T5.5) - afterwards `probesGreenAt` correctly reports none.
+    const priorGreenAt = this.lastResults.get(runtime.runtimeId)?.greenAt;
     // Recorded before the incident so anything reacting to the bus event reads
     // the breach run, never the last green one.
     this.lastResults.set(runtime.runtimeId, result);
-    if (breach !== undefined) await this.raiseIncident(runtime, breach, at);
+    if (breach !== undefined) await this.raiseIncident(runtime, breach, at, priorGreenAt);
     return result;
   }
 
@@ -578,7 +587,12 @@ export class ValidationProbeService {
    * we log it and still publish: hiding a breach because a write failed would
    * be the worse failure by far.
    */
-  private async raiseIncident(runtime: NamedRuntimeConfig, breach: ProbeResult, at: string): Promise<void> {
+  private async raiseIncident(
+    runtime: NamedRuntimeConfig,
+    breach: ProbeResult,
+    at: string,
+    lastGreenAt?: string
+  ): Promise<void> {
     this.options.logger.error("Validation runtime quarantined: a must-fail isolation probe succeeded", {
       runtimeId: runtime.runtimeId,
       probeId: breach.probeId,
@@ -586,7 +600,7 @@ export class ValidationProbeService {
     });
     if (this.options.quarantine !== undefined) {
       try {
-        await this.options.quarantine(runtime.runtimeId, breach.probeId, breach.detail);
+        await this.options.quarantine(runtime.runtimeId, breach.probeId, breach.detail, lastGreenAt);
       } catch (error) {
         this.options.logger.error("Quarantining the validation runtime failed; the incident is reported anyway", {
           runtimeId: runtime.runtimeId,

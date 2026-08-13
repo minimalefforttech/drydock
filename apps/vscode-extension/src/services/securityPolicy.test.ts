@@ -486,3 +486,33 @@ test("AI-bound overlay targets honor repo-relative omissions after canonicalizat
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// chat.openFile (an agent-emitted markdown link) opens through
+// EffectiveSecurityPolicy.assertHostFileAllowed - the same file-target check
+// resolvePolicyOverlayFile runs - so a link into a denied credential
+// directory refuses instead of silently opening (T2.2).
+test("AI file opens refuse a denied credential path and canonicalize an allowed one", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "drydock-policy-"));
+  try {
+    const home = path.join(root, "home");
+    const sshDir = path.join(home, ".ssh");
+    const sshKey = path.join(sshDir, "id_rsa");
+    await mkdir(sshDir, { recursive: true });
+    await writeFile(sshKey, "not a real key", "utf8");
+    const workspace = path.join(root, "workspace");
+    const allowedFile = path.join(workspace, "notes.md");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(allowedFile, "notes", "utf8");
+
+    const policy = loadEffectiveSecurityPolicy({
+      studioPolicyPath: path.join(root, "no-policy.json"),
+      baseDeniedPaths: [sshDir],
+      user: unrestrictedUser
+    });
+
+    assert.throws(() => policy.assertHostFileAllowed(sshKey), /intersects a denied path/);
+    assert.equal(policy.assertHostFileAllowed(allowedFile), allowedFile);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

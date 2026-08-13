@@ -265,9 +265,15 @@ test("purgeRuntimes deletes only terminal rows past their retention window", asy
     const dayMs = 24 * 60 * 60 * 1000;
 
     // removed 2 days ago → past the 24h window; removed 1h ago → retained.
+    // Both carry cleanup-attempt child rows, as every normally-removed
+    // runtime does in production (cleanup records its attempt before the
+    // status flips) - the FK has no cascade, so purge must clear children
+    // itself or the delete aborts (T1.2).
     await inventory.insertRuntime({ ...runtimeRecord(), runtimeId: asId<"RuntimeId">("rt-removed-old") });
+    await inventory.updateCleanupAttempt(asId<"RuntimeId">("rt-removed-old"), "2026-07-07T23:59:00.000Z", false);
     await inventory.updateRuntimeStatus(asId<"RuntimeId">("rt-removed-old"), "removed", "2026-07-08T00:00:00.000Z");
     await inventory.insertRuntime({ ...runtimeRecord(), runtimeId: asId<"RuntimeId">("rt-removed-fresh") });
+    await inventory.updateCleanupAttempt(asId<"RuntimeId">("rt-removed-fresh"), "2026-07-09T22:59:00.000Z", false);
     await inventory.updateRuntimeStatus(asId<"RuntimeId">("rt-removed-fresh"), "removed", "2026-07-09T23:00:00.000Z");
     // lost 10 days ago → past the 7d window; lost 2 days ago → retained.
     await inventory.insertRuntime({ ...runtimeRecord(), runtimeId: asId<"RuntimeId">("rt-lost-old") });
@@ -285,6 +291,11 @@ test("purgeRuntimes deletes only terminal rows past their retention window", asy
       [...remaining].sort(),
       ["rt-lost-fresh", "rt-removed-fresh", "rt-running"]
     );
+    // The purged runtime's ledger went with it; the retained one's survives.
+    const attempts = connection.database.prepare(
+      "SELECT runtime_id FROM runtime_cleanup_attempts ORDER BY runtime_id"
+    ).all() as { runtime_id: string }[];
+    assert.deepEqual(attempts.map((row) => row.runtime_id), ["rt-removed-fresh"]);
     connection.close();
   } finally {
     await rm(dir, { recursive: true, force: true });

@@ -7,9 +7,13 @@
  * - Associations key on (project_root_id, source) so a studio-managed row and a
  *   personal row coexist for one project; picking between them is routing's job
  *   (`resolveValidationRuntime`), not storage's (edge case H6).
- * - Settings live in one key/value table (the app_state pattern) with typed
- *   accessors; unknown or malformed keys degrade to the documented defaults
- *   rather than throwing, so a hand-edited state file cannot brick Configure.
+ * - Registry settings and the quarantine flag live in one key/value table (the
+ *   app_state pattern) with typed accessors; unknown or malformed keys degrade
+ *   to the documented defaults rather than throwing, so a hand-edited state
+ *   file cannot brick Configure. Task overrides used to share that table too
+ *   (`override.task.<taskId>`) but moved to their own `validation_task_overrides`
+ *   table (T5.2) so a deleted runtime's overrides can be found and
+ *   reassigned/cleared instead of dangling under a KV key nothing referenced.
  * - Nothing is seeded. The registry starts empty and the setup wizard creates
  *   the default runtime.
  * - Every timestamp arrives as a parameter; the store never reads the clock.
@@ -40,6 +44,7 @@ import type {
   ValidationRuntimeId,
   ValidationRuntimeLifecycle,
   ValidationRuntimeStore,
+  ValidationTaskOverride,
   ValidationTopologyPreset,
   ValidationVerdict,
   WorkspaceRootId
@@ -52,11 +57,12 @@ const SETTING_TOPOLOGY_PRESET = "topologyPreset";
 const SETTING_WARM_CAP = "warmCap";
 const SETTING_AUTO_CREATE = "autoCreate";
 /**
- * Namespaced key prefixes sharing the same table. Both are one small durable
- * fact per subject - a task's chosen runtime, a runtime's live incident - so
- * they ride the settings KV rather than earning tables of their own.
+ * The quarantine flag is one small durable fact per runtime, so it rides the
+ * settings KV under this namespaced prefix rather than earning a table of its
+ * own. Task overrides used to share this same scheme
+ * (`override.task.<taskId>`); T5.2 moved them to `validation_task_overrides`
+ * (below) so a deleted runtime's overrides are findable, not just a KV key.
  */
-const SETTING_TASK_OVERRIDE_PREFIX = "override.task.";
 const SETTING_QUARANTINE_PREFIX = "quarantine.";
 
 type SqlValue = string | number | null;
@@ -92,8 +98,8 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
       INSERT INTO validation_runtimes (
         runtime_id, display_name, image, lifecycle, capabilities_json,
         policy_profile_ref, profile_exception, archived, connection_json,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        vm_name, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.runtimeId,
       record.displayName,
@@ -104,6 +110,10 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
       record.profileException === true ? 1 : 0,
       record.archived === true ? 1 : 0,
       record.connection === undefined ? null : JSON.stringify(record.connection),
+      // T5.3: captured once, here, at create time; nothing ever updates it -
+      // see updateRuntime and NamedRuntimeUpdate, which deliberately have no
+      // vmName field.
+      record.vmName === undefined ? null : record.vmName,
       record.createdAt,
       record.updatedAt
     );
@@ -286,17 +296,50 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
   }
 
   // -------------------------------------------------------------------------
-  // Task overrides + quarantine (same KV table, namespaced keys)
+  // Task overrides (own table; T5.2)
   // -------------------------------------------------------------------------
 
   async getTaskOverride(taskId: TaskId): Promise<ValidationRuntimeId | null> {
-    const value = this.readSetting(`${SETTING_TASK_OVERRIDE_PREFIX}${taskId}`);
-    return value === null || value.length === 0 ? null : (value as ValidationRuntimeId);
+    const row = this.connection.database.prepare(`
+      SELECT runtime_id
+      FROM validation_task_overrides
+      WHERE task_id = ?
+    `).get(taskId) as { readonly runtime_id: string } | undefined;
+    return row === undefined ? null : (row.runtime_id as ValidationRuntimeId);
   }
 
   async setTaskOverride(taskId: TaskId, runtimeId: ValidationRuntimeId | null, updatedAt: string): Promise<void> {
-    this.writeSetting(`${SETTING_TASK_OVERRIDE_PREFIX}${taskId}`, runtimeId, updatedAt);
+    if (runtimeId === null) {
+      this.connection.database.prepare(`DELETE FROM validation_task_overrides WHERE task_id = ?`).run(taskId);
+      return;
+    }
+    this.connection.database.prepare(`
+      INSERT INTO validation_task_overrides (task_id, runtime_id, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(task_id) DO UPDATE SET
+        runtime_id = excluded.runtime_id,
+        updated_at = excluded.updated_at
+    `).run(taskId, runtimeId, updatedAt);
   }
+
+  /** Every task whose override points at this runtime - deleteRuntime's reassignment path. */
+  async listTaskOverridesForRuntime(runtimeId: ValidationRuntimeId): Promise<ValidationTaskOverride[]> {
+    const rows = this.connection.database.prepare(`
+      SELECT task_id, runtime_id, updated_at
+      FROM validation_task_overrides
+      WHERE runtime_id = ?
+      ORDER BY task_id ASC
+    `).all(runtimeId) as unknown as { readonly task_id: string; readonly runtime_id: string; readonly updated_at: string }[];
+    return rows.map((row) => ({
+      taskId: row.task_id as TaskId,
+      runtimeId: row.runtime_id as ValidationRuntimeId,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Quarantine (settings KV, namespaced keys)
+  // -------------------------------------------------------------------------
 
   /** An unreadable payload reads as "no quarantine flag" - see the note below. */
   async getQuarantine(runtimeId: ValidationRuntimeId): Promise<ValidationQuarantineRecord | null> {
@@ -316,8 +359,14 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
     const probeId = record["probeId"];
     const detail = record["detail"];
     const at = record["at"];
+    const lastGreenAt = record["lastGreenAt"];
     if (typeof probeId !== "string" || typeof detail !== "string" || typeof at !== "string") return null;
-    return { probeId, detail, at };
+    return {
+      probeId,
+      detail,
+      at,
+      ...(typeof lastGreenAt === "string" ? { lastGreenAt } : {})
+    };
   }
 
   async setQuarantine(
@@ -327,7 +376,14 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
   ): Promise<void> {
     this.writeSetting(
       `${SETTING_QUARANTINE_PREFIX}${runtimeId}`,
-      payload === null ? null : JSON.stringify({ probeId: payload.probeId, detail: payload.detail, at: payload.at }),
+      payload === null
+        ? null
+        : JSON.stringify({
+            probeId: payload.probeId,
+            detail: payload.detail,
+            at: payload.at,
+            ...(payload.lastGreenAt === undefined ? {} : { lastGreenAt: payload.lastGreenAt })
+          }),
       updatedAt
     );
   }
@@ -489,11 +545,12 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
     this.connection.database.prepare(`
       INSERT INTO validation_receipts (
         receipt_id, job_id, runtime_id, policy_profile_ref, changeset_ref,
-        mirror_version, mirror_freshness_at, fixture_manifest_hash,
+        mirror_version, mirror_freshness_at, mirror_ok, mirror_skipped_versions_json,
+        fixture_manifest_hash,
         license_wait_ms, probes_green_at, image_generation, revert_generation,
         verdict, summary, failing_test, failing_assertion, superseded,
         superseded_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.receiptId,
       record.jobId,
@@ -502,6 +559,8 @@ export class SqliteValidationRuntimeStore implements ValidationRuntimeStore {
       record.changesetRef,
       record.mirrorVersion ?? null,
       record.mirrorFreshnessAt ?? null,
+      record.mirrorOk === undefined ? null : (record.mirrorOk ? 1 : 0),
+      record.mirrorSkippedVersions === undefined ? null : JSON.stringify(record.mirrorSkippedVersions),
       record.fixtureManifestHash ?? null,
       record.licenseWaitMs,
       record.probesGreenAt ?? null,
@@ -570,6 +629,7 @@ interface RuntimeRow {
   readonly profile_exception: number;
   readonly archived: number;
   readonly connection_json: string | null;
+  readonly vm_name: string | null;
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -618,6 +678,8 @@ interface ReceiptRow {
   readonly changeset_ref: string;
   readonly mirror_version: number | null;
   readonly mirror_freshness_at: string | null;
+  readonly mirror_ok: number | null;
+  readonly mirror_skipped_versions_json: string | null;
   readonly fixture_manifest_hash: string | null;
   readonly license_wait_ms: number;
   readonly probes_green_at: string | null;
@@ -662,6 +724,8 @@ function mapRuntime(row: RuntimeRow): NamedRuntimeConfig {
     policyProfileRef: row.policy_profile_ref,
     ...(connection === null ? {} : { connection }),
     ...(row.profile_exception === 0 ? {} : { profileException: true }),
+    // Absent on rows written before T5.3 - callers fall back to vmNameFor.
+    ...(row.vm_name === null || row.vm_name.length === 0 ? {} : { vmName: row.vm_name }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.archived === 0 ? {} : { archived: true })
@@ -714,6 +778,8 @@ function mapReceipt(row: ReceiptRow): ValidationReceipt {
     changesetRef: row.changeset_ref,
     ...(row.mirror_version === null ? {} : { mirrorVersion: row.mirror_version }),
     ...(row.mirror_freshness_at === null ? {} : { mirrorFreshnessAt: row.mirror_freshness_at }),
+    ...(row.mirror_ok === null ? {} : { mirrorOk: row.mirror_ok !== 0 }),
+    ...(row.mirror_skipped_versions_json === null ? {} : { mirrorSkippedVersions: parseStringArray(row.mirror_skipped_versions_json) }),
     ...(row.fixture_manifest_hash === null ? {} : { fixtureManifestHash: row.fixture_manifest_hash }),
     licenseWaitMs: row.license_wait_ms,
     ...(row.probes_green_at === null ? {} : { probesGreenAt: row.probes_green_at }),

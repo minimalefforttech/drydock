@@ -60,6 +60,13 @@ export class RuntimeCleanupService {
       externalName: record.externalName,
       workspacePath: typeof record.metadata["workspacePath"] === "string" ? record.metadata["workspacePath"] : "",
       ...(typeof record.metadata["runtimeCwd"] === "string" ? { runtimeCwd: record.metadata["runtimeCwd"] } : {}),
+      // Cleanup runs without the adapter's in-process policy Map (a fresh
+      // process, or simply a runtime this instance never created) - the
+      // persisted metadata is the only remaining source for the egress
+      // allowlist string docker-sandbox's removeRuntime needs to revoke it.
+      ...(typeof record.metadata["networkAllowResources"] === "string"
+        ? { networkAllowResources: record.metadata["networkAllowResources"] }
+        : {}),
       mounts: [],
       status: "running" as const
     };

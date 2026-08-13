@@ -106,6 +106,26 @@ test("a missing source subtree is planned but flagged, not silently dropped", as
   }
 });
 
+test("joinUnderRoot refuses a traversal attempt even without manifest validation upstream (T4.2)", () => {
+  // checkEntries (manifest.ts) already rejects ".." in a manifest's subtrees/
+  // stubDirs before they ever reach buildSyncPlan; this is the helper's OWN
+  // guard, exercised directly since it is exported and callable by anyone.
+  const root = path.join("C:", "pkgroot");
+  assert.throws(
+    () => joinUnderRoot(root, "..\\..\\Windows\\System32"),
+    /Refusing to build a path outside/
+  );
+  assert.throws(
+    () => joinUnderRoot(root, "Pipeline\\..\\..\\escaped"),
+    /Refusing to build a path outside/
+  );
+  // A same-level ".." that still resolves inside the root is not a traversal.
+  assert.equal(
+    joinUnderRoot(root, "Pipeline\\rez\\..\\rez\\packages"),
+    path.join(root, "Pipeline", "rez", "packages")
+  );
+});
+
 test("unversioned packages keep their payload directories", () => {
   // In-memory facade: pipe_tools has its definition in the family directory, so
   // its subdirectories are payload rather than half-published versions.

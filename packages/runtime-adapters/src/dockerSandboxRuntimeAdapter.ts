@@ -86,6 +86,13 @@ export class DockerSandboxRuntimeAdapter implements RuntimeAdapter {
         throw new Error(`sbx network allow failed: ${allow.stderr || allow.error || allow.stdout}`);
       }
       this.networkPolicies.set(handle.externalName, resources);
+      // The Map above is this process's fast path; it does not survive a host
+      // restart. Returning the resources string on the handle lets the caller
+      // (RuntimeLifecycleService) persist it into the inventory record's
+      // metadata, which removeRuntime falls back to below when the Map has no
+      // entry - otherwise a runtime created before a restart is removed with
+      // its network-allow policy left behind and nothing can ever clean it up.
+      return { ...handle, networkAllowResources: resources };
     }
     return handle;
   }
@@ -99,7 +106,12 @@ export class DockerSandboxRuntimeAdapter implements RuntimeAdapter {
   }
 
   async removeRuntime(handle: RuntimeHandle, force: boolean): Promise<CommandResult> {
-    const resources = this.networkPolicies.get(handle.externalName);
+    // The Map is the fast path for a runtime this adapter instance created.
+    // A fresh instance (post-restart) has an empty Map for every runtime
+    // created earlier, so fall back to the resources string persisted on the
+    // handle - RuntimeCleanupService rebuilds it from the inventory record's
+    // metadata, which is the source of truth once the Map can no longer be.
+    const resources = this.networkPolicies.get(handle.externalName) ?? handle.networkAllowResources;
     if (resources) {
       const removePolicy = await this.removeNetwork(handle, resources);
       if (removePolicy.exitCode !== 0) {

@@ -127,6 +127,89 @@ test("renderConfigJson emits the Claude mcpServers shape for enabled servers onl
   assert.equal(service.renderConfigJson([]), null);
 });
 
+// ---------------------------------------------------------------------------
+// Name uniqueness (T3.6)
+// ---------------------------------------------------------------------------
+
+test("saveServer refuses a duplicate name, case-insensitively, before ever writing", async () => {
+  const { service } = await serviceWithServers();
+  await assert.rejects(() => service.saveServer({
+    name: "asset-db",
+    command: "npx",
+    args: [],
+    enabledByDefault: true,
+    sensitive: false
+  }), /An MCP server named "asset-db" already exists\./);
+  // Case-insensitive: the in-process check folds case exactly like the
+  // UNIQUE(name COLLATE NOCASE) index storage.ts adds for the race this
+  // check alone cannot close.
+  await assert.rejects(() => service.saveServer({
+    name: "ASSET-DB",
+    command: "npx",
+    args: [],
+    enabledByDefault: true,
+    sensitive: false
+  }), /An MCP server named "ASSET-DB" already exists\./);
+});
+
+/**
+ * Delegates every method to `inner` EXCEPT upsertServer, whose first call for
+ * `triggerName` throws the way node:sqlite's real UNIQUE(name COLLATE NOCASE)
+ * index would - simulating a concurrent writer that landed the same name
+ * between this caller's in-process pre-check and its own write (the T3.6
+ * race). Explicit delegation, not `{...inner}`: a class instance's methods
+ * live on its prototype, so spreading one drops them all at runtime even
+ * though the shape still type-checks against the McpServerStore interface.
+ */
+function racyStore(inner: McpServerStore, triggerName: string): McpServerStore {
+  let fired = false;
+  return {
+    upsertServer: (record: McpServerRecord) => {
+      if (!fired && record.name.toLowerCase() === triggerName.toLowerCase()) {
+        fired = true;
+        return Promise.reject(new Error("UNIQUE constraint failed: mcp_servers.name"));
+      }
+      return inner.upsertServer(record);
+    },
+    getServer: (serverId: McpServerId) => inner.getServer(serverId),
+    listServers: () => inner.listServers(),
+    deleteServer: (serverId: McpServerId) => inner.deleteServer(serverId),
+    setOverride: (override: McpOverride) => inner.setOverride(override),
+    clearOverride: (scope: McpOverrideScope, refId: string, serverId: McpServerId) =>
+      inner.clearOverride(scope, refId, serverId),
+    listOverrides: (scope?: McpOverrideScope, refId?: string) => inner.listOverrides(scope, refId)
+  };
+}
+
+test("saveServer maps the store's raw name-conflict error to the same readable message", async () => {
+  const store = racyStore(new MemoryMcpStore(), "shotgrid");
+  const service = new McpRegistryService({ clock, store });
+  // The pre-check sees no conflict (the store is empty) - only the store's
+  // write itself fails, exactly like the lost race the DB constraint guards.
+  await assert.rejects(
+    () => service.saveServer({ name: "shotgrid", command: "uvx", args: [], enabledByDefault: true, sensitive: false }),
+    /An MCP server named "shotgrid" already exists\./
+  );
+
+  // A DIFFERENT failure (anything not the name-conflict signature) must not
+  // be swallowed into the same friendly sentence.
+  const brokenInner = new MemoryMcpStore();
+  const brokenStore: McpServerStore = {
+    upsertServer: () => Promise.reject(new Error("disk I/O error")),
+    getServer: (serverId) => brokenInner.getServer(serverId),
+    listServers: () => brokenInner.listServers(),
+    deleteServer: (serverId) => brokenInner.deleteServer(serverId),
+    setOverride: (override) => brokenInner.setOverride(override),
+    clearOverride: (scope, refId, serverId) => brokenInner.clearOverride(scope, refId, serverId),
+    listOverrides: (scope, refId) => brokenInner.listOverrides(scope, refId)
+  };
+  const brokenService = new McpRegistryService({ clock, store: brokenStore });
+  await assert.rejects(
+    () => brokenService.saveServer({ name: "linter", command: "mcp-lint", args: [], enabledByDefault: true, sensitive: false }),
+    /disk I\/O error/
+  );
+});
+
 test("importServersFromConfigJson maps entries to read-only settings rows", () => {
   const imported = importServersFromConfigJson(
     JSON.stringify({ mcpServers: { docs: { command: "node", args: ["docs.mjs"], env: { TOKEN: "x" } }, bad: {} } }),

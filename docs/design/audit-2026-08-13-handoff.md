@@ -1,10 +1,87 @@
 # Repo audit + fix handoff — 2026-08-13
 
+## STATUS (fix session, 2026-08-13, later the same day): ALL ITEMS FIXED
+
+Every item below — T1.1–T1.3, T2.1–T2.5, T3.1–T3.11, T4.1–T4.8, T5.1–T5.6 — is
+**implemented in the working tree** (uncommitted). `npm test` **794 tests, 784
+pass, 0 fail, 10 skipped** (4 symlink-priv + 5 real-DCC + 1 new gated sync
+regression; +46 tests vs. the audit baseline). The opt-in live fire
+(`DRYDOCK_DCC_ITEST=1`, real Blender 5.2 + Houdini 20.5) re-ran **6/6** after the
+exec-path changes — the stall test now asserts the wrapper-PID-rooted sweep reaps
+the orphaned DCC (`sweep killed 2 pid(s); 0 orphaned survived`), and the new
+modify+delete changeset ships through the real guest sync script. **vsix 0.18.0**
+packaged (`.tmp/vsix-output/drydock-0.18.0.vsix`) and its extracted contents
+re-scanned clean for every scrubbed identifier family.
+
+Fix-approach notes where the audit left a choice:
+- **T1.1**: chose a NEW ship shape over base-seeding: `CloneSyncService.
+  validationWorkspacePatch` emits full-content `new file mode` diffs vs. git's
+  empty tree, scoped (chunked `:(literal)` pathspecs) to the base..HEAD file
+  set with `--no-renames`; deletion-only changesets honestly ship nothing.
+  Capture/landing keep `outboundChangesetPatch` untouched; `changesetRef` now
+  hashes the shipped bytes. Guest sync script gained the ws-containment
+  re-check (T4.1) alongside.
+- **T1.3**: `availabilityForJob` requires `lastResult.greenAt`; additionally
+  `ensureProbedOnce` re-runs when the last run was inconclusive (no green, no
+  breach) so an on-demand runtime cannot wedge "missing" for the process life.
+- **T3.5**: pruned at the STORE level (deleteProject's own transaction) plus a
+  zero-member throw in `resolveProjects`, to avoid new composition-root wiring.
+- **T3.9**: code-level CAS (`UPDATE … WHERE status='pending'`, changes===1) and
+  an atomic no-await `insertCandidateIfNoPendingDuplicate` store method; no new
+  unique index (migrations.ts convention keeps index creation to itself).
+- **T5.1**: run wrapper announces `drydock-wrapper-pid: <pid>` BEFORE reading
+  stdin; host honors only the FIRST pre-output marker (spoof-proof), never
+  flips watchdog budgets or the receipt tail on it; sweep script walks the
+  recorded root's descendants but only kills the root itself if token-matched
+  (PID-recycle guard).
+- **T2.5**: the audit's fix sketch would have broken production — VS Code's
+  webview host relays extension messages from the parent frame
+  (`contentWindow.postMessage` in `pre/index.html`), so genuine messages have
+  `event.source === window.parent`, not `null`. All 7 listeners use
+  `event.source !== null && event.source !== window.parent → reject`.
+- `SqliteConnection.close()` is now idempotent (double-close threw).
+
+**Follow-ups surfaced during the fixes — ALL RESOLVED in the same session's
+second pass** (suite 796/786/0 after; vsix **0.19.0** packaged + scanned clean):
+1. ~~railStatus "last failed verdict" branch unscoped~~ — FIXED: verdict pick
+   and queue count now scope by `resolvedRuntimeId` like parked/active; test
+   extended with a stale-runtime failed receipt.
+2. ~~openFile gate skips sensitive-basename patterns~~ — FIXED: after
+   `assertHostFileAllowed`, `sensitivePathMatch` on the canonical path refuses
+   with a readable message ("open it from the editor yourself").
+3. ~~host never re-verifies typed-confirm~~ — FIXED (F3): `policy.resolveAccess`
+   gained `confirmedEscalation`; the HOST re-derives escalation (rw mode ∪
+   sensitive path ∪ production path, on the EFFECTIVE path) from the pending
+   record and refuses an escalated approval without the attestation. Card
+   sends it only from the typed-confirm button. Tests: refusal without flag,
+   sensitive-edit refusal, benign read-only stays one-click.
+4. ~~isolatedRunService networkAllowlist restart gap~~ — INVESTIGATED, NO GAP:
+   isolated runs start via `lifecycle.startRuntime` (isolatedRunService:401),
+   so T2.3's metadata persistence covers them; the service's `networkAllowlist`
+   is a display-only isolation-card projection.
+5. ~~runtimeCwd metadata never written~~ — FIXED: `startRuntime` persists
+   `runtimeCwd` alongside `networkAllowResources` (hyperv's guestJobRoot is
+   not derivable from workspacePath; the docker derive-fallback remains).
+6. ~~chatTab onSelectionChange unguarded~~ — FIXED: captures the session id,
+   targets `chat.restartBackend` at it (previously it could restart whatever
+   session became selected mid-confirm), guards its transcript lines; the
+   background-task chip was withdrawn as superseded.
+7. ~~warm-cap ceiling not mirrored~~ — FIXED: `MAX_VALIDATION_WARM_CAP`
+   exported from contracts; configure.ts validates against it and sets the
+   input's `max`.
+8. ~~resolve edits land before CAS~~ — FIXED: CAS first, edits only after the
+   status swap is WON, so a losing concurrent resolve can no longer rewrite an
+   already-resolved candidate's content.
+
+Branch `ADR-22`. The origin-history standing decision below is untouched.
+
+---
+
+Original audit (for reference — all items below are now FIXED, see status above):
+
 For a fresh chat. Branch `ADR-22`, working tree **clean**, `npm test` **748/0 fail,
 9 skipped** (4 symlink-priv skips + 5 opt-in real-DCC tests). Tip commits:
 `285dabb` (session docs, vsix 0.17.0), `b43062d` (identifier scrub + DCC live fire).
-No code changed after `b43062d` — the audit below is READ-ONLY so far; **nothing
-here is fixed yet.**
 
 Project state (M0–M8, scrub, DCC live-fire, vsix) is in
 `docs/design/windows-dcc-runtime/HANDOFF.md`. This doc is the **audit + remaining-fix

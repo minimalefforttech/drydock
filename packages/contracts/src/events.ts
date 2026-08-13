@@ -264,7 +264,62 @@ export function summarizeStoredEvent(event: StoredEvent): TranscriptLine {
       summary: typeof text === "string" ? text : ""
     };
   }
-  return summarizeAgentEvent(event.payload as unknown as AgentEvent);
+  // eventType here is persisted data (a legacy, hand-edited, or newer-build
+  // row), not a value this process just constructed - unlike
+  // summarizeAgentEvent's own parameter, it is never guaranteed to be one of
+  // AgentEvent's variants. Guard it explicitly rather than letting
+  // summarizeAgentEvent's switch fall through to assertNever: getChatTimeline
+  // maps this over every row in a session, so one throw used to fail the
+  // WHOLE transcript load instead of just that row.
+  if (!isKnownAgentEventType(event.eventType)) {
+    return unrecognizedEventLine(event);
+  }
+  try {
+    return summarizeAgentEvent(event.payload as unknown as AgentEvent);
+  } catch {
+    // Known type, but a legacy/corrupt payload shape (a field
+    // summarizeAgentEvent expects is missing or the wrong shape) can still
+    // throw deep inside a case body - degrade the same way rather than
+    // reintroducing the one-bad-row-kills-the-transcript failure above.
+    return unrecognizedEventLine(event);
+  }
+}
+
+/**
+ * Compile-time-checked membership test: the `never` assignment in the default
+ * branch means adding a variant to AgentEvent without adding a case here is a
+ * type error, same guarantee assertNever gives summarizeAgentEvent's switch -
+ * but this one returns false instead of throwing, because its input is
+ * untrusted persisted data rather than an AgentEvent the process just built.
+ */
+function isKnownAgentEventType(value: string): value is AgentEvent["type"] {
+  const candidate = value as AgentEvent["type"];
+  switch (candidate) {
+    case "agent.text":
+    case "agent.reasoning":
+    case "agent.tool_call":
+    case "agent.command":
+    case "agent.file_edit":
+    case "agent.plan":
+    case "agent.error":
+    case "agent.done":
+    case "agent.spawn":
+    case "agent.node_done":
+      return true;
+    default: {
+      const exhaustiveCheck: never = candidate;
+      void exhaustiveCheck;
+      return false;
+    }
+  }
+}
+
+function unrecognizedEventLine(event: StoredEvent): TranscriptLine {
+  return {
+    eventType: event.eventType,
+    createdAt: event.createdAt,
+    summary: `Unrecognized event (${event.eventType})`
+  };
 }
 
 export function assertNever(value: never): never {

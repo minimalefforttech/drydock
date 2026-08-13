@@ -379,7 +379,7 @@ function render(): void {
  * F5's banner on the task hub. Same sentence as the Configure panel's, one
  * action, and no dismiss: a quarantine owns the truth until a TD resolves it.
  */
-function buildQuarantineBanner(entry: { readonly displayName: string; readonly probeId: string; readonly detail: string; readonly at: string }): HTMLElement {
+function buildQuarantineBanner(entry: { readonly displayName: string; readonly probeId: string; readonly detail: string; readonly at: string; readonly lastGreenAt?: string }): HTMLElement {
   const banner = el("section", "hub-quarantine");
   banner.setAttribute("role", "alert");
   const head = el("div", "hub-quarantine-head");
@@ -387,7 +387,7 @@ function buildQuarantineBanner(entry: { readonly displayName: string; readonly p
   name.title = `${entry.displayName} · probe ${entry.probeId}`;
   head.append(name, el("span", "hub-chip quiet", entry.probeId));
   banner.append(head);
-  banner.append(el("p", "hub-quarantine-line", quarantineSentence(entry.detail, entry.at)));
+  banner.append(el("p", "hub-quarantine-line", quarantineSentence(entry.detail, entry.at, entry.lastGreenAt)));
   const actions = el("div", "hub-quarantine-actions");
   actions.append(button("hub-chip-action", "Open Configure", "Open Configure › Validation runtimes", () => {
     // `configure` is not a PanelSurface yet (see the M7b report's DRIFT note);

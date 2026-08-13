@@ -125,7 +125,19 @@ export class McpRegistryService {
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
     };
-    await this.options.store.upsertServer(record);
+    try {
+      await this.options.store.upsertServer(record);
+    } catch (error) {
+      // The check above is TOCTOU (T3.6): two concurrent saves can both pass it
+      // before either writes. migrations.ts's UNIQUE(name COLLATE NOCASE) index
+      // is the real guard; this turns ITS raw constraint failure into the same
+      // sentence a same-process caller already gets above, instead of a bare
+      // SQLite error reaching the panel.
+      if (isNameConflict(error)) {
+        throw new Error(`An MCP server named "${name}" already exists.`);
+      }
+      throw error;
+    }
     return record;
   }
 
@@ -217,6 +229,17 @@ export class McpRegistryService {
   private isImported(serverId: string): boolean {
     return (this.options.importedServers ?? []).some((server) => server.serverId === serverId);
   }
+}
+
+/**
+ * True for the `mcp_servers` name-uniqueness violation (T3.6). The project's
+ * SQLite driver (node:sqlite) reports every constraint failure under the same
+ * generic `ERR_SQLITE_ERROR` code, so the constrained column - present in
+ * `error.message` - is the only specific signal available to tell this apart
+ * from some other failure `upsertServer` could throw.
+ */
+function isNameConflict(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("mcp_servers.name");
 }
 
 /**

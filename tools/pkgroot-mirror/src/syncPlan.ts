@@ -16,7 +16,7 @@
  */
 
 import { readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { pathSegments } from "./manifest.js";
 
 /** Definition files that make a directory a rez package, in preference order. */
@@ -84,10 +84,24 @@ export const nodeSyncFs: SyncFsFacade = {
   }
 };
 
-/** Join a source-root-relative entry onto an absolute root. */
+/**
+ * Join a source-root-relative entry onto an absolute root.
+ *
+ * Safe today only because manifest.ts's checkEntries rejects ".." before an
+ * entry ever reaches here - but this helper is exported and callable
+ * directly, so it carries its own traversal guard too (mirrors
+ * tools/package-vsix.mjs's assertInside) rather than trusting every future
+ * caller to have validated first.
+ */
 export function joinUnderRoot(root: string, entry: string): string {
   const segments = pathSegments(entry);
-  return segments.length === 0 ? root : join(root, ...segments);
+  if (segments.length === 0) return root;
+  const joined = join(root, ...segments);
+  const rel = relative(root, joined);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`Refusing to build a path outside ${root}: ${entry}`);
+  }
+  return joined;
 }
 
 /** Build the per-subtree copy plan plus the flat skipped-version report. */

@@ -95,11 +95,16 @@ export class MemoryService {
   /**
    * Captures agent-proposed notes as pending candidates. Each content is
    * trimmed; content matching an existing candidate of ANY status is skipped
-   * (dedupe against re-emitting agents and re-approvals alike). Scope
-   * suggestions resolve against the capture context: workspace (the default
-   * when the agent names none) anchors to the source session's roots, task to
-   * its linked task - a task suggestion without a linked task falls back to
-   * workspace. Returns only the records actually created.
+   * via an in-process scan (dedupe against re-emitting agents and
+   * re-approvals alike) - backstopped by an atomic PENDING-only check at
+   * insert time (T3.9, `insertCandidateIfNoPendingDuplicate`) so two
+   * concurrent, fire-and-forget captures of identical content (e.g. two
+   * overlapping turns) cannot both pass this scan before either has written
+   * and land duplicate pending rows. Scope suggestions resolve against the
+   * capture context: workspace (the default when the agent names none)
+   * anchors to the source session's roots, task to its linked task - a task
+   * suggestion without a linked task falls back to workspace. Returns only
+   * the records actually created.
    */
   async captureCandidates(
     sessionId: string,
@@ -134,9 +139,16 @@ export class MemoryService {
         ...(scope === "workspace" && context.sessionRoots !== undefined ? { scopeRoots: context.sessionRoots } : {}),
         ...(input.tags === undefined || input.tags.length === 0 ? {} : { tags: input.tags })
       };
-      await this.options.store.insertCandidate(record);
-      // Guard against duplicates within this same batch too.
+      // `seen` only rules out what THIS call already knew about when it
+      // started; the store's atomic check is the real gate against a
+      // concurrent capture inserting the identical pending content in the
+      // window between our scan above and this insert.
+      const inserted = await this.options.store.insertCandidateIfNoPendingDuplicate(record);
+      // Guard against duplicates within this same batch too, win or lose.
       seen.add(content);
+      if (!inserted) {
+        continue;
+      }
       created.push(record);
     }
     return created;
@@ -176,7 +188,13 @@ export class MemoryService {
    * Approves or rejects a pending candidate, applying any human edits first
    * (trimmed content, retargeted scope, adjusted tags) - the ask-user gate is
    * edit-then-approve. Re-resolving an already-resolved candidate is rejected
-   * so an approval/rejection cannot be flipped after the fact.
+   * so an approval/rejection cannot be flipped after the fact. This upfront
+   * status check is a fast sequential-case rejection, not the real guard: two
+   * concurrent resolve() calls on the same id can both pass it (T3.9), so the
+   * actual write is a compare-and-swap (`updateCandidateStatus`, atomic on
+   * status='pending') and a CAS that reports no-op is treated exactly like
+   * the sequential double-resolve - it throws the same "already X" error
+   * instead of returning a fabricated success for a write that never landed.
    */
   async resolve(memoryCandidateId: string, approve: boolean, edits?: MemoryCandidateEdits): Promise<MemoryCandidateRecord> {
     const id = asId<"MemoryCandidateId">(memoryCandidateId);
@@ -187,12 +205,23 @@ export class MemoryService {
     if (existing.status !== "pending") {
       throw new Error(`Memory candidate ${memoryCandidateId} is already ${existing.status}.`);
     }
+    // CAS FIRST, edits after: only the resolve that actually wins the status
+    // swap may touch content. The old order let a LOSING concurrent call
+    // rewrite the text of a candidate someone else had just approved (the
+    // T3.9 residual). The user-facing gate is still edit-then-approve; this
+    // is purely the write order underneath it.
+    const status: MemoryCandidateStatus = approve ? "approved" : "rejected";
+    const resolvedAt = this.options.clock.isoNow();
+    const applied = await this.options.store.updateCandidateStatus(id, status, resolvedAt);
+    if (!applied) {
+      // Lost a resolve race after the pending check above: a concurrent call
+      // already applied its own status first, so ours is a no-op (T3.9).
+      const settled = await this.options.store.getCandidate(id);
+      throw new Error(`Memory candidate ${memoryCandidateId} is already ${settled?.status ?? "resolved"}.`);
+    }
     if (approve && edits !== undefined) {
       await this.options.store.updateCandidateContent(id, edits);
     }
-    const status: MemoryCandidateStatus = approve ? "approved" : "rejected";
-    const resolvedAt = this.options.clock.isoNow();
-    await this.options.store.updateCandidateStatus(id, status, resolvedAt);
     const resolved = await this.options.store.getCandidate(id);
     if (resolved === null) {
       throw new Error(`Memory candidate ${memoryCandidateId} vanished during resolution.`);

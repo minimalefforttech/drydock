@@ -50,6 +50,24 @@ export class RuntimeLifecycleService {
     try {
       await this.options.authorizeStart?.(request);
       handle = await runtimeAdapter.createRuntime(request, externalName);
+      const durableHandleFacts = {
+        // Durable fallback for removeRuntime after a restart: the adapter's
+        // in-process policy map does not survive one, so the inventory
+        // record's metadata becomes the only place this string still exists.
+        ...(handle.networkAllowResources === undefined ? {} : { networkAllowResources: handle.networkAllowResources }),
+        // The adopted-handle rebuilders prefer a RECORDED cwd and only derive
+        // one (docker drive rewrite) when this key is absent; hyperv's
+        // guestJobRoot is not derivable from workspacePath at all, so the
+        // adapter's answer is persisted rather than re-guessed on adoption.
+        ...(handle.runtimeCwd === undefined ? {} : { runtimeCwd: handle.runtimeCwd })
+      };
+      if (Object.keys(durableHandleFacts).length > 0) {
+        await this.options.inventory.updateRuntimeMetadata(
+          request.runtimeId,
+          durableHandleFacts,
+          this.options.clock.isoNow()
+        );
+      }
       await this.options.inventory.updateRuntimeStatus(request.runtimeId, "running", this.options.clock.isoNow());
       this.options.logger.info("runtime running", { runtimeId: request.runtimeId, externalName });
       return handle;

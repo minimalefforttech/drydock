@@ -92,6 +92,25 @@ function Get-LocalGroupsForAccount {
   return $found
 }
 
+function Resolve-IdentitySid {
+  # ACL identities compare unreliably by name (locale-dependent display names,
+  # e.g. "BUILTIN\Administrators"); a SID is the only locale-independent key.
+  # An ACE's IdentityReference is usually an NTAccount, but an orphaned SID
+  # (deleted account) comes back as a bare SID string - try both, and treat a
+  # truly unresolvable identity as "not on the keep list" (fail closed: prune
+  # it) rather than accidentally preserving it.
+  param([string]$IdentityValue)
+  try {
+    return ([System.Security.Principal.NTAccount]$IdentityValue).Translate([System.Security.Principal.SecurityIdentifier]).Value
+  } catch {
+    try {
+      return (New-Object System.Security.Principal.SecurityIdentifier($IdentityValue)).Value
+    } catch {
+      return $null
+    }
+  }
+}
+
 if (-not (Test-Elevated)) {
   throw "setup-share.ps1 must run from an elevated PowerShell: it creates a local account, edits NTFS ACLs, publishes an SMB share and adds a firewall rule."
 }
@@ -157,8 +176,28 @@ if ($null -ne $account) {
 
 # --------------------------------------------------------------------- NTFS
 if (Test-Path -LiteralPath $MirrorRoot) {
-  if ($PSCmdlet.ShouldProcess($MirrorRoot, "Grant $accountIdentity read + execute (and remove any other rule for it)")) {
+  if ($PSCmdlet.ShouldProcess($MirrorRoot, "Break inheritance, strip broader inherited Allow ACEs, and grant $accountIdentity read + execute only")) {
     $acl = Get-Acl -LiteralPath $MirrorRoot
+    # Adding our own ACE was never enough on its own: NTFS unions every Allow
+    # ACE that matches the caller, so an inherited "Users"/"Authenticated
+    # Users" Allow from the parent directory still applied regardless of what
+    # we granted $accountIdentity here - the exact gap between this script's
+    # "read + execute, and nothing else" promise and its effective access.
+    # Break inheritance by COPYING first (nothing disappears silently), then
+    # prune every copied rule down to the handful of identities a read-only
+    # mirror root is allowed to name.
+    $acl.SetAccessRuleProtection($true, $true)
+    $keepSids = @(
+      "S-1-5-18",     # NT AUTHORITY\SYSTEM
+      "S-1-5-32-544", # BUILTIN\Administrators
+      "S-1-3-0"       # CREATOR OWNER - default ACL template for new children only
+    ) + @(Resolve-IdentitySid -IdentityValue $accountIdentity)
+    foreach ($rule in @($acl.Access)) {
+      $sid = Resolve-IdentitySid -IdentityValue $rule.IdentityReference.Value
+      if ($null -eq $sid -or $keepSids -notcontains $sid) {
+        $acl.RemoveAccessRule($rule) | Out-Null
+      }
+    }
     foreach ($rule in @($acl.Access | Where-Object { $_.IdentityReference.Value -eq $accountIdentity })) {
       $acl.RemoveAccessRule($rule) | Out-Null
     }

@@ -15,7 +15,9 @@
  * same id.
  *
  * SECURITY: this moves display-safe envelopes only; rendering (via textContent,
- * never innerHTML) is the views' responsibility.
+ * never innerHTML) is the views' responsibility. The message listener also
+ * only trusts host-posted messages (event.source === window.parent, or null
+ * from this repo's test harness) - see the check in startMessaging() below.
  */
 
 import {
@@ -94,6 +96,15 @@ export function createPanelBridge(prefix: string): PanelMessagingBridge {
 
   function startMessaging(): void {
     window.addEventListener("message", (event: MessageEvent<unknown>) => {
+      // SECURITY: only the extension host may drive this bus. VS Code's
+      // webview host relays extension messages via contentWindow.postMessage
+      // from the OUTER host frame, so genuine messages arrive with
+      // event.source === window.parent; this repo's test harness dispatches
+      // synthetic events whose source defaults to null. Anything else - e.g.
+      // a forged envelope from a sandboxed child iframe, whose source is its
+      // own contentWindow - is neither and must be rejected before event.data
+      // is read.
+      if (event.source !== null && event.source !== window.parent) return;
       const message = event.data as HostToWebviewMessage;
       if (typeof message !== "object" || message === null) return;
       if (message.protocolVersion !== WEBVIEW_PROTOCOL_VERSION) return;

@@ -28,17 +28,32 @@ import type { SqliteConnection } from "./sqliteConnection.js";
 export class SqliteDiffBaselineStore implements DiffBaselineStore {
   constructor(private readonly connection: SqliteConnection) {}
 
+  /**
+   * Inserts the baseline row and its per-file snapshots in one transaction
+   * (T3.8): a throw partway through the snapshot loop (e.g. a duplicate path
+   * violating the (baseline_id, path) primary key) leaves neither the
+   * baseline row nor any of its snapshot rows behind, instead of a baseline
+   * with a partial/missing file list.
+   */
   async insertBaseline(record: DiffBaselineRecord, snapshots: readonly FileBaselineSnapshot[]): Promise<void> {
-    this.connection.database.prepare(`
-      INSERT INTO diff_baselines (baseline_id, scope, session_id, root_path, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(record.baselineId, record.scope, record.sessionId ?? null, record.rootPath, record.createdAt);
-    const insertFile = this.connection.database.prepare(`
-      INSERT INTO diff_baseline_files (baseline_id, path, sha256, size, mtime_ms, captured_at_ms, blob_stored)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    for (const snapshot of snapshots) {
-      insertFile.run(record.baselineId, snapshot.path, snapshot.sha256, snapshot.size, snapshot.mtimeMs, snapshot.capturedAtMs, snapshot.blobStored ? 1 : 0);
+    const db = this.connection.database;
+    db.exec("BEGIN");
+    try {
+      db.prepare(`
+        INSERT INTO diff_baselines (baseline_id, scope, session_id, root_path, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(record.baselineId, record.scope, record.sessionId ?? null, record.rootPath, record.createdAt);
+      const insertFile = db.prepare(`
+        INSERT INTO diff_baseline_files (baseline_id, path, sha256, size, mtime_ms, captured_at_ms, blob_stored)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const snapshot of snapshots) {
+        insertFile.run(record.baselineId, snapshot.path, snapshot.sha256, snapshot.size, snapshot.mtimeMs, snapshot.capturedAtMs, snapshot.blobStored ? 1 : 0);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
   }
 
@@ -81,13 +96,22 @@ export class SqliteDiffBaselineStore implements DiffBaselineStore {
     ).run(baselineId, path);
   }
 
+  /** Deletes the baseline's file rows and its own row in one transaction (T3.8). */
   async deleteBaseline(baselineId: BaselineId): Promise<void> {
-    this.connection.database.prepare(
-      "DELETE FROM diff_baseline_files WHERE baseline_id = ?"
-    ).run(baselineId);
-    this.connection.database.prepare(
-      "DELETE FROM diff_baselines WHERE baseline_id = ?"
-    ).run(baselineId);
+    const db = this.connection.database;
+    db.exec("BEGIN");
+    try {
+      db.prepare(
+        "DELETE FROM diff_baseline_files WHERE baseline_id = ?"
+      ).run(baselineId);
+      db.prepare(
+        "DELETE FROM diff_baselines WHERE baseline_id = ?"
+      ).run(baselineId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 }
 

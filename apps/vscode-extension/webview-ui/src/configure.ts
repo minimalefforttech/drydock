@@ -29,6 +29,7 @@
 
 import {
   CONFIG_SECTIONS,
+  MAX_VALIDATION_WARM_CAP,
   type ConfigMcpRow,
   type ConfigProviderRow,
   type ConfigScope,
@@ -1095,7 +1096,10 @@ function quarantineBanner(current: ValidationConfigState): HTMLElement {
     name.title = `${entry.displayName} · probe ${entry.probeId}`;
     head.append(name, chip(entry.probeId, "cfg-micro"));
     block.append(head);
-    block.append(el("p", "cfg-quarantine-line", quarantineSentence(entry.detail, entry.at, runtime?.probes?.greenAt)));
+    // The record's own stamp wins: the breach run replaced the live probe
+    // view's green, so `probes.greenAt` is empty exactly when this banner
+    // shows (T5.5). The live value remains as fallback for legacy records.
+    block.append(el("p", "cfg-quarantine-line", quarantineSentence(entry.detail, entry.at, entry.lastGreenAt ?? runtime?.probes?.greenAt)));
     const actions = el("div", "cfg-quarantine-actions");
     actions.append(button("cfg-button", "Probe log", "Open this runtime's isolation evidence", () => {
       expandedRuntimeIds.add(entry.runtimeId);
@@ -1439,6 +1443,10 @@ function validationCreateFold(current: ValidationConfigState): HTMLElement {
   port.className = "cfg-input cfg-input-port";
   port.placeholder = "port";
   port.setAttribute("aria-label", "Guest SSH port");
+  // A TCP port is a whole number in 1..65535; the same range submit() checks below.
+  port.min = "1";
+  port.max = "65535";
+  port.step = "1";
 
   // The TD gate (F6): studios may forbid creating profile-exception runtimes
   // outright, in which case the control is ABSENT rather than disabled-and-teasing.
@@ -1484,11 +1492,14 @@ function validationCreateFold(current: ValidationConfigState): HTMLElement {
     const hostValue = host.value.trim();
     const userValue = user.value.trim();
     const portValue = Number(port.value);
+    // A TCP port is a whole number in 1..65535 - 22.7 and 99999 both used to
+    // pass the old finite/sign-only check.
+    const portValid = Number.isInteger(portValue) && portValue >= 1 && portValue <= 65535;
     const connection = hostValue.length > 0 && userValue.length > 0
       ? {
           host: hostValue,
           user: userValue,
-          ...(Number.isFinite(portValue) && portValue > 0 ? { port: portValue } : {})
+          ...(portValid ? { port: portValue } : {})
         }
       : undefined;
     validationMutate({
@@ -1637,14 +1648,17 @@ function validationSettingsRows(current: ValidationConfigState): Row[] {
         ? "No cap. Runtimes past your RAM budget queue behind a boot instead of thrashing."
         : `Effective cap: ${String(effective)}. Extra runtimes start on demand and report the boot as queue state.`,
       chips: capChips,
-      control: textField(mine === undefined ? "" : String(mine), { kind: "number", label: "Warm cap", min: 0 }, (next) => {
+      control: textField(mine === undefined ? "" : String(mine), { kind: "number", label: "Warm cap", min: 0, max: MAX_VALIDATION_WARM_CAP, step: 1 }, (next) => {
         const trimmed = next.trim();
         if (trimmed.length === 0) {
           validationMutate({ type: "config.validation.setSettings", warmCap: null }, "validation:warmcap");
           return;
         }
         const parsed = Number(trimmed);
-        if (!Number.isFinite(parsed) || parsed < 0) return;
+        // A runtime count: 3.5 warm runtimes is meaningless, not just unusual.
+        // The ceiling mirrors the boundary parser's own cap - past it the host
+        // would silently drop the message, so refuse it here instead.
+        if (!Number.isInteger(parsed) || parsed < 0 || parsed > MAX_VALIDATION_WARM_CAP) return;
         validationMutate({ type: "config.validation.setSettings", warmCap: parsed }, "validation:warmcap");
       })
     })

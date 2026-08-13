@@ -79,6 +79,10 @@ function receipt(input: {
     changesetRef: `sha-${input.jobId}`,
     mirrorVersion: 42,
     mirrorFreshnessAt: "2026-08-12T08:55:00.000Z",
+    // A degraded/torn mirror (T3.1): false/non-empty here so the round-trip
+    // below exercises the real JSON encode/decode, not just the absent case.
+    mirrorOk: false,
+    mirrorSkippedVersions: ["1.4.2-rc1"],
     licenseWaitMs: 1_500,
     probesGreenAt: "2026-08-12T08:00:00.000Z",
     verdict: input.verdict ?? "passed",
@@ -351,7 +355,7 @@ test("settings default to the single preset, take partial writes, and tolerate j
   }
 });
 
-test("task overrides and quarantine flags share the settings table without colliding", async () => {
+test("task overrides (own table) and quarantine (settings KV) round-trip independently", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
   try {
     const connection = new SqliteConnection(path.join(dir, "kv.sqlite"));
@@ -369,7 +373,8 @@ test("task overrides and quarantine flags share the settings table without colli
       { probeId: "probe.egress", detail: "EGRESS SUCCEEDED: reached nas:445", at: "2026-08-12T09:12:00.000Z" },
       "2026-08-12T09:12:00.000Z"
     );
-    // The registry settings keys are untouched by either namespace.
+    // Neither namespace touches the registry settings keys (T5.2: overrides
+    // moved OUT of this table into their own; quarantine stays here).
     await store.setSettings({ topologyPreset: "default-plus-named" }, "2026-08-12T09:00:00.000Z");
 
     assert.equal(await store.getTaskOverride(asId<"TaskId">("task-1")), asId<"ValidationRuntimeId">("vrt-2"));
@@ -404,6 +409,56 @@ test("task overrides and quarantine flags share the settings table without colli
     `);
     assert.equal(await reopenedStore.getQuarantine(asId<"ValidationRuntimeId">("vrt-9")), null);
     reopened.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("task overrides survive the KV-to-table migration and the legacy keys are removed", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "drydock-sqlite-"));
+  try {
+    const connection = new SqliteConnection(path.join(dir, "legacy-overrides.sqlite"));
+    // The pre-T5.2 shape: task overrides lived as `override.task.<taskId>` rows
+    // in validation_settings, exactly like quarantine still does today. Seed
+    // that shape by hand, then run migrations for the first time on this file.
+    connection.database.exec(`
+      CREATE TABLE validation_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO validation_settings (key, value, updated_at) VALUES
+        ('override.task.task-1', 'vrt-2', '2026-08-01T00:00:00.000Z'),
+        ('override.task.task-2', 'vrt-3', '2026-08-02T00:00:00.000Z'),
+        ('quarantine.vrt-9', '{"probeId":"probe.egress","detail":"d","at":"t"}', '2026-08-01T00:00:00.000Z');
+    `);
+
+    applyMigrations(connection);
+    const store = new SqliteValidationRuntimeStore(connection);
+
+    // The rows are readable through the new table-backed accessor...
+    assert.equal(await store.getTaskOverride(asId<"TaskId">("task-1")), asId<"ValidationRuntimeId">("vrt-2"));
+    assert.equal(await store.getTaskOverride(asId<"TaskId">("task-2")), asId<"ValidationRuntimeId">("vrt-3"));
+    assert.deepEqual(
+      (await store.listTaskOverridesForRuntime(asId<"ValidationRuntimeId">("vrt-2"))).map((row) => row.taskId),
+      [asId<"TaskId">("task-1")]
+    );
+    // ...the legacy KV rows are gone (not just shadowed)...
+    const remainingKv = connection.database.prepare(`
+      SELECT COUNT(*) AS count FROM validation_settings WHERE key LIKE 'override.task.%'
+    `).get() as { readonly count: number };
+    assert.equal(remainingKv.count, 0);
+    // ...and an unrelated KV row (quarantine) is untouched by the move.
+    assert.equal((await store.getQuarantine(asId<"ValidationRuntimeId">("vrt-9")))?.probeId, "probe.egress");
+
+    // Idempotent: re-running migrations (a second window opening the same
+    // file) must not throw or duplicate rows.
+    applyMigrations(connection);
+    const overrideCount = connection.database.prepare(`
+      SELECT COUNT(*) AS count FROM validation_task_overrides
+    `).get() as { readonly count: number };
+    assert.equal(overrideCount.count, 2);
+    connection.close();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

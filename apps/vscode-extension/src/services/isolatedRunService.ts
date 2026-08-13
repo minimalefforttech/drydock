@@ -997,6 +997,29 @@ export class IsolatedRunService {
     return patches;
   }
 
+  /**
+   * Guest-shaped patches for validation shipping (ADR 0022 / T1.1): the same
+   * clones, mid-turn refusal, and host-access gate as
+   * {@link buildOutboundPatches}, but each repository ships
+   * `validationWorkspacePatch` - full-content new-file diffs a freshly
+   * `git init`ed guest workspace can actually apply. Capture/landing keep
+   * using the incremental seam; only validation ships this shape.
+   */
+  async buildValidationPatches(sessionId: string): Promise<{ readonly repoName: string; readonly patch: string; readonly fileCount: number; readonly paths: readonly string[] }[] | null> {
+    const clones = this.sessionClones.get(sessionId);
+    if (clones === undefined || clones.length === 0) return null;
+    this.assertNoActiveTurnForSync(sessionId);
+    this.assertCloneHostAccess(clones);
+    const patches: { repoName: string; patch: string; fileCount: number; paths: readonly string[] }[] = [];
+    for (const clone of clones) {
+      const result = await this.options.cloneSync.validationWorkspacePatch(clone.clonePath, clone.omission);
+      if (result !== null) {
+        patches.push({ repoName: clone.name, patch: result.patch, fileCount: result.fileCount, paths: result.paths });
+      }
+    }
+    return patches;
+  }
+
   /** Push the developer's local edits into every clone (VM). Refuses while a turn runs. */
   async clonePush(sessionId: string): Promise<CloneSyncResult> {
     const clones = this.requireSessionClones(sessionId);

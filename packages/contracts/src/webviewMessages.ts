@@ -162,7 +162,21 @@ export type PanelRequestPayload =
   | { readonly type: "workspace.removeProject"; readonly projectId: string }
   | { readonly type: "workspace.updateProjectPath"; readonly projectId: string; readonly path: string }
   | { readonly type: "policy.requestAccess"; readonly sessionId: string; readonly hostPath: string; readonly mode: "read-only" | "read-write"; readonly reason: string }
-  | { readonly type: "policy.resolveAccess"; readonly accessRequestId: string; readonly approve: boolean; readonly editedHostPath?: string }
+  | {
+      readonly type: "policy.resolveAccess";
+      readonly accessRequestId: string;
+      readonly approve: boolean;
+      readonly editedHostPath?: string;
+      /**
+       * The card's attestation that its typed-confirm gate actually ran for an
+       * escalated approval (read-write, sensitive path, or production). The
+       * HOST re-derives escalation for the effective path and refuses an
+       * escalated approval without this flag - the webview's confirm UI alone
+       * must not be the only thing standing between a forged message and a
+       * mount (F3, follow-up to T2.4).
+       */
+      readonly confirmedEscalation?: boolean;
+    }
   | { readonly type: "diff.snapshotWorkspace"; readonly workspaceSetId: string }
   | { readonly type: "diff.status"; readonly sessionId?: string; readonly view?: DiffViewMode }
   | { readonly type: "diff.acceptFile"; readonly baselineId: string; readonly path: string; readonly view?: DiffViewMode }
@@ -1439,6 +1453,8 @@ export interface ValidationQuarantineRow {
   readonly probeId: string;
   readonly detail: string;
   readonly at: string;
+  /** Last green probe before the breach, recorded at incident time (T5.5). */
+  readonly lastGreenAt?: string;
 }
 
 /**
@@ -1466,6 +1482,10 @@ export interface ValidationReceiptView {
   readonly changesetRef: string;
   readonly mirrorVersion?: number;
   readonly mirrorFreshnessAt?: string;
+  /** True only when every mirrored subtree synced cleanly. */
+  readonly mirrorOk?: boolean;
+  /** Package versions the mirror left out because they were mid-publish. */
+  readonly mirrorSkippedVersions?: readonly string[];
   readonly probesGreenAt?: string;
   readonly licenseWaitMs: number;
   /** D2: the working set moved on after this evidence was produced. */
@@ -2797,13 +2817,18 @@ function parsePayload(value: unknown): PanelRequestPayload | null {
       const accessRequestId = payload["accessRequestId"];
       const approve = payload["approve"];
       const editedHostPath = payload["editedHostPath"];
+      const confirmedEscalation = payload["confirmedEscalation"];
       if (!isBoundedString(accessRequestId, MAX_ID_LENGTH)) return null;
       if (typeof approve !== "boolean") return null;
-      if (editedHostPath === undefined) {
-        return { type: "policy.resolveAccess", accessRequestId, approve };
-      }
-      if (!isBoundedString(editedHostPath, MAX_PATH_LENGTH)) return null;
-      return { type: "policy.resolveAccess", accessRequestId, approve, editedHostPath };
+      if (confirmedEscalation !== undefined && typeof confirmedEscalation !== "boolean") return null;
+      if (editedHostPath !== undefined && !isBoundedString(editedHostPath, MAX_PATH_LENGTH)) return null;
+      return {
+        type: "policy.resolveAccess",
+        accessRequestId,
+        approve,
+        ...(editedHostPath === undefined ? {} : { editedHostPath }),
+        ...(confirmedEscalation === undefined ? {} : { confirmedEscalation })
+      };
     }
     case "diff.snapshotWorkspace": {
       const workspaceSetId = payload["workspaceSetId"];
@@ -3160,8 +3185,12 @@ function isBoundedString(value: unknown, maxLength: number): value is string {
 // Validation runtimes (ADR 0022) - boundary parsing
 // ---------------------------------------------------------------------------
 
-/** A workstation runs a handful of VMs, not a fleet; the cap bounds the input. */
-const MAX_VALIDATION_WARM_CAP = 64;
+/**
+ * A workstation runs a handful of VMs, not a fleet; the cap bounds the input.
+ * Exported so the configure UI validates against the SAME ceiling the boundary
+ * parser enforces, instead of hardcoding a second number that can drift.
+ */
+export const MAX_VALIDATION_WARM_CAP = 64;
 const MAX_VALIDATION_CAPABILITY_COUNT = 32;
 const MAX_VALIDATION_CAPABILITY_LENGTH = 64;
 

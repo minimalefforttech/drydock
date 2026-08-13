@@ -93,6 +93,14 @@ export interface NamedRuntimeConfig {
    * badge in the UI and always forces the policy-delta confirm on reroute (H2).
    */
   readonly profileException?: boolean;
+  /**
+   * The Hyper-V VM name this runtime adopts, captured ONCE at createRuntime
+   * (T5.3). `displayName` is display-only: renaming never touches this, so a
+   * rename cannot re-point the row at a differently-named VM. Absent on rows
+   * written before this field existed - callers fall back to deriving the
+   * name from `displayName` (`vmNameFor`) for those.
+   */
+  readonly vmName?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
   /** Archived runtimes stay referenced by evidence but never resolve for new jobs. */
@@ -176,6 +184,12 @@ export interface ValidationQuarantineRecord {
   /** The probe's own sentence, in studio vocabulary; rendered verbatim. */
   readonly detail: string;
   readonly at: string;
+  /**
+   * The last green probe stamp BEFORE the breach run replaced it (T5.5) - the
+   * breach run overwrites the in-memory `lastResult`, so only this record can
+   * still tell the banner when isolation was last confirmed.
+   */
+  readonly lastGreenAt?: string;
 }
 
 /**
@@ -185,6 +199,18 @@ export interface ValidationQuarantineRecord {
  * Unknown never renders as green (ADR 0021 honesty rule).
  */
 export type ValidationRuntimeAvailability = "available" | "stopped" | "quarantined" | "missing";
+
+/**
+ * A task's runtime override (ADR 0022 F6, T5.2), in its own table. Previously
+ * a `override.task.<taskId>` row in the settings KV table with no way back to
+ * a runtime that got deleted; promoting it to a real row keyed by taskId lets
+ * `deleteRuntime` find and reassign/clear it exactly like an association.
+ */
+export interface ValidationTaskOverride {
+  readonly taskId: TaskId;
+  readonly runtimeId: ValidationRuntimeId;
+  readonly updatedAt: string;
+}
 
 // ---------------------------------------------------------------------------
 // Jobs
@@ -350,6 +376,10 @@ export interface ValidationReceipt {
   readonly changesetRef: string;
   readonly mirrorVersion?: number;
   readonly mirrorFreshnessAt?: string;
+  /** True only when every mirrored subtree synced cleanly (`MirrorStatus.ok`). */
+  readonly mirrorOk?: boolean;
+  /** Package versions the mirror left out because they were mid-publish. */
+  readonly mirrorSkippedVersions?: readonly string[];
   readonly fixtureManifestHash?: string;
   readonly licenseWaitMs: number;
   readonly probesGreenAt?: string;
@@ -461,13 +491,15 @@ export interface ValidationRuntimeStore {
   setSettings(update: ValidationRegistrySettingsUpdate, updatedAt: string): Promise<void>;
 
   /**
-   * The task-level runtime override (the cascade's first tier, ux-flows F6).
-   * Stored in the same key/value table under `override.task.<taskId>`, because
-   * it is one small durable preference per task rather than a table's worth of
-   * structure. `null` means the task follows the cascade.
+   * The task-level runtime override (the cascade's first tier, ux-flows F6),
+   * in its own `validation_task_overrides` table (T5.2 - this used to be a
+   * `override.task.<taskId>` settings-KV row with no way back to a deleted
+   * runtime). `null` means the task follows the cascade.
    */
   getTaskOverride(taskId: TaskId): Promise<ValidationRuntimeId | null>;
   setTaskOverride(taskId: TaskId, runtimeId: ValidationRuntimeId | null, updatedAt: string): Promise<void>;
+  /** Every task whose override currently points at this runtime (deleteRuntime's reassignment path). */
+  listTaskOverridesForRuntime(runtimeId: ValidationRuntimeId): Promise<ValidationTaskOverride[]>;
 
   /**
    * The durable quarantine flag (edge case E5, ux-flows F5) under

@@ -1029,7 +1029,10 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
       validationAdapters.set(id, entry);
     }
     const held = entry;
-    const externalName = validationVmName(runtime.displayName);
+    // T5.3: the stored vmName wins - this is the address the exec channel
+    // actually dials, so it must not move when a runtime is renamed. Only a
+    // pre-T5.3 row (no stored name yet) falls back to the derived one.
+    const externalName = runtime.vmName ?? validationVmName(runtime.displayName);
     const liteHandle = (): import("@drydock/contracts").RuntimeHandle => ({
       runtimeId: asId<"RuntimeId">(`validation-${id}`),
       runtimeGenerationId: asId<"RuntimeGenerationId">(`validation-gen-${id}`),
@@ -1076,8 +1079,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
         signal,
         onStdoutLine
       ),
-      sweepGuestJob: (jobToken, timeoutMs, signal) =>
-        held.adapter.sweepGuestJob(held.handle ?? liteHandle(), jobToken, timeoutMs, signal)
+      sweepGuestJob: (jobToken, timeoutMs, signal, wrapperPid) =>
+        held.adapter.sweepGuestJob(held.handle ?? liteHandle(), jobToken, timeoutMs, signal, wrapperPid)
     };
   };
   const validationProbes = new ValidationProbeService({
@@ -1088,8 +1091,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     config: () => validationProbeConfig,
     // The incident is applied durably BEFORE the banner event fires, so a
     // surface reacting to the event always finds a blocked queue (E5).
-    quarantine: async (runtimeId, probeId, detail) => {
-      await validationApp?.quarantine(runtimeId, probeId, detail);
+    quarantine: async (runtimeId, probeId, detail, lastGreenAt) => {
+      await validationApp?.quarantine(runtimeId, probeId, detail, lastGreenAt);
     }
   });
   let validationApp: ValidationAppService | undefined;
@@ -1100,11 +1103,13 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     bus,
     runtimeAvailability: async (runtime) => (await validationApp?.availabilityForJob(runtime)) ?? "missing",
     adapterFor: validationAdapterFor,
-    // The ADR 0014 capture seam, reused verbatim: a validation job ships the
-    // same outbound patches a subtask's changeset capture would, so evidence
-    // binds to exactly the snapshot the chain would have landed.
+    // Validation ships the guest-applicable shape of the ADR 0014 capture:
+    // the same base..HEAD file set a subtask's changeset would land, expressed
+    // as full-content new-file diffs so a freshly `git init`ed guest workspace
+    // can apply them (T1.1 - incremental modify/delete hunks have no base
+    // blobs there). The ref binds to exactly the bytes shipped.
     changesetSource: async (request) => {
-      const patches = await appService.buildOutboundPatches(String(request.sessionId));
+      const patches = await appService.buildValidationPatches(String(request.sessionId));
       if (patches === null || patches.length === 0) return null;
       return {
         changesetRef: computeChangesetRef(patches.map((patch) => ({
@@ -1465,6 +1470,12 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
   const reconcileOnActivate = async (): Promise<void> => {
     let deallocatedSessions = 0;
     let deallocatedRuntimes = 0;
+    // Quarantined/failed/threw: rows the kill switch could NOT actually tear
+    // down (e.g. an adapter kind not registered in this process flips the row
+    // but leaves the VM running). Counting only "removed" would read those as
+    // handled (T5.4) - latent while inventory is docker-only, wrong the moment
+    // a second adapter kind lands.
+    let deallocationShortfalls = 0;
     if (options.securityPolicy?.allowNetworkedAiOnThisMachine === false) {
       try {
         deallocatedSessions = await chatService.endAllSessionsForDeallocation();
@@ -1478,8 +1489,18 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
         if (runtime.status === "removed") continue;
         try {
           const result = await cleanup.cleanupRuntime(runtime.runtimeId, "force-remove");
-          if (result.status === "removed") deallocatedRuntimes += 1;
+          if (result.status === "removed") {
+            deallocatedRuntimes += 1;
+          } else {
+            deallocationShortfalls += 1;
+            logger.warn("kill-switch deallocation left a runtime behind", {
+              runtimeId: runtime.runtimeId,
+              status: result.status,
+              diagnostics: [...result.diagnostics]
+            });
+          }
         } catch (error) {
+          deallocationShortfalls += 1;
           logger.error("runtime deallocation cleanup failed", {
             runtimeId: runtime.runtimeId,
             error: error instanceof Error ? error.message : String(error)
@@ -1500,7 +1521,7 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
     if (
       sessionCounts.ended > 0 || sessionCounts.adopted > 0 || sessionCounts.elsewhere > 0 ||
       result.missingExternal.length > 0 || result.externalOnly.length > 0 || purgedRuntimes > 0 ||
-      deallocatedSessions > 0 || deallocatedRuntimes > 0
+      deallocatedSessions > 0 || deallocatedRuntimes > 0 || deallocationShortfalls > 0
     ) {
       logger.info("startup reconciliation", {
         endedSessions: sessionCounts.ended,
@@ -1510,7 +1531,8 @@ export async function createBackend(options: CreateBackendOptions): Promise<Back
         externalOnly: [...result.externalOnly],
         purgedRuntimes,
         deallocatedSessions,
-        deallocatedRuntimes
+        deallocatedRuntimes,
+        deallocationShortfalls
       });
     }
     bus.publish({ kind: "inventory-changed" });

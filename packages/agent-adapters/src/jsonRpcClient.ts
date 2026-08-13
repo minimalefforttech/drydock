@@ -178,7 +178,12 @@ export class LineJsonRpcClient {
       this.child.kill();
       await delay(150);
     }
-    this.rejectNotificationWaiters(new Error("app-server process stopped."));
+    // rejectAll, not just rejectNotificationWaiters: this used to leave any
+    // in-flight request() pending on the "exit" event handler to reject it,
+    // which never fires if the process ignores/outlives the kill above - the
+    // caller then hung on the per-request timeout (up to 120s) instead of
+    // finding out stop() already gave up on it.
+    this.rejectAll(new Error("app-server process stopped before completing pending requests."));
   }
 
   diagnostics(): string[] {

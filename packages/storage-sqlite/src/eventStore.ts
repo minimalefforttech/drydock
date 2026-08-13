@@ -75,7 +75,7 @@ export class SqliteEventStore implements EventStore {
         sessionId: row.session_id as StoredEvent["sessionId"],
         eventType: row.event_type,
         createdAt: row.created_at,
-        payload: JSON.parse(row.payload_json) as JsonObject,
+        payload: parsePayload(row.payload_json),
         sequence: row.seq
       };
       return row.run_id === null ? base : {
@@ -96,6 +96,23 @@ export class SqliteEventStore implements EventStore {
       WHERE session_id = ?
     `).run(sessionId);
     return Number(result.changes);
+  }
+}
+
+/**
+ * payload_json is normally whatever appendStoredEvent's own JSON.stringify
+ * wrote, but a legacy row (older schema) or a hand-edited/corrupted one can
+ * still hold invalid JSON. Every other JSON column in this package degrades a
+ * parse failure to a safe default instead of throwing (see
+ * agentQuestionStore.parseOptions, taskRecipeStore.parseRecipeSubtasks); this
+ * one must too - listEvents runs this over every row in one .map(), so a
+ * single throw here used to fail the WHOLE transcript load.
+ */
+function parsePayload(json: string): JsonObject {
+  try {
+    return JSON.parse(json) as JsonObject;
+  } catch {
+    return {};
   }
 }
 

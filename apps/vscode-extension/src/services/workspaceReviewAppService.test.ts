@@ -59,11 +59,17 @@ interface HarnessState {
   readonly events: string[];
   expandError: Error | null;
   sessionMode: "implementation" | "clone";
+  /** Mode on the PENDING record the F3 escalation gate reads. */
+  pendingMode: "read-only" | "read-write";
 }
 
 function harness(): { readonly service: WorkspaceReviewAppService; readonly state: HarnessState } {
-  const state: HarnessState = { expandCalls: [], events: [], expandError: null, sessionMode: "implementation" };
+  const state: HarnessState = { expandCalls: [], events: [], expandError: null, sessionMode: "implementation", pendingMode: "read-write" };
   const accessRequests = {
+    listRequests: () => {
+      const { resolvedAt: _at, resolvedBy: _by, ...pending } = approvedRecord("ar-1", "C:\\grant\\ar-1");
+      return Promise.resolve([{ ...pending, status: "pending" as const, mode: state.pendingMode }]);
+    },
     prepareApproval: (id: string) => {
       state.events.push(`prepare:${id}`);
       return Promise.resolve({ request: approvedRecord(id, `C:\\grant\\${id}`), mount: mount(id) });
@@ -99,7 +105,7 @@ function harness(): { readonly service: WorkspaceReviewAppService; readonly stat
 test("approval applies the mount before marking the request approved", async () => {
   const { service, state } = harness();
 
-  const summary = await service.resolveAccess("ar-1", true);
+  const summary = await service.resolveAccess("ar-1", true, undefined, true);
 
   assert.equal(summary.status, "approved");
   assert.equal(state.expandCalls.length, 1);
@@ -111,7 +117,7 @@ test("a failed mount apply leaves the request unapproved", async () => {
   const { service, state } = harness();
   state.expandError = new Error("restart failed");
 
-  await assert.rejects(service.resolveAccess("ar-1", true), /restart failed/);
+  await assert.rejects(service.resolveAccess("ar-1", true, undefined, true), /restart failed/);
 
   assert.equal(state.expandCalls.length, 0);
   assert.deepEqual(state.events, ["prepare:ar-1", "expand:session-1"]);
@@ -127,11 +133,40 @@ test("a denial resolves without applying a mount", async () => {
   assert.deepEqual(state.events, ["deny:ar-1"]);
 });
 
+test("an escalated approval without the card's typed-confirm attestation is refused (F3)", async () => {
+  const { service, state } = harness();
+
+  // Read-write is escalated; the HOST derives that itself and refuses - a
+  // forged webview message cannot one-click what the card would make the
+  // user type for.
+  await assert.rejects(service.resolveAccess("ar-1", true), /typed confirmation/);
+  assert.equal(state.expandCalls.length, 0);
+  assert.deepEqual(state.events, [], "nothing may be prepared or mounted before the gate");
+
+  // The same refusal covers an edit onto a sensitive path, whatever the mode.
+  state.pendingMode = "read-only";
+  await assert.rejects(
+    service.resolveAccess("ar-1", true, "C:\\Users\\td\\.ssh\\id_rsa"),
+    /typed confirmation/
+  );
+  assert.deepEqual(state.events, []);
+});
+
+test("a read-only benign approval stays one click - no attestation required", async () => {
+  const { service, state } = harness();
+  state.pendingMode = "read-only";
+
+  const summary = await service.resolveAccess("ar-1", true);
+
+  assert.equal(summary.status, "approved");
+  assert.deepEqual(state.events, ["prepare:ar-1", "expand:session-1", "mark:ar-1"]);
+});
+
 test("a clone session cannot be widened into a live host mount", async () => {
   const { service, state } = harness();
   state.sessionMode = "clone";
 
-  await assert.rejects(service.resolveAccess("ar-1", true), /Clone sessions cannot add live host mounts/);
+  await assert.rejects(service.resolveAccess("ar-1", true, undefined, true), /Clone sessions cannot add live host mounts/);
 
   assert.equal(state.expandCalls.length, 0);
   assert.deepEqual(state.events, ["prepare:ar-1"]);

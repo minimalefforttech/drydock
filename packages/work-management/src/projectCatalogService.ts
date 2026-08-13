@@ -79,7 +79,14 @@ export class ProjectCatalogService {
     return record;
   }
 
-  /** Removes a project from the catalog and every set that referenced it. */
+  /**
+   * Removes a project from the catalog and its membership in every workspace
+   * set that referenced it. T3.5: a set this removal would otherwise leave
+   * with zero projects is pruned by the store instead of surviving as a dead
+   * entry that resolves to zero mounts - WorkspaceSetService.validateSet
+   * already refuses to create or update a set down to no projects, so a set
+   * emptied out by a removal here is never a valid state to leave behind.
+   */
   async removeProject(projectId: ProjectId): Promise<void> {
     await this.options.store.deleteProject(projectId);
   }

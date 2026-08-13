@@ -49,7 +49,16 @@ export function toggleField(value: boolean, label: string, disabled: boolean, co
 /** Single-line text (or number) that commits on blur and Enter. */
 export function textField(
   value: string,
-  options: { readonly kind?: "text" | "number"; readonly placeholder?: string; readonly label: string; readonly disabled?: boolean; readonly min?: number; readonly max?: number },
+  options: {
+    readonly kind?: "text" | "number";
+    readonly placeholder?: string;
+    readonly label: string;
+    readonly disabled?: boolean;
+    readonly min?: number;
+    readonly max?: number;
+    /** Native spinner/validity granularity; only meaningful for kind "number". */
+    readonly step?: number;
+  },
   commit: (next: string) => void
 ): HTMLInputElement {
   const input = document.createElement("input");
@@ -61,6 +70,7 @@ export function textField(
   if (options.disabled === true) input.disabled = true;
   if (options.min !== undefined) input.min = String(options.min);
   if (options.max !== undefined) input.max = String(options.max);
+  if (options.step !== undefined) input.step = String(options.step);
   let committed = value;
   const send = (): void => {
     if (input.value === committed) return;
